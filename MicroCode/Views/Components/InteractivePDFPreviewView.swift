@@ -86,10 +86,15 @@ struct InteractivePDFPreviewView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 18)
+
+                PreviewCloseTabButton()
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+            .background({
+                let theme = AppState.shared?.appTheme ?? .dark
+                return theme.isGlass ? Color.clear : Color(nsColor: theme.panelBackground)
+            }())
             
             Divider()
             
@@ -98,16 +103,17 @@ struct InteractivePDFPreviewView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
-            loadPDF()
+            loadPDF(from: url)
         }
-        .onChange(of: url) { _ in
-            loadPDF()
+        .onChange(of: url) { newURL in
+            loadPDF(from: newURL)
+            reloadToken = UUID()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
             guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
             if let savedPath = note.userInfo?["path"] as? String,
                URL(fileURLWithPath: savedPath).standardizedFileURL.path == url.standardizedFileURL.path {
-                loadPDF()
+                loadPDF(from: url)
                 reloadToken = UUID()
             }
         }
@@ -115,14 +121,14 @@ struct InteractivePDFPreviewView: View {
             guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
             if let changedPath = note.userInfo?["path"] as? String,
                URL(fileURLWithPath: changedPath).standardizedFileURL.path == url.standardizedFileURL.path {
-                loadPDF()
+                loadPDF(from: url)
                 reloadToken = UUID()
             }
         }
     }
     
-    private func loadPDF() {
-        if let doc = PDFDocument(url: url) {
+    private func loadPDF(from targetURL: URL) {
+        if let doc = PDFDocument(url: targetURL) {
             self.pdfDocument = doc
             self.pageCount = doc.pageCount
         }

@@ -34,6 +34,7 @@ enum StreamableAIProvider: String, CaseIterable {
     case kimi = "kimi"
     case perplexity = "perplexity"
     case perch = "perch"
+    case tokenme = "tokenme"
     case typhoon = "typhoon"
     case cerebras = "cerebras"
     case together = "together"
@@ -77,6 +78,7 @@ enum StreamableAIProvider: String, CaseIterable {
         case .kimi: return "https://api.moonshot.ai/v1"
         case .perplexity: return "https://api.perplexity.ai"
         case .perch: return UserDefaults.standard.string(forKey: "perch_base_url") ?? "https://api.perchai.app/v1"
+        case .tokenme: return UserDefaults.standard.string(forKey: "tokenme_base_url") ?? "https://api.tokenme.limited/api/v1"
         case .typhoon: return "https://api.opentyphoon.ai/v1"
         case .cerebras: return "https://api.cerebras.ai/v1"
         case .together: return "https://api.together.xyz/v1"
@@ -112,7 +114,8 @@ enum StreamableAIProvider: String, CaseIterable {
         case .kimi: return "kimi-k2-0711-preview"
         case .perplexity: return "sonar-reasoning-pro"
         case .perch: return "perch-1-pro"
-        case .typhoon: return "typhoon-v2.1-12b-instruct"
+        case .tokenme: return "deepseek-ai/deepseek-v4-flash-0731"
+        case .typhoon: return "typhoon-v2.5-30b-a3b-instruct"
         case .cerebras: return "llama-3.3-70b"
         case .together: return "Qwen/Qwen2.5-Coder-32B-Instruct"
         case .fireworks: return "accounts/fireworks/models/deepseek-v3"
@@ -131,7 +134,7 @@ enum StreamableAIProvider: String, CaseIterable {
     var usesOpenAIFormat: Bool {
         switch self {
         case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
-             .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
+             .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
              .grok, .qwen, .glm, .copilot, .local:
             return true
         case .gemini, .anthropic, .aipass:
@@ -152,6 +155,10 @@ enum StreamableAIProvider: String, CaseIterable {
         if AIClient.isAiPassMediaModel(m) { return .aipass }
         if m.contains("@default") || m.contains("@azure") || m.contains("@jts") || m.contains("pathumma") { return .aipass }
         if m.hasPrefix("accounts/fireworks/") { return .fireworks }
+        if m.hasPrefix("unsloth/") || m == "deepseek-ai/deepseek-v4-flash-0731" || m.contains("nvfp4") { return .tokenme }
+        if m == "google/gemma-4-31b-it" && (UserDefaults.standard.string(forKey: "subscriptionActiveProvider") == "tokenme" || !(UserDefaults.standard.string(forKey: "tokenme_api_key") ?? "").isEmpty) {
+            return .tokenme
+        }
         if m.hasPrefix("nvidia/") || m.contains("nemotron") { return .nvidia }
         if m.contains("/") && (m.hasPrefix("anthropic/") || m.hasPrefix("google/") || m.hasPrefix("openai/") || m.hasPrefix("deepseek/") || m.hasPrefix("x-ai/") || m.hasPrefix("openrouter/")) {
             return .openrouter
@@ -309,7 +316,7 @@ enum AIStructuredTurnCodec {
                 options: .regularExpression
             )
         }
-        if result.lowercased().contains("waiting for tool response") {
+        if result.range(of: "waiting for tool response", options: .caseInsensitive) != nil {
             result = result.replacingOccurrences(
                 of: #"(?mi)^[ \t]*[*_]*waiting for tool response\.{0,3}[*_]*[ \t]*\r?\n?"#,
                 with: "",
@@ -446,7 +453,7 @@ final class AIClient: ObservableObject {
     @Published var currentStreamedText: String = ""
     
     private var streamTask: Task<Void, Never>?
-    private let requestTimeout: TimeInterval = 60
+    private let requestTimeout: TimeInterval = 180
     private var pendingStreamTokens: String = ""
     private var lastStreamDeliveryUptime: TimeInterval = 0
     private let streamFlushInterval: TimeInterval = 0.016 // ~60fps target for smooth text render
@@ -469,23 +476,35 @@ final class AIClient: ObservableObject {
     }
     
     private func detectStreamRepetitionLoop(_ fullText: String) -> Bool {
-        let lines = fullText.components(separatedBy: .newlines)
+        // Inspect only completed lines (drop trailing partial line currently being streamed)
+        // and keep short structural lines (`}`, `</div>`, `.a {`) so separate blocks never collapse.
+        let rawLines = fullText.components(separatedBy: .newlines)
+        guard rawLines.count >= 7 else { return false }
+        let lines = rawLines.dropLast()
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { $0.count >= 8 }
+            .filter { !$0.isEmpty }
         
         let count = lines.count
-        guard count >= 3 else { return false }
+        guard count >= 6 else { return false }
         
-        // 1. Triple repetition of identical line: A, A, A
-        if lines[count - 1] == lines[count - 2] && lines[count - 2] == lines[count - 3] {
+        // 1. 6x consecutive repetition of identical non-trivial line (>= 24 chars)
+        let last = lines[count - 1]
+        if last.count >= 24 &&
+           lines[count - 2] == last &&
+           lines[count - 3] == last &&
+           lines[count - 4] == last &&
+           lines[count - 5] == last &&
+           lines[count - 6] == last {
             return true
         }
         
-        // 2. Alternating 2-line cycle: A, B, A, B, A, B
-        if count >= 6 {
-            let n = count
-            if lines[n-1] == lines[n-3] && lines[n-3] == lines[n-5] &&
-               lines[n-2] == lines[n-4] && lines[n-4] == lines[n-6] {
+        // 2. 5x alternating 2-line cycle: (A, B) x 5 where A+B is non-trivial
+        if count >= 10 {
+            let a = lines[count - 2]
+            let b = lines[count - 1]
+            if a != b && (a.count + b.count) >= 40 &&
+               lines[count - 4] == a && lines[count - 6] == a && lines[count - 8] == a && lines[count - 10] == a &&
+               lines[count - 3] == b && lines[count - 5] == b && lines[count - 7] == b && lines[count - 9] == b {
                 return true
             }
         }
@@ -521,10 +540,47 @@ final class AIClient: ObservableObject {
             return "glm-5.3-flash"
         }
         
-        // GitHub Copilot API does not accept the synthetic "auto" selector model ID
+        // GitHub Copilot API uses dot-separated model IDs (`claude-sonnet-5.5`, `claude-opus-5.5`, `claude-fable-5.1`)
         if provider == .copilot || baseURL.contains("githubcopilot.com") {
             if lower == "auto" || lower == "copilot" {
-                return "gpt-4o"
+                return "gpt-4.1"
+            }
+            if lower == "claude-fable-5-1" || lower == "claude-fable-5.1" {
+                return "claude-fable-5.1"
+            }
+            if lower.hasPrefix("claude-haiku-5") {
+                return "claude-haiku-5.5"
+            }
+            if lower == "claude-haiku-4-5" || lower == "claude-haiku-4.5" {
+                return "claude-haiku-4.5"
+            }
+            if lower.hasPrefix("claude-sonnet-5-5") || lower.hasPrefix("claude-sonnet-5.5") {
+                return "claude-sonnet-5.5"
+            }
+            if lower == "claude-sonnet-5" {
+                return "claude-sonnet-5"
+            }
+            if lower.hasPrefix("claude-opus-5-5") || lower.hasPrefix("claude-opus-5.5") {
+                return "claude-opus-5.5"
+            }
+            if lower == "claude-opus-5" {
+                return "claude-opus-5"
+            }
+            if lower.hasPrefix("claude-opus-4-8") || lower.hasPrefix("claude-opus-4.8") {
+                return "claude-opus-4.8"
+            }
+        }
+        
+        // Direct Anthropic API (`api.anthropic.com`) remapping for CodeAssist-only 5-5 model IDs
+        if baseURL.contains("api.anthropic.com") {
+            if lower.hasPrefix("claude-haiku-5") {
+                return "claude-haiku-4-5"
+            }
+            if lower.hasPrefix("claude-sonnet-5") {
+                return "claude-sonnet-4-6"
+            }
+            if lower.hasPrefix("claude-opus-5") || lower == "claude-opus-4-8" {
+                return "claude-opus-4-6"
             }
         }
         
@@ -541,6 +597,20 @@ final class AIClient: ObservableObject {
             }
             if lower.hasPrefix("deepseek") {
                 return "deepseek-chat"
+            }
+        }
+        
+        // SCB 10X OpenTyphoon Official API (`api.opentyphoon.ai/v1`) retired v2 / v2.1 chat models;
+        // remap legacy, non-chat (OCR/ASR), or AiPASS Typhoon aliases to active `typhoon-v2.5-30b-a3b-instruct`.
+        if provider == .typhoon || baseURL.contains("opentyphoon.ai") {
+            if lower == "typhoon" ||
+               lower == "typhoon2.5-qwen3-30b" ||
+               lower.hasPrefix("typhoon-v2.1") ||
+               lower.hasPrefix("typhoon-v2-") ||
+               lower.hasPrefix("typhoon-v1") ||
+               lower.contains("ocr") ||
+               lower.contains("asr") {
+                return "typhoon-v2.5-30b-a3b-instruct"
             }
         }
         
@@ -564,7 +634,7 @@ final class AIClient: ObservableObject {
             return !trimmed.isEmpty && !trimmed.hasPrefix("{")
         case .omni:
             return false
-        case .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .typhoon,
+        case .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
              .cerebras, .together, .fireworks, .minimax, .nvidia,
              .copilot, .aipass, .glm, .grok, .qwen, .local:
             return !trimmed.isEmpty && !trimmed.hasPrefix("{")
@@ -655,6 +725,7 @@ final class AIClient: ObservableObject {
                 case .kimi: subType = .kimi
                 case .perplexity: subType = .perplexity
                 case .perch: subType = .perch
+                case .tokenme: subType = .tokenme
                 case .typhoon: subType = .typhoon
                 case .qwen: subType = .qwen
                 case .grok: subType = .grok
@@ -680,6 +751,7 @@ final class AIClient: ObservableObject {
             case .kimi: subType = .kimi
             case .perplexity: subType = .perplexity
             case .perch: subType = .perch
+            case .tokenme: subType = .tokenme
             case .typhoon: subType = .typhoon
             case .qwen: subType = .qwen
             case .grok: subType = .grok
@@ -703,7 +775,7 @@ final class AIClient: ObservableObject {
         if let acc = SubscriptionAuthManager.shared.getAccount(subType), SubscriptionAuthManager.shared.isConnected(subType) {
             return acc
         }
-        if SubscriptionAuthManager.shared.isConnected(.aipass) {
+        if provider == .omni, SubscriptionAuthManager.shared.isConnected(.aipass) {
             return SubscriptionAuthManager.shared.getAccount(.aipass)
         }
         return SubscriptionAuthManager.shared.getAccount(subType)
@@ -732,6 +804,11 @@ final class AIClient: ObservableObject {
         var provider = provider
         if Self.isAiPassMediaModel(model) {
             provider = .aipass
+        } else if rawKeyMode == "subscription",
+                  UserDefaults.standard.string(forKey: "subscriptionActiveProvider") == "tokenme",
+                  SubscriptionAuthManager.shared.isConnected(.tokenme),
+                  SubscriptionProviderType.tokenme.modelInfos.contains(where: { $0.modelID.caseInsensitiveCompare(model) == .orderedSame }) {
+            provider = .tokenme
         } else if provider == .omni && !useDotminiEnterprise {
             let detected = StreamableAIProvider.detect(from: model)
             if detected != .omni {
@@ -763,8 +840,8 @@ final class AIClient: ObservableObject {
         let useCustomGateway = (ent.mode == .customGateway && !ent.customGatewayBaseURL.isEmpty)
         
         if provider == .local || keyMode == "local" {
-            actualKey = "local"
             baseURL = LocalLLMService.cachedEndpoint
+            actualKey = LocalLLMService.resolveAPIKey(forEndpoint: baseURL)
         } else if useVertexGemini {
             actualKey = "vertex_enterprise"
             baseURL = "vertex://\(ent.vertexLocation)/\(ent.vertexProjectId)"
@@ -824,6 +901,12 @@ final class AIClient: ObservableObject {
                       let codeAssistCreds = Self.loadGoogleCodeAssistCredentials(fallbackToken: "") {
                 actualKey = codeAssistCreds.refreshToken
                 baseURL = "https://daily-cloudcode-pa.googleapis.com/v1internal"
+            } else if provider == .typhoon,
+                      SubscriptionAuthManager.shared.isConnected(.aipass),
+                      let aipassToken = SubscriptionAuthManager.shared.token(for: .aipass) {
+                actualKey = Self.resolveAiPassSessionCookie(primary: aipassToken)
+                baseURL = StreamableAIProvider.aipass.directBaseURL
+                provider = .aipass
             } else {
                 let message = "No active subscription session or API key found for \(provider.rawValue). Connect in Settings → AI Provider → Subscription, or add a Direct API Key."
                 onError(message)
@@ -952,7 +1035,7 @@ final class AIClient: ObservableObject {
                         case .anthropic:
                             try await streamAnthropic(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
-                             .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
+                             .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
                              .grok, .qwen, .glm, .copilot, .local:
                             try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         }
@@ -964,6 +1047,11 @@ final class AIClient: ObservableObject {
                     return // Success
                     
                 } catch let error as NSError {
+                    if Task.isCancelled || error.code == NSURLErrorCancelled {
+                        onError("Generation stopped by user.")
+                        self.isStreaming = false
+                        return
+                    }
                     // Retry on transient errors
                     let transientCodes: Set<Int> = [429, 503, -1001, -1004, -1005, -1009]
                     if transientCodes.contains(error.code) && retryCount < maxRetries {
@@ -1043,8 +1131,14 @@ final class AIClient: ObservableObject {
         let fallbackModel = creds?.defaultModel ?? "gpt-6-luna"
         
         var candidateModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        if candidateModel.isEmpty || candidateModel == "gpt-4o" || candidateModel == "gpt-4o-mini" || candidateModel == "gpt-5.4" || candidateModel == "gpt-5.4-mini" {
-            candidateModel = fallbackModel
+        let lowerCandidate = candidateModel.lowercased()
+        let supportedCodexOAuthModels: Set<String> = ["gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-reserve"]
+        if candidateModel.isEmpty || !supportedCodexOAuthModels.contains(lowerCandidate) {
+            if lowerCandidate.contains("5.6") && !lowerCandidate.contains("luna") {
+                candidateModel = "gpt-5.6-terra"
+            } else {
+                candidateModel = supportedCodexOAuthModels.contains(fallbackModel.lowercased()) ? fallbackModel : "gpt-6-luna"
+            }
         }
         
         try await executeCodexResponsesStream(
@@ -1321,6 +1415,11 @@ final class AIClient: ObservableObject {
         var provider = (rawKeyMode == "local") ? .local : provider
         if Self.isAiPassMediaModel(model) {
             provider = .aipass
+        } else if rawKeyMode == "subscription",
+                  UserDefaults.standard.string(forKey: "subscriptionActiveProvider") == "tokenme",
+                  SubscriptionAuthManager.shared.isConnected(.tokenme),
+                  SubscriptionProviderType.tokenme.modelInfos.contains(where: { $0.modelID.caseInsensitiveCompare(model) == .orderedSame }) {
+            provider = .tokenme
         } else if provider == .omni && !useDotminiEnterprise {
             let detected = StreamableAIProvider.detect(from: model)
             if detected != .omni {
@@ -1411,6 +1510,12 @@ final class AIClient: ObservableObject {
                       let codeAssistCreds = Self.loadGoogleCodeAssistCredentials(fallbackToken: "") {
                 actualKey = codeAssistCreds.refreshToken
                 baseURL = "https://daily-cloudcode-pa.googleapis.com/v1internal"
+            } else if provider == .typhoon,
+                      SubscriptionAuthManager.shared.isConnected(.aipass),
+                      let aipassToken = SubscriptionAuthManager.shared.token(for: .aipass) {
+                actualKey = Self.resolveAiPassSessionCookie(primary: aipassToken)
+                baseURL = StreamableAIProvider.aipass.directBaseURL
+                provider = .aipass
             } else {
                 throw NSError(domain: "AIClient", code: 401, userInfo: [NSLocalizedDescriptionKey: "No active subscription or API key found for \(provider.rawValue)."])
             }
@@ -1544,7 +1649,7 @@ final class AIClient: ObservableObject {
             case .aipass:
                 return (text: "", toolCalls: [])
             case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
-                 .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
+                 .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
                  .grok, .qwen, .glm, .copilot, .local:
                 return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools)
             }
@@ -1552,6 +1657,35 @@ final class AIClient: ObservableObject {
     }
     
     // MARK: - Error Parsing
+    
+    /// Extracts clean error descriptions from OpenAI (`{"error": {"message": ...}}`), FastAPI/OpenTyphoon (`{"detail": ...}`), or string responses.
+    private static func extractOpenAICompatibleErrorMessage(from raw: String) -> String? {
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let err = json["error"] as? [String: Any],
+           let msg = (err["message"] as? String) ?? (err["detail"] as? String),
+           !msg.isEmpty {
+            return msg
+        }
+        if let errStr = json["error"] as? String, !errStr.isEmpty {
+            return errStr
+        }
+        if let detailStr = json["detail"] as? String, !detailStr.isEmpty {
+            return detailStr
+        }
+        if let detailArr = json["detail"] as? [[String: Any]] {
+            let msgs = detailArr.compactMap { $0["msg"] as? String }
+            if !msgs.isEmpty {
+                return msgs.joined(separator: "; ")
+            }
+        }
+        if let msg = json["message"] as? String, !msg.isEmpty {
+            return msg
+        }
+        return nil
+    }
     
     private func parseErrorMessage(_ error: NSError) -> String {
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct"
@@ -1562,23 +1696,30 @@ final class AIClient: ObservableObject {
                 return "Network connection error while contacting AI provider (\(error.localizedDescription)). Please check your internet connection."
             }
         }
+        let serverDetail = (error.userInfo[NSLocalizedDescriptionKey] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasServerDetail = !serverDetail.isEmpty && !serverDetail.contains("The operation couldn’t be completed") && !serverDetail.contains("The operation couldn't be completed")
         switch error.code {
         case 402:
             if keyMode == "cloud" {
                 return "Payment required: Your Dotmini Cloud credit balance is insufficient or requires top-up. Check Settings → Wallet."
             } else {
-                return "External provider API returned HTTP 402 (Insufficient balance or quota on your external provider account)."
+                return hasServerDetail ? "External provider API returned HTTP 402: \(serverDetail)" : "External provider API returned HTTP 402 (Insufficient balance or quota on your external provider account)."
             }
-        case 429: return "Rate limited by provider (HTTP 429: Requests/Tokens Per Minute quota exceeded on your API key). Please wait 1-2 minutes for the provider quota window to reset, or check your quota in Google AI Studio / provider console."
+        case 429:
+            return hasServerDetail ? "Rate limited by provider (HTTP 429): \(serverDetail)" : "Rate limited by provider (HTTP 429: Requests/Tokens Per Minute quota exceeded on your API key). Please wait 1-2 minutes for the provider quota window to reset."
         case 401, 403:
             if keyMode == "cloud" {
                 return "Dotmini Cloud License or session is invalid/expired (401). Please check your License in Settings → Account."
             } else {
-                return "Provider authentication failed (HTTP \(error.code)). Please verify your Subscription or BYOK API Key in Settings → AI Provider."
+                let suffix = hasServerDetail ? " (\(serverDetail))" : ""
+                return "Provider authentication failed (HTTP \(error.code))\(suffix). Please verify your Subscription or BYOK API Key in Settings → AI Provider."
             }
-        case 404: return "Model or endpoint not found (HTTP 404). Verify the selected model is supported by this provider."
-        case 503, 500: return "AI service temporarily unavailable (500/503). Try again in a moment."
-        default: return error.localizedDescription
+        case 404:
+            return hasServerDetail ? "Model or endpoint not found (HTTP 404): \(serverDetail)" : "Model or endpoint not found (HTTP 404). Verify the selected model is supported by this provider."
+        case 503, 500:
+            return hasServerDetail ? "AI service error (HTTP \(error.code)): \(serverDetail)" : "AI service temporarily unavailable (500/503). Try again in a moment."
+        default:
+            return error.localizedDescription
         }
     }
     
@@ -1590,7 +1731,7 @@ final class AIClient: ObservableObject {
             return 65536
         } else if lower.contains("claude-3-7") || lower.contains("claude-3-opus") {
             return 64000
-        } else if lower.contains("claude-3-5") {
+        } else if lower.contains("claude-3-5") || lower.contains("typhoon") {
             return 8192
         } else if lower.contains("o1") || lower.contains("o3") {
             return 65536
@@ -2044,6 +2185,9 @@ final class AIClient: ObservableObject {
     
     private static func resolveCodeAssistModelID(_ model: String) -> String {
         let lower = model.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if lower.hasPrefix("gpt-oss-") {
+            return "gpt-oss-120b-medium"
+        }
         if lower.contains("claude") {
             if lower.contains("opus") {
                 if lower.contains("high") { return "claude-opus-5-5-high" }
@@ -2055,7 +2199,18 @@ final class AIClient: ObservableObject {
                 return "claude-sonnet-5-5-medium"
             }
         }
-        if lower.contains("argon") || lower.contains("3.8") || lower.contains("3.7") || lower.contains("3.6") {
+        if lower.contains("argon") {
+            if lower.hasSuffix("-high") { return "gemini-4-argon-high" }
+            if lower.hasSuffix("-low") { return "gemini-4-argon-low" }
+            return "gemini-4-argon-medium"
+        }
+        if lower == "gemini-3.8-pro" || lower == "gemini-3.7-pro" || lower == "gemini-3.6-pro" {
+            return "gemini-4-argon-medium"
+        }
+        if lower == "gemini-3.8-flash-high" { return "gemini-3.8-flash-high" }
+        if lower == "gemini-3.8-flash-medium" { return "gemini-3.8-flash-medium" }
+        if lower == "gemini-3.8-flash-low" { return "gemini-3.8-flash-low" }
+        if lower.contains("3.8") || lower.contains("3.7") || lower.contains("3.6") {
             return "gemini-3.8-flash-tiered"
         }
         if lower.contains("3.5-flash-lite") || lower.contains("3.1-flash-lite") || lower == "gemini-flash-lite" {
@@ -2286,7 +2441,11 @@ final class AIClient: ObservableObject {
             let code = httpResponse.statusCode
             if code == 429 || code == 503 || code == 404 {
                 let fallbackChain = [
+                    "gemini-4-argon-high",
+                    "gemini-4-argon-medium",
+                    "gemini-4-argon-low",
                     "gemini-3.8-flash-tiered",
+                    "gemini-3.8-flash-medium",
                     "gemini-3-flash",
                     "gemini-3.5-flash-lite",
                     "gemini-2.5-flash",
@@ -2486,7 +2645,7 @@ final class AIClient: ObservableObject {
     
     // MARK: - OpenAI/DeepSeek Streaming
     
-    private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
+    private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?, maxTokensOverride: Int? = nil, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
         guard let url = URL(string: "\(baseURL)/chat/completions") else {
             throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for openai"])
         }
@@ -2632,13 +2791,17 @@ final class AIClient: ObservableObject {
             "messages": messages,
             "stream": true
         ]
+        let isTokenMe = baseURL.contains("tokenme.limited")
+        // TokenMe enforces a tiny ~512-token default cap (shared with `reasoning`) when `max_tokens` is omitted,
+        // and supports up to 32,768 output tokens across all chat models. Always send an explicit budget.
+        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : maxOutputTokens(for: effectiveModel))
         if isOpenAIReasoning {
-            body["max_completion_tokens"] = maxOutputTokens(for: effectiveModel)
+            body["max_completion_tokens"] = requestedMaxTokens
         } else if isReasoningNoTemp {
-            body["max_tokens"] = maxOutputTokens(for: effectiveModel)
+            body["max_tokens"] = requestedMaxTokens
         } else {
             body["temperature"] = 0.7
-            body["max_tokens"] = maxOutputTokens(for: effectiveModel)
+            body["max_tokens"] = requestedMaxTokens
         }
         
         if let tools = tools, !tools.isEmpty, !baseURL.contains("perplexity.ai") {
@@ -2658,10 +2821,45 @@ final class AIClient: ObservableObject {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if isCopilot && (code == 400 || code == 403 || code == 404) && effectiveModel != "gpt-4.1" {
+                NSLog("⚠️ [streamOpenAI] GitHub Copilot HTTP %d on %@ — falling back to Copilot gpt-4.1", code, effectiveModel)
+                try await streamOpenAI(
+                    prompt: prompt,
+                    attachments: attachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: "gpt-4.1",
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    tools: tools,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
+            }
             if (code == 401 || code == 402 || code == 403 || code == 404 || code == 429 || code == 503) && !isCloudProxy {
+                // Only failover to TH-AI Passport / Google CodeAssist for non-explicit third-party endpoints,
+                // or for Typhoon on quota/rate-limit/outage (402/429/503) mapped to `typhoon2.5-qwen3-30b`.
+                // Never mask 401/403/404 auth or model errors on explicit BYOK endpoints with an unrelated Gemini/DeepSeek model.
+                let isExplicitThirdPartyEndpoint = baseURL.contains("tokenme.limited") ||
+                    baseURL.contains("opentyphoon.ai") ||
+                    baseURL.contains("openrouter.ai") ||
+                    baseURL.contains("groq.com") ||
+                    baseURL.contains("mistral.ai") ||
+                    baseURL.contains("moonshot.ai") ||
+                    baseURL.contains("perplexity.ai") ||
+                    baseURL.contains("perchai.app") ||
+                    baseURL.contains("cerebras.ai") ||
+                    baseURL.contains("together.xyz") ||
+                    baseURL.contains("fireworks.ai") ||
+                    baseURL.contains("minimax.io") ||
+                    baseURL.contains("nvidia.com") ||
+                    baseURL.contains("x.ai") ||
+                    baseURL.contains("aliyuncs.com")
+
                 // 1. DeepSeek direct API (e.g. HTTP 402 Insufficient Balance / 401 / 403) -> seamlessly failover to TH-AI Passport DeepSeek-V4-Flash
                 let aipassCookie = Self.resolveAiPassSessionCookie(primary: "")
-                if (baseURL.contains("api.deepseek.com") || lowerEffective.contains("deepseek")) && !aipassCookie.isEmpty {
+                if (baseURL.contains("api.deepseek.com") || (!isExplicitThirdPartyEndpoint && lowerEffective.contains("deepseek"))) && !aipassCookie.isEmpty {
                     NSLog("⚠️ [streamOpenAI] HTTP %d on DeepSeek (%@) — failing over seamlessly to TH-AI Passport DeepSeek-V4-Flash", code, effectiveModel)
                     try await streamAiPass(
                         prompt: prompt,
@@ -2693,8 +2891,25 @@ final class AIClient: ObservableObject {
                     )
                     return
                 }
-                // 3. General TH-AI Passport failover if authenticated
-                if !aipassCookie.isEmpty {
+
+                if baseURL.contains("opentyphoon.ai") && (code == 402 || code == 429 || code == 503) && !aipassCookie.isEmpty {
+                    NSLog("⚠️ [streamOpenAI] HTTP %d on OpenTyphoon (%@) — failing over to TH-AI Passport typhoon2.5-qwen3-30b", code, effectiveModel)
+                    try await streamAiPass(
+                        prompt: prompt,
+                        attachments: attachments,
+                        systemPrompt: systemPrompt,
+                        conversationHistory: conversationHistory,
+                        model: "typhoon2.5-qwen3-30b",
+                        sessionCookie: aipassCookie,
+                        tools: tools,
+                        onToken: onToken,
+                        onToolCall: onToolCall
+                    )
+                    return
+                }
+
+                // 3. General TH-AI Passport failover if authenticated (skip for explicit third-party BYOK endpoints)
+                if !isExplicitThirdPartyEndpoint && !aipassCookie.isEmpty {
                     NSLog("⚠️ [streamOpenAI] HTTP %d on %@ — failing over to TH-AI Passport", code, effectiveModel)
                     try await streamAiPass(
                         prompt: prompt,
@@ -2709,8 +2924,8 @@ final class AIClient: ObservableObject {
                     )
                     return
                 }
-                // 4. Google CodeAssist fallback
-                if let codeAssistCreds = Self.loadGoogleCodeAssistCredentials(fallbackToken: "") {
+                // 4. Google CodeAssist fallback (skip for explicit third-party BYOK endpoints)
+                if !isExplicitThirdPartyEndpoint, let codeAssistCreds = Self.loadGoogleCodeAssistCredentials(fallbackToken: "") {
                     NSLog("⚠️ [streamOpenAI] HTTP %d on %@ — failing over to Google CodeAssist", code, effectiveModel)
                     try await streamGoogleCodeAssist(
                         prompt: prompt,
@@ -2729,17 +2944,54 @@ final class AIClient: ObservableObject {
             var errText = ""
             for try await l in bytes.lines {
                 errText += l
-                if errText.count > 500 { break }
+                if errText.count > 800 { break }
             }
-            var parsedMsg: String? = nil
-            if let data = errText.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let err = json["error"] as? [String: Any],
-               let msg = err["message"] as? String {
-                parsedMsg = msg
+            let lowerErrText = errText.lowercased()
+            if (code == 400 || code == 422),
+               requestedMaxTokens > 2048,
+               (lowerErrText.contains("max_tokens") ||
+                lowerErrText.contains("max_completion_tokens") ||
+                lowerErrText.contains("output token limit") ||
+                lowerErrText.contains("context_length") ||
+                lowerErrText.contains("maximum context") ||
+                lowerErrText.contains("token limit")) {
+                let reducedMaxTokens = max(2048, requestedMaxTokens / 2)
+                NSLog("⚠️ [streamOpenAI] HTTP %d output/context token cap hit on %@ (requested %d) — retrying with max_tokens=%d", code, effectiveModel, requestedMaxTokens, reducedMaxTokens)
+                try await streamOpenAI(
+                    prompt: prompt,
+                    attachments: attachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: model,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    tools: tools,
+                    maxTokensOverride: reducedMaxTokens,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
             }
-            let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: nil))
-            let finalMsg = parsedMsg ?? customMsg
+            if (code == 400 || code == 422), let tools = tools, !tools.isEmpty, lowerErrText.contains("tool") {
+                NSLog("⚠️ [streamOpenAI] HTTP %d tool-choice unsupported on %@ (%@) — retrying without server-side tools", code, effectiveModel, baseURL)
+                try await streamOpenAI(
+                    prompt: prompt,
+                    attachments: attachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: model,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    tools: nil,
+                    maxTokensOverride: maxTokensOverride,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
+            }
+            let parsedMsg = Self.extractOpenAICompatibleErrorMessage(from: errText)
+            let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: parsedMsg.map { [NSLocalizedDescriptionKey: $0] }))
+            let finalMsg = parsedMsg.map { code == 400 || code == 422 ? "API error (\(code)): \($0)" : customMsg } ?? customMsg
             print("[AIClient] HTTP \(code) error from \(url.absoluteString): \(finalMsg)")
             throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
@@ -2748,6 +3000,31 @@ final class AIClient: ObservableObject {
         var toolCallBuffers: [Int: (id: String, name: String, args: String)] = [:]
         var isStreamingReasoning = false
         var emittedNativeToolCalls = false
+        var sawLengthTruncation = false
+
+        func flushBufferedToolCalls() {
+            for idx in toolCallBuffers.keys.sorted() {
+                guard let buffer = toolCallBuffers[idx], !buffer.name.isEmpty else { continue }
+                let trimmedArgs = buffer.args.trimmingCharacters(in: .whitespacesAndNewlines)
+                let parsedArgs: [String: Any]?
+                if trimmedArgs.isEmpty {
+                    parsedArgs = [:]
+                } else {
+                    parsedArgs = (try? JSONSerialization.jsonObject(with: Data(trimmedArgs.utf8))) as? [String: Any]
+                }
+                guard let rawArgs = parsedArgs else {
+                    NSLog("⚠️ [streamOpenAI] Skipping truncated/malformed tool call '%@' (args len=%d, finish_reason=length:%d)", buffer.name, trimmedArgs.count, sawLengthTruncation ? 1 : 0)
+                    sawLengthTruncation = true
+                    continue
+                }
+                let canonicalName = AgentToolBox.normalizeToolName(buffer.name)
+                let canonicalArgs = AgentToolBox.normalizeToolParams(rawArgs)
+                let toolCall = AIToolCall(id: buffer.id, name: canonicalName, arguments: canonicalArgs)
+                emittedNativeToolCalls = true
+                onToolCall?(toolCall)
+            }
+            toolCallBuffers.removeAll()
+        }
         
         for try await line in bytes.lines {
             if Task.isCancelled { break }
@@ -2757,7 +3034,7 @@ final class AIClient: ObservableObject {
             guard let data = jsonString.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             
-            // Capture token usage from final stream chunk (OpenAI/DeepSeek/Grok/Qwen/GLM)
+            // Capture token usage from final stream chunk (OpenAI/DeepSeek/Grok/Qwen/GLM/TokenMe)
             if let usage = json["usage"] as? [String: Any] {
                 let promptTok = usage["prompt_tokens"] as? Int ?? 0
                 let completionTok = usage["completion_tokens"] as? Int ?? 0
@@ -2775,16 +3052,23 @@ final class AIClient: ObservableObject {
             }
             
             guard let choices = json["choices"] as? [[String: Any]],
-                  let delta = choices.first?["delta"] as? [String: Any] else { continue }
+                  let firstChoice = choices.first else { continue }
+            let finishReason = firstChoice["finish_reason"] as? String
+            if finishReason == "length" {
+                sawLengthTruncation = true
+            }
+            let delta = (firstChoice["delta"] as? [String: Any]) ?? [:]
             
-            // Reasoning tokens (DeepSeek R1 / thinking models / GLM)
-            if let reasoning = delta["reasoning_content"] as? String, !reasoning.isEmpty {
+            // Reasoning tokens: support both `reasoning_content` (DeepSeek API / GLM) and `reasoning` (TokenMe / vLLM / SGLang / OpenRouter)
+            let reasoningChunk = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String)
+            if let reasoning = reasoningChunk, !reasoning.isEmpty {
                 if !isStreamingReasoning {
                     isStreamingReasoning = true
                     appendStreamToken("<thought>", onToken: onToken)
                 }
                 appendStreamToken(reasoning, onToken: onToken)
-            } else if let content = delta["content"] as? String {
+            }
+            if let content = delta["content"] as? String, !content.isEmpty {
                 if isStreamingReasoning {
                     isStreamingReasoning = false
                     appendStreamToken("</thought>\n\n", onToken: onToken)
@@ -2798,7 +3082,15 @@ final class AIClient: ObservableObject {
             }
             
             // Tool calls (streamed incrementally)
-            if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
+            if let toolCalls = delta["tool_calls"] as? [[String: Any]], !toolCalls.isEmpty {
+                if isStreamingReasoning {
+                    isStreamingReasoning = false
+                    appendStreamToken("</thought>\n\n", onToken: onToken)
+                    flushPendingStreamTokens(onToken: onToken)
+                } else {
+                    // Heartbeat so AgentService watchdog knows tool-call JSON bytes are actively arriving
+                    onToken("")
+                }
                 for tc in toolCalls {
                     let idx = tc["index"] as? Int ?? 0
                     var entry = toolCallBuffers[idx] ?? (id: UUID().uuidString, name: "", args: "")
@@ -2818,17 +3110,8 @@ final class AIClient: ObservableObject {
             }
             
             // Check finish reason
-            if let finishReason = choices.first?["finish_reason"] as? String, finishReason == "tool_calls" {
-                for idx in toolCallBuffers.keys.sorted() {
-                    guard let buffer = toolCallBuffers[idx], !buffer.name.isEmpty else { continue }
-                    let rawArgs = (try? JSONSerialization.jsonObject(with: Data(buffer.args.utf8))) as? [String: Any] ?? [:]
-                    let canonicalName = AgentToolBox.normalizeToolName(buffer.name)
-                    let canonicalArgs = AgentToolBox.normalizeToolParams(rawArgs)
-                    let toolCall = AIToolCall(id: buffer.id, name: canonicalName, arguments: canonicalArgs)
-                    emittedNativeToolCalls = true
-                    onToolCall?(toolCall)
-                }
-                toolCallBuffers.removeAll()
+            if finishReason == "tool_calls" {
+                flushBufferedToolCalls()
             }
         }
         
@@ -2836,19 +3119,11 @@ final class AIClient: ObservableObject {
             isStreamingReasoning = false
             appendStreamToken("</thought>\n\n", onToken: onToken)
         }
+        flushPendingStreamTokens(onToken: onToken)
         
         // Flush any remaining buffered tool calls (e.g. if provider sent finish_reason: "stop" or nil)
         if !toolCallBuffers.isEmpty {
-            for idx in toolCallBuffers.keys.sorted() {
-                guard let buffer = toolCallBuffers[idx], !buffer.name.isEmpty else { continue }
-                let rawArgs = (try? JSONSerialization.jsonObject(with: Data(buffer.args.utf8))) as? [String: Any] ?? [:]
-                let canonicalName = AgentToolBox.normalizeToolName(buffer.name)
-                let canonicalArgs = AgentToolBox.normalizeToolParams(rawArgs)
-                let toolCall = AIToolCall(id: buffer.id, name: canonicalName, arguments: canonicalArgs)
-                emittedNativeToolCalls = true
-                onToolCall?(toolCall)
-            }
-            toolCallBuffers.removeAll()
+            flushBufferedToolCalls()
         }
         
         // Fallback: if model (e.g. DeepSeek R1/V3, Qwen, GLM, or OpenRouter gateway) emitted DSML or <tool_call> tags in content
@@ -3258,7 +3533,7 @@ final class AIClient: ObservableObject {
         return (text: text, toolCalls: toolCalls)
     }
     
-    private func syncOpenAI(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?) async throws -> (text: String, toolCalls: [AIToolCall]) {
+    private func syncOpenAI(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?, maxTokensOverride: Int? = nil) async throws -> (text: String, toolCalls: [AIToolCall]) {
         guard let url = URL(string: "\(baseURL)/chat/completions") else {
             throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for openai"])
         }
@@ -3311,15 +3586,17 @@ final class AIClient: ObservableObject {
         
         let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model), baseURL: baseURL)
         let isReasoning = effectiveModel.hasPrefix("o1") || effectiveModel.hasPrefix("o3") || effectiveModel.hasPrefix("o4")
+        let isTokenMe = baseURL.contains("tokenme.limited")
+        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : maxOutputTokens(for: effectiveModel))
         var body: [String: Any] = [
             "model": effectiveModel,
             "messages": apiMessages
         ]
         if isReasoning {
-            body["max_completion_tokens"] = maxOutputTokens(for: effectiveModel)
+            body["max_completion_tokens"] = requestedMaxTokens
         } else {
             body["temperature"] = 0.7
-            body["max_tokens"] = maxOutputTokens(for: effectiveModel)
+            body["max_tokens"] = requestedMaxTokens
         }
         if let tools = tools, !tools.isEmpty, !baseURL.contains("perplexity.ai") {
             body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
@@ -3333,15 +3610,24 @@ final class AIClient: ObservableObject {
         }
         
         guard httpResponse.statusCode == 200 else {
-            let errorText: String
-            if let errJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errObj = errJson["error"] as? [String: Any],
-               let msg = errObj["message"] as? String {
-                errorText = msg
-            } else {
-                let raw = String(data: data, encoding: .utf8) ?? ""
-                errorText = raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : raw
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            let lowerRaw = raw.lowercased()
+            if (httpResponse.statusCode == 400 || httpResponse.statusCode == 422),
+               requestedMaxTokens > 2048,
+               (lowerRaw.contains("max_tokens") ||
+                lowerRaw.contains("max_completion_tokens") ||
+                lowerRaw.contains("output token limit") ||
+                lowerRaw.contains("context_length") ||
+                lowerRaw.contains("maximum context") ||
+                lowerRaw.contains("token limit")) {
+                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, baseURL: baseURL, tools: tools, maxTokensOverride: max(2048, requestedMaxTokens / 2))
             }
+            if (httpResponse.statusCode == 400 || httpResponse.statusCode == 422),
+               let tools = tools, !tools.isEmpty, lowerRaw.contains("tool") {
+                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, baseURL: baseURL, tools: nil, maxTokensOverride: maxTokensOverride)
+            }
+            let errorText = Self.extractOpenAICompatibleErrorMessage(from: raw)
+                ?? (raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : String(raw.prefix(400)))
             throw NSError(domain: "AIClient", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "API error (\(httpResponse.statusCode)): \(errorText)"])
         }
         
@@ -3373,7 +3659,7 @@ final class AIClient: ObservableObject {
         }
         
         let content = message["content"] as? String ?? ""
-        let reasoning = message["reasoning_content"] as? String ?? ""
+        let reasoning = (message["reasoning_content"] as? String) ?? (message["reasoning"] as? String) ?? ""
         let text: String
         if !reasoning.isEmpty && !content.isEmpty {
             text = "<thought>\(reasoning)</thought>\n\n\(content)"
@@ -3465,15 +3751,9 @@ final class AIClient: ObservableObject {
         }
         
         guard httpResponse.statusCode == 200 else {
-            let errorText: String
-            if let errJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errObj = errJson["error"] as? [String: Any],
-               let msg = errObj["message"] as? String {
-                errorText = msg
-            } else {
-                let raw = String(data: data, encoding: .utf8) ?? ""
-                errorText = raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : raw
-            }
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            let errorText = Self.extractOpenAICompatibleErrorMessage(from: raw)
+                ?? (raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : String(raw.prefix(400)))
             throw NSError(domain: "AIClient", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "API error (\(httpResponse.statusCode)): \(errorText)"])
         }
         
@@ -3688,7 +3968,12 @@ final class AIClient: ObservableObject {
             return "gemini-3.8-flash"
         case "gemini-3-flash", "gemini-3-flash-preview":
             return "gemini-3.5-flash"
+        case "typhoon", "typhoon-v2.5-30b-a3b-instruct", "typhoon-v2.1-12b-instruct", "typhoon-v2-70b-instruct", "typhoon-v2-r1-70b-preview", "typhoon-v2-8b-instruct":
+            return "typhoon2.5-qwen3-30b"
         default:
+            if lower.hasPrefix("typhoon-") {
+                return "typhoon2.5-qwen3-30b"
+            }
             return trimmed
         }
     }
@@ -4874,7 +5159,7 @@ final class AIClient: ObservableObject {
 
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = requestTimeout
-        sessionConfig.timeoutIntervalForResource = 300
+        sessionConfig.timeoutIntervalForResource = 1800
         let session = URLSession(configuration: sessionConfig)
 
         let (bytes, response) = try await session.bytes(for: streamReq)

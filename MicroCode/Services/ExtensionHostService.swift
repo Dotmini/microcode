@@ -157,14 +157,16 @@ final class ExtensionHostService: ObservableObject {
     }
 
     private func locateCompatHost() -> URL? {
-        let appSupportHost = FileManager.default.homeDirectoryForCurrentUser
+        let homeURL = FileManager.default.homeDirectoryForCurrentUser
+        let appSupportHost = homeURL
             .appendingPathComponent("Library/Application Support/MicroCode/vscode-compat-host/src/index.js")
-        let devRepoHost = URL(fileURLWithPath: "/Users/dotmini/Documents/SX/codetunner-native/vscode-compat-host/src/index.js")
+        let microcodeHomeHost = homeURL
+            .appendingPathComponent(".microcode/vscode-compat-host/src/index.js")
         let candidates = [
             Bundle.main.resourceURL?.appendingPathComponent("vscode-compat-host/src/index.js"),
             Bundle.main.resourceURL?.appendingPathComponent("vscode-compat/index.js"),
             appSupportHost,
-            devRepoHost,
+            microcodeHomeHost,
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("vscode-compat-host/src/index.js")
         ].compactMap { $0 }

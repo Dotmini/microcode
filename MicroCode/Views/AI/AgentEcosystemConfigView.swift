@@ -923,7 +923,7 @@ public struct AgentEcosystemConfigView: View {
                 Spacer()
                 Button {
                     Task {
-                        await discovery.refresh()
+                        await discovery.refresh(force: true)
                     }
                 } label: {
                     if discovery.isScanning {

@@ -401,6 +401,22 @@ final class NotebookCellModel: ObservableObject, Identifiable {
     // Procedure Metadata
     @Published var procedureMetadata: [String: AnyCodable] = [:]
     @Published var generatedCode: String = ""
+
+    // Per-Cell AI / Autonomous Agent Configuration & Live Execution State
+    @Published var aiSelection: CellAISelection = .inherit
+    @Published var agentExecutionMode: Bool = true
+    @Published var agentThought: String = ""
+    @Published var agentToolSteps: [CellAgentToolStep] = []
+    @Published var agentStatusText: String = ""
+
+    // Cell Mode v2: Sequential Queue, Reactive DAG Epoch, Inline DataFrame, Telemetry, Diff & Time-Travel
+    @Published var isQueued: Bool = false
+    @Published var lastRunEpoch: Int = 0
+    @Published var inlineDataFrame: InlineDataFramePayload? = nil
+    @Published var telemetry: CellExecutionTelemetry? = nil
+    @Published var versionSnapshots: [CellVersionSnapshot] = []
+    @Published var pendingDiffOldContent: String? = nil
+    @Published var pendingDiffSource: String = "AI Agent"
     
     enum CellType: String, CaseIterable {
         case code = "Code"
@@ -421,6 +437,52 @@ final class NotebookCellModel: ObservableObject, Identifiable {
         outputImages = []
         dataFramePath = nil
         isDataFrame = false
+        inlineDataFrame = nil
+        telemetry = nil
+        agentThought = ""
+        agentToolSteps = []
+        agentStatusText = ""
+    }
+
+    func recordAgentEditBaseline(previousContent: String, source: String = "AI Agent") {
+        let trimmedPrev = previousContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrev.isEmpty else { return }
+        if pendingDiffOldContent == nil {
+            pendingDiffOldContent = previousContent
+        }
+        pendingDiffSource = source
+        let nextVer = (versionSnapshots.last?.versionNumber ?? 0) + 1
+        versionSnapshots.append(CellVersionSnapshot(
+            versionNumber: nextVer,
+            timestamp: Date(),
+            sourceLabel: "Before \(source)",
+            content: previousContent,
+            outputPreview: String(output.prefix(160)),
+            durationMs: telemetry?.durationMs
+        ))
+        if versionSnapshots.count > 12 {
+            versionSnapshots.removeFirst(versionSnapshots.count - 12)
+        }
+    }
+
+    func recordExecutionSnapshot(source: String = "Run") {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let last = versionSnapshots.last, last.content == content {
+            return
+        }
+        let nextVer = (versionSnapshots.last?.versionNumber ?? 0) + 1
+        versionSnapshots.append(CellVersionSnapshot(
+            versionNumber: nextVer,
+            timestamp: Date(),
+            sourceLabel: source,
+            content: content,
+            outputPreview: String(output.prefix(160)),
+            durationMs: telemetry?.durationMs
+        ))
+        if versionSnapshots.count > 12 {
+            versionSnapshots.removeFirst(versionSnapshots.count - 12)
+        }
     }
     
     func appendOutput(_ text: String) {
@@ -465,24 +527,38 @@ final class NotebookViewModel: ObservableObject {
     /// yet saved to a user-chosen file (autosave still protects the work).
     @Published var currentFileURL: URL?
     @Published var lastAutoSave: Date?
+    @Published var isReactiveMode: Bool = false
+    @Published var showVariableInspector: Bool = false
+    @Published var isAppPresentationMode: Bool = false
+    @Published var globalExecutionEpoch: Int = 0
     private var autoSaveWork: DispatchWorkItem?
+    private var executionQueue: [(cellId: UUID, target: ComputeTarget?)] = []
+    private var isDrainingQueue: Bool = false
+
+    var isAnyCellExecuting: Bool {
+        activeNotebook?.cells.contains(where: { $0.isExecuting }) ?? false
+    }
 
     private var dataDirectory: URL {
         (scientificProjectURL ?? workingDirectory).appendingPathComponent("data", isDirectory: true)
     }
 
-    /// Realtime autosave: debounced so rapid typing/runs don't thrash disk.
-    /// Always writes the UserDefaults crash-recovery snapshot AND a real .mic
-    /// file (the bound file, or a stable autosave.mic) so work is never lost.
+    /// Realtime autosave: debounced & offloaded to `NotebookPersistenceActor` WAL
+    /// so rapid typing or 60Hz output streaming never blocks `@MainActor` or `cfprefsd`.
     func scheduleAutoSave() {
         autoSaveWork?.cancel()
+        let delay: TimeInterval = isAnyCellExecuting ? 1.8 : 0.8
         let work = DispatchWorkItem { [weak self] in self?.performAutoSave() }
         autoSaveWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func performAutoSave() {
-        autoSave() // UserDefaults snapshot (crash recovery — keep)
+        guard !isAnyCellExecuting else {
+            scheduleAutoSave()
+            return
+        }
+        autoSave() // Off-MainActor atomic WAL snapshot
         guard let notebook = activeNotebook else { return }
         let url = currentFileURL
             ?? workingDirectory.appendingPathComponent("autosave.mic")
@@ -613,7 +689,7 @@ final class NotebookViewModel: ObservableObject {
         if type == .code {
             content = ""  // Will use language default content
         } else if type == .agent {
-            content = "Use the shell tool to list files in the current directory."
+            content = ""  // Clean prompt composer with placeholder
         } else {
             content = "# Heading\n\nText here..."
         }
@@ -653,14 +729,131 @@ final class NotebookViewModel: ObservableObject {
         scheduleAutoSave()
     }
     
+    // MARK: - Cell Mode v2: Sequential Async Scheduler, Warm Kernels & Cached Polyglot Execution
+
+    func cancelExecutionQueue() {
+        guard let nb = activeNotebook else {
+            executionQueue.removeAll()
+            return
+        }
+        for queued in executionQueue {
+            nb.cells.first(where: { $0.id == queued.cellId })?.isQueued = false
+        }
+        executionQueue.removeAll()
+    }
+
+    func enqueueCells(_ cells: [NotebookCellModel], computeTarget: ComputeTarget? = nil) {
+        let runnable = cells.filter { $0.type == .code || $0.type == .procedure || $0.type == .agent }
+        guard !runnable.isEmpty else { return }
+
+        for c in runnable {
+            if !c.isExecuting && !executionQueue.contains(where: { $0.cellId == c.id }) {
+                c.isQueued = true
+                executionQueue.append((cellId: c.id, target: computeTarget))
+            }
+        }
+
+        Task { @MainActor in
+            await self.drainExecutionQueueIfNeeded()
+        }
+    }
+
+    private func drainExecutionQueueIfNeeded() async {
+        guard !isDrainingQueue else { return }
+        if isAnyCellExecuting {
+            return
+        }
+        isDrainingQueue = true
+        defer {
+            isDrainingQueue = false
+            if !isAnyCellExecuting && kernelStatus == "Running" {
+                kernelStatus = "Idle"
+            }
+        }
+
+        while !executionQueue.isEmpty {
+            let nextItem = executionQueue.removeFirst()
+            guard let notebook = activeNotebook,
+                  let cell = notebook.cells.first(where: { $0.id == nextItem.cellId }) else {
+                continue
+            }
+            cell.isQueued = false
+            cell.isExecuting = true
+            cell.clearOutput()
+            kernelStatus = "Running"
+
+            let ok = await performCellExecutionBody(cell, computeTarget: nextItem.target)
+            if !ok {
+                // Halt downstream batch cascade on runtime/compile failure
+                cancelExecutionQueue()
+                kernelStatus = "Error"
+                break
+            }
+        }
+    }
+
+    private func enqueueReactiveDownstream(from rootCell: NotebookCellModel, computeTarget: ComputeTarget?) {
+        guard isReactiveMode, let nb = activeNotebook else { return }
+        let inputs = nb.cells.map {
+            (
+                id: $0.id,
+                isRunnableCode: $0.type == .code || $0.type == .procedure,
+                content: $0.type == .procedure ? $0.generatedCode : $0.content,
+                lastRunEpoch: $0.lastRunEpoch
+            )
+        }
+        let graph = CellLineageDAGAnalyzer.analyzeGraph(cells: inputs)
+        let orderedIds = nb.cells.map(\.id)
+        let downstreamIds = CellLineageDAGAnalyzer.transitiveDownstreamIds(
+            from: rootCell.id,
+            graph: graph,
+            orderedIds: orderedIds
+        )
+        guard !downstreamIds.isEmpty else { return }
+        let downstreamCells = downstreamIds.compactMap { id in nb.cells.first(where: { $0.id == id }) }
+        enqueueCells(downstreamCells, computeTarget: computeTarget)
+    }
+
     func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget? = nil) {
         guard cell.type == .code || cell.type == .procedure || cell.type == .agent else { return }
         TelemetryService.shared.recordFeature("Notebook Cell (\(cell.language.rawValue))")
 
         let effectiveTarget: ComputeTarget = cell.computeTargetOverride ?? computeTarget ?? AppState.shared?.currentComputeTarget ?? .localCPU
 
-        // If the cell is already executing, clicking the Stop button cancels/interrupts the kernel
+        // 1. If queued but not yet running, unqueue immediately
+        if cell.isQueued && !cell.isExecuting {
+            executionQueue.removeAll { $0.cellId == cell.id }
+            cell.isQueued = false
+            return
+        }
+
+        // 2. If currently executing, interrupt/stop cleanly (preserving warm Python RAM state via SIGINT)
         if cell.isExecuting {
+            cancelExecutionQueue()
+            if cell.type == .agent {
+                CellAgentCoordinator.shared.stop(sessionId: "agent-cell-\(cell.id.uuidString)")
+                cell.agentStatusText = ""
+                cell.isExecuting = false
+                self.kernelStatus = "Idle"
+                return
+            }
+
+            let isLocal = (effectiveTarget == .localCPU || effectiveTarget == .localMLX || effectiveTarget == .localNvidia)
+            if isLocal {
+                if (cell.language == .python || cell.type == .procedure || cell.language == .sql),
+                   let nbId = activeNotebook?.id {
+                    LocalPersistentPythonKernelPool.shared.interrupt(notebookId: nbId)
+                } else if cell.language == .julia, let nbId = activeNotebook?.id {
+                    LocalPersistentJuliaKernelPool.shared.restart(notebookId: nbId)
+                    cell.appendOutput("\n⏹ Julia execution interrupted.\n")
+                    cell.isExecuting = false
+                    self.kernelStatus = "Idle"
+                } else {
+                    PolyglotStreamingAndCacheEngine.shared.cancelProcess(for: cell.id)
+                }
+                return
+            }
+
             Task {
                 let kernel = ComputeKernelRouter.shared.getKernel(for: effectiveTarget)
                 try? await kernel.cancel()
@@ -673,155 +866,142 @@ final class NotebookViewModel: ObservableObject {
             return
         }
 
-        // Auto-detect 3rd-party imports so the env manager always reflects what
-        // the code actually needs without the user typing anything.
-        if cell.language == .python {
-            _ = PythonEnvManager.shared.detectImportsFromCode(cell.content)
+        // 3. If another cell is currently executing or queue is draining, enqueue sequentially
+        if isDrainingQueue || isAnyCellExecuting {
+            enqueueCells([cell], computeTarget: computeTarget)
+            return
         }
 
+        // 4. Synchronous state transition so callers & Agent tools observe `isExecuting == true` immediately
+        cell.isQueued = false
         cell.isExecuting = true
         cell.clearOutput()
         kernelStatus = "Running"
 
-        // Agent cells always run through the AI Agent (which respects remote executionTarget)
-        if cell.type == .agent {
-            runAgentCell(cell)
-            return
+        Task { @MainActor in
+            let ok = await self.performCellExecutionBody(cell, computeTarget: computeTarget)
+            if ok && self.isReactiveMode {
+                self.enqueueReactiveDownstream(from: cell, computeTarget: computeTarget)
+            }
+            await self.drainExecutionQueueIfNeeded()
+        }
+    }
+
+    private func performCellExecutionBody(_ cell: NotebookCellModel, computeTarget: ComputeTarget?) async -> Bool {
+        let effectiveTarget: ComputeTarget = cell.computeTargetOverride ?? computeTarget ?? AppState.shared?.currentComputeTarget ?? .localCPU
+
+        if cell.language == .python || cell.type == .procedure {
+            let codeToScan = cell.type == .procedure ? cell.generatedCode : cell.content
+            _ = PythonEnvManager.shared.detectImportsFromCode(codeToScan)
         }
 
-        // If it's not a local execution, route to the Compute Kernel
+        if cell.type == .agent {
+            return await executeAgentCellAsync(cell)
+        }
+
         if effectiveTarget != .localCPU && effectiveTarget != .localMLX && effectiveTarget != .localNvidia {
-            Task {
-                do {
-                    if effectiveTarget == .customHPC {
-                        try await CloudGPUService.shared.ensureManagedSession()
-                    }
-                    if effectiveTarget == .googleColab {
-                        if !GoogleColabService.shared.status.isConnected {
-                            if GoogleColabService.shared.checkAndConnectFromClipboardIfValid() {
-                                for _ in 0..<8 {
-                                    if GoogleColabService.shared.status.isConnected { break }
-                                    try? await Task.sleep(nanoseconds: 500_000_000)
-                                }
-                            }
-                        }
-                    }
-                    let kernel = ComputeKernelRouter.shared.getKernel(for: effectiveTarget)
-                    try await kernel.start()
-                    
-                    let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { chunk in
-                        DispatchQueue.main.async {
-                            cell.appendOutput(chunk)
-                        }
-                    }
-                    
-                    DispatchQueue.main.async {
-                        let rawOutput = cell.output
-                        let pattern = "\\[IMAGE:([^\\]]+)\\]"
-                        if let regex = try? NSRegularExpression(pattern: pattern) {
-                            let matches = regex.matches(in: rawOutput, range: NSRange(rawOutput.startIndex..., in: rawOutput))
-                            var images: [URL] = cell.outputImages
-                            for match in matches {
-                                if let range = Range(match.range(at: 1), in: rawOutput) {
-                                    let filename = String(rawOutput[range])
-                                    let imageURL = filename.hasPrefix("/")
-                                        ? URL(fileURLWithPath: filename)
-                                        : self.workingDirectory.appendingPathComponent(filename)
-                                    if FileManager.default.fileExists(atPath: imageURL.path) && !images.contains(imageURL) {
-                                        images.append(imageURL)
-                                    }
-                                }
-                            }
-                            cell.outputImages = images
-                            cell.output = regex.stringByReplacingMatches(in: rawOutput, range: NSRange(rawOutput.startIndex..., in: rawOutput), withTemplate: "")
-                        }
-                        let clean = result.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && cell.outputImages.isEmpty {
-                            cell.output = clean.isEmpty ? "(Executed with no output)" : clean
-                        }
-                        cell.isExecuting = false
-                        self.kernelStatus = "Idle"
-                        cell.executionCount = (cell.executionCount ?? 0) + 1
-                        self.totalExecutions += 1
-                    }
-                } catch {
-                    DispatchQueue.main.async {
-                        if effectiveTarget == .googleColab {
-                            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeOpenColabSheet"), object: nil)
-                        }
-                        cell.appendOutput("❌ Kernel Error: \(error.localizedDescription)\n")
-                        cell.isExecuting = false
-                        self.kernelStatus = "Error"
-                    }
-                }
-            }
-            return
+            return await executeRemoteKernelCellAsync(cell, effectiveTarget: effectiveTarget)
         }
-        
+
         if cell.type == .procedure {
-            runProcedureCell(cell)
-            return
+            return await executeLocalPythonOrProcedureCellAsync(cell)
         }
-        
+
         switch cell.language {
         case .python:
-            runPythonCell(cell)
-        case .r:
-            runRCell(cell)
-        case .julia:
-            runJuliaCell(cell)
-        case .sql:
-            runSQLCell(cell)
-        case .ardium:
-            runArdiumCell(cell)
-        case .rmarkdown:
-            runRMarkdownCell(cell)
-        case .latex:
-            runLaTeXCell(cell)
+            return await executeLocalPythonOrProcedureCellAsync(cell)
         case .rust:
-            runRustCell(cell)
-        case .go:
-            runGoCell(cell)
-
+            return await executeLocalRustCellAsync(cell)
         case .cpp:
-            runCppCell(cell)
+            return await executeLocalCppCellAsync(cell)
         case .objc:
-            runObjcCell(cell)
+            return await executeLocalObjcCellAsync(cell)
+        case .julia:
+            return await executeLocalJuliaCellAsync(cell)
+        case .go:
+            return await executeLocalGoCellAsync(cell)
+        case .r:
+            return await executeLocalRCellAsync(cell)
+        case .rmarkdown:
+            return await executeLocalRMarkdownCellAsync(cell)
+        case .latex:
+            return await executeLocalLaTeXCellAsync(cell)
+        case .sql:
+            return await executeLocalSQLCellAsync(cell)
+        case .ardium:
+            return await executeLocalArdiumCellAsync(cell)
         case .java, .csharp:
-            let langKey = (cell.language == .java) ? "java" : "csharp"
-            let cellID = cell.id
-            let content = cell.content
-            Task { @MainActor in
-                cell.isExecuting = true
-                cell.output = ""
-                let ready = await RuntimeManager.shared.ensureRuntime(forLanguage: langKey) { msg in
-                    DispatchQueue.main.async {
-                        cell.appendOutput(msg + "\n")
-                    }
-                }
-                if !ready {
-                    self.handleCellOutput(
-                        cellID: cellID,
-                        result: "❌ \(cell.language.rawValue) runtime is not installed. Run `curl -fsSL https://microcode.dotmini.net/install.sh | bash` in Terminal."
-                    )
-                    return
-                }
-                guard let appState = AppState.shared else {
-                    self.handleCellOutput(cellID: cellID, result: "❌ AppState is not ready.")
-                    return
-                }
-                let res = await appState.executeScript(code: content, language: langKey)
-                let combined = res.stdout + (res.stderr.isEmpty ? "" : (res.stdout.isEmpty ? "" : "\n") + res.stderr)
-                self.handleCellOutput(cellID: cellID, result: combined.isEmpty ? "(Executed with no output)" : combined)
-            }
+            return await executeLocalManagedRuntimeCellAsync(cell)
         }
     }
-    
-    private func runProcedureCell(_ cell: NotebookCellModel) {
-        // Procedure cells always run as Python with generated code
-        runPythonCell(cell)
+
+    private func parseEmbeddedImageMarkers(from rawText: String) -> (cleanText: String, images: [URL]) {
+        let pattern = "\\[IMAGE:([^\\]]+)\\]"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return (rawText, [])
+        }
+        var images: [URL] = []
+        let matches = regex.matches(in: rawText, range: NSRange(rawText.startIndex..., in: rawText))
+        for match in matches {
+            if let range = Range(match.range(at: 1), in: rawText) {
+                let filename = String(rawText[range])
+                let imageURL = filename.hasPrefix("/")
+                    ? URL(fileURLWithPath: filename)
+                    : workingDirectory.appendingPathComponent(filename)
+                if FileManager.default.fileExists(atPath: imageURL.path) && !images.contains(imageURL) {
+                    images.append(imageURL)
+                }
+            }
+        }
+        let cleaned = regex.stringByReplacingMatches(
+            in: rawText,
+            range: NSRange(rawText.startIndex..., in: rawText),
+            withTemplate: ""
+        )
+        return (cleaned, images)
     }
-    
+
+    private func finalizeCellExecution(
+        cell: NotebookCellModel,
+        outputText: String,
+        images: [URL] = [],
+        inlineDF: InlineDataFramePayload? = nil,
+        telemetry: CellExecutionTelemetry? = nil,
+        hadError: Bool = false
+    ) -> Bool {
+        // Backward-compatible check for legacy JSON DataFrame path marker
+        if inlineDF == nil,
+           let data = outputText.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let isDF = json["__microcode_dataframe__"] as? Bool, isDF,
+           let path = json["path"] as? String {
+            cell.output = ""
+            cell.dataFramePath = path
+            cell.isDataFrame = true
+        } else {
+            let parsed = parseEmbeddedImageMarkers(from: outputText)
+            var mergedImages = images
+            for img in parsed.images where !mergedImages.contains(img) {
+                mergedImages.append(img)
+            }
+            cell.output = parsed.cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
+            cell.outputImages = mergedImages
+            cell.inlineDataFrame = inlineDF
+        }
+
+        cell.telemetry = telemetry
+        cell.isExecuting = false
+        totalExecutions += 1
+        cell.executionCount = totalExecutions
+        globalExecutionEpoch += 1
+        cell.lastRunEpoch = globalExecutionEpoch
+        cell.recordExecutionSnapshot(source: telemetry?.isCachedBinary == true ? "Cached Run" : "Run")
+        kernelStatus = hadError ? "Error" : "Idle"
+        activeNotebook?.modifiedAt = Date()
+        scheduleAutoSave()
+        return !hadError
+    }
+
     nonisolated private func buildCellProcessEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
@@ -845,711 +1025,411 @@ final class NotebookViewModel: ObservableObject {
         if env["GOROOT"] == nil, let goRoot = RuntimeManager.shared.portableGoRoot() {
             env["GOROOT"] = goRoot
         }
+        env["MICROCODE_LOCAL_API_TOKEN"] = LocalBackendAuth.token
         return env
     }
-    
-    private func runAgentCell(_ cell: NotebookCellModel) {
-        let cellID = cell.id
-        let prompt = cell.content
-        let workingDir = workingDirectory.path
-        
-        // Find existing AgentToolBox instance or create a local scope one
-        let toolBox = AgentToolBox.shared
-        toolBox.workspaceRoot = workingDir
-        
-        let systemPrompt = """
-        You are a highly capable OS-Level Agent executing inside a MicroCode Notebook cell.
-        You have direct access to the user's local machine via tool calls.
-        Your current working directory is: \(workingDir)
-        
-        You can execute tools by using the following XML format:
-        <call:shell_command>{"command": "ls -la"}</call:shell_command>
-        <call:file_write>{"path": "test.txt", "content": "hello"}</call:file_write>
-        
-        Available Tools:
-        - shell_command: Run any bash command (arguments: command)
-        - file_write: Write a file (arguments: path, content)
-        - file_read: Read a file (arguments: path)
-        
-        Execute the user's instructions and output your findings or actions taken.
-        """
-        
-        // We capture the view model context to update UI
-        DispatchQueue.main.async {
-            cell.appendOutput("🤖 [Agent Booting] Initializing OS-Level execution...\n")
+
+    private func executeAgentCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let prompt = cell.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            cell.isExecuting = false
+            self.kernelStatus = "Idle"
+            return true
         }
-        
-        let model = UserDefaults.standard.string(forKey: "aiModel") ?? "gemini-2.5-flash"
-        
-        AIClient.shared.sendMessage(
-            prompt: prompt,
-            systemPrompt: systemPrompt,
-            provider: .gemini,
-            model: model,
-            apiKey: "",
-            onToken: { token in
-                DispatchQueue.main.async {
-                    cell.appendOutput(token)
-                }
-            },
-            onComplete: { fullResponse in
-                let regex = try? NSRegularExpression(pattern: "<call:(shell_command|file_write|file_read)>\\s*\\{(.*?)\\}\\s*</call:\\1>", options: [.dotMatchesLineSeparators])
-                let nsString = fullResponse as NSString
-                
-                if let matches = regex?.matches(in: fullResponse, range: NSRange(location: 0, length: nsString.length)), !matches.isEmpty {
-                    DispatchQueue.main.async {
-                        cell.appendOutput("\n\n⚙️ [Agent Executing Tool]...\n")
+        guard let appState = AppState.shared else {
+            cell.output = "⚠️ Application state is not initialized."
+            cell.isExecuting = false
+            self.kernelStatus = "Error"
+            return false
+        }
+
+        let sessionId = "agent-cell-\(cell.id.uuidString)"
+        let workspaceRoot = appState.workspaceFolder?.path ?? workingDirectory.path
+        let notebookContext = CellAgentCoordinator.shared.buildNotebookContextSnapshot(viewModel: self)
+
+        cell.agentStatusText = cell.agentExecutionMode ? "Agent inspecting notebook…" : "Generating…"
+        cell.agentThought = ""
+        cell.agentToolSteps = []
+        let t0 = CFAbsoluteTimeGetCurrent()
+
+        return await withCheckedContinuation { continuation in
+            var resumed = false
+            CellAgentCoordinator.shared.startExecution(
+                sessionId: sessionId,
+                prompt: prompt,
+                selection: cell.aiSelection,
+                isAgentMode: cell.agentExecutionMode,
+                appState: appState,
+                notebookContext: notebookContext,
+                workspaceRoot: workspaceRoot,
+                onStatus: { status in
+                    cell.agentStatusText = status
+                },
+                onThought: { thought in
+                    cell.agentThought = thought
+                },
+                onText: { liveText in
+                    cell.output = liveText
+                },
+                onToolSteps: { steps in
+                    cell.agentToolSteps = steps
+                },
+                onComplete: { finalText in
+                    guard !resumed else { return }
+                    resumed = true
+                    if cell.output.isEmpty && !finalText.isEmpty {
+                        cell.output = finalText
+                    } else if cell.output.isEmpty && !cell.agentToolSteps.isEmpty {
+                        cell.output = "ดำเนินการเสร็จเรียบร้อย (\(cell.agentToolSteps.count) tool steps)"
                     }
-                    
-                    for match in matches {
-                        let toolName = nsString.substring(with: match.range(at: 1))
-                        let argsString = "{" + nsString.substring(with: match.range(at: 2)) + "}"
-                        
-                        var args: [String: Any] = [:]
-                        if let data = argsString.data(using: .utf8),
-                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                            args = json
-                        } else {
-                            if toolName == "shell_command" {
-                                let cmdRegex = try? NSRegularExpression(pattern: "\"command\"\\s*:\\s*\"([^\"]+)\"")
-                                if let cmdMatch = cmdRegex?.firstMatch(in: argsString, range: NSRange(location: 0, length: argsString.utf16.count)) {
-                                    args["command"] = (argsString as NSString).substring(with: cmdMatch.range(at: 1))
-                                }
-                            }
-                        }
-                        
-                        // Execute Tool
-                        Task {
-                            let result = (try? await toolBox.execute(toolName, params: args)) ?? "Error executing tool"
-                            DispatchQueue.main.async {
-                                cell.appendOutput("\n[Tool Output (\(toolName))]:\n\(result)\n")
-                                cell.isExecuting = false
-                                self.kernelStatus = "Idle"
-                                cell.executionCount = (cell.executionCount ?? 0) + 1
-                                self.totalExecutions += 1
-                            }
-                        }
-                        return
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        cell.isExecuting = false
-                        self.kernelStatus = "Idle"
-                        cell.executionCount = (cell.executionCount ?? 0) + 1
-                        self.totalExecutions += 1
-                    }
-                }
-            },
-            onError: { error in
-                DispatchQueue.main.async {
-                    cell.appendOutput("\n❌ Agent Error: \(error)\n")
+                    cell.agentStatusText = ""
+                    cell.telemetry = CellExecutionTelemetry(
+                        durationMs: (CFAbsoluteTimeGetCurrent() - t0) * 1000.0,
+                        memoryDeltaBytes: 0,
+                        peakRSSBytes: 0,
+                        metalAllocatedBytes: 0,
+                        isCachedBinary: false
+                    )
+                    cell.isExecuting = false
+                    self.kernelStatus = "Idle"
+                    self.totalExecutions += 1
+                    cell.executionCount = self.totalExecutions
+                    self.globalExecutionEpoch += 1
+                    cell.lastRunEpoch = self.globalExecutionEpoch
+                    self.scheduleAutoSave()
+                    continuation.resume(returning: true)
+                },
+                onError: { error in
+                    guard !resumed else { return }
+                    resumed = true
+                    let prefix = cell.output.isEmpty ? "" : cell.output + "\n\n"
+                    cell.output = prefix + "⚠️ \(error)"
+                    cell.agentStatusText = ""
                     cell.isExecuting = false
                     self.kernelStatus = "Error"
+                    continuation.resume(returning: false)
                 }
-            }
-        )
-    }
-    
-    private func runRustCell(_ cell: NotebookCellModel) {
-        let uuid = UUID().uuidString.prefix(8)
-        let workingDir = workingDirectory
-        let tempRs = workingDir.appendingPathComponent("temp_\(uuid).rs")
-        let tempBin = workingDir.appendingPathComponent("temp_\(uuid)")
-        let content = cell.content
-        let cellID = cell.id
-        
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            
-            _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "rust") { msg in
-                DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
-            }
-            let rustcPath = RuntimeManager.shared.selectedExecutable(for: .rust) ?? "rustc"
-            let env = self.buildCellProcessEnvironment()
-            
-            do {
-                try content.write(to: tempRs, atomically: true, encoding: .utf8)
-                
-                // 1. Compile
-                let compileProcess = Process()
-                compileProcess.environment = env
-                if rustcPath.contains("/") {
-                    compileProcess.executableURL = URL(fileURLWithPath: rustcPath)
-                    compileProcess.arguments = [tempRs.path, "-o", tempBin.path]
-                } else {
-                    compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                    compileProcess.arguments = ["rustc", tempRs.path, "-o", tempBin.path]
-                }
-                compileProcess.currentDirectoryURL = workingDir
-                
-                let compileErrorPipe = Pipe()
-                compileProcess.standardError = compileErrorPipe
-                
-                try compileProcess.run()
-                compileProcess.waitUntilExit()
-                
-                let compileErrorData = compileErrorPipe.fileHandleForReading.readDataToEndOfFile()
-                let compileError = String(data: compileErrorData, encoding: .utf8) ?? ""
-                
-                if compileProcess.terminationStatus == 0 {
-                    // 2. Run
-                    let runProcess = Process()
-                    runProcess.executableURL = tempBin
-                    runProcess.currentDirectoryURL = workingDir
-                    runProcess.environment = env
-                    
-                    let outputPipe = Pipe()
-                    let errorPipe = Pipe()
-                    runProcess.standardOutput = outputPipe
-                    runProcess.standardError = errorPipe
-                    
-                    try runProcess.run()
-                    runProcess.waitUntilExit()
-                    
-                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    
-                    let output = String(data: outputData, encoding: .utf8) ?? ""
-                    let error = String(data: errorData, encoding: .utf8) ?? ""
-                    
-                    try? FileManager.default.removeItem(at: tempBin)
-                    
-                    let result = output + (error.isEmpty ? "" : "\n" + error)
-                    self.handleCellOutput(cellID: cellID, result: result)
-                } else {
-                    let result = "❌ Compilation Failed:\n" + compileError
-                    self.handleCellOutput(cellID: cellID, result: result)
-                }
-                
-                try? FileManager.default.removeItem(at: tempRs)
-            } catch {
-                let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cellID: cellID, result: result)
-            }
+            )
         }
     }
 
-    private func runGoCell(_ cell: NotebookCellModel) {
-        let uuid = UUID().uuidString.prefix(8)
-        let workingDir = workingDirectory
-        let tempGo = workingDir.appendingPathComponent("temp_\(uuid).go")
-        let content = cell.content
-        let cellID = cell.id
-        
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            
-            _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "go") { msg in
-                DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+    private func executeRemoteKernelCellAsync(_ cell: NotebookCellModel, effectiveTarget: ComputeTarget) async -> Bool {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        do {
+            if effectiveTarget == .customHPC {
+                try await CloudGPUService.shared.ensureManagedSession()
             }
-            let goPath = RuntimeManager.shared.selectedExecutable(for: .go) ?? "go"
-            let env = self.buildCellProcessEnvironment()
-            
-            do {
-                try content.write(to: tempGo, atomically: true, encoding: .utf8)
-                
-                let process = Process()
-                process.environment = env
-                if goPath.contains("/") {
-                    process.executableURL = URL(fileURLWithPath: goPath)
-                    process.arguments = ["run", tempGo.path]
-                } else {
-                    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                    process.arguments = ["go", "run", tempGo.path]
-                }
-                process.currentDirectoryURL = workingDir
-                
-                let outputPipe = Pipe()
-                let errorPipe = Pipe()
-                process.standardOutput = outputPipe
-                process.standardError = errorPipe
-                
-                try process.run()
-                process.waitUntilExit()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                let error = String(data: errorData, encoding: .utf8) ?? ""
-                
-                try? FileManager.default.removeItem(at: tempGo)
-                
-                let result = output + (error.isEmpty ? "" : "\n" + error)
-                self.handleCellOutput(cellID: cellID, result: result)
-            } catch {
-                let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cellID: cellID, result: result)
-            }
-        }
-    }
-    
-    private func runCppCell(_ cell: NotebookCellModel) {
-        let uuid = UUID().uuidString.prefix(8)
-        let workingDir = workingDirectory
-        let tempCpp = workingDir.appendingPathComponent("temp_\(uuid).cpp")
-        let tempBin = workingDir.appendingPathComponent("temp_\(uuid)")
-        let content = cell.content
-        let cellID = cell.id
-        
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            
-            _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "cpp") { msg in
-                DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
-            }
-            let clangppPath = RuntimeManager.shared.selectedExecutable(for: .cpp) ?? "clang++"
-            let env = self.buildCellProcessEnvironment()
-            
-            do {
-                try content.write(to: tempCpp, atomically: true, encoding: .utf8)
-                
-                let compileProcess = Process()
-                compileProcess.environment = env
-                if clangppPath.contains("/") {
-                    compileProcess.executableURL = URL(fileURLWithPath: clangppPath)
-                    compileProcess.arguments = ["-std=c++20", tempCpp.path, "-o", tempBin.path]
-                } else {
-                    compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                    compileProcess.arguments = ["clang++", "-std=c++20", tempCpp.path, "-o", tempBin.path]
-                }
-                compileProcess.currentDirectoryURL = workingDir
-                
-                let compileErrorPipe = Pipe()
-                compileProcess.standardError = compileErrorPipe
-                
-                try compileProcess.run()
-                compileProcess.waitUntilExit()
-                
-                let compileErrorData = compileErrorPipe.fileHandleForReading.readDataToEndOfFile()
-                let compileError = String(data: compileErrorData, encoding: .utf8) ?? ""
-                
-                if compileProcess.terminationStatus == 0 {
-                    let runProcess = Process()
-                    runProcess.executableURL = tempBin
-                    runProcess.currentDirectoryURL = workingDir
-                    runProcess.environment = env
-                    
-                    let outputPipe = Pipe()
-                    let errorPipe = Pipe()
-                    runProcess.standardOutput = outputPipe
-                    runProcess.standardError = errorPipe
-                    
-                    try runProcess.run()
-                    runProcess.waitUntilExit()
-                    
-                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    
-                    let output = String(data: outputData, encoding: .utf8) ?? ""
-                    let error = String(data: errorData, encoding: .utf8) ?? ""
-                    
-                    try? FileManager.default.removeItem(at: tempBin)
-                    
-                    let result = output + (error.isEmpty ? "" : "\n" + error)
-                    self.handleCellOutput(cellID: cellID, result: result)
-                } else {
-                    let result = "❌ Compilation Failed:\n" + compileError
-                    self.handleCellOutput(cellID: cellID, result: result)
-                }
-                
-                try? FileManager.default.removeItem(at: tempCpp)
-            } catch {
-                let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cellID: cellID, result: result)
-            }
-        }
-    }
-    
-    private func runObjcCell(_ cell: NotebookCellModel) {
-        let uuid = UUID().uuidString.prefix(8)
-        let workingDir = workingDirectory
-        let tempObjc = workingDir.appendingPathComponent("temp_\(uuid).m")
-        let tempBin = workingDir.appendingPathComponent("temp_\(uuid)")
-        let content = cell.content
-        let cellID = cell.id
-        
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            let env = self.buildCellProcessEnvironment()
-            
-            do {
-                try content.write(to: tempObjc, atomically: true, encoding: .utf8)
-                
-                let compileProcess = Process()
-                compileProcess.environment = env
-                compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                compileProcess.arguments = ["clang", "-framework", "Foundation", tempObjc.path, "-o", tempBin.path]
-                compileProcess.currentDirectoryURL = workingDir
-                
-                let compileErrorPipe = Pipe()
-                compileProcess.standardError = compileErrorPipe
-                
-                try compileProcess.run()
-                compileProcess.waitUntilExit()
-                
-                let compileErrorData = compileErrorPipe.fileHandleForReading.readDataToEndOfFile()
-                let compileError = String(data: compileErrorData, encoding: .utf8) ?? ""
-                
-                if compileProcess.terminationStatus == 0 {
-                    let runProcess = Process()
-                    runProcess.executableURL = tempBin
-                    runProcess.currentDirectoryURL = workingDir
-                    runProcess.environment = env
-                    
-                    let outputPipe = Pipe()
-                    let errorPipe = Pipe()
-                    runProcess.standardOutput = outputPipe
-                    runProcess.standardError = errorPipe
-                    
-                    try runProcess.run()
-                    runProcess.waitUntilExit()
-                    
-                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    
-                    let output = String(data: outputData, encoding: .utf8) ?? ""
-                    let error = String(data: errorData, encoding: .utf8) ?? ""
-                    
-                    try? FileManager.default.removeItem(at: tempBin)
-                    
-                    let result = output + (error.isEmpty ? "" : "\n" + error)
-                    self.handleCellOutput(cellID: cellID, result: result)
-                } else {
-                    let result = "❌ Compilation Failed:\n" + compileError
-                    self.handleCellOutput(cellID: cellID, result: result)
-                }
-                
-                try? FileManager.default.removeItem(at: tempObjc)
-            } catch {
-                let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cellID: cellID, result: result)
-            }
-        }
-    }
-    
-    private func runArdiumCell(_ cell: NotebookCellModel) {
-        let cellID = cell.id
-        let code = cell.content
-        let workingDir = workingDirectory
-        
-        DispatchQueue.main.async {
-            cell.isExecuting = true
-            cell.output = ""
-        }
-        
-        Task {
-            var finalCode = code
-            if !finalCode.contains("fn main(") && !finalCode.contains("func main(") {
-                let trimmed = finalCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.contains("print") || trimmed.contains("println") || trimmed.contains("show()") {
-                    finalCode = "fn main() {\n" + finalCode + "\n}"
-                }
-            }
-            
-            let res = await ArdiumRunner.execute(code: finalCode)
-            var out = res.stdout
-            if !res.stderr.isEmpty {
-                out += (out.isEmpty ? "" : "\n") + res.stderr
-            }
-            if out.isEmpty && res.exitCode == 0 {
-                out = "(Executed with no output)"
-            }
-            
-            let cleanPattern = #"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"#
-            let cleanOut = out.replacingOccurrences(of: cleanPattern, with: "", options: .regularExpression)
-            
-            await MainActor.run {
-                self.handleCellOutput(cellID: cellID, result: cleanOut)
-            }
-        }
-    }
-    
-    private func runPythonCell(_ cell: NotebookCellModel) {
-        // Simple setup code - no user content in strings to avoid syntax issues
-        let setupCode = """
-        import os
-        import sys
-        os.chdir(r'\(workingDirectory.path)')
-        
-        # MicroCode Shared Memory Bridge
-        \(SharedMemoryService.shared.getPythonBridgeCode())
-        
-        # Setup matplotlib for inline display
-        try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            plt.ioff()
-        except:
-            pass
-        
-        """
-        
-        
-        // User's code runs here
-        let userCode = cell.type == .procedure ? cell.generatedCode : cell.content
-        
-        // Auto-save matplotlib figures after execution
-        let saveCode = """
-        
-        # Auto-save matplotlib figures
-        try:
-            import matplotlib.pyplot as plt
-            figs = [plt.figure(n) for n in plt.get_fignums()]
-            for i, fig in enumerate(figs):
-                fig.savefig(f'output_{i}.png', dpi=100, bbox_inches='tight')
-                print(f'[IMAGE:output_{i}.png]')
-            plt.close('all')
-        except:
-            pass
-        """
-        
-        let fullCode = setupCode + userCode + saveCode
-        
-        // Use selected Python version or active environment
-        let pythonPath = PythonEnvManager.shared.activeEnvironment?.pythonPath ?? selectedPythonPath
-        let cellID = cell.id
-        PythonEnvManager.shared.executeCode(fullCode, pythonPath: pythonPath) { [weak self] result, success in
-            self?.handleCellOutput(cellID: cellID, result: result)
-        }
-    }
-    
-    private func runRCell(_ cell: NotebookCellModel) {
-        // Honour the R interpreter explicitly selected in Manage Environments
-        // before falling back to conventional Rscript locations.
-        let rPaths = ["/opt/homebrew/bin/Rscript", "/usr/local/bin/Rscript", "/usr/bin/Rscript"]
-        guard let rPath = RuntimeManager.shared.selectedExecutable(for: .r)
-            ?? rPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            DispatchQueue.main.async {
-                cell.output = "❌ R is not installed. Please install R from https://cran.r-project.org/"
-                cell.isExecuting = false
-                self.kernelStatus = "Idle"
-            }
-            return
-        }
-        
-        // R setup code for graphics
-        let setupCode = """
-        setwd("\(workingDirectory.path)")
-        
-        # Setup for saving plots
-        .plot_counter <- 0
-        .save_plot <- function() {
-            .plot_counter <<- .plot_counter + 1
-            filename <- paste0("output_", .plot_counter, ".png")
-            dev.copy(png, filename, width = 800, height = 600)
-            dev.off()
-            cat(paste0("[IMAGE:", filename, "]\\n"))
-        }
-        
-        """
-        
-        // Auto-save plots code
-        let saveCode = """
-        
-        # Auto-save any open plots
-        tryCatch({
-            if (dev.cur() > 1) {
-                .save_plot()
-            }
-        }, error = function(e) {})
-        """
-        
-        let fullCode = setupCode + cell.content + saveCode
-        let workingDir = workingDirectory
-        let tempFile = workingDir.appendingPathComponent("temp_script_\(UUID().uuidString).R")
-        let cellID = cell.id
-        
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            do {
-                try fullCode.write(to: tempFile, atomically: true, encoding: .utf8)
-                
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: rPath)
-                let isRscript = URL(fileURLWithPath: rPath).lastPathComponent.lowercased().contains("rscript")
-                process.arguments = isRscript
-                    ? ["--vanilla", tempFile.path]
-                    : ["--vanilla", "--slave", "-f", tempFile.path]
-                process.currentDirectoryURL = workingDir
-                
-                let outputPipe = Pipe()
-                let errorPipe = Pipe()
-                process.standardOutput = outputPipe
-                process.standardError = errorPipe
-                
-                try process.run()
-                process.waitUntilExit()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                let error = String(data: errorData, encoding: .utf8) ?? ""
-                
-                let result = process.terminationStatus == 0 ? output : (output + "\n" + error)
-                
-                // Cleanup temp file
-                try? FileManager.default.removeItem(at: tempFile)
-                
-                self.handleCellOutput(cellID: cellID, result: result)
-            } catch {
-                DispatchQueue.main.async {
-                    // This creates a capture of 'cell'. We need to avoid it.
-                    // But we used 'cell.id' and 'cellID'. We need to resolve cell safely.
-                    // For simplicity, we can use handleCellOutput for errors too.
-                    self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-    
-    nonisolated private func handleCellOutput(cellID: UUID, result: String) {
-        // Check for DataFrame metadata
-        var isDataFrame = false
-        var dfPath: String? = nil
-        
-        if let data = result.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let isDF = json["__microcode_dataframe__"] as? Bool, isDF,
-           let path = json["path"] as? String {
-            isDataFrame = true
-            dfPath = path
-        }
-        
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            guard let notebook = self.activeNotebook,
-                  let cell = notebook.cells.first(where: { $0.id == cellID }) else { return }
-            
-            if isDataFrame, let path = dfPath {
-                cell.output = "" // Clear text output
-                cell.dataFramePath = path
-                cell.isDataFrame = true
-                cell.executionCount = (self.totalExecutions + 1)
-                cell.isExecuting = false
-                self.totalExecutions += 1
-                self.kernelStatus = "Idle"
-                return
-            }
-            
-            // Parse output for image markers
-            var textOutput = result
-            var images: [URL] = []
-            
-            // Find [IMAGE:filename] markers
-            let pattern = "\\[IMAGE:([^\\]]+)\\]"
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
-                for match in matches {
-                    if let range = Range(match.range(at: 1), in: result) {
-                        let filename = String(result[range])
-                        let imageURL = filename.hasPrefix("/")
-                            ? URL(fileURLWithPath: filename)
-                            : self.workingDirectory.appendingPathComponent(filename)
-                        if FileManager.default.fileExists(atPath: imageURL.path) {
-                            images.append(imageURL)
+            if effectiveTarget == .googleColab {
+                if !GoogleColabService.shared.status.isConnected {
+                    if GoogleColabService.shared.checkAndConnectFromClipboardIfValid() {
+                        for _ in 0..<8 {
+                            if GoogleColabService.shared.status.isConnected { break }
+                            try? await Task.sleep(nanoseconds: 500_000_000)
                         }
                     }
                 }
-                // Remove image markers from text output
-                textOutput = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
             }
-            
-            cell.output = textOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            cell.outputImages = images
-            cell.isExecuting = false
-            self.totalExecutions += 1
-            cell.executionCount = self.totalExecutions
-            self.kernelStatus = "Idle"
-            self.activeNotebook?.modifiedAt = Date()
-        }
-    }
-    
-    private func runRMarkdownCell(_ cell: NotebookCellModel) {
-        // Find R executable
-        let rPaths = ["/opt/homebrew/bin/R", "/usr/local/bin/R", "/usr/bin/R"]
-        guard let rPath = rPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            DispatchQueue.main.async {
-                cell.output = "❌ R is not installed. Install R from https://cran.r-project.org/"
-                cell.isExecuting = false
-                self.kernelStatus = "Idle"
-            }
-            return
-        }
-        
-        let workingDir = workingDirectory
-        let tempRmd = workingDir.appendingPathComponent("temp_\(UUID().uuidString).Rmd")
-        let outputHtml = workingDir.appendingPathComponent("temp_\(UUID().uuidString).html")
-        let content = cell.content
-        let cellID = cell.id
-        
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            do {
-                try content.write(to: tempRmd, atomically: true, encoding: .utf8)
-                
-                // Render R Markdown using rmarkdown::render()
-                let renderScript = """
-                rmarkdown::render('\(tempRmd.path)', output_file = '\(outputHtml.path)', quiet = TRUE)
-                cat('[RMARKDOWN_OUTPUT:\(outputHtml.path)]')
-                """
-                
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: rPath)
-                process.arguments = ["-e", renderScript]
-                process.currentDirectoryURL = workingDir
-                
-                let outputPipe = Pipe()
-                let errorPipe = Pipe()
-                process.standardOutput = outputPipe
-                process.standardError = errorPipe
-                
-                try process.run()
-                process.waitUntilExit()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                let error = String(data: errorData, encoding: .utf8) ?? ""
-                
-                // Cleanup temp files
-                try? FileManager.default.removeItem(at: tempRmd)
-                
-                if process.terminationStatus == 0 && FileManager.default.fileExists(atPath: outputHtml.path) {
-                    // Read the HTML output
-                    let htmlContent = try? String(contentsOf: outputHtml, encoding: .utf8)
-                    let summary = "✅ R Markdown rendered successfully!\n📄 Output: \(outputHtml.lastPathComponent)\n\nPreview (first 500 chars):\n" + (htmlContent?.prefix(500).description ?? "")
-                    
-                    self.handleCellOutput(cellID: cellID, result: summary)
-                    // Note: We need to set outputImages too. handleCellOutput parses them.
-                    // But here we construct a summary.
-                    // To support outputImages properly via handleCellOutput, we normally embed [IMAGE:path].
-                    // Or we can modify cell if we Dispatch.main (which we do in handleCellOutput).
-                    // But here we had custom logic.
-                    // Let's rely on handleCellOutput, but it overwrites outputImages based on parsing.
-                    // We can embed the [IMAGE:...] for the HTML file.
-                    // Or update handleCellOutput to append?
-                    // The original code set cell.outputImages = [outputHtml] directly.
-                    // Let's modify handleCellOutput to accept optional images?
-                    // Or, stick to the original logic which updated cell directly in Dispatch.main.
-                    // BUT we have cellID now. So we need to look it up.
-                } else {
-                    let result = "❌ R Markdown render failed:\n" + error + "\n" + output
-                    self.handleCellOutput(cellID: cellID, result: result)
+            let kernel = ComputeKernelRouter.shared.getKernel(for: effectiveTarget)
+            try await kernel.start()
+
+            let streamBuf = TerminalStreamBuffer()
+            let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { chunk in
+                let snap = streamBuf.appendChunk(chunk)
+                DispatchQueue.main.async {
+                    cell.output = snap
                 }
-            } catch {
-                self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
             }
+            let dtMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+            let combined = cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result : cell.output
+            let hadErr = combined.contains("Traceback") || combined.contains("Error:")
+            return finalizeCellExecution(
+                cell: cell,
+                outputText: combined,
+                telemetry: CellExecutionTelemetry(durationMs: dtMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false),
+                hadError: hadErr
+            )
+        } catch {
+            if effectiveTarget == .googleColab {
+                NotificationCenter.default.post(name: NSNotification.Name("MicroCodeOpenColabSheet"), object: nil)
+            }
+            let dtMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+            return finalizeCellExecution(
+                cell: cell,
+                outputText: cell.output + "\n❌ Kernel Error: \(error.localizedDescription)",
+                telemetry: CellExecutionTelemetry(durationMs: dtMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false),
+                hadError: true
+            )
+        }
+    }
+
+    private func executeLocalPythonOrProcedureCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let userCode = cell.type == .procedure ? cell.generatedCode : cell.content
+        let nbId = activeNotebook?.id ?? UUID()
+        let rawPython = PythonEnvManager.shared.activeEnvironment?.pythonPath ?? selectedPythonPath
+        let resolvedPython = PythonEnvManager.shared.resolveExecutablePath(rawPython)
+
+        let kernel = LocalPersistentPythonKernelPool.shared.kernel(
+            for: nbId,
+            pythonPath: resolvedPython,
+            workingDirectory: workingDirectory
+        )
+
+        let outcome = await kernel.executeCell(
+            cellId: cell.id,
+            executionIndex: totalExecutions + 1,
+            code: userCode
+        ) { liveStream in
+            cell.output = liveStream
+        }
+
+        return finalizeCellExecution(
+            cell: cell,
+            outputText: outcome.stdoutText,
+            images: outcome.imageURLs,
+            inlineDF: outcome.inlineDataFrame,
+            telemetry: outcome.telemetry,
+            hadError: outcome.hadError
+        )
+    }
+
+    private func executeLocalRustCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "rust") { msg in
+            DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+        }
+        let rustcPath = RuntimeManager.shared.selectedExecutable(for: .rust) ?? "rustc"
+        let env = buildCellProcessEnvironment()
+
+        let res = await PolyglotStreamingAndCacheEngine.shared.runCompiledCellWithCache(
+            cellId: cell.id,
+            languageTag: "rust",
+            sourceExtension: "rs",
+            sourceCode: cell.content,
+            compilerExecutable: rustcPath,
+            compilerArgsBuilder: { src, bin in ["-O", src, "-o", bin] },
+            workingDirectory: workingDirectory,
+            environment: env,
+            onStream: { live in cell.output = live }
+        )
+        return finalizeCellExecution(cell: cell, outputText: res.output, telemetry: res.telemetry, hadError: res.hadError)
+    }
+
+    private func executeLocalCppCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "cpp") { msg in
+            DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+        }
+        let clangppPath = RuntimeManager.shared.selectedExecutable(for: .cpp) ?? "clang++"
+        let env = buildCellProcessEnvironment()
+
+        let res = await PolyglotStreamingAndCacheEngine.shared.runCompiledCellWithCache(
+            cellId: cell.id,
+            languageTag: "cpp20",
+            sourceExtension: "cpp",
+            sourceCode: cell.content,
+            compilerExecutable: clangppPath,
+            compilerArgsBuilder: { src, bin in ["-std=c++20", "-O2", src, "-o", bin] },
+            workingDirectory: workingDirectory,
+            environment: env,
+            onStream: { live in cell.output = live }
+        )
+        return finalizeCellExecution(cell: cell, outputText: res.output, telemetry: res.telemetry, hadError: res.hadError)
+    }
+
+    private func executeLocalObjcCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let env = buildCellProcessEnvironment()
+        let res = await PolyglotStreamingAndCacheEngine.shared.runCompiledCellWithCache(
+            cellId: cell.id,
+            languageTag: "objc",
+            sourceExtension: "m",
+            sourceCode: cell.content,
+            compilerExecutable: "clang",
+            compilerArgsBuilder: { src, bin in ["-O2", "-fobjc-arc", "-framework", "Foundation", src, "-o", bin] },
+            workingDirectory: workingDirectory,
+            environment: env,
+            onStream: { live in cell.output = live }
+        )
+        return finalizeCellExecution(cell: cell, outputText: res.output, telemetry: res.telemetry, hadError: res.hadError)
+    }
+
+    private func executeLocalGoCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "go") { msg in
+            DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+        }
+        let goPath = RuntimeManager.shared.selectedExecutable(for: .go) ?? "go"
+        let env = buildCellProcessEnvironment()
+        let tempGo = workingDirectory.appendingPathComponent("temp_\(UUID().uuidString.prefix(8)).go")
+        defer { try? FileManager.default.removeItem(at: tempGo) }
+
+        do {
+            try cell.content.write(to: tempGo, atomically: true, encoding: .utf8)
+            let execURL = goPath.contains("/") ? URL(fileURLWithPath: goPath) : URL(fileURLWithPath: "/usr/bin/env")
+            let args = goPath.contains("/") ? ["run", tempGo.path] : ["go", "run", tempGo.path]
+            let res = try await PolyglotStreamingAndCacheEngine.shared.runStreamingProcess(
+                cellId: cell.id,
+                executableURL: execURL,
+                arguments: args,
+                workingDirectory: workingDirectory,
+                environment: env,
+                onStream: { live in cell.output = live }
+            )
+            let tel = CellExecutionTelemetry(durationMs: res.durationMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false)
+            return finalizeCellExecution(cell: cell, outputText: res.output, telemetry: tel, hadError: res.exitCode != 0)
+        } catch {
+            return finalizeCellExecution(cell: cell, outputText: "❌ Error: \(error.localizedDescription)", hadError: true)
+        }
+    }
+
+    private func executeLocalArdiumCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        var finalCode = cell.content
+        if !finalCode.contains("fn main(") && !finalCode.contains("func main(") {
+            let trimmed = finalCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.contains("print") || trimmed.contains("println") || trimmed.contains("show()") {
+                finalCode = "fn main() {\n" + finalCode + "\n}"
+            }
+        }
+        let res = await ArdiumRunner.execute(code: finalCode)
+        var out = res.stdout
+        if !res.stderr.isEmpty {
+            out += (out.isEmpty ? "" : "\n") + res.stderr
+        }
+        let cleanPattern = #"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"#
+        let cleanOut = out.replacingOccurrences(of: cleanPattern, with: "", options: .regularExpression)
+        let tel = CellExecutionTelemetry(
+            durationMs: (CFAbsoluteTimeGetCurrent() - t0) * 1000.0,
+            memoryDeltaBytes: 0,
+            peakRSSBytes: 0,
+            metalAllocatedBytes: 0,
+            isCachedBinary: false
+        )
+        return finalizeCellExecution(cell: cell, outputText: cleanOut, telemetry: tel, hadError: res.exitCode != 0)
+    }
+
+    private func executeLocalManagedRuntimeCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let langKey = (cell.language == .java) ? "java" : "csharp"
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let ready = await RuntimeManager.shared.ensureRuntime(forLanguage: langKey) { msg in
+            DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+        }
+        guard ready else {
+            return finalizeCellExecution(
+                cell: cell,
+                outputText: "❌ \(cell.language.rawValue) runtime is not installed. Run `curl -fsSL https://microcode.dotmini.net/install.sh | bash` in Terminal.",
+                hadError: true
+            )
+        }
+        guard let appState = AppState.shared else {
+            return finalizeCellExecution(cell: cell, outputText: "❌ AppState is not ready.", hadError: true)
+        }
+        let res = await appState.executeScript(code: cell.content, language: langKey)
+        let combined = res.stdout + (res.stderr.isEmpty ? "" : (res.stdout.isEmpty ? "" : "\n") + res.stderr)
+        let tel = CellExecutionTelemetry(
+            durationMs: (CFAbsoluteTimeGetCurrent() - t0) * 1000.0,
+            memoryDeltaBytes: 0,
+            peakRSSBytes: 0,
+            metalAllocatedBytes: 0,
+            isCachedBinary: false
+        )
+        return finalizeCellExecution(cell: cell, outputText: combined, telemetry: tel, hadError: res.exitCode != 0)
+    }
+
+    private func executeLocalRCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let rPaths = ["/opt/homebrew/bin/Rscript", "/usr/local/bin/Rscript", "/usr/bin/Rscript"]
+        guard let rPath = RuntimeManager.shared.selectedExecutable(for: .r)
+            ?? rPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            return finalizeCellExecution(
+                cell: cell,
+                outputText: "❌ R is not installed. Please install R from https://cran.r-project.org/",
+                hadError: true
+            )
+        }
+
+        let artifactsDir = workingDirectory.appendingPathComponent("artifacts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
+        let cellTag = "cell_\(cell.id.uuidString.prefix(8).lowercased())_run\(totalExecutions + 1)"
+
+        let setupCode = """
+        setwd("\(workingDirectory.path)")
+        .plot_counter <- 0
+        .save_plot <- function() {
+            .plot_counter <<- .plot_counter + 1
+            filename <- file.path("\(artifactsDir.path)", paste0("\(cellTag)_rplot_", .plot_counter, ".png"))
+            dev.copy(png, filename, width = 1200, height = 840, res = 144)
+            dev.off()
+            cat(paste0("[IMAGE:", filename, "]\\n"))
+        }
+
+        """
+        let saveCode = """
+
+        tryCatch({
+            if (dev.cur() > 1) { .save_plot() }
+        }, error = function(e) {})
+        """
+
+        let tempFile = workingDirectory.appendingPathComponent("temp_script_\(UUID().uuidString.prefix(8)).R")
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        do {
+            try (setupCode + cell.content + saveCode).write(to: tempFile, atomically: true, encoding: .utf8)
+            let isRscript = URL(fileURLWithPath: rPath).lastPathComponent.lowercased().contains("rscript")
+            let args = isRscript ? ["--vanilla", tempFile.path] : ["--vanilla", "--slave", "-f", tempFile.path]
+            let res = try await PolyglotStreamingAndCacheEngine.shared.runStreamingProcess(
+                cellId: cell.id,
+                executableURL: URL(fileURLWithPath: rPath),
+                arguments: args,
+                workingDirectory: workingDirectory,
+                environment: buildCellProcessEnvironment(),
+                onStream: { live in cell.output = live }
+            )
+            let tel = CellExecutionTelemetry(durationMs: res.durationMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false)
+            return finalizeCellExecution(cell: cell, outputText: res.output, telemetry: tel, hadError: res.exitCode != 0)
+        } catch {
+            return finalizeCellExecution(cell: cell, outputText: "❌ Error: \(error.localizedDescription)", hadError: true)
         }
     }
     
-    private func runLaTeXCell(_ cell: NotebookCellModel) {
-        // Find pdflatex or xelatex
+    private func executeLocalRMarkdownCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let rPaths = ["/opt/homebrew/bin/R", "/usr/local/bin/R", "/usr/bin/R"]
+        guard let rPath = RuntimeManager.shared.selectedExecutable(for: .r)
+            ?? rPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            return finalizeCellExecution(
+                cell: cell,
+                outputText: "❌ R is not installed. Install R from https://cran.r-project.org/",
+                hadError: true
+            )
+        }
+
+        let shortId = UUID().uuidString.prefix(8)
+        let tempRmd = workingDirectory.appendingPathComponent("temp_\(shortId).Rmd")
+        let outputHtml = workingDirectory.appendingPathComponent("report_\(shortId).html")
+        defer { try? FileManager.default.removeItem(at: tempRmd) }
+
+        do {
+            try cell.content.write(to: tempRmd, atomically: true, encoding: .utf8)
+            let renderScript = "rmarkdown::render('\(tempRmd.path)', output_file = '\(outputHtml.path)', quiet = TRUE)"
+            let isRscript = URL(fileURLWithPath: rPath).lastPathComponent.lowercased().contains("rscript")
+            let args = isRscript ? ["-e", renderScript] : ["--slave", "-e", renderScript]
+            let res = try await PolyglotStreamingAndCacheEngine.shared.runStreamingProcess(
+                cellId: cell.id,
+                executableURL: URL(fileURLWithPath: rPath),
+                arguments: args,
+                workingDirectory: workingDirectory,
+                environment: buildCellProcessEnvironment(),
+                onStream: { live in cell.output = live }
+            )
+            let tel = CellExecutionTelemetry(durationMs: res.durationMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false)
+            if res.exitCode == 0 && FileManager.default.fileExists(atPath: outputHtml.path) {
+                let htmlContent = try? String(contentsOf: outputHtml, encoding: .utf8)
+                let summary = "✅ R Markdown rendered successfully!\n📄 Output: \(outputHtml.lastPathComponent)\n\nPreview:\n" + (htmlContent?.prefix(400).description ?? "")
+                return finalizeCellExecution(cell: cell, outputText: summary, images: [outputHtml], telemetry: tel, hadError: false)
+            }
+            return finalizeCellExecution(cell: cell, outputText: "❌ R Markdown render failed:\n" + res.output, telemetry: tel, hadError: true)
+        } catch {
+            return finalizeCellExecution(cell: cell, outputText: "❌ Error: \(error.localizedDescription)", hadError: true)
+        }
+    }
+
+    private func executeLocalLaTeXCellAsync(_ cell: NotebookCellModel) async -> Bool {
         let latexPaths = [
             "/Library/TeX/texbin/pdflatex",
             "/usr/local/texlive/2024/bin/universal-darwin/pdflatex",
@@ -1558,78 +1438,48 @@ final class NotebookViewModel: ObservableObject {
             "/usr/bin/pdflatex"
         ]
         guard let latexPath = latexPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            DispatchQueue.main.async {
-                cell.output = "❌ LaTeX is not installed. Install MacTeX from https://tug.org/mactex/"
-                cell.isExecuting = false
-                self.kernelStatus = "Idle"
-            }
-            return
+            return finalizeCellExecution(
+                cell: cell,
+                outputText: "❌ LaTeX is not installed. Install MacTeX from https://tug.org/mactex/",
+                hadError: true
+            )
         }
-        
+
         let uuid = UUID().uuidString.prefix(8)
-        let workingDir = workingDirectory
-        let tempTex = workingDir.appendingPathComponent("temp_\(uuid).tex")
-        let tempPdf = workingDir.appendingPathComponent("temp_\(uuid).pdf")
-        let content = cell.content
-        let cellID = cell.id
-        
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            do {
-                try content.write(to: tempTex, atomically: true, encoding: .utf8)
-                
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: latexPath)
-                process.arguments = ["-interaction=nonstopmode", "-output-directory=\(workingDir.path)", tempTex.path]
-                process.currentDirectoryURL = workingDir
-                
-                let outputPipe = Pipe()
-                let errorPipe = Pipe()
-                process.standardOutput = outputPipe
-                process.standardError = errorPipe
-                
-                try process.run()
-                process.waitUntilExit()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                let error = String(data: errorData, encoding: .utf8) ?? ""
-                
-                // Cleanup auxiliary files
-                let auxExtensions = ["aux", "log", "out", "toc", "tex"]
-                for ext in auxExtensions {
-                    let auxFile = workingDir.appendingPathComponent("temp_\(uuid).\(ext)")
-                    try? FileManager.default.removeItem(at: auxFile)
-                }
-                
-                if process.terminationStatus == 0 && FileManager.default.fileExists(atPath: tempPdf.path) {
-                     // For correct handling in handleCellOutput, we need to ensure the PDF is picked up.
-                     // handleCellOutput looks for [IMAGE:filename].
-                     // Let's construct a result string that includes that.
-                     let summary = "✅ LaTeX compiled successfully!\n📄 PDF: \(tempPdf.lastPathComponent)\n\n💡 Tip: Click the PDF to open it.\n[IMAGE:\(tempPdf.lastPathComponent)]"
-                     
-                     self.handleCellOutput(cellID: cellID, result: summary)
-                } else {
-                    // Extract errors from log
-                    let logFile = workingDir.appendingPathComponent("temp_\(uuid).log")
-                    let logContent = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
-                    let errorLines = logContent.components(separatedBy: "\n").filter { $0.contains("!") || $0.contains("Error") }
-                    
-                    let errorSummary = errorLines.isEmpty ? error + output : errorLines.joined(separator: "\n")
-                    let result = "❌ LaTeX compilation failed:\n\(errorSummary)"
-                    self.handleCellOutput(cellID: cellID, result: result)
-                }
-            } catch {
-                self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
+        let tempTex = workingDirectory.appendingPathComponent("temp_\(uuid).tex")
+        let tempPdf = workingDirectory.appendingPathComponent("temp_\(uuid).pdf")
+        defer {
+            for ext in ["aux", "log", "out", "toc", "tex"] {
+                try? FileManager.default.removeItem(at: workingDirectory.appendingPathComponent("temp_\(uuid).\(ext)"))
             }
+        }
+
+        do {
+            try cell.content.write(to: tempTex, atomically: true, encoding: .utf8)
+            let res = try await PolyglotStreamingAndCacheEngine.shared.runStreamingProcess(
+                cellId: cell.id,
+                executableURL: URL(fileURLWithPath: latexPath),
+                arguments: ["-interaction=nonstopmode", "-output-directory=\(workingDirectory.path)", tempTex.path],
+                workingDirectory: workingDirectory,
+                environment: buildCellProcessEnvironment(),
+                onStream: nil
+            )
+            let tel = CellExecutionTelemetry(durationMs: res.durationMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false)
+            if res.exitCode == 0 && FileManager.default.fileExists(atPath: tempPdf.path) {
+                let summary = "✅ LaTeX compiled successfully!\n📄 PDF: \(tempPdf.lastPathComponent)"
+                return finalizeCellExecution(cell: cell, outputText: summary, images: [tempPdf], telemetry: tel, hadError: false)
+            }
+            let logFile = workingDirectory.appendingPathComponent("temp_\(uuid).log")
+            let logContent = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+            let errorLines = logContent.components(separatedBy: "\n").filter { $0.contains("!") || $0.contains("Error") }
+            let errorSummary = errorLines.isEmpty ? res.output : errorLines.joined(separator: "\n")
+            return finalizeCellExecution(cell: cell, outputText: "❌ LaTeX compilation failed:\n\(errorSummary)", telemetry: tel, hadError: true)
+        } catch {
+            return finalizeCellExecution(cell: cell, outputText: "❌ Error: \(error.localizedDescription)", hadError: true)
         }
     }
-    
-    private func runJuliaCell(_ cell: NotebookCellModel) {
-        // Honour the Julia executable selected in Manage Environments.
+
+    private func executeLocalJuliaCellAsync(_ cell: NotebookCellModel) async -> Bool {
         let juliaPaths = [
             "/Applications/Julia-1.10.app/Contents/Resources/julia/bin/julia",
             "/Applications/Julia-1.9.app/Contents/Resources/julia/bin/julia",
@@ -1639,67 +1489,30 @@ final class NotebookViewModel: ObservableObject {
         ]
         guard let juliaPath = RuntimeManager.shared.selectedExecutable(for: .julia)
             ?? juliaPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            DispatchQueue.main.async {
-                cell.output = "❌ Julia is not installed. Install from https://julialang.org/downloads/"
-                cell.isExecuting = false
-                self.kernelStatus = "Idle"
-            }
-            return
+            return finalizeCellExecution(
+                cell: cell,
+                outputText: "❌ Julia is not installed. Install from https://julialang.org/downloads/",
+                hadError: true
+            )
         }
-        
-        let workingDir = workingDirectory
-        let tempFile = workingDir.appendingPathComponent("temp_\(UUID().uuidString).jl")
-        
-        // Setup code for plots
-        let setupCode = """
-        cd("\(workingDir.path)")
-        
-        """
-        
-        let fullCode = setupCode + cell.content
-        let cellID = cell.id
-        
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            do {
-                try fullCode.write(to: tempFile, atomically: true, encoding: .utf8)
-                
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: juliaPath)
-                process.arguments = [tempFile.path]
-                process.currentDirectoryURL = workingDir
-                
-                let outputPipe = Pipe()
-                let errorPipe = Pipe()
-                process.standardOutput = outputPipe
-                process.standardError = errorPipe
-                
-                try process.run()
-                process.waitUntilExit()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                let error = String(data: errorData, encoding: .utf8) ?? ""
-                
-                let result = process.terminationStatus == 0 ? output : (output + "\n" + error)
-                
-                try? FileManager.default.removeItem(at: tempFile)
-                
-                self.handleCellOutput(cellID: cellID, result: result)
-            } catch {
-                self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
-            }
-        }
+
+        let nbId = activeNotebook?.id ?? UUID()
+        let res = await LocalPersistentJuliaKernelPool.shared.execute(
+            notebookId: nbId,
+            cellId: cell.id,
+            juliaPath: juliaPath,
+            workingDirectory: workingDirectory,
+            code: cell.content,
+            onStream: { live in cell.output = live }
+        )
+        return finalizeCellExecution(cell: cell, outputText: res.output, telemetry: res.telemetry, hadError: res.hadError)
     }
-    
-    private func runSQLCell(_ cell: NotebookCellModel) {
+
+    private func executeLocalSQLCellAsync(_ cell: NotebookCellModel) async -> Bool {
         let lines = cell.content.components(separatedBy: "\n")
         var hasExplicitConnection = false
         var dbPath = workingDirectory.appendingPathComponent("notebook.db").path
-        
+
         for line in lines {
             if line.lowercased().contains("connect to:") {
                 hasExplicitConnection = true
@@ -1708,112 +1521,119 @@ final class NotebookViewModel: ObservableObject {
                 }
             }
         }
-        
-        let sqlStatements = lines.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
-        let cellID = cell.id
 
-        // If no explicit external database connection is requested, execute directly over
-        // the Rosetta In-Memory DataFrames in POSIX Shared Memory
-        if !hasExplicitConnection {
+        let sqlStatements = lines
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
+            .joined(separator: "\n")
+
+        if !hasExplicitConnection && !SharedMemoryService.shared.sharedDataFrames.isEmpty {
             let session = activeNotebookId?.uuidString ?? "default_notebook"
-            Task {
-                do {
-                    let result = try await BackendService.shared.executeInMemorySQL(sessionId: session, query: sqlStatements)
-                    if !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.handleCellOutput(cellID: cellID, result: result)
-                        }
-                        return
-                    }
-                } catch {
-                    // Fall back to local SQLite execution below
-                }
-                
-                executeLocalSqlite(dbPath: dbPath, sqlStatements: sqlStatements, cellID: cellID)
+            let t0 = CFAbsoluteTimeGetCurrent()
+            if let result = try? await BackendService.shared.executeInMemorySQL(sessionId: session, query: sqlStatements),
+               !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !result.contains("Error") {
+                let tel = CellExecutionTelemetry(
+                    durationMs: (CFAbsoluteTimeGetCurrent() - t0) * 1000.0,
+                    memoryDeltaBytes: 0,
+                    peakRSSBytes: 0,
+                    metalAllocatedBytes: 0,
+                    isCachedBinary: false
+                )
+                return finalizeCellExecution(cell: cell, outputText: result, telemetry: tel, hadError: false)
             }
-            return
         }
 
-        executeLocalSqlite(dbPath: dbPath, sqlStatements: sqlStatements, cellID: cellID)
-    }
-
-    private func executeLocalSqlite(dbPath: String, sqlStatements: String, cellID: UUID) {
-        // Use Python's sqlite3 to execute SQL
-        let pythonCode = """
-        import sqlite3
-        import os
-        
-        db_path = r'\(dbPath)'
-        
-        # Create database if it doesn't exist
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        sql = '''\(sqlStatements)'''
-        
+        // Execute in Warm Persistent Python Kernel: queries BOTH `notebook.db` AND live RAM DataFrames,
+        // automatically rendering SELECT results in `NotebookInlineDataGridStudio` (`Table` | `Chart` | `Stats`)!
+        let dbB64 = Data(dbPath.utf8).base64EncodedString()
+        let sqlB64 = Data(sqlStatements.utf8).base64EncodedString()
+        let pySQLScript = """
+        import sqlite3 as _mc_sq3, base64 as _mc_sq_b64
+        _mc_db_p = _mc_sq_b64.b64decode("\(dbB64)").decode("utf-8")
+        _mc_sql_txt = _mc_sq_b64.b64decode("\(sqlB64)").decode("utf-8").strip()
+        _mc_conn = _mc_sq3.connect(_mc_db_p)
         try:
-            # Split and execute multiple statements
-            for statement in sql.strip().split(';'):
-                statement = statement.strip()
-                if statement:
-                    cursor.execute(statement)
-            
-            # If it's a SELECT query, fetch and display results
-            if sql.strip().upper().startswith('SELECT'):
-                rows = cursor.fetchall()
-                columns = [desc[0] for desc in cursor.description] if cursor.description else []
-                
-                if columns:
-                    # Print header
-                    print(' | '.join(columns))
-                    print('-' * (len(' | '.join(columns)) + 10))
-                    
-                    # Print rows
-                    for row in rows:
-                        print(' | '.join(str(cell) for cell in row))
-                    
-                    print(f'\\n{len(rows)} rows returned')
-            else:
-                conn.commit()
-                print(f'Query executed successfully. Rows affected: {cursor.rowcount}')
-        
-        except Exception as e:
-            print(f'SQL Error: {e}')
+            try:
+                import pandas as _mc_pd
+                _mc_existing_tbls = {r[0] for r in _mc_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                for _mc_vn, _mc_vv in list(globals().items()):
+                    if not _mc_vn.startswith("_") and type(_mc_vv).__name__ == "DataFrame" and hasattr(_mc_vv, "to_sql") and _mc_vn not in _mc_existing_tbls:
+                        try:
+                            _mc_vv.to_sql(_mc_vn, _mc_conn, index=False, if_exists="replace")
+                        except Exception:
+                            pass
+            except Exception:
+                _mc_pd = None
+
+            _mc_stmts = [s.strip() for s in _mc_sql_txt.split(";") if s.strip()]
+            for _mc_idx, _mc_st in enumerate(_mc_stmts):
+                _mc_upper = _mc_st.upper()
+                _mc_is_query = _mc_upper.startswith("SELECT") or _mc_upper.startswith("WITH") or _mc_upper.startswith("PRAGMA")
+                if _mc_is_query and _mc_idx == len(_mc_stmts) - 1 and _mc_pd is not None:
+                    _mc_df_out = _mc_pd.read_sql_query(_mc_st, _mc_conn)
+                    display(_mc_df_out)
+                elif _mc_is_query:
+                    _mc_cur = _mc_conn.execute(_mc_st)
+                    _mc_rows = _mc_cur.fetchall()
+                    _mc_cols = [d[0] for d in (_mc_cur.description or [])]
+                    if _mc_cols:
+                        print(" | ".join(_mc_cols))
+                        print("-" * (len(" | ".join(_mc_cols)) + 6))
+                        for _mc_r in _mc_rows[:200]:
+                            print(" | ".join(str(x) for x in _mc_r))
+                        print(f"\\n{len(_mc_rows)} rows returned")
+                else:
+                    _mc_cur = _mc_conn.execute(_mc_st)
+                    _mc_conn.commit()
+                    print(f"Query executed successfully. Rows affected: {_mc_cur.rowcount}")
         finally:
-            conn.close()
+            _mc_conn.close()
         """
-        
-        let pythonPath = PythonEnvManager.shared.activeEnvironment?.pythonPath ?? selectedPythonPath
-        PythonEnvManager.shared.executeCode(pythonCode, pythonPath: pythonPath) { [weak self] result, success in
-            self?.handleCellOutput(cellID: cellID, result: result)
+
+        let nbId = activeNotebook?.id ?? UUID()
+        let rawPython = PythonEnvManager.shared.activeEnvironment?.pythonPath ?? selectedPythonPath
+        let resolvedPython = PythonEnvManager.shared.resolveExecutablePath(rawPython)
+        let kernel = LocalPersistentPythonKernelPool.shared.kernel(
+            for: nbId,
+            pythonPath: resolvedPython,
+            workingDirectory: workingDirectory
+        )
+        let outcome = await kernel.executeCell(
+            cellId: cell.id,
+            executionIndex: totalExecutions + 1,
+            code: pySQLScript
+        ) { live in
+            cell.output = live
         }
+        return finalizeCellExecution(
+            cell: cell,
+            outputText: outcome.stdoutText,
+            images: outcome.imageURLs,
+            inlineDF: outcome.inlineDataFrame,
+            telemetry: outcome.telemetry,
+            hadError: outcome.hadError
+        )
     }
-    
-    // MARK: - Run Cells by Color
-    
+
+    // MARK: - Sequential Batch Execution (Color, Tag, Downstream DAG, Run All & Kernel Lifecycle)
+
     func runCellsByColor(_ colorTheme: CellColorTheme, computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook else { return }
-        let cellsToRun = notebook.cells.filter { $0.colorTheme == colorTheme && $0.type == .code }
-        
-        for cell in cellsToRun {
-            runCell(cell, computeTarget: computeTarget)
+        let cellsToRun = notebook.cells.filter {
+            $0.colorTheme == colorTheme && ($0.type == .code || $0.type == .procedure)
         }
+        enqueueCells(cellsToRun, computeTarget: computeTarget)
     }
-    
+
     func getCellsByColor() -> [CellColorTheme: [NotebookCellModel]] {
         guard let notebook = activeNotebook else { return [:] }
-        
         var grouped: [CellColorTheme: [NotebookCellModel]] = [:]
-        for cell in notebook.cells where cell.type == .code {
-            let theme = cell.colorTheme
-            if grouped[theme] == nil {
-                grouped[theme] = []
-            }
-            grouped[theme]?.append(cell)
+        for cell in notebook.cells where (cell.type == .code || cell.type == .procedure) {
+            grouped[cell.colorTheme, default: []].append(cell)
         }
         return grouped
     }
-    
+
     func getUsedColors() -> [CellColorTheme] {
         let grouped = getCellsByColor()
         return grouped.keys.sorted { $0.rawValue < $1.rawValue }
@@ -1829,43 +1649,76 @@ final class NotebookViewModel: ObservableObject {
         return Array(Set(tags)).sorted()
     }
 
-    /// Run every runnable cell carrying the given name-tag, in order, across
-    /// all languages (each cell runs via its own `cell.language`).
+    /// Sequentially run every runnable cell carrying the given name-tag, in deterministic order.
     func runCellsByTag(_ tag: String, computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook else { return }
         let key = tag.trimmingCharacters(in: .whitespaces)
-        for cell in notebook.cells where
-            (cell.type == .code || cell.type == .procedure || cell.type == .agent)
-            && cell.tag.trimmingCharacters(in: .whitespaces) == key {
-            runCell(cell, computeTarget: computeTarget)
+        let matching = notebook.cells.filter {
+            ($0.type == .code || $0.type == .procedure || $0.type == .agent)
+            && $0.tag.trimmingCharacters(in: .whitespaces) == key
         }
+        enqueueCells(matching, computeTarget: computeTarget)
     }
-    
+
     func runSelectedCell(computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook,
               let id = selectedCellId,
               let cell = notebook.cells.first(where: { $0.id == id }) else { return }
         runCell(cell, computeTarget: computeTarget)
     }
-    
+
     func runAllCells(computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook else { return }
-        for cell in notebook.cells where cell.type == .code {
-            runCell(cell, computeTarget: computeTarget)
-        }
+        let runnable = notebook.cells.filter { $0.type == .code || $0.type == .procedure }
+        enqueueCells(runnable, computeTarget: computeTarget)
     }
-    
+
+    /// Runs `rootCell` followed by all transitive downstream cells in topological notebook order.
+    func runDownstreamCells(from rootCell: NotebookCellModel, computeTarget: ComputeTarget = .localCPU) {
+        guard let nb = activeNotebook else { return }
+        let inputs = nb.cells.map {
+            (
+                id: $0.id,
+                isRunnableCode: $0.type == .code || $0.type == .procedure,
+                content: $0.type == .procedure ? $0.generatedCode : $0.content,
+                lastRunEpoch: $0.lastRunEpoch
+            )
+        }
+        let graph = CellLineageDAGAnalyzer.analyzeGraph(cells: inputs)
+        let downstreamIds = CellLineageDAGAnalyzer.transitiveDownstreamIds(
+            from: rootCell.id,
+            graph: graph,
+            orderedIds: nb.cells.map(\.id)
+        )
+        var batch: [NotebookCellModel] = [rootCell]
+        for id in downstreamIds {
+            if let c = nb.cells.first(where: { $0.id == id }) {
+                batch.append(c)
+            }
+        }
+        enqueueCells(batch, computeTarget: computeTarget)
+    }
+
     func clearAllOutputs() {
+        cancelExecutionQueue()
         guard let notebook = activeNotebook else { return }
         for cell in notebook.cells {
-            cell.output = ""
+            cell.clearOutput()
             cell.executionCount = nil
+            cell.lastRunEpoch = 0
         }
+        scheduleAutoSave()
     }
-    
+
     func restartKernel() {
+        cancelExecutionQueue()
+        if let nbId = activeNotebook?.id {
+            LocalPersistentPythonKernelPool.shared.restart(notebookId: nbId)
+            LocalPersistentJuliaKernelPool.shared.restart(notebookId: nbId)
+        }
         clearAllOutputs()
         totalExecutions = 0
+        globalExecutionEpoch = 0
         kernelStatus = "Restarted"
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             self?.kernelStatus = "Idle"
@@ -2363,16 +2216,16 @@ final class NotebookViewModel: ObservableObject {
     
     // MARK: - .mic Format (MicroCode Notebook)
     func exportAsMic(notebook: NotebookModel, to url: URL) {
-        do {
-            let micNotebook = MicNotebook(from: notebook)
-            let encoder = JSONEncoder()
-            let jsonData = try encoder.encode(micNotebook)
-            // LZFSE Compression
-            let compressedData = try (jsonData as NSData).compressed(using: .lzfse)
-            try compressedData.write(to: url)
-            print("✅ Exported as .mic to \(url.lastPathComponent)")
-        } catch {
-            print("❌ Failed to export .mic: \(error)")
+        let micNotebook = MicNotebook(from: notebook)
+        Task.detached(priority: .utility) {
+            do {
+                let encoder = JSONEncoder()
+                let jsonData = try encoder.encode(micNotebook)
+                let compressedData = try (jsonData as NSData).compressed(using: .lzfse)
+                await NotebookPersistenceActor.shared.writeDataAtomically(compressedData as Data, to: url)
+            } catch {
+                print("❌ Failed to export .mic: \(error)")
+            }
         }
     }
     
@@ -2399,19 +2252,24 @@ final class NotebookViewModel: ObservableObject {
         }
     }
     
-    // MARK: - Auto-Save to UserDefaults
+    // MARK: - Off-MainActor Atomic WAL Crash-Recovery Auto-Save
     
     func autoSave() {
         var allNotebooks: [[String: Any]] = []
+        let iso = ISO8601DateFormatter()
+        let nowStr = iso.string(from: Date())
         
         for notebook in notebooks {
             var cellsArray: [[String: Any]] = []
             for cell in notebook.cells {
+                let cappedOutput = cell.output.count > 64_000
+                    ? String(cell.output.suffix(64_000))
+                    : cell.output
                 var cellDict: [String: Any] = [
                     "type": cell.type.rawValue,
                     "language": cell.language.rawValue,
                     "content": cell.content,
-                    "output": cell.output,
+                    "output": cappedOutput,
                     "color_theme": cell.colorTheme.rawValue,
                     "tag": cell.tag,
                     "is_collapsed": cell.isCollapsed,
@@ -2425,21 +2283,24 @@ final class NotebookViewModel: ObservableObject {
                 "name": notebook.name,
                 "cells": cellsArray,
                 "data_files": notebook.dataFiles.map { ["name": $0.name, "path": $0.url.path, "type": $0.type.rawValue, "size": $0.size] as [String: Any] },
-                "created_at": ISO8601DateFormatter().string(from: notebook.createdAt),
-                "modified_at": ISO8601DateFormatter().string(from: Date())
+                "created_at": iso.string(from: notebook.createdAt),
+                "modified_at": nowStr
             ])
         }
         
-        if let data = try? JSONSerialization.data(withJSONObject: [
+        let payload: [String: Any] = [
             "notebooks": allNotebooks,
             "active_id": activeNotebookId?.uuidString ?? ""
-        ]) {
-            UserDefaults.standard.set(data, forKey: "microcode_notebooks_autosave")
+        ]
+        Task {
+            await NotebookPersistenceActor.shared.writeWALSnapshot(payload: payload)
         }
     }
     
     func loadAutoSave() {
-        guard let data = UserDefaults.standard.data(forKey: "microcode_notebooks_autosave"),
+        let walData = NotebookPersistenceActor.shared.loadWALSnapshotSync()
+            ?? UserDefaults.standard.data(forKey: "microcode_notebooks_autosave")
+        guard let data = walData,
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let notebooksArray = dict["notebooks"] as? [[String: Any]],
               !notebooksArray.isEmpty else { return }
@@ -2516,10 +2377,15 @@ struct NotebookView: View {
     @ObservedObject private var sharedMemory = SharedMemoryService.shared
     @ObservedObject private var colabService = GoogleColabService.shared
     @State private var isReady = false
-    @State private var showAIPanel = false
+    @AppStorage("notebook.showAIPanel") private var showAIPanel = false
+    @AppStorage("notebook.sidebarWidth") private var sidebarWidth: Double = 232
+    @AppStorage("notebook.aiPanelWidth") private var aiPanelWidth: Double = 356
+    @State private var sidebarDragStartWidth: CGFloat? = nil
+    @State private var aiPanelDragStartWidth: CGFloat? = nil
     @State private var showingHPCSettings = false
     @State private var showingColabSettings = false
     @State private var showingExportPopover = false
+    @State private var hoveredToolbarItem: String? = nil
     private let notebookHeaderHeight: CGFloat = 28
     
     private var panelBackground: Color {
@@ -2531,49 +2397,127 @@ struct NotebookView: View {
     }
     
     var body: some View {
-        HStack(spacing: 0) {
-            // Sidebar
-            if viewModel.showingSidebar {
-                notebookSidebar
-                    .frame(width: 260)
-                Divider()
-            }
-            
-            // Main Content
-            VStack(spacing: 0) {
-                notebookToolbar
-                
-                Divider()
-                
-                // Cells Area
-                if let notebook = viewModel.activeNotebook {
-                    // Observes the NotebookModel directly so add/delete/reorder
-                    // of cells refreshes the list INSTANTLY (previously the
-                    // model was reached via a computed property and never
-                    // @ObservedObject, so deleting a non-selected cell only
-                    // updated on the next unrelated viewModel change → lag).
-                    NotebookCellsList(notebook: notebook, viewModel: viewModel)
-                } else {
-                    VStack(spacing: 16) {
-                        ProgressView()
-                            .scaleEffect(1.2)
-                        Text("Loading notebook...")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
+        GeometryReader { geo in
+            let totalWidth = max(640, geo.size.width)
+            let maxSidebarAllowed = min(320, max(180, totalWidth * 0.25))
+            let effectiveSidebarW: CGFloat = viewModel.showingSidebar
+                ? min(max(180, CGFloat(sidebarWidth)), maxSidebarAllowed)
+                : 0
+            let minCenterRequired: CGFloat = 430
+            let maxAIPanelAllowed = min(560, max(280, totalWidth - effectiveSidebarW - minCenterRequired))
+            let effectiveAIPanelW: CGFloat = showAIPanel
+                ? min(max(280, CGFloat(aiPanelWidth)), maxAIPanelAllowed)
+                : 0
+            let centerWidth = max(320, totalWidth - effectiveSidebarW - effectiveAIPanelW)
+
+            HStack(spacing: 0) {
+                // Sidebar (Resizable & Responsively Clamped)
+                if viewModel.showingSidebar {
+                    notebookSidebar
+                        .frame(width: effectiveSidebarW)
+
+                    NotebookVerticalResizeHandle { translationX, isEnded in
+                        let start = sidebarDragStartWidth ?? effectiveSidebarW
+                        if sidebarDragStartWidth == nil { sidebarDragStartWidth = start }
+                        let proposed = min(max(180, start + translationX), maxSidebarAllowed)
+                        sidebarWidth = Double(proposed)
+                        if isEnded { sidebarDragStartWidth = nil }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            }
-            
-            // AI Agent Panel (Right Side)
-            if showAIPanel {
-                Divider()
-                NotebookAIPanel(
-                    viewModel: viewModel,
-                    isShowing: $showAIPanel
-                )
-                .frame(width: 380)
-                .transition(.move(edge: .trailing))
+                
+                // Main Content
+                VStack(spacing: 0) {
+                    notebookToolbar(availableWidth: centerWidth)
+                    
+                    Divider()
+
+                    if viewModel.showVariableInspector {
+                        let activeVars = sharedMemory.activeVariables(for: viewModel.activeNotebookId)
+                        let memPair = viewModel.activeNotebookId.flatMap { sharedMemory.kernelMemoryByNotebook[$0] } ?? (0, 0)
+                        NotebookVariableInspectorBar(
+                            variables: activeVars,
+                            rssBytes: memPair.rssBytes,
+                            metalBytes: memPair.metalBytes,
+                            isDark: appState.appTheme.isDark,
+                            onInspectVariable: { v in
+                                viewModel.addCell(type: .code, language: .python)
+                                if let lastCell = viewModel.activeNotebook?.cells.last {
+                                    lastCell.content = v.name
+                                    viewModel.runCell(lastCell, computeTarget: appState.currentComputeTarget)
+                                }
+                            },
+                            onPinToSHM: { v in
+                                viewModel.addCell(type: .code, language: .python)
+                                if let lastCell = viewModel.activeNotebook?.cells.last {
+                                    lastCell.content = "shm.set(\"\(v.name)\", \(v.name))\nprint(\"Pinned \(v.name) to Zero-Copy POSIX SHM:\", shm.list())"
+                                    viewModel.runCell(lastCell, computeTarget: appState.currentComputeTarget)
+                                }
+                                let sid = viewModel.activeNotebookId?.uuidString ?? "default_notebook"
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 650_000_000)
+                                    await SharedMemoryService.shared.refreshList(sessionId: sid)
+                                }
+                            },
+                            onSendToAgent: { v in
+                                if !showAIPanel {
+                                    withAnimation(.easeInOut(duration: 0.16)) { showAIPanel = true }
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                    NotificationCenter.default.post(
+                                        name: Notification.Name("InsertNotebookAgentMention"),
+                                        object: nil,
+                                        userInfo: ["mention": "@\(v.name)"]
+                                    )
+                                }
+                            },
+                            onClose: {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    viewModel.showVariableInspector = false
+                                }
+                            }
+                        )
+                        Divider()
+                    }
+                    
+                    // Cells Area
+                    if let notebook = viewModel.activeNotebook {
+                        // Observes the NotebookModel directly so add/delete/reorder
+                        // of cells refreshes the list INSTANTLY (previously the
+                        // model was reached via a computed property and never
+                        // @ObservedObject, so deleting a non-selected cell only
+                        // updated on the next unrelated viewModel change → lag).
+                        NotebookCellsList(notebook: notebook, viewModel: viewModel)
+                    } else {
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .scaleEffect(1.2)
+                            Text("Loading notebook...")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .frame(minWidth: 320, maxWidth: .infinity)
+                
+                // AI Agent Panel (Right Side — Draggable & Responsively Clamped)
+                if showAIPanel {
+                    NotebookVerticalResizeHandle { translationX, isEnded in
+                        let start = aiPanelDragStartWidth ?? effectiveAIPanelW
+                        if aiPanelDragStartWidth == nil { aiPanelDragStartWidth = start }
+                        // Dragging left (negative translationX) widens the right panel
+                        let proposed = min(max(280, start - translationX), maxAIPanelAllowed)
+                        aiPanelWidth = Double(proposed)
+                        if isEnded { aiPanelDragStartWidth = nil }
+                    }
+
+                    NotebookAIPanel(
+                        viewModel: viewModel,
+                        isShowing: $showAIPanel
+                    )
+                    .frame(width: effectiveAIPanelW)
+                    .transition(.move(edge: .trailing))
+                }
             }
         }
         .fileImporter(
@@ -2601,7 +2545,7 @@ struct NotebookView: View {
                 viewModel.syncScientificFiles(from: workspace)
             }
             Task {
-                await SharedMemoryService.shared.refreshList()
+                await SharedMemoryService.shared.refreshList(sessionId: viewModel.activeNotebookId?.uuidString ?? "default_notebook")
             }
             
             // Check if code was exported from AI Agent
@@ -2670,21 +2614,35 @@ struct NotebookView: View {
             guard let code = notification.userInfo?["code"] as? String,
                   !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-            // SMART + SAFE: AI-generated code ALWAYS becomes a brand-new cell.
-            // It must never overwrite or inject into an existing cell (the
-            // user's previous work is untouchable). Language is resolved from
-            // the AI code-fence tag for ALL supported languages — LaTeX, C++,
-            // Go, Rust, SQL, Java, etc. — not just Python/R.
             let langStr = notification.userInfo?["language"] as? String ?? ""
+            let mode = notification.userInfo?["mode"] as? String ?? "insert"
+            let autoRun = notification.userInfo?["autoRun"] as? Bool ?? false
             let language = CellLanguage.from(fenceTag: langStr)
+                ?? viewModel.activeNotebook?.cells.first(where: { $0.id == viewModel.selectedCellId })?.language
                 ?? viewModel.activeNotebook?.cells.last?.language
                 ?? .python
 
-            viewModel.addCell(type: .code, language: language)
-            if let newCell = viewModel.activeNotebook?.cells.last {
-                newCell.content = code
-                viewModel.selectedCellId = newCell.id   // focus the new cell
+            if mode == "replace_selected",
+               let selId = viewModel.selectedCellId,
+               let selectedCell = viewModel.activeNotebook?.cells.first(where: { $0.id == selId }),
+               selectedCell.type == .code {
+                selectedCell.recordAgentEditBaseline(previousContent: selectedCell.content, source: "Notebook Agent")
+                selectedCell.language = language
+                selectedCell.content = code
                 viewModel.scheduleAutoSave()
+                if autoRun {
+                    viewModel.runCell(selectedCell)
+                }
+            } else {
+                viewModel.addCell(type: .code, language: language)
+                if let newId = viewModel.selectedCellId,
+                   let newCell = viewModel.activeNotebook?.cells.first(where: { $0.id == newId }) {
+                    newCell.content = code
+                    viewModel.scheduleAutoSave()
+                    if autoRun {
+                        viewModel.runCell(newCell)
+                    }
+                }
             }
         }
     }
@@ -2729,22 +2687,34 @@ struct NotebookView: View {
     
     private var notebookSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack {
+            // Header — aligned 28pt executive top bar matching Notebook Toolbar & Agent Panel
+            HStack(spacing: 6) {
                 Image(systemName: "doc.text.fill")
+                    .font(.system(size: 11))
                     .foregroundColor(.orange)
                 Text("Cell Sheets")
-                    .font(.headline)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(.primary.opacity(0.92))
                 Spacer()
                 
                 Button(action: { viewModel.createNotebook() }) {
                     Image(systemName: "plus")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(hoveredToolbarItem == "new_sheet" ? .primary : .secondary)
+                        .frame(width: 22, height: 20)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4.5)
+                                .fill(hoveredToolbarItem == "new_sheet" ? Color.primary.opacity(appState.appTheme.isDark ? 0.09 : 0.06) : Color.clear)
+                        )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { h in hoveredToolbarItem = h ? "new_sheet" : (hoveredToolbarItem == "new_sheet" ? nil : hoveredToolbarItem) }
+                .help("New Cell Sheet")
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 10)
             .frame(height: notebookHeaderHeight)
-            .background(controlBackground)
+            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
             
             Divider()
             
@@ -3202,20 +3172,101 @@ struct NotebookView: View {
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
-    // MARK: - Toolbar
+    // MARK: - Toolbar (100% Bezel-Free Native Executive Header)
     
-    private var notebookToolbar: some View {
-        HStack(spacing: 6) {
+    private var isDarkToolbar: Bool {
+        appState.appTheme.isDark
+    }
+    
+    private func toolbarPillFill(id: String, active: Bool = false) -> Color {
+        if active {
+            return Color.primary.opacity(isDarkToolbar ? 0.115 : 0.08)
+        }
+        if hoveredToolbarItem == id {
+            return Color.primary.opacity(isDarkToolbar ? 0.085 : 0.058)
+        }
+        return Color.primary.opacity(isDarkToolbar ? 0.045 : 0.03)
+    }
+    
+    private func toolbarPillStroke(id: String, active: Bool = false) -> Color {
+        if active {
+            return Color.primary.opacity(isDarkToolbar ? 0.22 : 0.16)
+        }
+        if hoveredToolbarItem == id {
+            return Color.primary.opacity(isDarkToolbar ? 0.16 : 0.12)
+        }
+        return Color.primary.opacity(isDarkToolbar ? 0.10 : 0.07)
+    }
+    
+    @ViewBuilder
+    private func toolbarIconButton(
+        id: String,
+        icon: String,
+        tooltip: String,
+        tint: Color? = nil,
+        active: Bool = false,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        let isHovered = hoveredToolbarItem == id && !disabled
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(
+                    disabled
+                        ? .secondary.opacity(0.32)
+                        : (tint ?? (active || isHovered ? .primary : .secondary))
+                )
+                .frame(width: 22, height: 21)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(
+                            active
+                                ? Color.primary.opacity(isDarkToolbar ? 0.11 : 0.08)
+                                : (isHovered ? Color.primary.opacity(isDarkToolbar ? 0.085 : 0.055) : Color.clear)
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(
+                            active
+                                ? Color.primary.opacity(isDarkToolbar ? 0.20 : 0.14)
+                                : Color.clear,
+                            lineWidth: 0.8
+                        )
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .fixedSize()
+        .onHover { h in
+            hoveredToolbarItem = h ? id : (hoveredToolbarItem == id ? nil : hoveredToolbarItem)
+        }
+        .help(tooltip)
+    }
+    
+    private func notebookToolbar(availableWidth: CGFloat) -> some View {
+        let isCompact = availableWidth < 760
+        let isUltraCompact = availableWidth < 580
+        let maxTitleWidth: CGFloat = availableWidth > 820 ? 200 : (availableWidth > 640 ? 132 : 92)
+
+        return HStack(spacing: isCompact ? 4 : 5.5) {
             // Sidebar toggle
-            Button(action: { viewModel.showingSidebar.toggle() }) {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 12))
+            toolbarIconButton(
+                id: "toggle_sidebar",
+                icon: "sidebar.left",
+                tooltip: "Toggle Cell Sheets Sidebar",
+                tint: viewModel.showingSidebar ? .primary.opacity(0.88) : nil
+            ) {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    viewModel.showingSidebar.toggle()
+                }
             }
-            .buttonStyle(.borderless)
             
-            Divider().frame(height: 14)
+            Divider().frame(height: 13).opacity(0.65)
             
-            // Notebook Name (compact, truncated)
+            // Notebook Name (responsive width, never crushed prematurely)
             if let notebook = viewModel.activeNotebook {
                 if viewModel.isEditingName {
                     TextField("Name", text: Binding(
@@ -3223,222 +3274,133 @@ struct NotebookView: View {
                         set: { notebook.name = $0 }
                     ))
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(maxWidth: 140)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .padding(.horizontal, 5)
+                    .frame(height: 20)
+                    .frame(maxWidth: maxTitleWidth)
+                    .background(Color.primary.opacity(isDarkToolbar ? 0.08 : 0.05))
+                    .cornerRadius(4)
                     .onSubmit { viewModel.isEditingName = false }
                 } else {
-                    Text(notebook.name)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: 120, alignment: .leading)
-                        .onTapGesture(count: 2) {
-                            viewModel.isEditingName = true
-                        }
-                }
-                
-                Button(action: { viewModel.isEditingName.toggle() }) {
-                    Image(systemName: "pencil")
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            
-            Divider().frame(height: 14)
-            
-            // Python version
-            pythonVersionMenu
-            
-            // Add Cell
-            Menu {
-                Text("Code Cells")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Button { viewModel.addCell(type: .code, language: .python) } label: {
-                    Label("Python", systemImage: "p.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .r) } label: {
-                    Label("R", systemImage: "r.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .julia) } label: {
-                    Label("Julia", systemImage: "j.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .sql) } label: {
-                    Label("SQL", systemImage: "cylinder.fill")
-                }
-                
-                Divider()
-                
-                Text("Compiled")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Button { viewModel.addCell(type: .code, language: .ardium) } label: {
-                    Label("Ardium", systemImage: "sparkles")
-                }
-                Button { viewModel.addCell(type: .code, language: .rust) } label: {
-                    Label("Rust", systemImage: "gearshape.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .go) } label: {
-                    Label("Go", systemImage: "g.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .cpp) } label: {
-                    Label("C++", systemImage: "c.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .objc) } label: {
-                    Label("Objective-C", systemImage: "apple.logo")
-                }
-                
-                Divider()
-                
-                Text("Documents")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Button { viewModel.addCell(type: .code, language: .rmarkdown) } label: {
-                    Label("R Markdown", systemImage: "doc.richtext.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .latex) } label: {
-                    Label("LaTeX", systemImage: "function")
-                }
-                
-                Divider()
-                
-                Button("Markdown") { viewModel.addCell(type: .markdown) }
-                Button("Raw") { viewModel.addCell(type: .raw) }
-                
-                Divider()
-                
-                Button { viewModel.addCell(type: .procedure) } label: {
-                    Label("SAS Procedure", systemImage: "tablecells.fill")
-                }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12))
-            }
-            .menuIndicator(.hidden)
-            .help("Add Cell")
-            
-            // Run Selected
-            Button(action: { viewModel.runSelectedCell(computeTarget: appState.currentComputeTarget) }) {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 11))
-            }
-            .disabled(viewModel.selectedCellId == nil)
-            .help("Run Selected Cell")
-            
-            // Run All
-            Menu {
-                Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
-                    Label("Run All Cells", systemImage: "forward.fill")
-                }
-                
-                Divider()
-                
-                let usedColors = viewModel.getUsedColors().filter { $0 != .none }
-                if !usedColors.isEmpty {
-                    Menu("Run by Color") {
-                        ForEach(usedColors) { theme in
-                            Button {
-                                viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
-                            } label: {
-                                HStack {
-                                    Circle().fill(theme.iconColor).frame(width: 8, height: 8)
-                                    Text(theme.rawValue.capitalized)
-                                }
+                    HStack(spacing: 3) {
+                        Text(notebook.name)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundColor(.primary.opacity(0.93))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(minWidth: isUltraCompact ? 46 : 68, maxWidth: maxTitleWidth, alignment: .leading)
+                            .layoutPriority(2)
+                            .onTapGesture(count: 2) {
+                                viewModel.isEditingName = true
                             }
+                        
+                        Button(action: { viewModel.isEditingName.toggle() }) {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(hoveredToolbarItem == "rename_nb" ? .primary : .secondary.opacity(0.75))
+                                .frame(width: 17, height: 19)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(hoveredToolbarItem == "rename_nb" ? Color.primary.opacity(isDarkToolbar ? 0.08 : 0.05) : Color.clear)
+                                )
+                                .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        .onHover { h in
+                            hoveredToolbarItem = h ? "rename_nb" : (hoveredToolbarItem == "rename_nb" ? nil : hoveredToolbarItem)
+                        }
+                        .help("Rename Cell Sheet")
                     }
                 }
-
-                let usedTags = viewModel.getUsedTags()
-                if !usedTags.isEmpty {
-                    Menu("Run by Tag") {
-                        ForEach(usedTags, id: \.self) { t in
-                            Button {
-                                viewModel.runCellsByTag(t, computeTarget: appState.currentComputeTarget)
-                            } label: { Label(t, systemImage: "tag.fill") }
-                        }
-                    }
-                }
-            } label: {
-                Image(systemName: "forward.fill")
-                    .font(.system(size: 11))
-            } primaryAction: {
-                viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
             }
-            .menuIndicator(.hidden)
-            .help("Run All")
             
-            Spacer()
+            Divider().frame(height: 13).opacity(0.65)
+            
+            // Python Kernel / Virtual Environment Selector Pill (compact, zero AppKit bezel)
+            pythonVersionPill(isCompact: isCompact, isUltraCompact: isUltraCompact)
+            
+            // Unified Segmented Action Capsule: [ + | ▶ | ▶▶ ▾ ]
+            cellExecutionCapsule
+
+            // Reactive DAG Mode Pill (⚡ Auto-runs downstream dependent cells)
+            Button(action: { viewModel.isReactiveMode.toggle() }) {
+                HStack(spacing: 3.5) {
+                    Image(systemName: viewModel.isReactiveMode ? "bolt.fill" : "bolt")
+                        .font(.system(size: 9.5, weight: .semibold))
+                    if !isCompact {
+                        Text("DAG")
+                            .font(.system(size: 10, weight: viewModel.isReactiveMode ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                }
+                .foregroundColor(viewModel.isReactiveMode ? .orange : (hoveredToolbarItem == "reactive_dag" ? .primary : .secondary))
+                .padding(.horizontal, isCompact ? 5.5 : 6.5)
+                .frame(height: 21)
+                .background(
+                    viewModel.isReactiveMode
+                        ? Color.orange.opacity(isDarkToolbar ? 0.16 : 0.11)
+                        : toolbarPillFill(id: "reactive_dag")
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(
+                            viewModel.isReactiveMode
+                                ? Color.orange.opacity(0.45)
+                                : toolbarPillStroke(id: "reactive_dag"),
+                            lineWidth: 0.8
+                        )
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .onHover { h in
+                hoveredToolbarItem = h ? "reactive_dag" : (hoveredToolbarItem == "reactive_dag" ? nil : hoveredToolbarItem)
+            }
+            .help("Reactive DAG Mode: Automatically re-run downstream dependent cells when an upstream variable changes")
+            
+            Spacer(minLength: 4)
             
             // --- Right side: compute, open, export, count, AI ---
             
-            // Compute Engine Selector
-            Menu {
-                Text("Compute Engine")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                ForEach(ComputeTarget.userSelectable) { target in
-                    Button {
-                        appState.currentComputeTarget = target
-                    } label: {
-                        HStack {
-                            Text(target.displayName)
-                            if appState.currentComputeTarget == target {
-                                Image(systemName: "checkmark")
-                            }
-                            if target.isPremium {
-                                Image(systemName: "star.fill")
-                            }
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: appState.currentComputeTarget.icon)
-                        .foregroundColor(appState.currentComputeTarget == .yourCloud ? .green : (appState.currentComputeTarget.isPremium ? .orange : .secondary))
-                    if appState.currentComputeTarget == .yourCloud {
-                        Text("Your Cloud")
-                            .font(.system(size: 11, weight: .medium))
-                    } else if appState.currentComputeTarget == .googleColab {
-                        Text("Google Colab")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8))
-                }
-                .font(.system(size: 11))
-            }
-            .menuIndicator(.hidden)
-            .help("Select Compute Engine: \(appState.currentComputeTarget.displayName)")
+            computeEnginePill(isCompact: isCompact, isUltraCompact: isUltraCompact)
             
             // Google Colab Cloud GPU Status & Settings
             if appState.currentComputeTarget == .googleColab {
                 Button(action: { showingColabSettings = true }) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4.5) {
                         Circle()
                             .fill(colabService.status.statusColor)
                             .frame(width: 6, height: 6)
                         
-                        Text(colabService.status.isConnected ? colabService.detectedGPU : "Colab Runtime")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(colabService.status.isConnected ? .green : .primary)
+                        if !isUltraCompact {
+                            Text(colabService.status.isConnected ? colabService.detectedGPU : "Colab")
+                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                .foregroundColor(colabService.status.isConnected ? .green : .primary.opacity(0.9))
+                                .lineLimit(1)
+                        }
                         
                         Image(systemName: "slider.horizontal.3")
                             .font(.system(size: 9))
                             .foregroundColor(.secondary)
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .cornerRadius(5)
-                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                    .padding(.horizontal, 6.5)
+                    .frame(height: 21)
+                    .background(toolbarPillFill(id: "colab_cfg"))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(toolbarPillStroke(id: "colab_cfg"), lineWidth: 0.8)
+                    )
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
+                .onHover { h in
+                    hoveredToolbarItem = h ? "colab_cfg" : (hoveredToolbarItem == "colab_cfg" ? nil : hoveredToolbarItem)
+                }
                 .help("Google Colab Cloud Compute & Runtime Bridge Settings")
                 .popover(isPresented: $showingColabSettings, arrowEdge: .bottom) {
                     GoogleColabSheetView()
@@ -3451,76 +3413,63 @@ struct NotebookView: View {
             
             // Your Cloud SSH Server Selector (Auto-synced with Remote Explorer)
             if appState.currentComputeTarget == .yourCloud {
-                Menu {
-                    Text("Synced SSH Servers")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    let servers = RemoteConnectionManager.shared.servers
-                    if servers.isEmpty {
-                        Text("No SSH servers configured")
-                            .foregroundColor(.secondary)
-                    } else {
-                        ForEach(servers) { s in
-                            Button {
-                                appState.selectedSSHComputeServer = s
-                                RemoteConnectionManager.shared.currentConnection = s
-                            } label: {
-                                HStack {
-                                    Text("\(s.name) (\(s.username)@\(s.host))")
-                                    let isSel = (appState.selectedSSHComputeServer?.id ?? RemoteConnectionManager.shared.currentConnection?.id ?? servers.first?.id) == s.id
-                                    if isSel {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    let activeServer = appState.selectedSSHComputeServer ?? RemoteConnectionManager.shared.currentConnection ?? RemoteConnectionManager.shared.servers.first
+                let activeServer = appState.selectedSSHComputeServer ?? RemoteConnectionManager.shared.currentConnection ?? RemoteConnectionManager.shared.servers.first
+                Button(action: presentSSHServerMenu) {
                     HStack(spacing: 4) {
                         Circle()
                             .fill(activeServer != nil ? Color.green : Color.secondary)
-                            .frame(width: 6, height: 6)
+                            .frame(width: 5.5, height: 5.5)
                         Text(activeServer?.name ?? "Auto SSH")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.primary)
+                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(.primary.opacity(0.9))
+                            .lineLimit(1)
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 8))
+                            .font(.system(size: 7.5, weight: .semibold))
                             .foregroundColor(.secondary)
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.06))
-                    .cornerRadius(4)
+                    .padding(.horizontal, 6.5)
+                    .frame(height: 21)
+                    .background(toolbarPillFill(id: "ssh_srv"))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(toolbarPillStroke(id: "ssh_srv"), lineWidth: 0.8)
+                    )
+                    .contentShape(Rectangle())
                 }
-                .menuIndicator(.hidden)
+                .buttonStyle(.plain)
+                .fixedSize()
+                .onHover { h in
+                    hoveredToolbarItem = h ? "ssh_srv" : (hoveredToolbarItem == "ssh_srv" ? nil : hoveredToolbarItem)
+                }
                 .help("Active SSH Compute Server (Auto-synced with Remote Explorer)")
                 
-                // Auto-ENV Indicator
-                HStack(spacing: 3) {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 5, height: 5)
-                    Text("Auto ENV")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundColor(.green)
+                if !isCompact {
+                    HStack(spacing: 3) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 5, height: 5)
+                        Text("Auto ENV")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.green)
+                    }
+                    .padding(.horizontal, 5.5)
+                    .frame(height: 21)
+                    .background(Color.green.opacity(0.11))
+                    .clipShape(RoundedRectangle(cornerRadius: 4.5, style: .continuous))
+                    .help("Remote Python Environment: Auto venv (~/.microcode/venv) with on-demand package installation")
                 }
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.12))
-                .cornerRadius(4)
-                .help("Remote Python Environment: Auto venv (~/.microcode/venv) with on-demand package installation")
             }
             
             if appState.currentComputeTarget == .customHPC {
-                Button(action: { showingHPCSettings = true }) {
-                    Image(systemName: "gearshape.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.blue)
+                toolbarIconButton(
+                    id: "hpc_cfg",
+                    icon: "gearshape.fill",
+                    tooltip: "MicroCode Cloud — advanced settings",
+                    tint: .blue
+                ) {
+                    showingHPCSettings = true
                 }
-                .buttonStyle(.plain)
-                .help("MicroCode Cloud — advanced settings")
                 .popover(isPresented: $showingHPCSettings, arrowEdge: .bottom) {
                     HPCSettingsView()
                         .environmentObject(appState)
@@ -3529,190 +3478,677 @@ struct NotebookView: View {
             
             // GPU Wallet — deliberately separate from AI-token balance.
             if appState.currentComputeTarget.isPremium {
-                HStack(spacing: 2) {
+                HStack(spacing: 2.5) {
                     Image(systemName: "bolt.circle.fill")
+                        .font(.system(size: 10))
                         .foregroundColor(.yellow)
                     Text(cloudGPU.balanceText)
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                 }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
-                .background(Color.yellow.opacity(0.1))
-                .cornerRadius(4)
+                .padding(.horizontal, 5.5)
+                .frame(height: 21)
+                .background(Color.yellow.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 4.5, style: .continuous))
                 .help("Cloud GPU Wallet: \(cloudGPU.balanceText). This is separate from AI tokens.")
-                
-                Divider().frame(height: 14)
             }
             
-            // Open
-            Button(action: { openNotebookFile() }) {
-                Image(systemName: "folder")
-                    .font(.system(size: 11))
-            }
-            .help("Open Notebook")
-            
-            // Export is a persistent popover: one click opens it and it stays
-            // available until the user explicitly closes it.
-            Button(action: { showingExportPopover = true }) {
-                Image(systemName: "square.and.arrow.down")
-                    .font(.system(size: 11))
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showingExportPopover, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Export Notebook").font(.headline)
-                            Text("Save .mic or export a Jupyter .ipynb copy")
-                                .font(.caption).foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button { showingExportPopover = false } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Close")
-                    }
-                    Divider()
-                    Button(action: { viewModel.quickSave() }) {
-                        Label("Quick Save (.mic)", systemImage: "bolt.fill")
-                    }
-                    .keyboardShortcut("s", modifiers: .command)
-                    Button(action: { viewModel.saveAs() }) {
-                        Label("Save As… (.mic)", systemImage: "square.and.arrow.down")
-                    }
-                    .keyboardShortcut("s", modifiers: [.command, .shift])
-                    Button(action: { viewModel.exportIpynb() }) {
-                        Label("Export as Jupyter (.ipynb)", systemImage: "arrow.up.forward.square")
-                    }
-                    Button(action: { viewModel.exportPlainPythonScript() }) {
-                        Label("Export as Git-Clean Script (.py # %%)", systemImage: "doc.text.fill")
-                    }
-                    Button(action: {
-                        if let nb = viewModel.activeNotebook {
-                            colabService.openColabInBrowser(notebook: nb)
-                        }
-                    }) {
-                        Label("Open in Google Colab", systemImage: "sparkles.rectangle.stack")
-                    }
-                    Divider()
-                    Text(viewModel.lastAutoSave.map { "Autosaved \($0.formatted(date: .omitted, time: .standard))" } ?? "Autosave on")
-                        .font(.caption).foregroundColor(.secondary)
+            // Live Kernel Variable & Unified/Metal Memory Inspector Toggle
+            let liveVarCount = sharedMemory.activeVariables(for: viewModel.activeNotebookId).count
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    viewModel.showVariableInspector.toggle()
                 }
-                .padding(14)
-                .frame(width: 300)
-            }
-            .help("Export Notebook (.mic / .ipynb)")
-            
-            Divider().frame(height: 14)
-            
-            // Execution count (compact)
-            Text("\(viewModel.totalExecutions)")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.05))
-                .cornerRadius(4)
-                .help("Total Executions: \(viewModel.totalExecutions)")
-            
-            // AI Toggle
-            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showAIPanel.toggle() } }) {
-                Image(systemName: showAIPanel ? "brain.fill" : "brain")
-                    .font(.system(size: 12))
-                    .foregroundColor(showAIPanel ? .accentColor : .secondary)
-                    .frame(width: 24, height: 24)
-                    .background(showAIPanel ? Color.accentColor.opacity(0.12) : Color.clear)
-                    .cornerRadius(5)
+            }) {
+                HStack(spacing: 3.5) {
+                    Image(systemName: "memorychip")
+                        .font(.system(size: 10, weight: .medium))
+                    if liveVarCount > 0 {
+                        Text("\(liveVarCount)")
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    } else if !isCompact {
+                        Text("Vars")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                }
+                .foregroundColor(
+                    viewModel.showVariableInspector
+                        ? .green
+                        : (hoveredToolbarItem == "vars_inspector" ? .primary : (liveVarCount > 0 ? .green.opacity(0.9) : .secondary))
+                )
+                .padding(.horizontal, 6)
+                .frame(height: 21)
+                .background(
+                    viewModel.showVariableInspector
+                        ? Color.green.opacity(isDarkToolbar ? 0.15 : 0.11)
+                        : toolbarPillFill(id: "vars_inspector")
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(
+                            viewModel.showVariableInspector
+                                ? Color.green.opacity(0.42)
+                                : toolbarPillStroke(id: "vars_inspector"),
+                            lineWidth: 0.8
+                        )
+                )
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("AI Agent")
+            .fixedSize()
+            .onHover { h in
+                hoveredToolbarItem = h ? "vars_inspector" : (hoveredToolbarItem == "vars_inspector" ? nil : hoveredToolbarItem)
+            }
+            .help("Toggle Live Kernel Variable & Apple Silicon Unified/Metal Memory Inspector")
+
+            // 1-Click Executive App / Dashboard Presentation Mode Toggle
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    viewModel.isAppPresentationMode.toggle()
+                }
+            }) {
+                HStack(spacing: 3.5) {
+                    Image(systemName: viewModel.isAppPresentationMode ? "sparkles.tv.fill" : "sparkles.tv")
+                        .font(.system(size: 10, weight: .medium))
+                    if !isCompact {
+                        Text("App")
+                            .font(.system(size: 10, weight: viewModel.isAppPresentationMode ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                }
+                .foregroundColor(
+                    viewModel.isAppPresentationMode
+                        ? .accentColor
+                        : (hoveredToolbarItem == "app_mode" ? .primary : .secondary)
+                )
+                .padding(.horizontal, isCompact ? 5.5 : 6)
+                .frame(height: 21)
+                .background(toolbarPillFill(id: "app_mode", active: viewModel.isAppPresentationMode))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(toolbarPillStroke(id: "app_mode", active: viewModel.isAppPresentationMode), lineWidth: 0.8)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .onHover { h in
+                hoveredToolbarItem = h ? "app_mode" : (hoveredToolbarItem == "app_mode" ? nil : hoveredToolbarItem)
+            }
+            .help("Toggle Executive App / Dashboard Presentation Mode (hides raw code, shows Markdown, @param widgets, DataGrids & plots)")
+
+            // Open Notebook
+            toolbarIconButton(
+                id: "open_nb",
+                icon: "folder",
+                tooltip: "Open Notebook (.mic / .ipynb)"
+            ) {
+                openNotebookFile()
+            }
+            
+            // Export Notebook (persistent popover with clean theme-matched rows)
+            toolbarIconButton(
+                id: "export_nb",
+                icon: "square.and.arrow.down",
+                tooltip: "Export Notebook (.mic / .ipynb)",
+                active: showingExportPopover
+            ) {
+                showingExportPopover.toggle()
+            }
+            .popover(isPresented: $showingExportPopover, arrowEdge: .bottom) {
+                exportNotebookPopover
+            }
+            
+            Divider().frame(height: 13).opacity(0.65)
+            
+            // Execution count (compact 21pt badge)
+            if !isUltraCompact {
+                Text("\(viewModel.totalExecutions)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 5.5)
+                    .frame(height: 21)
+                    .background(Color.primary.opacity(isDarkToolbar ? 0.05 : 0.035))
+                    .clipShape(RoundedRectangle(cornerRadius: 4.5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                            .stroke(Color.primary.opacity(isDarkToolbar ? 0.09 : 0.06), lineWidth: 0.7)
+                    )
+                    .help("Total Executions: \(viewModel.totalExecutions)")
+            }
+            
+            // Show compact AI Model Selector in toolbar only when the right Agent Panel is closed
+            if !showAIPanel && !isCompact {
+                CellAIModelSelectorPill(
+                    selection: nil,
+                    showRoleSelector: false,
+                    maxWidth: min(165, availableWidth * 0.24),
+                    compact: true,
+                    minimalChrome: true
+                )
+            }
+
+            // Formal AI Agent Panel Toggle
+            Button(action: { withAnimation(.easeInOut(duration: 0.16)) { showAIPanel.toggle() } }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "sidebar.right")
+                        .font(.system(size: 10.5, weight: .medium))
+                    if !isUltraCompact {
+                        Text("Agent")
+                            .font(.system(size: 10.5, weight: showAIPanel ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                }
+                .foregroundColor(showAIPanel || hoveredToolbarItem == "toggle_agent" ? .primary : .secondary)
+                .padding(.horizontal, isUltraCompact ? 6 : 7.5)
+                .frame(height: 21)
+                .background(toolbarPillFill(id: "toggle_agent", active: showAIPanel))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(toolbarPillStroke(id: "toggle_agent", active: showAIPanel), lineWidth: 0.8)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .fixedSize(horizontal: true, vertical: false)
+            .onHover { h in
+                hoveredToolbarItem = h ? "toggle_agent" : (hoveredToolbarItem == "toggle_agent" ? nil : hoveredToolbarItem)
+            }
+            .help("Toggle Notebook Agent Panel")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
         .frame(height: notebookHeaderHeight)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
-    // MARK: - Python Version Menu
+    // MARK: - Unified Cell & Execution Action Capsule ([ + | ▶ | ▶▶ ▾ ])
     
-    private var pythonVersionMenu: some View {
-        Menu {
-            Text("Python Version")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            
-            if appState.availablePythonVersions.isEmpty {
-                Button("python3 (default)") {
-                    appState.selectedPythonVersion = "python3"
-                    viewModel.selectedPythonPath = PythonEnvManager.shared.systemPythonExecutable
-                    pythonEnvManager.activeEnvironment = nil
-                }
-            } else {
-                ForEach(appState.availablePythonVersions) { version in
-                    Button {
-                        appState.selectedPythonVersion = version.path
-                        viewModel.selectedPythonPath = version.path
-                        pythonEnvManager.activeEnvironment = nil
-                    } label: {
-                        HStack {
-                            Text(version.displayName)
-                            if appState.selectedPythonVersion == version.path {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
+    private var cellExecutionCapsule: some View {
+        let canRunSelected = viewModel.selectedCellId != nil
+        let dividerColor = Color.primary.opacity(isDarkToolbar ? 0.11 : 0.08)
+        
+        return HStack(spacing: 0) {
+            // 1. Add Cell (+)
+            Button(action: presentAddCellMenu) {
+                Image(systemName: "plus")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(hoveredToolbarItem == "add_cell" ? .primary : .primary.opacity(0.82))
+                    .frame(width: 24, height: 21)
+                    .background(
+                        hoveredToolbarItem == "add_cell"
+                            ? Color.primary.opacity(isDarkToolbar ? 0.10 : 0.07)
+                            : Color.clear
+                    )
+                    .contentShape(Rectangle())
             }
-            
-            if !pythonEnvManager.environments.isEmpty {
-                Divider()
-                
-                Text("Virtual Environments")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                ForEach(pythonEnvManager.environments) { env in
-                    Button {
-                        pythonEnvManager.activateEnvironment(env)
-                    } label: {
-                        HStack {
-                            Text(env.name)
-                            if pythonEnvManager.activeEnvironment?.id == env.id {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
+            .buttonStyle(.plain)
+            .onHover { h in
+                hoveredToolbarItem = h ? "add_cell" : (hoveredToolbarItem == "add_cell" ? nil : hoveredToolbarItem)
             }
+            .help("Add Cell")
             
-            Divider()
+            Rectangle().fill(dividerColor).frame(width: 0.8, height: 13)
             
-            Button("Refresh Versions") {
-                // TODO: Fix AppState access pattern
-                // appState.detectPythonVersions()
+            // 2. Run Selected Cell (▶)
+            Button(action: { viewModel.runSelectedCell(computeTarget: appState.currentComputeTarget) }) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(
+                        canRunSelected
+                            ? (hoveredToolbarItem == "run_sel" ? .green : .green.opacity(0.88))
+                            : .secondary.opacity(0.32)
+                    )
+                    .frame(width: 24, height: 21)
+                    .background(
+                        canRunSelected && hoveredToolbarItem == "run_sel"
+                            ? Color.green.opacity(isDarkToolbar ? 0.14 : 0.10)
+                            : Color.clear
+                    )
+                    .contentShape(Rectangle())
             }
-        } label: {
-            HStack(spacing: 4) {
+            .buttonStyle(.plain)
+            .disabled(!canRunSelected)
+            .onHover { h in
+                hoveredToolbarItem = h ? "run_sel" : (hoveredToolbarItem == "run_sel" ? nil : hoveredToolbarItem)
+            }
+            .help("Run Selected Cell")
+            
+            Rectangle().fill(dividerColor).frame(width: 0.8, height: 13)
+            
+            // 3. Run All Cells (▶▶)
+            Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(hoveredToolbarItem == "run_all" ? .green : .primary.opacity(0.85))
+                    .frame(width: 25, height: 21)
+                    .background(
+                        hoveredToolbarItem == "run_all"
+                            ? Color.green.opacity(isDarkToolbar ? 0.14 : 0.10)
+                            : Color.clear
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { h in
+                hoveredToolbarItem = h ? "run_all" : (hoveredToolbarItem == "run_all" ? nil : hoveredToolbarItem)
+            }
+            .help("Run All Cells")
+            
+            // 4. Run Filtered / Kernel Options Chevron (▾)
+            Button(action: presentRunOptionsMenu) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7.5, weight: .semibold))
+                    .foregroundColor(hoveredToolbarItem == "run_opts" ? .primary : .secondary.opacity(0.8))
+                    .frame(width: 15, height: 21)
+                    .background(
+                        hoveredToolbarItem == "run_opts"
+                            ? Color.primary.opacity(isDarkToolbar ? 0.10 : 0.07)
+                            : Color.clear
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { h in
+                hoveredToolbarItem = h ? "run_opts" : (hoveredToolbarItem == "run_opts" ? nil : hoveredToolbarItem)
+            }
+            .help("Run by Color / Tag & Kernel Actions")
+        }
+        .frame(height: 21)
+        .background(Color.primary.opacity(isDarkToolbar ? 0.048 : 0.032))
+        .clipShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5.5, style: .continuous)
+                .stroke(Color.primary.opacity(isDarkToolbar ? 0.12 : 0.085), lineWidth: 0.8)
+        )
+        .fixedSize()
+    }
+    
+    // MARK: - Python Environment & Compute Engine Pills
+    
+    private func pythonVersionPill(isCompact: Bool, isUltraCompact: Bool) -> some View {
+        let maxW: CGFloat = isUltraCompact ? 96 : (isCompact ? 126 : 158)
+        return Button(action: presentPythonVersionMenu) {
+            HStack(spacing: 4.5) {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 9.5, weight: .semibold))
                     .foregroundColor(.green)
                 Text(currentPythonDisplay)
-                    .font(.system(size: 12))
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundColor(.primary.opacity(0.9))
                     .lineLimit(1)
-                Spacer(minLength: 8)
+                    .truncationMode(.tail)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 7.5, weight: .semibold))
+                    .foregroundColor(.secondary.opacity(0.8))
+            }
+            .padding(.horizontal, 7)
+            .frame(maxWidth: maxW)
+            .frame(height: 21)
+            .background(toolbarPillFill(id: "py_env"))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(toolbarPillStroke(id: "py_env"), lineWidth: 0.8)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
+        .onHover { h in
+            hoveredToolbarItem = h ? "py_env" : (hoveredToolbarItem == "py_env" ? nil : hoveredToolbarItem)
+        }
+        .help("Select Python Interpreter or Virtual Environment (\(currentPythonDisplay))")
+    }
+    
+    private func computeEnginePill(isCompact: Bool, isUltraCompact: Bool) -> some View {
+        let target = appState.currentComputeTarget
+        let isRemoteCompute = (target == .yourCloud || target == .googleColab || target.isPremium)
+        let iconTint: Color = target == .yourCloud ? .green : (target.isPremium ? .orange : .secondary)
+        return Button(action: presentComputeEngineMenu) {
+            HStack(spacing: 4) {
+                Image(systemName: target.icon)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(hoveredToolbarItem == "compute_target" && !isRemoteCompute ? .primary : iconTint)
+                if !isUltraCompact {
+                    if target == .yourCloud {
+                        Text("Your Cloud")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(.primary.opacity(0.9))
+                            .lineLimit(1)
+                    } else if target == .googleColab {
+                        Text("Colab")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(.primary.opacity(0.9))
+                            .lineLimit(1)
+                    }
+                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7.5, weight: .semibold))
+                    .foregroundColor(.secondary.opacity(0.8))
+            }
+            .padding(.horizontal, 6.5)
+            .frame(height: 21)
+            .background(toolbarPillFill(id: "compute_target", active: isRemoteCompute))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(toolbarPillStroke(id: "compute_target", active: isRemoteCompute), lineWidth: 0.8)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .onHover { h in
+            hoveredToolbarItem = h ? "compute_target" : (hoveredToolbarItem == "compute_target" ? nil : hoveredToolbarItem)
+        }
+        .help("Select Compute Engine: \(target.displayName)")
+    }
+    
+    private var exportNotebookPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Export Notebook")
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Text("Save .mic, Jupyter .ipynb, or clean Python script")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button { showingExportPopover = false } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+            Divider()
+            exportActionRow(id: "exp_quick", title: "Quick Save (.mic)", shortcutHint: "⌘S", icon: "bolt.fill") {
+                viewModel.quickSave()
+                showingExportPopover = false
+            }
+            .keyboardShortcut("s", modifiers: .command)
+            
+            exportActionRow(id: "exp_saveas", title: "Save As… (.mic)", shortcutHint: "⇧⌘S", icon: "square.and.arrow.down") {
+                showingExportPopover = false
+                viewModel.saveAs()
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            
+            exportActionRow(id: "exp_ipynb", title: "Export as Jupyter (.ipynb)", shortcutHint: nil, icon: "arrow.up.forward.square") {
+                showingExportPopover = false
+                viewModel.exportIpynb()
+            }
+            
+            exportActionRow(id: "exp_py", title: "Export as Git-Clean Script (.py # %%)", shortcutHint: nil, icon: "doc.text.fill") {
+                showingExportPopover = false
+                viewModel.exportPlainPythonScript()
+            }
+            
+            exportActionRow(id: "exp_colab", title: "Open in Google Colab", shortcutHint: nil, icon: "sparkles.rectangle.stack") {
+                showingExportPopover = false
+                if let nb = viewModel.activeNotebook {
+                    colabService.openColabInBrowser(notebook: nb)
+                }
+            }
+            Divider()
+            Text(viewModel.lastAutoSave.map { "Autosaved \($0.formatted(date: .omitted, time: .standard))" } ?? "Autosave active")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+        }
+        .padding(12)
+        .frame(width: 288)
+    }
+    
+    @ViewBuilder
+    private func exportActionRow(
+        id: String,
+        title: String,
+        shortcutHint: String?,
+        icon: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        let hovered = hoveredToolbarItem == id
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(hovered ? .accentColor : .secondary)
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(.primary)
+                Spacer()
+                if let shortcutHint {
+                    Text(shortcutHint)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
             }
             .padding(.horizontal, 8)
-            .frame(minWidth: 190, minHeight: 28, maxHeight: 28)
+            .padding(.vertical, 5.5)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(hovered ? Color.primary.opacity(isDarkToolbar ? 0.09 : 0.06) : Color.clear)
+            )
             .contentShape(Rectangle())
-            .background(controlBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
-        .menuIndicator(.hidden)
-        .menuStyle(.borderlessButton)
-        .fixedSize(horizontal: true, vertical: false)
+        .buttonStyle(.plain)
+        .onHover { h in
+            hoveredToolbarItem = h ? id : (hoveredToolbarItem == id ? nil : hoveredToolbarItem)
+        }
+    }
+    
+    // MARK: - Native NSMenu Popups (Zero AppKit Bezel Bleed)
+    
+    private func makeMenuHeader(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+    
+    private func makeMenuActionItem(
+        _ title: String,
+        icon: String? = nil,
+        checked: Bool = false,
+        action: @escaping () -> Void
+    ) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(ClosureMenuActionHandler.performMenuAction(_:)),
+            keyEquivalent: ""
+        )
+        item.target = ClosureMenuActionHandler.shared
+        item.representedObject = action
+        item.state = checked ? .on : .off
+        if let icon, let img = NSImage(systemSymbolName: icon, accessibilityDescription: nil) {
+            item.image = img
+        }
+        return item
+    }
+    
+    private func presentAddCellMenu() {
+        let menu = NSMenu(title: "Add Cell")
+        menu.autoenablesItems = false
+        
+        menu.addItem(makeMenuHeader("Code Cells"))
+        menu.addItem(makeMenuActionItem("Python", icon: "p.circle.fill") { viewModel.addCell(type: .code, language: .python) })
+        menu.addItem(makeMenuActionItem("R", icon: "r.circle.fill") { viewModel.addCell(type: .code, language: .r) })
+        menu.addItem(makeMenuActionItem("Julia", icon: "j.circle.fill") { viewModel.addCell(type: .code, language: .julia) })
+        menu.addItem(makeMenuActionItem("SQL", icon: "cylinder.fill") { viewModel.addCell(type: .code, language: .sql) })
+        
+        menu.addItem(.separator())
+        menu.addItem(makeMenuHeader("Compiled"))
+        menu.addItem(makeMenuActionItem("Ardium", icon: "sparkles") { viewModel.addCell(type: .code, language: .ardium) })
+        menu.addItem(makeMenuActionItem("Rust", icon: "gearshape.fill") { viewModel.addCell(type: .code, language: .rust) })
+        menu.addItem(makeMenuActionItem("Go", icon: "g.circle.fill") { viewModel.addCell(type: .code, language: .go) })
+        menu.addItem(makeMenuActionItem("C++", icon: "c.circle.fill") { viewModel.addCell(type: .code, language: .cpp) })
+        menu.addItem(makeMenuActionItem("Objective-C", icon: "apple.logo") { viewModel.addCell(type: .code, language: .objc) })
+        
+        menu.addItem(.separator())
+        menu.addItem(makeMenuHeader("Documents"))
+        menu.addItem(makeMenuActionItem("Markdown", icon: "text.alignleft") { viewModel.addCell(type: .markdown) })
+        menu.addItem(makeMenuActionItem("R Markdown", icon: "doc.richtext.fill") { viewModel.addCell(type: .code, language: .rmarkdown) })
+        menu.addItem(makeMenuActionItem("LaTeX", icon: "function") { viewModel.addCell(type: .code, language: .latex) })
+        menu.addItem(makeMenuActionItem("Raw Text", icon: "doc.plaintext") { viewModel.addCell(type: .raw) })
+        
+        menu.addItem(.separator())
+        menu.addItem(makeMenuHeader("Autonomous & Analytics"))
+        menu.addItem(makeMenuActionItem("AI Agent Cell", icon: "brain.head.profile") { viewModel.addCell(type: .agent) })
+        menu.addItem(makeMenuActionItem("SAS Procedure", icon: "tablecells.fill") { viewModel.addCell(type: .procedure) })
+        
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+    
+    private func presentRunOptionsMenu() {
+        let menu = NSMenu(title: "Run Options")
+        menu.autoenablesItems = false
+        
+        menu.addItem(makeMenuActionItem("Run All Cells", icon: "forward.fill") {
+            viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
+        })
+        if let selId = viewModel.selectedCellId,
+           let selCell = viewModel.activeNotebook?.cells.first(where: { $0.id == selId }) {
+            menu.addItem(makeMenuActionItem("Run Selected Cell", icon: "play.fill") {
+                viewModel.runSelectedCell(computeTarget: appState.currentComputeTarget)
+            })
+            menu.addItem(makeMenuActionItem("Run Selected + Downstream Cells (DAG)", icon: "arrow.turn.right.down") {
+                viewModel.runDownstreamCells(from: selCell, computeTarget: appState.currentComputeTarget)
+            })
+        }
+        menu.addItem(makeMenuActionItem("Reactive DAG Auto-Run Mode", icon: "bolt.fill", checked: viewModel.isReactiveMode) {
+            viewModel.isReactiveMode.toggle()
+        })
+        
+        let usedColors = viewModel.getUsedColors().filter { $0 != .none }
+        if !usedColors.isEmpty {
+            let colorSub = NSMenu(title: "Run by Color")
+            colorSub.autoenablesItems = false
+            for theme in usedColors {
+                colorSub.addItem(makeMenuActionItem(theme.rawValue.capitalized, icon: "circle.fill") {
+                    viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
+                })
+            }
+            let parent = NSMenuItem(title: "Run by Color", action: nil, keyEquivalent: "")
+            parent.image = NSImage(systemSymbolName: "paintpalette", accessibilityDescription: nil)
+            parent.submenu = colorSub
+            menu.addItem(parent)
+        }
+        
+        let usedTags = viewModel.getUsedTags()
+        if !usedTags.isEmpty {
+            let tagSub = NSMenu(title: "Run by Tag")
+            tagSub.autoenablesItems = false
+            for tag in usedTags {
+                tagSub.addItem(makeMenuActionItem(tag, icon: "tag.fill") {
+                    viewModel.runCellsByTag(tag, computeTarget: appState.currentComputeTarget)
+                })
+            }
+            let parent = NSMenuItem(title: "Run by Tag", action: nil, keyEquivalent: "")
+            parent.image = NSImage(systemSymbolName: "tag", accessibilityDescription: nil)
+            parent.submenu = tagSub
+            menu.addItem(parent)
+        }
+        
+        menu.addItem(.separator())
+        menu.addItem(makeMenuActionItem("Clear All Outputs", icon: "trash") {
+            viewModel.clearAllOutputs()
+        })
+        menu.addItem(makeMenuActionItem("Restart Kernel", icon: "arrow.clockwise") {
+            viewModel.restartKernel()
+        })
+        
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+    
+    private func presentPythonVersionMenu() {
+        let menu = NSMenu(title: "Python Environment")
+        menu.autoenablesItems = false
+        
+        menu.addItem(makeMenuHeader("Python Interpreter"))
+        if appState.availablePythonVersions.isEmpty {
+            let isSys = pythonEnvManager.activeEnvironment == nil
+            menu.addItem(makeMenuActionItem("python3 (System Default)", icon: "terminal", checked: isSys) {
+                appState.selectedPythonVersion = "python3"
+                viewModel.selectedPythonPath = PythonEnvManager.shared.systemPythonExecutable
+                pythonEnvManager.activeEnvironment = nil
+            })
+        } else {
+            for version in appState.availablePythonVersions {
+                let isChecked = pythonEnvManager.activeEnvironment == nil && appState.selectedPythonVersion == version.path
+                menu.addItem(makeMenuActionItem(version.displayName, icon: "cpu", checked: isChecked) {
+                    appState.selectedPythonVersion = version.path
+                    viewModel.selectedPythonPath = version.path
+                    pythonEnvManager.activeEnvironment = nil
+                })
+            }
+        }
+        
+        if !pythonEnvManager.environments.isEmpty {
+            menu.addItem(.separator())
+            menu.addItem(makeMenuHeader("Virtual Environments"))
+            for env in pythonEnvManager.environments {
+                let isChecked = pythonEnvManager.activeEnvironment?.id == env.id
+                menu.addItem(makeMenuActionItem("venv: \(env.name)", icon: "shippingbox.fill", checked: isChecked) {
+                    pythonEnvManager.activateEnvironment(env)
+                    viewModel.selectedPythonPath = env.pythonPath
+                })
+            }
+        }
+        
+        menu.addItem(.separator())
+        menu.addItem(makeMenuActionItem("Manage Python Environments…", icon: "slider.horizontal.3") {
+            let allCode = (viewModel.activeNotebook?.cells ?? [])
+                .filter { $0.type == .code }
+                .map { $0.content }
+                .joined(separator: "\n")
+            _ = pythonEnvManager.detectImportsFromCode(allCode)
+            appState.showingPythonEnv = true
+        })
+        
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+    
+    private func presentComputeEngineMenu() {
+        let menu = NSMenu(title: "Compute Engine")
+        menu.autoenablesItems = false
+        menu.addItem(makeMenuHeader("Compute Engine"))
+        
+        for target in ComputeTarget.userSelectable {
+            let title = target.isPremium ? "\(target.displayName)  ★" : target.displayName
+            let isChecked = appState.currentComputeTarget == target
+            menu.addItem(makeMenuActionItem(title, icon: target.icon, checked: isChecked) {
+                appState.currentComputeTarget = target
+            })
+        }
+        
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+    
+    private func presentSSHServerMenu() {
+        let menu = NSMenu(title: "Synced SSH Servers")
+        menu.autoenablesItems = false
+        menu.addItem(makeMenuHeader("Synced SSH Servers"))
+        
+        let servers = RemoteConnectionManager.shared.servers
+        if servers.isEmpty {
+            menu.addItem(makeMenuHeader("No SSH servers configured"))
+        } else {
+            for s in servers {
+                let isSel = (appState.selectedSSHComputeServer?.id ?? RemoteConnectionManager.shared.currentConnection?.id ?? servers.first?.id) == s.id
+                menu.addItem(makeMenuActionItem("\(s.name) (\(s.username)@\(s.host))", icon: "server.rack", checked: isSel) {
+                    appState.selectedSSHComputeServer = s
+                    RemoteConnectionManager.shared.currentConnection = s
+                })
+            }
+        }
+        
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
     
     private var currentPythonDisplay: String {
@@ -3858,6 +4294,7 @@ struct DataFileRow: View {
 struct NotebookCellsList: View {
     @ObservedObject var notebook: NotebookModel
     @ObservedObject var viewModel: NotebookViewModel
+    @ObservedObject private var sharedMemory = SharedMemoryService.shared
     @EnvironmentObject var appState: AppState
 
     private var controlBackground: Color {
@@ -3865,14 +4302,30 @@ struct NotebookCellsList: View {
     }
 
     var body: some View {
+        let dagGraph = CellLineageDAGAnalyzer.analyzeGraph(
+            cells: notebook.cells.map { c in
+                (
+                    id: c.id,
+                    isRunnableCode: c.type == .code || c.type == .procedure,
+                    content: c.type == .procedure ? c.generatedCode : c.content,
+                    lastRunEpoch: c.lastRunEpoch
+                )
+            }
+        )
+        let liveVars = sharedMemory.activeVariables(for: notebook.id)
+
         ScrollView {
             LazyVStack(spacing: 12) {
                 ForEach(notebook.cells) { cell in
                     NotebookCellView(
                         cell: cell,
                         isSelected: viewModel.selectedCellId == cell.id,
+                        dagInfo: dagGraph[cell.id],
+                        liveVariables: liveVars,
+                        isAppMode: viewModel.isAppPresentationMode,
                         onSelect: { viewModel.selectedCellId = cell.id },
                         onRun: { viewModel.runCell(cell, computeTarget: appState.currentComputeTarget) },
+                        onRunDownstream: { viewModel.runDownstreamCells(from: cell, computeTarget: appState.currentComputeTarget) },
                         onDelete: { viewModel.deleteCell(cell) },
                         onMoveUp: { viewModel.moveCell(cell, direction: -1) },
                         onMoveDown: { viewModel.moveCell(cell, direction: 1) },
@@ -3892,27 +4345,44 @@ struct NotebookCellsList: View {
                     .onChange(of: cell.language) { _ in viewModel.scheduleAutoSave() }
                 }
 
-                HStack(spacing: 16) {
-                    Button(action: { viewModel.addCell(type: .code) }) {
-                        HStack { Image(systemName: "chevron.left.forwardslash.chevron.right"); Text("Code") }
+                if !viewModel.isAppPresentationMode {
+                    HStack(spacing: 16) {
+                        Button(action: { viewModel.addCell(type: .code) }) {
+                            HStack { Image(systemName: "chevron.left.forwardslash.chevron.right"); Text("Code") }
+                                .padding(.horizontal, 16).padding(.vertical, 8)
+                                .background(controlBackground).cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        Button(action: { viewModel.addCell(type: .markdown) }) {
+                            HStack { Image(systemName: "text.alignleft"); Text("Text") }
+                                .padding(.horizontal, 16).padding(.vertical, 8)
+                                .background(controlBackground).cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        Button(action: { viewModel.addCell(type: .procedure) }) {
+                            HStack { Image(systemName: "tablecells.fill"); Text("Procedure") }
+                                .padding(.horizontal, 16).padding(.vertical, 8)
+                                .background(controlBackground).cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        Button(action: { viewModel.addCell(type: .agent) }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "brain.head.profile")
+                                    .foregroundColor(.accentColor)
+                                Text("AI Agent")
+                            }
                             .padding(.horizontal, 16).padding(.vertical, 8)
-                            .background(controlBackground).cornerRadius(8)
+                            .background(controlBackground)
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.accentColor.opacity(0.28), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    Button(action: { viewModel.addCell(type: .markdown) }) {
-                        HStack { Image(systemName: "text.alignleft"); Text("Text") }
-                            .padding(.horizontal, 16).padding(.vertical, 8)
-                            .background(controlBackground).cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
-                    Button(action: { viewModel.addCell(type: .procedure) }) {
-                        HStack { Image(systemName: "tablecells.fill"); Text("Procedure") }
-                            .padding(.horizontal, 16).padding(.vertical, 8)
-                            .background(controlBackground).cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
+                    .padding(.vertical, 20)
                 }
-                .padding(.vertical, 20)
             }
             .padding()
         }
@@ -3926,8 +4396,12 @@ struct NotebookCellView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var cell: NotebookCellModel
     let isSelected: Bool
+    var dagInfo: CellDAGNodeInfo? = nil
+    var liveVariables: [KernelVariableInfo] = []
+    var isAppMode: Bool = false
     let onSelect: () -> Void
     let onRun: () -> Void
+    var onRunDownstream: (() -> Void)? = nil
     let onDelete: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
@@ -3979,6 +4453,275 @@ struct NotebookCellView: View {
     }
     
     var body: some View {
+        Group {
+            if isAppMode {
+                executiveAppModeCellCard
+            } else if cell.type == .agent {
+                inlineAgentCellCard
+            } else {
+                standardNotebookCellCard
+            }
+        }
+    }
+
+    // MARK: - 1-Click Executive App / Dashboard Presentation Mode Card
+
+    @ViewBuilder
+    private var executiveAppModeCellCard: some View {
+        let paramSpecs = (cell.type == .code) ? CellParameterEngine.parseParameters(from: cell.content) : []
+        let trimmedOutput = cell.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasVisualOutput = !paramSpecs.isEmpty
+            || cell.inlineDataFrame != nil
+            || cell.isDataFrame
+            || !cell.outputImages.isEmpty
+            || !trimmedOutput.isEmpty
+
+        if cell.type == .markdown {
+            RichMarkdownCellView(
+                text: Binding(get: { cell.content }, set: { cell.content = $0 }),
+                liveVariables: liveVariables,
+                isDark: appState.appTheme.isDark,
+                forceRenderedOnly: true
+            )
+            .padding(.vertical, 4)
+            .background(cellCardBackground)
+            .cornerRadius(10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(cellBorderColor, lineWidth: 0.8)
+            )
+            .padding(.horizontal, 16)
+        } else if hasVisualOutput {
+            VStack(alignment: .leading, spacing: 8) {
+                if !paramSpecs.isEmpty {
+                    CellParamWidgetsBar(
+                        specs: paramSpecs,
+                        language: cell.language.rawValue,
+                        isDark: appState.appTheme.isDark
+                    ) { spec, newLiteral, shouldAutoRun in
+                        cell.content = CellParameterEngine.updateParameterValue(
+                            in: cell.content,
+                            spec: spec,
+                            newFormattedLiteral: newLiteral,
+                            language: cell.language.rawValue
+                        )
+                        if shouldAutoRun { onRun() }
+                    }
+                    .padding(.top, 8)
+                }
+
+                cellRichOutputsContent
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
+            .background(cellCardBackground)
+            .cornerRadius(10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(cellBorderColor, lineWidth: 0.8)
+            )
+            .padding(.horizontal, 16)
+        }
+    }
+
+    // MARK: - Dedicated Formal Inline Agent Cell (Clean Composer + Instant Enter/Click Send)
+
+    private var inlineAgentCellCard: some View {
+        let isDark = appState.appTheme.isDark
+        let canSend = !cell.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasAgentActivity = cell.isExecuting
+            || !cell.agentThought.isEmpty
+            || !cell.agentToolSteps.isEmpty
+            || !cell.agentStatusText.isEmpty
+            || !cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        return VStack(alignment: .leading, spacing: 0) {
+            // Prompt Input (when expanded)
+            if !cell.isCollapsed {
+                CellPromptInputView(
+                    text: Binding(
+                        get: { cell.content },
+                        set: { cell.content = $0 }
+                    ),
+                    placeholder: cell.agentExecutionMode
+                        ? "สั่ง Agent ให้สร้าง แก้ไข หรือรัน Cell… (กด Enter เพื่อส่ง, Shift+Enter ขึ้นบรรทัดใหม่)"
+                        : "พิมพ์คำถามหรือให้ AI สร้างโค้ด… (กด Enter เพื่อส่ง)",
+                    isDark: isDark,
+                    minHeight: 36,
+                    maxHeight: 160,
+                    fontSize: 12.5,
+                    onFocus: { focused in
+                        if focused { onSelect() }
+                    },
+                    onSubmit: {
+                        onSelect()
+                        if !cell.isExecuting && !cell.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            onRun()
+                        }
+                    }
+                )
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+            }
+
+            // Consolidated Single-Row Action Bar (No duplicate badges, no Tag/Color clutter)
+            HStack(spacing: 6) {
+                CellModeTogglePill(
+                    isAgentMode: Binding(
+                        get: { cell.agentExecutionMode },
+                        set: { cell.agentExecutionMode = $0 }
+                    ),
+                    compact: true
+                )
+                .fixedSize()
+
+                CellAIModelSelectorPill(
+                    selection: Binding(
+                        get: { cell.aiSelection },
+                        set: { cell.aiSelection = $0 }
+                    ),
+                    showRoleSelector: cell.agentExecutionMode,
+                    maxWidth: 230,
+                    compact: true,
+                    minimalChrome: true,
+                    roleIconOnly: true
+                )
+
+                if cell.isCollapsed && canSend {
+                    Text(cell.content.replacingOccurrences(of: "\n", with: " "))
+                        .font(.system(size: 11.5))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
+                Spacer(minLength: 6)
+
+                if isHovering || isSelected {
+                    HStack(spacing: 5) {
+                        Button(action: onMoveUp) {
+                            Image(systemName: "arrow.up")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Move Cell Up")
+
+                        Button(action: onMoveDown) {
+                            Image(systemName: "arrow.down")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Move Cell Down")
+
+                        Button(action: { cell.isCollapsed.toggle() }) {
+                            Image(systemName: cell.isCollapsed ? "chevron.down" : "chevron.up")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .help(cell.isCollapsed ? "Expand Cell" : "Collapse Cell")
+
+                        Button(action: onDelete) {
+                            Image(systemName: "trash")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Delete Cell")
+                    }
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundColor(.secondary)
+                }
+
+                // Always-visible Send / Stop button
+                if cell.isExecuting {
+                    Button(action: {
+                        onSelect()
+                        onRun()
+                    }) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 25, height: 25)
+                            .background(Color.red.opacity(0.85))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("Stop Agent")
+                } else {
+                    Button(action: {
+                        onSelect()
+                        onRun()
+                    }) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(canSend ? .white : .secondary.opacity(0.55))
+                            .frame(width: 25, height: 25)
+                            .background(canSend ? Color.accentColor : Color.primary.opacity(0.07))
+                            .clipShape(Circle())
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                    .fixedSize()
+                    .help(cell.agentExecutionMode ? "Run Agent (Enter)" : "Send (Enter)")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, cell.isCollapsed ? 8 : 7)
+
+            // Agent Reasoning, Tool Timeline & Response Output
+            if !cell.isCollapsed && hasAgentActivity {
+                Divider()
+                    .opacity(0.55)
+                    .padding(.horizontal, 12)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    if cell.isExecuting {
+                        HStack(spacing: 7) {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .scaleEffect(0.75)
+                            Text(cell.agentStatusText.isEmpty ? "Working…" : cell.agentStatusText)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer()
+                        }
+                    }
+                    if !cell.agentThought.isEmpty {
+                        AntigravityThoughtBlockView(content: cell.agentThought, durationSeconds: nil)
+                    }
+                    if !cell.agentToolSteps.isEmpty {
+                        CellAgentToolStepsTimeline(steps: cell.agentToolSteps)
+                    }
+                    if !cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        CellAIRichContentView(content: cell.output)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+        }
+        .background(cellCardBackground)
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    isSelected
+                        ? Color.accentColor.opacity(0.85)
+                        : Color.primary.opacity(isDark ? 0.12 : 0.09),
+                    lineWidth: isSelected ? 1.5 : 1
+                )
+        )
+        .padding(.horizontal, 16)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { isHovering = $0 }
+    }
+
+    private var standardNotebookCellCard: some View {
         HStack(alignment: .top, spacing: 0) {
             // Left Gutter
             VStack(spacing: 4) {
@@ -4006,16 +4749,92 @@ struct NotebookCellView: View {
                 cellHeader
                 
                 if !cell.isCollapsed {
+                    if let oldCode = cell.pendingDiffOldContent, oldCode != cell.content {
+                        CellInlineDiffBanner(
+                            oldCode: oldCode,
+                            newCode: cell.content,
+                            sourceLabel: cell.pendingDiffSource,
+                            isDark: appState.appTheme.isDark,
+                            onAccept: {
+                                cell.pendingDiffOldContent = nil
+                            },
+                            onRevert: {
+                                cell.content = oldCode
+                                cell.pendingDiffOldContent = nil
+                            }
+                        )
+                    }
+
+                    if cell.type == .code {
+                        let paramSpecs = CellParameterEngine.parseParameters(from: cell.content)
+                        if !paramSpecs.isEmpty {
+                            CellParamWidgetsBar(
+                                specs: paramSpecs,
+                                language: cell.language.rawValue,
+                                isDark: appState.appTheme.isDark
+                            ) { spec, newLiteral, shouldAutoRun in
+                                cell.content = CellParameterEngine.updateParameterValue(
+                                    in: cell.content,
+                                    spec: spec,
+                                    newFormattedLiteral: newLiteral,
+                                    language: cell.language.rawValue
+                                )
+                                if shouldAutoRun { onRun() }
+                            }
+                        }
+                    }
+
                     if cell.type == .procedure {
                         SASProcedureView(cell: cell, onRun: onRun)
                     } else if cell.type == .markdown {
-                        // Render Markdown
-                        TextEditor(text: Binding(
-                            get: { cell.content },
-                            set: { cell.content = $0 }
-                        ))
-                        .font(.body)
-                        .padding(8)
+                        RichMarkdownCellView(
+                            text: Binding(
+                                get: { cell.content },
+                                set: { cell.content = $0 }
+                            ),
+                            liveVariables: liveVariables,
+                            isDark: appState.appTheme.isDark,
+                            forceRenderedOnly: false
+                        )
+                    } else if cell.type == .agent {
+                        // Theme-Native Inline Agent Prompt Composer
+                        VStack(alignment: .leading, spacing: 6) {
+                            ZStack(alignment: .topLeading) {
+                                if cell.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text(cell.agentExecutionMode
+                                         ? "สั่ง Agent ให้สร้าง/แก้ไข/รัน Cell วิเคราะห์ข้อมูล หรือเรียกใช้เครื่องมือใน Workspace และ MCP…"
+                                         : "พิมพ์คำถามหรือให้ AI สร้างโค้ด…")
+                                        .font(.system(size: 12.5))
+                                        .foregroundColor(.secondary.opacity(0.65))
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 10)
+                                        .allowsHitTesting(false)
+                                }
+                                TextEditor(text: Binding(
+                                    get: { cell.content },
+                                    set: { cell.content = $0 }
+                                ))
+                                .font(.system(size: 12.5))
+                                .scrollContentBackground(.hidden)
+                                .background(Color.clear)
+                                .frame(minHeight: 54, maxHeight: 220)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                            }
+                            .background(
+                                appState.appTheme.isGlass
+                                    ? Color.primary.opacity(0.04)
+                                    : Color(nsColor: appState.appTheme.panelBackground).opacity(0.75)
+                            )
+                            .cornerRadius(7)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .stroke(Color.primary.opacity(appState.appTheme.isDark ? 0.10 : 0.08), lineWidth: 1)
+                            )
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
                     } else {
                         // Code Editor - height matches line count exactly
                         // Zero-allocation UTF8 scan instead of components(separatedBy:)
@@ -4047,116 +4866,13 @@ struct NotebookCellView: View {
                     }
                     
                     // Output Section
-                    if !cell.output.isEmpty || !cell.outputImages.isEmpty || cell.isDataFrame {
+                    let hasAgentActivity = cell.type == .agent && (cell.isExecuting || !cell.agentThought.isEmpty || !cell.agentToolSteps.isEmpty || !cell.agentStatusText.isEmpty)
+                    if !cell.output.isEmpty || !cell.outputImages.isEmpty || cell.isDataFrame || cell.inlineDataFrame != nil || hasAgentActivity {
                         Divider()
                             .padding(.horizontal, 8)
                         
-                        VStack(alignment: .leading, spacing: 8) {
-                            // DataFrame Output
-                            if let dfPath = cell.dataFramePath, cell.isDataFrame {
-                                DataFrameView(rawPath: dfPath, onGenerateCode: onGenerateCode)
-                                    .frame(height: 300)
-                            }
-                            
-                            // Text Output
-                            if !cell.output.isEmpty {
-                                let hasError = cell.output.contains("Error") || cell.output.contains("Traceback") || cell.output.contains("Exception") || cell.output.contains("CUDA out of memory")
-                                if hasError {
-                                    CellSelfHealingBanner(cell: cell, onRun: onRun)
-                                }
-                                
-                                ScrollView {
-                                    Text(cell.output)
-                                        .font(.system(size: 12, design: .monospaced))
-                                        .foregroundColor(hasError ? .red : .primary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .textSelection(.enabled)
-                                }
-                                .frame(maxHeight: 200)
-                            }
-                            
-                            // Image Output (matplotlib, PIL, etc.)
-                            if !cell.outputImages.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 12) {
-                                        ForEach(cell.outputImages, id: \.self) { imageURL in
-                                            if imageURL.pathExtension.lowercased() == "pdf" {
-                                                // PDF File
-                                                Button(action: { NSWorkspace.shared.open(imageURL) }) {
-                                                    VStack(spacing: 8) {
-                                                        Image(systemName: "doc.text.fill")
-                                                            .font(.largeTitle)
-                                                            .foregroundColor(.red)
-                                                        Text("Open PDF")
-                                                            .font(.caption)
-                                                            .foregroundColor(.primary)
-                                                    }
-                                                    .frame(width: 120, height: 120)
-                                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
-                                                    .cornerRadius(8)
-                                                    .overlay(
-                                                        RoundedRectangle(cornerRadius: 8)
-                                                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                                                    )
-                                                }
-                                                .buttonStyle(.plain)
-                                            } else if imageURL.pathExtension.lowercased() == "html" {
-                                                // HTML File
-                                                Button(action: { NSWorkspace.shared.open(imageURL) }) {
-                                                    VStack(spacing: 8) {
-                                                        Image(systemName: "safari.fill")
-                                                            .font(.largeTitle)
-                                                            .foregroundColor(.blue)
-                                                        Text("View Report")
-                                                            .font(.caption)
-                                                            .foregroundColor(.primary)
-                                                    }
-                                                    .frame(width: 120, height: 120)
-                                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
-                                                    .cornerRadius(8)
-                                                    .overlay(
-                                                        RoundedRectangle(cornerRadius: 8)
-                                                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                                                    )
-                                                }
-                                                .buttonStyle(.plain)
-                                            } else if let nsImage = NSImage(contentsOf: imageURL) {
-                                                VStack(spacing: 4) {
-                                                    Image(nsImage: nsImage)
-                                                        .resizable()
-                                                        .aspectRatio(contentMode: .fit)
-                                                        .frame(maxHeight: 300)
-                                                        .cornerRadius(8)
-                                                        .shadow(radius: 2)
-                                                        .onTapGesture {
-                                                            NSWorkspace.shared.open(imageURL)
-                                                        }
-                                                    
-                                                    Text(imageURL.lastPathComponent)
-                                                        .font(.caption2)
-                                                        .foregroundColor(.secondary)
-                                                }
-                                                .contextMenu {
-                                                    Button("Save Image...") {
-                                                        let panel = NSSavePanel()
-                                                        panel.allowedContentTypes = [.png]
-                                                        panel.nameFieldStringValue = imageURL.lastPathComponent
-                                                        if panel.runModal() == .OK, let url = panel.url {
-                                                             try? FileManager.default.copyItem(at: imageURL, to: url)
-                                                        }
-                                                    }
-                                                    Button("Copy Image") {
-                                                        NSPasteboard.general.clearContents()
-                                                        NSPasteboard.general.writeObjects([nsImage])
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                        }
-                                    }
-                        }
-                        .padding(8)
+                        cellRichOutputsContent
+                            .padding(8)
                     }
                 }
             }
@@ -4176,15 +4892,169 @@ struct NotebookCellView: View {
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
     }
+
+    @ViewBuilder
+    private var cellRichOutputsContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Auto-Rendered Native Inline DataFrame Grid & Retina Chart Studio (Python & SQL)
+            if let inlineDF = cell.inlineDataFrame {
+                NotebookInlineDataGridStudio(
+                    payload: inlineDF,
+                    isDark: appState.appTheme.isDark,
+                    onCreateSQLQueryCell: onGenerateCode
+                )
+            }
+
+            // Legacy file-backed DataFrame Output
+            if let dfPath = cell.dataFramePath, cell.isDataFrame, cell.inlineDataFrame == nil {
+                DataFrameView(rawPath: dfPath, onGenerateCode: onGenerateCode)
+                    .frame(height: 300)
+            }
+
+            if cell.type == .agent {
+                if cell.isExecuting {
+                    HStack(spacing: 7) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.75)
+                        Text(cell.agentStatusText.isEmpty ? "Working…" : cell.agentStatusText)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer()
+                        Button(action: onRun) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 8))
+                                Text("Stop")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(.primary.opacity(0.85))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                    }
+                }
+                if !cell.agentThought.isEmpty {
+                    AntigravityThoughtBlockView(content: cell.agentThought, durationSeconds: nil)
+                }
+                if !cell.agentToolSteps.isEmpty {
+                    CellAgentToolStepsTimeline(steps: cell.agentToolSteps)
+                }
+                if !cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    CellAIRichContentView(content: cell.output)
+                }
+            } else if !cell.output.isEmpty {
+                let hasError = cell.output.contains("Error")
+                    || cell.output.contains("Traceback")
+                    || cell.output.contains("Exception")
+                    || cell.output.contains("CUDA out of memory")
+                if hasError && !isAppMode {
+                    CellSelfHealingBanner(cell: cell, onRun: onRun)
+                }
+
+                VirtualizedCellOutputLogView(
+                    output: cell.output,
+                    hasError: hasError
+                )
+            }
+
+            // Image Output (Retina matplotlib, PIL, PDF, HTML — cached via NotebookImageCache)
+            if !cell.outputImages.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(cell.outputImages, id: \.self) { imageURL in
+                            if imageURL.pathExtension.lowercased() == "pdf" {
+                                Button(action: { NSWorkspace.shared.open(imageURL) }) {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: "doc.text.fill")
+                                            .font(.largeTitle)
+                                            .foregroundColor(.red)
+                                        Text("Open PDF")
+                                            .font(.caption)
+                                            .foregroundColor(.primary)
+                                    }
+                                    .frame(width: 120, height: 120)
+                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+                                    .cornerRadius(8)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            } else if imageURL.pathExtension.lowercased() == "html" {
+                                Button(action: { NSWorkspace.shared.open(imageURL) }) {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: "safari.fill")
+                                            .font(.largeTitle)
+                                            .foregroundColor(.blue)
+                                        Text("View Report")
+                                            .font(.caption)
+                                            .foregroundColor(.primary)
+                                    }
+                                    .frame(width: 120, height: 120)
+                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+                                    .cornerRadius(8)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            } else if let nsImage = NotebookImageCache.shared.image(for: imageURL) {
+                                VStack(spacing: 4) {
+                                    Image(nsImage: nsImage)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .frame(maxHeight: 320)
+                                        .cornerRadius(8)
+                                        .shadow(radius: 2)
+                                        .onTapGesture {
+                                            NSWorkspace.shared.open(imageURL)
+                                        }
+
+                                    Text(imageURL.lastPathComponent)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                .contextMenu {
+                                    Button("Save Image...") {
+                                        let panel = NSSavePanel()
+                                        panel.allowedContentTypes = [.png]
+                                        panel.nameFieldStringValue = imageURL.lastPathComponent
+                                        if panel.runModal() == .OK, let url = panel.url {
+                                            try? FileManager.default.copyItem(at: imageURL, to: url)
+                                        }
+                                    }
+                                    Button("Copy Image") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.writeObjects([nsImage])
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     
     private var cellHeader: some View {
-        HStack {
+        HStack(spacing: 6) {
             // Cell Type Badge
             Text(cell.type.rawValue)
                 .font(.system(size: 9, weight: .medium))
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(cellTypeColor.opacity(0.2))
+                .background(cellTypeColor.opacity(0.16))
                 .foregroundColor(cellTypeColor)
                 .cornerRadius(4)
             
@@ -4211,6 +5081,7 @@ struct NotebookCellView: View {
                             .font(.system(size: 10))
                         Text(cell.language.rawValue)
                             .font(.system(size: 9, weight: .medium))
+                            .lineLimit(1)
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -4219,6 +5090,7 @@ struct NotebookCellView: View {
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 
                 // Per-Cell Heterogeneous Compute Target Chip
                 Menu {
@@ -4249,6 +5121,7 @@ struct NotebookCellView: View {
                             .font(.system(size: 8))
                         Text(cell.computeTargetOverride != nil ? current.displayName : "Default")
                             .font(.system(size: 9, weight: .medium))
+                            .lineLimit(1)
                     }
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
@@ -4257,19 +5130,28 @@ struct NotebookCellView: View {
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .help("Per-Cell Compute Engine (Overrides default target for this cell)")
             } else if cell.type == .agent {
-                HStack(spacing: 4) {
-                    Image(systemName: "brain")
-                        .font(.system(size: 10))
-                    Text("OS-Level Agent")
-                        .font(.system(size: 9, weight: .medium))
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.purple.opacity(0.2))
-                .foregroundColor(.purple)
-                .cornerRadius(4)
+                CellModeTogglePill(
+                    isAgentMode: Binding(
+                        get: { cell.agentExecutionMode },
+                        set: { cell.agentExecutionMode = $0 }
+                    ),
+                    compact: true
+                )
+                .fixedSize()
+
+                CellAIModelSelectorPill(
+                    selection: Binding(
+                        get: { cell.aiSelection },
+                        set: { cell.aiSelection = $0 }
+                    ),
+                    showRoleSelector: cell.agentExecutionMode,
+                    maxWidth: 215,
+                    compact: true,
+                    minimalChrome: true
+                )
             }
             
             // Name-tag (catalog) chip — used for "Run by Tag"
@@ -4303,13 +5185,32 @@ struct NotebookCellView: View {
                             showTagEditor = false
                         }
                     HStack {
-                        Button("Clear") { cell.tag = ""; tagDraft = ""; showTagEditor = false }
+                        Button(action: { cell.tag = ""; tagDraft = ""; showTagEditor = false }) {
+                            Text("Clear")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.07))
+                                .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+
                         Spacer()
-                        Button("Set") {
+
+                        Button(action: {
                             cell.tag = tagDraft.trimmingCharacters(in: .whitespaces)
                             showTagEditor = false
+                        }) {
+                            Text("Set")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 4)
+                                .background(Color.accentColor)
+                                .cornerRadius(5)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.plain)
                     }
                     .frame(width: 220)
                 }
@@ -4440,6 +5341,85 @@ struct NotebookCellView: View {
                 .labelsHidden()
                 .frame(width: 24, height: 24)
             }
+
+            // DAG Lineage: Stale Upstream Indicator & 1-Click Run Downstream
+            if let dag = dagInfo {
+                if dag.isStaleFromUpstream {
+                    Button(action: onRun) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                                .font(.system(size: 8.5, weight: .semibold))
+                            Text("Stale")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 5.5)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.15))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("Upstream cell (\(dag.upstreamCellNumbers.map { "#\($0)" }.joined(separator: ", "))) updated \(dag.referencedUpstreamSymbols.joined(separator: ", ")). Click to re-run.")
+                }
+
+                if !dag.downstreamCellIds.isEmpty {
+                    Button(action: { onRunDownstream?() ?? onRun() }) {
+                        HStack(spacing: 2.5) {
+                            Image(systemName: "arrow.turn.right.down")
+                                .font(.system(size: 8, weight: .semibold))
+                            Text("\(dag.downstreamCellIds.count)")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        }
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("Run this cell + \(dag.downstreamCellIds.count) downstream dependent cell(s)")
+                }
+            }
+
+            // Per-Cell Execution Telemetry Pill (Duration, RAM Delta, Metal GPU, Binary Cache)
+            if let tel = cell.telemetry {
+                HStack(spacing: 4) {
+                    Image(systemName: tel.isCachedBinary ? "bolt.fill" : "timer")
+                        .font(.system(size: 8))
+                        .foregroundColor(tel.isCachedBinary ? .green : .secondary)
+                    if tel.isCachedBinary {
+                        Text("Cached")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundColor(.green)
+                    }
+                    Text(tel.formattedDuration)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(tel.isCachedBinary ? .green : .secondary)
+                    if let memDelta = tel.formattedMemoryDelta {
+                        Text("· \(memDelta)")
+                            .font(.system(size: 8.5, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.85))
+                    }
+                    if let metal = tel.formattedMetal {
+                        Text("· \(metal)")
+                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.purple)
+                    }
+                }
+                .padding(.horizontal, 5.5)
+                .padding(.vertical, 2)
+                .background((tel.isCachedBinary ? Color.green : Color.primary).opacity(0.065))
+                .cornerRadius(4)
+                .fixedSize()
+            }
+
+            // Per-Cell Time-Travel Snapshot History
+            CellVersionHistoryButton(snapshots: cell.versionSnapshots) { snap in
+                cell.content = snap.content
+                cell.pendingDiffOldContent = nil
+            }
             
             Spacer()
             
@@ -4475,6 +5455,7 @@ struct NotebookCellView: View {
     
     private var executionLabel: String {
         if cell.isExecuting { return "[*]" }
+        if cell.isQueued { return "[⏳]" }
         if let count = cell.executionCount { return "[\(count)]" }
         return "[ ]"
     }
@@ -4485,7 +5466,7 @@ struct NotebookCellView: View {
         case .markdown: return .green
         case .raw: return .gray
         case .procedure: return .orange
-        case .agent: return .purple
+        case .agent: return .accentColor
         }
     }
 }
@@ -4493,6 +5474,7 @@ struct NotebookCellView: View {
 // MARK: - Cell Self-Healing Banner
 
 struct CellSelfHealingBanner: View {
+    @EnvironmentObject var appState: AppState
     @ObservedObject var cell: NotebookCellModel
     let onRun: () -> Void
     
@@ -4530,32 +5512,40 @@ struct CellSelfHealingBanner: View {
                     cell.computeTargetOverride = .localCPU
                     onRun()
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 3.5) {
                         Image(systemName: "laptopcomputer")
                             .font(.system(size: 9))
                         Text("Run on Local Mac")
                     }
                     .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
+                    .background(Color.accentColor)
+                    .cornerRadius(4.5)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(.plain)
                 .help("Execute this cell immediately on your local Mac processor")
                 
                 Button {
                     NotificationCenter.default.post(name: NSNotification.Name("MicroCodeOpenColabSheet"), object: nil)
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 3.5) {
                         Image(systemName: "bolt.fill")
                             .font(.system(size: 9))
                         Text("Connect Colab")
                     }
-                    .font(.system(size: 10))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 7.5)
+                    .padding(.vertical, 3.5)
+                    .background(Color.primary.opacity(0.08))
+                    .cornerRadius(4.5)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.plain)
             }
             
-            // 1. AI Agent Auto-Fix Button (Monochrome / Theme-matching)
+            // 1. AI Agent Auto-Fix Button (Monochrome / Theme-matching, zero AppKit bezel)
             Button {
                 triggerAgentAutoFix()
             } label: {
@@ -4564,9 +5554,18 @@ struct CellSelfHealingBanner: View {
                         .font(.system(size: 10))
                     Text("Agent Auto-Fix")
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.primary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3.5)
+                .background(Color.primary.opacity(0.09))
+                .cornerRadius(4.5)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4.5)
+                        .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
+                )
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
             .disabled(isFixing)
             .help("MicroCode AI Agent repairs and re-runs this cell automatically")
             
@@ -4574,14 +5573,19 @@ struct CellSelfHealingBanner: View {
             Button {
                 openInAgentChat()
             } label: {
-                HStack(spacing: 3) {
+                HStack(spacing: 3.5) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 9))
                     Text("Ask Agent")
                 }
-                .font(.system(size: 10))
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 7.5)
+                .padding(.vertical, 3.5)
+                .background(Color.primary.opacity(0.06))
+                .cornerRadius(4.5)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
             .disabled(isFixing)
             .help("Switch to MicroCode AI Agent to interactively debug and fix this error")
             
@@ -4592,14 +5596,19 @@ struct CellSelfHealingBanner: View {
                 showCopied = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { showCopied = false }
             } label: {
-                HStack(spacing: 3) {
+                HStack(spacing: 3.5) {
                     Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 9))
                     Text(showCopied ? "Copied" : "Copy")
                 }
-                .font(.system(size: 10))
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(showCopied ? .green : .secondary)
+                .padding(.horizontal, 7.5)
+                .padding(.vertical, 3.5)
+                .background(Color.primary.opacity(0.06))
+                .cornerRadius(4.5)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
             .disabled(isFixing)
         }
         .padding(.horizontal, 8)
@@ -4637,54 +5646,56 @@ struct CellSelfHealingBanner: View {
         Do NOT write explanations or conversation.
         """
         
-        let providerStr = UserDefaults.standard.string(forKey: "aiProvider") ?? "gemini"
-        let provider = StreamableAIProvider(rawValue: providerStr) ?? .gemini
-        let model = UserDefaults.standard.string(forKey: "aiModel") ?? provider.defaultModel
-        let key = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
-        
-        AIClient.shared.sendMessage(
+        var healSelection = CellAISelection.inherit
+        healSelection.subAgentRole = CellSubAgentRole.bugHunter.rawValue
+        let sessionId = "self-heal-\(cell.id.uuidString)"
+        let workspaceRoot = appState.workspaceFolder?.path ?? NotebookViewModel.shared.workingDirectory.path
+
+        CellAgentCoordinator.shared.startExecution(
+            sessionId: sessionId,
             prompt: prompt,
-            systemPrompt: "You are the MicroCode AI Agent. Output ONLY the fixed code inside a single markdown code block.",
-            provider: provider,
-            model: model,
-            apiKey: key,
-            onToken: { _ in },
+            selection: healSelection,
+            isAgentMode: false,
+            appState: appState,
+            notebookContext: "",
+            workspaceRoot: workspaceRoot,
+            onStatus: { status in
+                if !status.isEmpty { self.fixStatus = status }
+            },
+            onThought: { _ in },
+            onText: { _ in },
+            onToolSteps: { _ in },
             onComplete: { response in
-                DispatchQueue.main.async {
-                    self.isFixing = false
-                    
-                    var fixed = response.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if fixed.contains("```") {
-                        let lines = fixed.components(separatedBy: .newlines)
-                        var codeLines: [String] = []
-                        var inside = false
-                        for l in lines {
-                            let trimmed = l.trimmingCharacters(in: .whitespaces)
-                            if trimmed.hasPrefix("```") {
-                                inside.toggle()
-                                continue
-                            }
-                            if inside {
-                                codeLines.append(l)
-                            }
+                self.isFixing = false
+                var fixed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+                if fixed.contains("```") {
+                    let lines = fixed.components(separatedBy: .newlines)
+                    var codeLines: [String] = []
+                    var inside = false
+                    for l in lines {
+                        let trimmed = l.trimmingCharacters(in: .whitespaces)
+                        if trimmed.hasPrefix("```") {
+                            inside.toggle()
+                            continue
                         }
-                        if !codeLines.isEmpty {
-                            fixed = codeLines.joined(separator: "\n")
+                        if inside {
+                            codeLines.append(l)
                         }
                     }
-                    
-                    if !fixed.isEmpty {
-                        self.cell.content = fixed
-                        self.cell.appendOutput("\n⚡ [Agent Self-Healing] Code patched. Re-executing now...\n")
-                        self.onRun()
+                    if !codeLines.isEmpty {
+                        fixed = codeLines.joined(separator: "\n")
                     }
+                }
+                if !fixed.isEmpty {
+                    self.cell.recordAgentEditBaseline(previousContent: self.cell.content, source: "Agent Auto-Fix")
+                    self.cell.content = fixed
+                    self.cell.appendOutput("\n⚡ [Agent Self-Healing] Code patched. Re-executing now...\n")
+                    self.onRun()
                 }
             },
             onError: { err in
-                DispatchQueue.main.async {
-                    self.isFixing = false
-                    self.cell.appendOutput("\n⚠️ [Agent Self-Healing] Repair error: \(err)\n")
-                }
+                self.isFixing = false
+                self.cell.appendOutput("\n⚠️ [Agent Self-Healing] Repair error: \(err)\n")
             }
         )
     }
@@ -5244,5 +6255,48 @@ struct HPCSettingsView: View {
             testOK = false
             testMsg = "Unreachable: \(error.localizedDescription)"
         }
+    }
+}
+
+// MARK: - Responsive Draggable Vertical Split Handle
+
+struct NotebookVerticalResizeHandle: View {
+    let onDrag: (_ translationX: CGFloat, _ isEnded: Bool) -> Void
+    @State private var isHovering = false
+    @State private var isDragging = false
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(
+                    (isHovering || isDragging)
+                        ? Color.primary.opacity(0.28)
+                        : Color(nsColor: .separatorColor)
+                )
+                .frame(width: 1)
+        }
+        .frame(width: 6)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else if !isDragging {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    if !isDragging { isDragging = true }
+                    onDrag(value.translation.width, false)
+                }
+                .onEnded { value in
+                    isDragging = false
+                    if !isHovering { NSCursor.pop() }
+                    onDrag(value.translation.width, true)
+                }
+        )
     }
 }

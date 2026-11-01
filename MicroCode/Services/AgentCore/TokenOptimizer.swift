@@ -167,13 +167,61 @@ class TokenOptimizer: ObservableObject {
         }
     }
     
-    // MARK: - Estimate Token Count (fast approximation)
+    // MARK: - Estimate Token Count (Unicode / Thai / CJK & Code aware, O(1) UTF-8 byte analysis)
     
     nonisolated func estimateTokens(_ text: String) -> Int {
-        // GPT-style tokenization: ~4 chars per token for English, ~3 for code
-        let hasCode = text.contains("{") || text.contains("func ") || text.contains("def ")
-        let ratio: Double = hasCode ? 3.0 : 4.0
-        return max(1, Int(ceil(Double(text.count) / ratio)))
+        guard !text.isEmpty else { return 0 }
+        let charCount = text.count
+        let utf8Count = text.utf8.count
+        let hasCode = text.contains("{") || text.contains("func ") || text.contains("def ") || text.contains("fn ")
+        let asciiRatio: Double = hasCode ? 3.0 : 4.0
+        // Multi-byte scripts (Thai, CJK, etc.) use ~3 UTF-8 bytes per char (2 extra bytes beyond charCount)
+        // and consume ~1.05 BPE tokens per character instead of 0.25 tokens per character.
+        let extraBytes = max(0, utf8Count - charCount)
+        let approxMultiByteChars = min(Double(charCount), Double(extraBytes) / 2.0)
+        let approxAsciiChars = max(0.0, Double(charCount) - approxMultiByteChars)
+        let estimated = (approxMultiByteChars * 1.05) + (approxAsciiChars / asciiRatio)
+        return max(1, Int(ceil(estimated)))
+    }
+
+    nonisolated private func isToolResultTurn(_ msg: (role: String, content: String)) -> Bool {
+        guard msg.role == "user" else { return false }
+        if msg.content.contains(AIStructuredTurnCodec.markerKey),
+           case .toolResults = AIStructuredTurnCodec.decode(msg.content) {
+            return true
+        }
+        return msg.content.hasPrefix("Tool execution results:")
+    }
+
+    nonisolated private func isAssistantToolCallTurn(_ msg: (role: String, content: String)) -> Bool {
+        guard msg.role == "assistant" else { return false }
+        if msg.content.contains(AIStructuredTurnCodec.markerKey),
+           case .assistantToolCalls(_, let calls) = AIStructuredTurnCodec.decode(msg.content) {
+            return !calls.isEmpty
+        }
+        return false
+    }
+
+    /// Adjusts a history split index backward so an `assistant (tool_calls)` turn and its paired `user (tool_results)`
+    /// turn are never severed across summarization or epoch compaction boundaries.
+    nonisolated private func alignAtomicToolBoundary(
+        _ messages: [(role: String, content: String)],
+        candidateIndex: Int,
+        minIndex: Int = 0
+    ) -> Int {
+        var idx = max(minIndex, min(candidateIndex, messages.count))
+        while idx > minIndex && idx < messages.count {
+            if isToolResultTurn(messages[idx]) {
+                idx -= 1
+                continue
+            }
+            if isAssistantToolCallTurn(messages[idx - 1]) {
+                idx -= 1
+                continue
+            }
+            break
+        }
+        return idx
     }
     
     // MARK: - Compress System Prompt
@@ -244,20 +292,24 @@ class TokenOptimizer: ObservableObject {
         var result: [(role: String, content: String)] = []
         let originalTokens = totalTokens
         
-        // Strategy 1: Keep recent messages intact, summarize older ones
-        let keepCount = min(8, sanitizedMessages.count) // Keep last 8 messages verbatim
-        let toSummarize = Array(sanitizedMessages.dropLast(keepCount))
-        let recentMessages = Array(sanitizedMessages.suffix(keepCount))
+        // Strategy 1: Keep recent messages intact without ever splitting an assistant(tool_call) / user(tool_result) pair
+        let candidateSplit = max(0, sanitizedMessages.count - min(8, sanitizedMessages.count))
+        let safeSplitIndex = alignAtomicToolBoundary(sanitizedMessages, candidateIndex: candidateSplit, minIndex: 0)
+        let toSummarize = Array(sanitizedMessages[0..<safeSplitIndex])
+        let recentMessages = Array(sanitizedMessages[safeSplitIndex..<sanitizedMessages.count])
         
-        // Summarize older messages
+        // Summarize older messages while maintaining strict user/assistant turn alternation
         if !toSummarize.isEmpty {
             let summary = summarizeMessages(toSummarize)
             if !summary.isEmpty {
                 result.append((role: "user", content: "[Previous conversation summary: \(summary)]"))
+                if recentMessages.first?.role == "user" {
+                    result.append((role: "assistant", content: "Understood. Continuing with the prior workspace context."))
+                }
             }
         }
         
-        // Add recent messages with per-message compression only if over budget
+        // Add recent messages with per-message compression only if over budget (preserving structured JSON envelopes)
         let remainingBudget = effectiveBudget - result.reduce(0) { $0 + estimateTokens($1.content) }
         let perMessageBudget = max(2_000, remainingBudget / max(1, recentMessages.count))
         
@@ -265,8 +317,17 @@ class TokenOptimizer: ObservableObject {
             let msgTokens = estimateTokens(msg.content)
             if msgTokens > perMessageBudget {
                 if msg.content.contains(AIStructuredTurnCodec.markerKey) {
-                    let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(msg.content, maxCharsPerOutput: perMessageBudget * 4)
-                    result.append((role: msg.role, content: compacted))
+                    if msg.role == "user" {
+                        let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(msg.content, maxCharsPerOutput: perMessageBudget * 3)
+                        result.append((role: msg.role, content: compacted))
+                    } else if msg.role == "assistant",
+                              case .assistantToolCalls(let text, let toolCalls) = AIStructuredTurnCodec.decode(msg.content) {
+                        let compressedText = compressText(text, targetTokens: max(500, perMessageBudget / 2))
+                        let reencoded = AIStructuredTurnCodec.encodeAssistantTurn(text: compressedText, toolCalls: toolCalls)
+                        result.append((role: "assistant", content: reencoded))
+                    } else {
+                        result.append(msg)
+                    }
                 } else {
                     let compressed = compressText(msg.content, targetTokens: perMessageBudget)
                     result.append((role: msg.role, content: compressed))
@@ -522,10 +583,33 @@ class TokenOptimizer: ObservableObject {
     // MARK: - Private Helpers
     
     private func summarizeMessages(_ messages: [(role: String, content: String)]) -> String {
-        // Extractive summarization: pick key sentences from each message
+        // Extractive summarization: decode structured tool turns cleanly instead of summarizing raw JSON
         var summaryParts: [String] = []
         
         for msg in messages {
+            if msg.content.contains(AIStructuredTurnCodec.markerKey),
+               let decoded = AIStructuredTurnCodec.decode(msg.content) {
+                switch decoded {
+                case .assistantToolCalls(let text, let toolCalls):
+                    let toolNames = toolCalls.map(\.name).joined(separator: ", ")
+                    let note = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let shortNote = note.isEmpty ? "" : " (\(String(note.prefix(140))))"
+                    if !toolNames.isEmpty {
+                        summaryParts.append("AI tools [\(toolNames)]\(shortNote)")
+                    } else if !shortNote.isEmpty {
+                        summaryParts.append("AI:\(shortNote)")
+                    }
+                case .toolResults(let results, _):
+                    let outcomes = results.prefix(4).map { r in
+                        "\(r.name): \(r.success ? "ok" : "err")"
+                    }.joined(separator: ", ")
+                    if !outcomes.isEmpty {
+                        summaryParts.append("Results [\(outcomes)]")
+                    }
+                }
+                continue
+            }
+
             let sentences = msg.content.components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
                 .filter { $0.trimmingCharacters(in: .whitespaces).count > 10 }
             
@@ -545,7 +629,8 @@ class TokenOptimizer: ObservableObject {
             }
         }
         
-        return summaryParts.joined(separator: " | ")
+        let joined = summaryParts.joined(separator: " | ")
+        return joined.count > 6_000 ? String(joined.suffix(6_000)) : joined
     }
     
     func compressText(_ text: String, targetTokens: Int) -> String {
@@ -710,11 +795,13 @@ class TokenOptimizer: ObservableObject {
         }
         
         // 2. Cache-Aligned Epoch Tail: Quantize the uncompacted recent tail in blocks of 6 messages
-        // so the boundary between compacted middle turns and verbatim recent turns only advances every 6 messages!
+        // while locking atomic assistant(tool_call)/user(tool_result) boundaries.
         let remainingCount = history.count - 1
         let epochAlignedRecentCount = min(remainingCount, 6 + (remainingCount % 6))
-        let middleTurns = history.dropFirst().dropLast(epochAlignedRecentCount)
-        let recentTurns = history.suffix(epochAlignedRecentCount)
+        let candidateTailStart = max(1, history.count - epochAlignedRecentCount)
+        let safeTailStart = alignAtomicToolBoundary(history, candidateIndex: candidateTailStart, minIndex: 1)
+        let middleTurns = history[1..<safeTailStart]
+        let recentTurns = history[safeTailStart..<history.count]
         
         // 3. Compact older middle turns deterministically while keeping file headers, errors, and code excerpts
         for item in middleTurns {
@@ -755,6 +842,32 @@ class TokenOptimizer: ObservableObject {
         // 4. Append recent turns with 100% verbatim fidelity
         for recent in recentTurns {
             optimized.append(recent)
+        }
+
+        // 5. Deep-Run Overflow Guard (for unlimited autonomous runs with 50-300+ tool turns):
+        // If compacted history still exceeds effectiveBudget, fold the oldest middle-turn pairs atomically
+        // into a synthetic checkpoint turn while strictly preserving role alternation and recent tool pairs.
+        let compactedTokens = optimized.reduce(0) { $0 + estimateTokens($1.content) }
+        if compactedTokens > effectiveBudget {
+            let protectedTailCount = max(recentTurns.count, min(12, optimized.count - 1))
+            let maxFoldLimit = max(1, optimized.count - protectedTailCount)
+            if maxFoldLimit > 2 {
+                let foldEnd = alignAtomicToolBoundary(optimized, candidateIndex: maxFoldLimit, minIndex: 1)
+                if foldEnd > 1 {
+                    let foldedSlice = Array(optimized[1..<foldEnd])
+                    let foldedSummary = summarizeMessages(foldedSlice)
+                    var rebuilt: [(role: String, content: String)] = [optimized[0]]
+                    let checkpointMsg = "[Earlier autonomous execution checkpoint (\(foldedSlice.count / 2) tool steps folded): \(foldedSummary)]"
+                    if foldEnd < optimized.count && optimized[foldEnd].role == "assistant" {
+                        rebuilt.append((role: "assistant", content: checkpointMsg))
+                        rebuilt.append((role: "user", content: "Continue executing from the checkpoint above without repeating completed steps."))
+                    } else {
+                        rebuilt.append((role: "assistant", content: checkpointMsg))
+                    }
+                    rebuilt.append(contentsOf: optimized[foldEnd..<optimized.count])
+                    optimized = rebuilt
+                }
+            }
         }
         
         let finalTokens = optimized.reduce(0) { $0 + estimateTokens($1.content) }

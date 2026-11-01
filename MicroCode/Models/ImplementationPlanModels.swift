@@ -246,10 +246,10 @@ class ImplementationPlanManager: ObservableObject {
         return await presentPlan(plan)
     }
     
-    /// Load plan from workspace's .microcode/task.md
+    /// Load plan from workspace's isolated task.md (~/.microcode/workspaces/<id>/task.md or repo .microcode/task.md)
     @discardableResult
     func loadFromTaskMarkdown(workspacePath: String) -> Bool {
-        let taskURL = URL(fileURLWithPath: workspacePath).appendingPathComponent(".microcode/task.md")
+        let taskURL = WorkspaceStoragePaths.readableWorkspaceOrStateFile(named: "task.md", workspacePath: workspacePath)
         guard let content = try? String(contentsOf: taskURL, encoding: .utf8), !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }

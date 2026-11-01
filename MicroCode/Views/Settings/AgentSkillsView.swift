@@ -80,8 +80,9 @@ final class AgentSkillsStore: ObservableObject {
             "\(home)/.gemini/antigravity/builtin/skills"
         ]
         
-        // Scan active workspace and external volumes for project-specific skills
+        // Scan active workspace (both isolated ~/.microcode/workspaces/<id>/skills and optional repo folders)
         if let ws = AgentToolBox.shared.workspaceRoot, !ws.isEmpty {
+            searchRoots.append(WorkspaceStoragePaths.managedStateFile(named: "skills", workspacePath: ws).path)
             searchRoots.append("\(ws)/.microcode/skills")
             searchRoots.append("\(ws)/.skills")
             searchRoots.append("\(ws)/.agents/skills")
@@ -500,11 +501,12 @@ final class AgentSkillsStore: ObservableObject {
         }
         
         let baseRoot: String
+        let userHome = FileManager.default.homeDirectoryForCurrentUser.path
         if scope.lowercased() == "global" {
-            baseRoot = "\(NSHomeDirectory())/.microcode/skills"
+            baseRoot = "\(userHome)/.microcode/skills"
         } else {
-            let ws = workspacePath ?? AgentToolBox.shared.workspaceRoot ?? "\(NSHomeDirectory())/.microcode"
-            baseRoot = (ws as NSString).appendingPathComponent(".microcode/skills")
+            let ws = workspacePath ?? AgentToolBox.shared.workspaceRoot
+            baseRoot = WorkspaceStoragePaths.managedStateFile(named: "skills", workspacePath: ws).path
         }
         
         let skillDir = URL(fileURLWithPath: baseRoot).appendingPathComponent(cleanId)

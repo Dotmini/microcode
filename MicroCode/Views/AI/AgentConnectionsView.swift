@@ -644,10 +644,16 @@ public struct AgentConnectionsView: View {
     
     private func connectFreeModel() {
         if let openCode = discovery.engines.first(where: { $0.id == "opencode" && $0.isInstalled }) {
+            let bestFree = ACPAgentSession.resolveOpenCodeModel(
+                nil,
+                discoveredModels: openCode.models.map(\.id),
+                isAuthenticated: openCode.isAuthenticated
+            )
+            UserDefaults.standard.set("acp", forKey: "aiKeyMode")
             appState.aiProvider = "opencode"
-            appState.aiModel = "opencode/nemotron-3.5-lightning-free"
+            appState.aiModel = bestFree
             _ = acpHost.quickConnect(.openCode)
-            showToast("Connected to Free Nemotron 3.5 via OpenCode!")
+            showToast("Connected to Free \(bestFree) via OpenCode!")
         } else {
             appState.aiProvider = "deepseek"
             appState.aiModel = "deepseek-flash"
@@ -695,7 +701,7 @@ public struct AgentSetupWizardView: View {
     @State private var currentStdin: Pipe? = nil
     
     @State private var selectedModel: String = "Agent default"
-    @State private var selectedEffort: String = "High"
+    @State private var selectedEffort: String = "Agent default"
     @State private var selectedPermission: ACPPermissionMode = .reviewEach
     @State private var copyFeedbackInstall: Bool = false
     @State private var copyFeedbackLogin: Bool = false
@@ -1006,19 +1012,21 @@ public struct AgentSetupWizardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("REASONING EFFORT")
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    
-                    Picker("", selection: $selectedEffort) {
-                        Text("High (Real-time thinking stream)").tag("High")
-                        Text("Agent default").tag("Agent default")
-                        Text("Medium").tag("Medium")
-                        Text("Low").tag("Low")
+                if target.acpType?.supportsEffortFlag == true {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("REASONING EFFORT")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        
+                        Picker("", selection: $selectedEffort) {
+                            Text("Agent default").tag("Agent default")
+                            Text("High (Real-time thinking stream)").tag("High")
+                            Text("Medium").tag("Medium")
+                            Text("Low").tag("Low")
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             
@@ -1026,7 +1034,9 @@ public struct AgentSetupWizardView: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 9.5))
                     .foregroundColor(.primary)
-                Text("High reasoning enables real-time token streaming of internal thoughts and step deliberation.")
+                Text(target.acpType?.supportsEffortFlag == true
+                     ? "High reasoning enables real-time token streaming of internal thoughts and step deliberation."
+                     : "Reasoning effort tier is automatically controlled by the selected model variant.")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
@@ -1227,7 +1237,7 @@ public struct AgentSetupWizardView: View {
     
     private func connectAgent() {
         connectionError = nil
-        let effortParam = selectedEffort == "Agent default" ? "high" : selectedEffort
+        let effortParam: String? = (selectedEffort == "Agent default") ? nil : selectedEffort
         
         if target == .nineRouter {
             acpHost.activeAgentId = nil
@@ -1271,10 +1281,15 @@ public struct AgentSetupWizardView: View {
             onConnected()
             
         case .freeModel:
-            if let _ = discovery.engines.first(where: { $0.id == "opencode" && $0.isInstalled }) {
+            if let openCode = discovery.engines.first(where: { $0.id == "opencode" && $0.isInstalled }) {
                 _ = acpHost.quickConnect(.openCode, effort: effortParam)
+                UserDefaults.standard.set("acp", forKey: "aiKeyMode")
                 appState.aiProvider = "opencode"
-                appState.aiModel = "opencode/nemotron-3.5-lightning-free"
+                appState.aiModel = ACPAgentSession.resolveOpenCodeModel(
+                    nil,
+                    discoveredModels: openCode.models.map(\.id),
+                    isAuthenticated: openCode.isAuthenticated
+                )
             } else {
                 appState.aiProvider = "deepseek"
                 appState.aiModel = "deepseek-chat"

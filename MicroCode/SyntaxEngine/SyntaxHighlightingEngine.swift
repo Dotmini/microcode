@@ -551,9 +551,16 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     }
     
     /// Asynchronously apply highlighting to an existing NSTextStorage.
-    /// Uses true dirty-line incremental application so typing on a single line only updates that line's tokens.
+    /// Uses true dirty-line incremental application so typing or AI patching only updates changed lines,
+    /// and prioritizes `visibleCharRange` synchronously on Frame 0 when opening large files.
     @MainActor
-    public func applyHighlightingAsync(to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
+    public func applyHighlightingAsync(
+        to textStorage: NSTextStorage,
+        fontSize: CGFloat,
+        font: NSFont? = nil,
+        visibleCharRange: NSRange? = nil,
+        completion: (@MainActor @Sendable () -> Void)? = nil
+    ) {
         // Cancel previous tasks to prevent "task explosion" and race conditions
         currentHighlightTask?.cancel()
         currentApplyTask?.cancel()
@@ -573,7 +580,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         if cachedLines < 150 && content.utf16.count < 6000 {
             // SYNC PATH (Zero Flash) — small files only
             let update = lexer.retokenizeDirtyRegionsIncremental(in: content)
-            self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
+            self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version, visibleCharRange: visibleCharRange)
             completion?()
             return
         }
@@ -598,7 +605,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 return
             }
             
-            // 2. Apply attributes on the main thread (only dirty lines for edits!)
+            // 2. Apply attributes on the main thread (only dirty lines for edits, viewport-first for full open!)
             await MainActor.run {
                 defer { completion?() }
                 if Task.isCancelled { return }
@@ -608,7 +615,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 self.lock.unlock()
                 
                 if isStillValid {
-                    self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
+                    self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version, visibleCharRange: visibleCharRange)
                 }
             }
         }
@@ -620,10 +627,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         to textStorage: NSTextStorage,
         fontSize: CGFloat,
         font: NSFont?,
-        expectedVersion: Int? = nil
+        expectedVersion: Int? = nil,
+        visibleCharRange: NSRange? = nil
     ) {
         if update.isFullDocument {
-            applyTokens(update.tokens, to: textStorage, fontSize: fontSize, font: font, expectedVersion: expectedVersion)
+            applyTokens(update.tokens, to: textStorage, fontSize: fontSize, font: font, expectedVersion: expectedVersion, visibleCharRange: visibleCharRange)
             return
         }
         guard let dirtyRange = update.dirtyCharRange, dirtyRange.length > 0 else { return }
@@ -652,7 +660,14 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     /// CRITICAL: Must be called on the main thread.
     /// Uses chunking to prevent Main Thread blocking on large updates.
     @MainActor
-    private func applyTokens(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont?, expectedVersion: Int? = nil) {
+    private func applyTokens(
+        _ tokens: [SyntaxToken],
+        to textStorage: NSTextStorage,
+        fontSize: CGFloat,
+        font: NSFont?,
+        expectedVersion: Int? = nil,
+        visibleCharRange: NSRange? = nil
+    ) {
         assert(Thread.isMainThread, "applyTokens must be called on the main thread")
         currentApplyTask?.cancel()
         
@@ -668,12 +683,43 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             textStorage.endEditing()
             return
         }
+
+        // VIEWPORT-FIRST PRIORITY PASS: Immediately color tokens inside/around the visible viewport
+        // synchronously so Frame 0 never renders unhighlighted text, even when jumping to line 3000+.
+        var remainingTokens = tokens
+        if let vis = visibleCharRange, vis.length > 0 {
+            let priorityStart = max(0, vis.location - 4000)
+            let priorityEnd = vis.location + vis.length + 4000
+            var viewportTokens: [SyntaxToken] = []
+            var deferredTokens: [SyntaxToken] = []
+            viewportTokens.reserveCapacity(min(tokens.count, 1500))
+            deferredTokens.reserveCapacity(tokens.count)
+
+            for tok in tokens {
+                let r = tok.range.nsRange
+                let tokEnd = r.location + r.length
+                if tokEnd >= priorityStart && r.location <= priorityEnd {
+                    viewportTokens.append(tok)
+                } else {
+                    deferredTokens.append(tok)
+                }
+            }
+
+            if !viewportTokens.isEmpty {
+                textStorage.beginEditing()
+                applyTokensBatch(viewportTokens, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
+                textStorage.endEditing()
+                remainingTokens = deferredTokens
+            }
+        }
         
-        // Large update: Chunk it asynchronously on Main Actor to allow UI events to interleave
+        guard !remainingTokens.isEmpty else { return }
+
+        // Large offscreen remainder: Chunk asynchronously on Main Actor to allow 60/120fps scrolling & UI events
         currentApplyTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             var startIndex = 0
-            while startIndex < tokens.count {
+            while startIndex < remainingTokens.count {
                 if Task.isCancelled { return }
                 if let expectedVersion = expectedVersion {
                     self.lock.lock()
@@ -682,8 +728,8 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                     if !valid { return }
                 }
                 
-                let endIndex = min(startIndex + chunkSize, tokens.count)
-                let chunk = Array(tokens[startIndex..<endIndex])
+                let endIndex = min(startIndex + chunkSize, remainingTokens.count)
+                let chunk = Array(remainingTokens[startIndex..<endIndex])
                 
                 textStorage.beginEditing()
                 self.applyTokensBatch(chunk, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
@@ -1429,6 +1475,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             let editableChanged = lastIsEditable != p.isEditable
             let highlightingChanged = lastEnableHighlighting != p.enableHighlighting
             let lineNumbersChanged = lastShowLineNumbers != p.showLineNumbers
+            let fileURLChanged = lastFileURL != p.fileURL
             let visualConfigChanged = langChanged || themeNameChanged || fontChanged
                 || darkChanged || transparentChanged || editableChanged
                 || highlightingChanged || lineNumbersChanged
@@ -1527,28 +1574,91 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
             // Content replacement (only when external binding differs from NSTextView buffer)
             let didReplaceBuffer = (textView.string != normalizedText)
+            var appliedIncrementalPatch = false
             if didReplaceBuffer {
-                isUpdating = true
-                let r = NSRange(location: 0, length: (normalizedText as NSString).length)
-                if r.length > 0 {
-                    let attr = NSMutableAttributedString(string: normalizedText)
-                    attr.addAttributes([.foregroundColor: fgColor, .font: customFont, .ligature: 0], range: r)
-                    textView.textStorage?.setAttributedString(attr)
+                let existingNS = textView.string as NSString
+                let newNS = normalizedText as NSString
+                let oldLen = existingNS.length
+                let newLen = newNS.length
+
+                // INCREMENTAL UTF-16 DIFF PATCHING:
+                // When AI (`replace_in_file`), Cmd+K, or Collaboration updates part of an already-loaded
+                // document (same file & visual config), patch only the changed UTF-16 window instead of
+                // destroying the entire NSTextStorage, preserving scroll offset, cursor selection, and
+                // unchanged TextKit glyph layout + IncrementalLexer line caches.
+                let sameLogicalFile = !fileURLChanged
+                if !force && !visualConfigChanged && sameLogicalFile && oldLen > 0 && newLen > 0,
+                   let ts = textView.textStorage,
+                   let patch = Self.computeUTF16DiffPatch(old: existingNS, new: newNS),
+                   (patch.oldRange.length + patch.newRange.length) < max(oldLen, newLen) {
+                    let oldSelection = textView.selectedRange()
+                    let savedOrigin = scrollView.contentView.bounds.origin
+
+                    isUpdating = true
+                    ts.beginEditing()
+                    ts.replaceCharacters(in: patch.oldRange, with: patch.replacement)
+                    if patch.newRange.length > 0 {
+                        ts.addAttributes([.foregroundColor: fgColor, .font: customFont, .ligature: 0], range: patch.newRange)
+                    }
+                    ts.endEditing()
+                    isUpdating = false
+
+                    let delta = patch.newRange.length - patch.oldRange.length
+                    let oldEnd = patch.oldRange.location + patch.oldRange.length
+                    let newSelLoc: Int
+                    if oldSelection.location >= oldEnd {
+                        newSelLoc = max(0, min(newLen, oldSelection.location + delta))
+                    } else if oldSelection.location > patch.oldRange.location {
+                        newSelLoc = min(newLen, patch.newRange.location + patch.newRange.length)
+                    } else {
+                        newSelLoc = min(newLen, oldSelection.location)
+                    }
+                    textView.setSelectedRange(NSRange(location: newSelLoc, length: 0))
+                    scrollView.contentView.scroll(to: savedOrigin)
+                    scrollView.reflectScrolledClipView(scrollView.contentView)
+
+                    if p.enableHighlighting {
+                        engine.processEdit(range: patch.newRange, changeInLength: delta, newContent: normalizedText)
+                    }
+                    appliedIncrementalPatch = true
                 } else {
-                    textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
+                    isUpdating = true
+                    let r = NSRange(location: 0, length: newLen)
+                    if r.length > 0 {
+                        let attr = NSMutableAttributedString(string: normalizedText)
+                        attr.addAttributes([.foregroundColor: fgColor, .font: customFont, .ligature: 0], range: r)
+                        textView.textStorage?.setAttributedString(attr)
+                    } else {
+                        textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
+                    }
+                    isUpdating = false
                 }
-                isUpdating = false
                 (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.refreshContentIndex()
             }
 
             if force || didReplaceBuffer || langChanged || themeNameChanged || darkChanged || fontChanged || highlightingChanged {
                 if p.enableHighlighting {
-                    engine.setDocument(textView.string, language: p.language)
+                    if !appliedIncrementalPatch {
+                        engine.setDocument(textView.string, language: p.language)
+                    }
                 } else {
                     engine.cancelHighlighting()
                 }
                 if p.enableHighlighting, let ts = textView.textStorage, ts.length > 0 {
-                    engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font) { [weak textView, weak scrollView] in
+                    let visCharRange: NSRange? = {
+                        guard let lm = textView.layoutManager, let tc = textView.textContainer else { return nil }
+                        let visRect = scrollView.contentView.bounds
+                        guard visRect.height > 0 else {
+                            return NSRange(location: 0, length: min(ts.length, 8000))
+                        }
+                        let glyphRange = lm.glyphRange(forBoundingRectWithoutAdditionalLayout: visRect, in: tc)
+                        if glyphRange.length == 0 {
+                            return NSRange(location: 0, length: min(ts.length, 8000))
+                        }
+                        return lm.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+                    }()
+
+                    engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font, visibleCharRange: visCharRange) { [weak textView, weak scrollView] in
                         if let tv = textView, let tc = tv.textContainer, let sv = scrollView {
                             tv.layoutManager?.ensureLayout(forBoundingRect: sv.contentView.bounds, in: tc)
                             tv.needsDisplay = true
@@ -1597,6 +1707,51 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             }
         }
         
+        nonisolated static func computeUTF16DiffPatch(
+            old oldNS: NSString,
+            new newNS: NSString
+        ) -> (oldRange: NSRange, newRange: NSRange, replacement: String)? {
+            let oldLen = oldNS.length
+            let newLen = newNS.length
+            let minLen = min(oldLen, newLen)
+
+            var prefix = 0
+            while prefix < minLen && oldNS.character(at: prefix) == newNS.character(at: prefix) {
+                prefix += 1
+            }
+            // Do not split a UTF-16 surrogate pair at the prefix boundary
+            if prefix > 0 && prefix < minLen {
+                let nextOld = oldNS.character(at: prefix)
+                let nextNew = newNS.character(at: prefix)
+                if (0xDC00...0xDFFF).contains(nextOld) || (0xDC00...0xDFFF).contains(nextNew) {
+                    prefix -= 1
+                }
+            }
+
+            if prefix == oldLen && prefix == newLen {
+                return nil
+            }
+
+            var suffix = 0
+            let maxSuffix = minLen - prefix
+            while suffix < maxSuffix && oldNS.character(at: oldLen - 1 - suffix) == newNS.character(at: newLen - 1 - suffix) {
+                suffix += 1
+            }
+            // Do not split a UTF-16 surrogate pair at the suffix boundary
+            if suffix > 0 {
+                let firstOldSuffix = oldNS.character(at: oldLen - suffix)
+                let firstNewSuffix = newNS.character(at: newLen - suffix)
+                if (0xDC00...0xDFFF).contains(firstOldSuffix) || (0xDC00...0xDFFF).contains(firstNewSuffix) {
+                    suffix -= 1
+                }
+            }
+
+            let oldRange = NSRange(location: prefix, length: oldLen - prefix - suffix)
+            let newRange = NSRange(location: prefix, length: newLen - prefix - suffix)
+            let replacement = newNS.substring(with: newRange)
+            return (oldRange: oldRange, newRange: newRange, replacement: replacement)
+        }
+
         deinit {
             NotificationCenter.default.removeObserver(self)
             isInvalidated = true
@@ -1636,7 +1791,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                     lspChangeTask = Task {
                         try? await Task.sleep(nanoseconds: 250_000_000)
                         guard !Task.isCancelled else { return }
-                        await LSPManager.shared.documentChanged(uri: url.absoluteString, language: language, content: fullString)
+                        await LSPManager.shared.documentChanged(uri: url.standardizedFileURL.absoluteString, language: language, content: fullString)
                     }
                 }
                 

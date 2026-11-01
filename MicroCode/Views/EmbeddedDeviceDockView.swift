@@ -11,116 +11,153 @@ import SwiftUI
 struct EmbeddedDeviceDockView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
+    @ObservedObject private var serveSim = ServeSimService.shared
     @ObservedObject private var dockService = PreviewDockService.shared
     @ObservedObject private var hotReloadEngine = PreviewHotReloadEngine.shared
     var showsCloseButton: Bool = true
     @State private var textToSend = ""
     @State private var showingTextInput = false
     @State private var isDropTargeted = false
+    @State private var isHoveringCloseDock = false
+
+    private var shouldShowHotReloadControls: Bool {
+        guard let kind = dockService.activeTab?.kind else { return false }
+        switch kind {
+        case .web, .diff:
+            return false
+        case .ios, .android, .iOSPhysical, .androidPhysical:
+            return true
+        case .file(let url):
+            let ext = url.pathExtension.lowercased()
+            return ["swift", "html", "htm", "svg", "md", "markdown", "mdx"].contains(ext)
+        }
+    }
 
     var body: some View {
         let canvas = appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.editorBackground)
+        let panelBg = appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground)
         VStack(spacing: 0) {
             // MARK: - Multi-Purpose Tab Strip
             HStack(spacing: 4) {
-                // Scrollable Tabs
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        ForEach(dockService.openTabs) { tab in
-                            let isActive = (dockService.activeTabId == tab.id)
-                            HStack(spacing: 5) {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.15)) {
-                                        dockService.selectTab(id: tab.id)
-                                    }
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        if case .file(let fileURL) = tab.kind {
-                                            ProgrammingLanguageIconView(fileName: fileURL.lastPathComponent, size: 13)
-                                        } else {
-                                            Image(systemName: tab.icon)
-                                                .font(.system(size: 10))
-                                        }
-                                        Text(tab.title)
-                                            .font(.system(size: 11.5, weight: isActive ? .semibold : .medium))
-                                            .lineLimit(1)
-                                            .fixedSize()
-                                    }
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-
-                                if tab.isClosable {
+                // Scrollable Tabs with Auto-Scroll to Active Tab
+                ScrollViewReader { tabScrollProxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(dockService.openTabs) { tab in
+                                let isActive = (dockService.activeTabId == tab.id)
+                                HStack(spacing: 5) {
                                     Button {
                                         withAnimation(.easeInOut(duration: 0.15)) {
-                                            dockService.closeTab(id: tab.id)
+                                            dockService.selectTab(id: tab.id)
                                         }
                                     } label: {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 8, weight: .bold))
-                                            .foregroundColor(.secondary)
-                                            .padding(3)
-                                            .contentShape(Rectangle())
+                                        HStack(spacing: 5) {
+                                            if case .file(let fileURL) = tab.kind {
+                                                ProgrammingLanguageIconView(fileName: fileURL.lastPathComponent, size: 13)
+                                            } else {
+                                                Image(systemName: tab.icon)
+                                                    .font(.system(size: 10))
+                                            }
+                                            Text(tab.title)
+                                                .font(.system(size: 11.5, weight: isActive ? .semibold : .medium))
+                                                .lineLimit(1)
+                                                .fixedSize()
+                                        }
+                                        .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
-                                    .help("Close tab")
-                                }
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(isActive ? Color.primary.opacity(0.11) : Color.clear)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .stroke(isActive ? Color.primary.opacity(0.12) : Color.clear, lineWidth: 0.8)
-                            )
-                            .foregroundColor(isActive ? .primary : .secondary)
-                        }
 
-                        // "+" Open Preview / File Tab menu
-                        Menu {
-                            Button {
-                                dockService.selectTab(id: "web")
-                            } label: {
-                                Label("WebApp Preview (Localhost)", systemImage: "globe")
+                                    if tab.isClosable {
+                                        Button {
+                                            withAnimation(.easeInOut(duration: 0.15)) {
+                                                dockService.closeTab(id: tab.id)
+                                            }
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundColor(isActive ? .primary.opacity(0.8) : .secondary)
+                                                .frame(width: 16, height: 16)
+                                                .background(Color.primary.opacity(isActive ? 0.08 : 0.0))
+                                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                                .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("Close tab")
+                                    }
+                                }
+                                .padding(.leading, 8)
+                                .padding(.trailing, 5)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(isActive ? Color(nsColor: appState.appTheme.elevatedBackground) : Color.clear)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .stroke(isActive ? Color.primary.opacity(0.16) : Color.clear, lineWidth: 0.8)
+                                )
+                                .foregroundColor(isActive ? .primary : .secondary)
+                                .id(tab.id)
                             }
-                            Button {
-                                dockService.selectTab(id: "ios")
+
+                            // "+" Open Preview / File Tab menu
+                            Menu {
+                                Button {
+                                    dockService.selectTab(id: "web")
+                                } label: {
+                                    Label("WebApp Preview (Localhost)", systemImage: "globe")
+                                }
+                                Button {
+                                    dockService.selectTab(id: "ios")
+                                } label: {
+                                    Label("iOS Simulator", systemImage: "iphone")
+                                }
+                                Button {
+                                    dockService.selectTab(id: "android")
+                                } label: {
+                                    Label("Android Emulator", systemImage: "candybarphone")
+                                }
+                                Divider()
+                                Button {
+                                    dockService.pickAndOpenFile()
+                                } label: {
+                                    Label("Open File to Preview…", systemImage: "doc.badge.plus")
+                                }
                             } label: {
-                                Label("iOS Simulator", systemImage: "iphone")
+                                Image(systemName: "plus")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
                             }
-                            Button {
-                                dockService.selectTab(id: "android")
-                            } label: {
-                                Label("Android Emulator", systemImage: "candybarphone")
-                            }
-                            Divider()
-                            Button {
-                                dockService.pickAndOpenFile()
-                            } label: {
-                                Label("Open File to Preview…", systemImage: "doc.badge.plus")
-                            }
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 10.5, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .frame(width: 22, height: 22)
-                                .contentShape(Rectangle())
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("Open WebApp Preview, Simulator, or File in Split Pane")
+                            
                         }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help("Open WebApp Preview, Simulator, or File in Split Pane")
-                        
+                        .padding(.horizontal, 4)
                     }
-                    .padding(.horizontal, 4)
+                    .onAppear {
+                        DispatchQueue.main.async {
+                            tabScrollProxy.scrollTo(dockService.activeTabId, anchor: .center)
+                        }
+                    }
+                    .onChange(of: dockService.activeTabId) { newId in
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            tabScrollProxy.scrollTo(newId, anchor: .center)
+                        }
+                    }
+                    .onChange(of: dockService.openTabs.count) { _ in
+                        DispatchQueue.main.async {
+                            tabScrollProxy.scrollTo(dockService.activeTabId, anchor: .center)
+                        }
+                    }
                 }
                 
-                Spacer()
+                Spacer(minLength: 4)
 
-                // Universal Playground-style Hot Reload Control Group (hidden on .web tab which has its own unified toolbar)
-                if dockService.activeTab?.kind != .web {
+                // Universal Playground-style Hot Reload Control Group (shown only on runtime & live-renderable tabs)
+                if shouldShowHotReloadControls {
                     hotReloadControlsBar
                 }
 
@@ -176,7 +213,7 @@ struct EmbeddedDeviceDockView: View {
                     .buttonStyle(.plain)
                     .help("Device & Run settings")
 
-                    if dockService.activeTab?.kind == .ios && (ServeSimService.shared.isActive || deviceRuntime.isWorking) {
+                    if dockService.activeTab?.kind == .ios && (serveSim.isActive || serveSim.connectionState == .connecting || deviceRuntime.isWorking) {
                         Button {
                             deviceRuntime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
                         } label: {
@@ -210,6 +247,72 @@ struct EmbeddedDeviceDockView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Flutter Hot Reload")
+                    }
+
+                    if dockService.activeTab?.kind == .ios {
+                        // iOS Simulator Target Picker (supports unified iPhone Duo Outer/Inner, all ready iPhone/iPad models, plus full detected Mac catalog)
+                        Menu {
+                            AppleSimulatorSelectorMenuContent(
+                                autoStartIfActive: true,
+                                workspaceURL: appState.workspaceFolder
+                            )
+                        } label: {
+                            HStack(spacing: 3) {
+                                let toolbarIcon: String = {
+                                    if deviceRuntime.isSelectedDeviceIPhoneDuo && deviceRuntime.iPhoneDuoDisplayMode == .inner {
+                                        return "book.pages"
+                                    }
+                                    if deviceRuntime.selectedDevice?.appleSimulatorFamily == .iPad {
+                                        return "ipad"
+                                    }
+                                    return "iphone"
+                                }()
+                                Image(systemName: toolbarIcon)
+                                    .font(.system(size: 10))
+                                Text(deviceRuntime.selectedAppleToolbarTitle)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(5)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("เลือกรุ่น iOS / iPadOS Simulator (iPhone Duo / iPhone / iPad ที่ตรวจพบในเครื่อง)")
+
+                        // 1-Click Outer / Inner Screen Switcher for iPhone Duo (จอนอก ↔ จอใน)
+                        if deviceRuntime.isSelectedDeviceIPhoneDuo {
+                            HStack(spacing: 2) {
+                                ForEach(IPhoneDuoDisplayMode.allCases) { mode in
+                                    Button {
+                                        Task { await deviceRuntime.setIPhoneDuoDisplayMode(mode) }
+                                    } label: {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: mode.icon)
+                                                .font(.system(size: 8.5, weight: .semibold))
+                                            Text(mode.compactBadge)
+                                                .font(.system(size: 9.5, weight: .semibold))
+                                        }
+                                        .padding(.horizontal, 6)
+                                        .frame(height: 18)
+                                        .background(deviceRuntime.iPhoneDuoDisplayMode == mode ? Color.accentColor : Color.clear)
+                                        .foregroundColor(deviceRuntime.iPhoneDuoDisplayMode == mode ? .white : .secondary)
+                                        .cornerRadius(3.5)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("iPhone Duo — \(mode.shortLabel) (\(mode.resolutionLabel))")
+                                }
+                            }
+                            .padding(2)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(5)
+                            .fixedSize()
+                        }
                     }
 
                     if deviceRuntime.embeddedDockMode == .android || dockService.activeTab?.kind == .android {
@@ -295,29 +398,38 @@ struct EmbeddedDeviceDockView: View {
                     .buttonStyle(.plain)
                     .help(dockService.isExpandedWidth ? "Restore Split Width" : "Expand Preview Split Width")
 
-                    // Standard macOS Human Interface Close Button [✕] at top-right
+                    // Unmistakable Close Button [✕] at top-right of Preview Split Pane
                     Button {
                         withAnimation(.easeInOut(duration: 0.16)) {
                             appState.hidePreviewInspector()
                             dockService.hideDock()
                         }
                     } label: {
-                        Image(systemName: "sidebar.right")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .frame(width: 22, height: 22)
-                            .background(Color.primary.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundColor(isHoveringCloseDock ? .white : .primary.opacity(0.85))
+                            .frame(width: 24, height: 22)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(isHoveringCloseDock ? Color.red.opacity(0.85) : Color.primary.opacity(0.10))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .stroke(isHoveringCloseDock ? Color.red.opacity(0.95) : Color.primary.opacity(0.14), lineWidth: 0.8)
+                            )
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("Close Preview Split Pane (⌘I)")
+                    .onHover { hovering in
+                        isHoveringCloseDock = hovering
+                    }
+                    .help("Close Preview Pane (⌘I)")
                     .layoutPriority(10)
                 }
             }
             .padding(.horizontal, 8)
-            .frame(height: 30)
-            .background(canvas)
+            .frame(height: 32)
+            .background(panelBg)
             
             Divider()
 
@@ -348,6 +460,9 @@ struct EmbeddedDeviceDockView: View {
                                 dockService.hideDock()
                             }
                         )
+                        .onAppear {
+                            deviceRuntime.selectDefaultAppleSimulatorIfNeeded()
+                        }
                     case .iOSPhysical:
                         PhysicalIOSDeviceTabView(canvasColor: canvas)
                     case .androidPhysical:
@@ -364,8 +479,10 @@ struct EmbeddedDeviceDockView: View {
                         )
                     case .file(let url):
                         filePreviewRouter(for: url, canvas: canvas)
-                    case .diff(_, let title, let oldContent, let newContent):
+                            .id(active.id)
+                    case .diff(let id, let title, let oldContent, let newContent):
                         InteractiveDiffPreviewView(title: title, oldContent: oldContent, newContent: newContent)
+                            .id("\(id):\(oldContent.hashValue):\(newContent.hashValue)")
                     }
                 } else {
                     // Quick Preview Hub (shown only if all tabs were cleared)
@@ -561,6 +678,7 @@ struct EmbeddedDeviceDockView: View {
 struct DevicePreviewHeaderMenu: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
+    @ObservedObject private var serveSim = ServeSimService.shared
     @ObservedObject private var dockService = PreviewDockService.shared
 
     private var isPreviewShowing: Bool {
@@ -616,7 +734,7 @@ struct DevicePreviewHeaderMenu: View {
                 
                 Divider()
                 
-                let appleSimulators = deviceRuntime.devices.filter(\.isAppleSimulator)
+                let appleSimulators = deviceRuntime.pickerAppleSimulators
                 let physicalAppleDevices = deviceRuntime.devices.filter(\.isPhysicalAppleDevice)
                 let androidDevices = deviceRuntime.devices.filter { $0.platform == .android }
                 
@@ -626,10 +744,52 @@ struct DevicePreviewHeaderMenu: View {
                         if !devices.isEmpty {
                             Section(family.menuTitle) {
                                 ForEach(devices) { device in
-                                    Button("\(device.name) — \(device.state)") {
+                                    let labelName = device.isIPhoneDuoFamily ? "iPhone Duo (\(deviceRuntime.iPhoneDuoDisplayMode.compactBadge))" : device.name
+                                    Button("\(labelName) — \(device.state)") {
                                         Task { await openRuntimeDestination(device) }
                                     }
                                     .disabled(deviceRuntime.isWorking || !device.isReadyForLaunch)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !deviceRuntime.detectedIPhoneModels.isEmpty || !deviceRuntime.detectedIPadModels.isEmpty {
+                    Menu("เพิ่ม/รันรุ่นอื่นที่ตรวจพบในเครื่อง…") {
+                        if !deviceRuntime.detectedIPhoneModels.isEmpty {
+                            Menu("iPhone (\(deviceRuntime.detectedIPhoneModels.count) รุ่น)") {
+                                ForEach(deviceRuntime.detectedIPhoneModels) { model in
+                                    Button("\(model.name) (\(model.runtimeName))") {
+                                        Task {
+                                            withAnimation(.easeInOut(duration: 0.16)) {
+                                                appState.showPreviewInspector()
+                                                PreviewDockService.shared.selectTab(id: "ios")
+                                            }
+                                            await deviceRuntime.selectOrProvisionDetectedModel(model, autoStartIfActive: true)
+                                            if !ServeSimService.shared.isActive {
+                                                await deviceRuntime.startEmbeddedAppleSimulator()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !deviceRuntime.detectedIPadModels.isEmpty {
+                            Menu("iPad (\(deviceRuntime.detectedIPadModels.count) รุ่น)") {
+                                ForEach(deviceRuntime.detectedIPadModels) { model in
+                                    Button("\(model.name) (\(model.runtimeName))") {
+                                        Task {
+                                            withAnimation(.easeInOut(duration: 0.16)) {
+                                                appState.showPreviewInspector()
+                                                PreviewDockService.shared.selectTab(id: "ios")
+                                            }
+                                            await deviceRuntime.selectOrProvisionDetectedModel(model, autoStartIfActive: true)
+                                            if !ServeSimService.shared.isActive {
+                                                await deviceRuntime.startEmbeddedAppleSimulator()
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

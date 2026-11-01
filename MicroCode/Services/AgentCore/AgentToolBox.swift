@@ -12,6 +12,7 @@
 import Foundation
 import AppKit
 import PDFKit
+import Darwin
 
 // MARK: - Agent Tool Protocol
 
@@ -67,11 +68,21 @@ class AgentToolBox: ObservableObject {
     
     /// Workspace root — all file operations are sandboxed to this path
     var workspaceRoot: String? = nil
+
+    /// Task-local isolated workspace root when executing inside an autonomous run,
+    /// falling back to the UI's active workspaceRoot. Prevents cross-project bleeding
+    /// when multiple workspaces, chats, or windows are switched mid-execution.
+    var effectiveWorkspaceRoot: String? {
+        if let pinned = AgentExecutionContext.workspaceRoot, !pinned.isEmpty {
+            return pinned
+        }
+        return workspaceRoot
+    }
     
     init() {
         registerBuiltinTools()
         Task { @MainActor in
-            let initialWs = self.workspaceRoot ?? UserDefaults.standard.string(forKey: "MicroCode.WorkspacePath") ?? FileManager.default.currentDirectoryPath
+            let initialWs = self.effectiveWorkspaceRoot ?? UserDefaults.standard.string(forKey: "MicroCode.WorkspacePath") ?? FileManager.default.currentDirectoryPath
             MCPClient.shared.configure(workspacePath: initialWs)
         }
     }
@@ -81,6 +92,7 @@ class AgentToolBox: ObservableObject {
         register(FileWriteTool())
         register(FileSearchTool())
         register(GrepSearchTool())
+        register(CodebaseSearchTool())
         register(ReplaceInFileTool())
         register(ListDirectoryTreeTool())
         register(ShellCommandTool())
@@ -98,6 +110,11 @@ class AgentToolBox: ObservableObject {
         register(AlphaFoldInputValidateTool())
         register(ArdiumRunTool())
         register(PlaygroundRunTool())
+        register(CellListTool())
+        register(CellReadTool())
+        register(CellCreateTool())
+        register(CellUpdateTool())
+        register(CellDeleteTool())
         register(CellRunTool())
         register(InspectImageTool())
         register(ExtractPDFTool())
@@ -125,14 +142,22 @@ class AgentToolBox: ObservableObject {
         register(BackgroundAgentControlTool())
         // Feature 10: Voice Coding
         register(VoiceCodingTool())
-        // Feature 11: Autonomous Skill Engine 2.0, Hyper-Mesh MCP 2.0 & SubAgent Swarm 2.0
+        // Feature 11: Autonomous Skill Engine 2.0, Hyper-Mesh MCP 2.0, SubAgent Swarm 2.0 & PNS 24/7
         register(SkillEngineTool())
         register(MCPOrchestratorTool())
         register(SwarmOrchestratorTool())
+        register(PNSNervousSystemTool())
         // Feature 12: TH-AI Passport Multimodal Generation (Image, Video, Music/Audio)
         register(GenerateImageTool())
         register(GenerateVideoTool())
         register(GenerateMusicTool())
+        // Feature 13: Embedded & IoT Hardware-in-the-Loop (HIL) Zero-Mock Tools
+        register(EmbeddedListHardwareTool())
+        register(EmbeddedCompileTool())
+        register(EmbeddedFlashTool())
+        register(EmbeddedSerialCaptureTool())
+        register(EmbeddedSerialSendTool())
+        register(EmbeddedDecodeCrashTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -149,12 +174,26 @@ class AgentToolBox: ObservableObject {
             return "file_write"
         case "edit_file", "str_replace", "str_replace_editor", "str_replace_based_edit_tool", "edit", "replace", "modify_file":
             return "replace_in_file"
-        case "bash", "run_terminal_cmd", "execute_command", "run_command", "terminal", "exec", "cmd", "sh", "zsh", "run_shell":
+        case "bash", "run_terminal_cmd", "execute_command", "run_command", "terminal", "exec", "cmd", "sh", "zsh", "run_shell", "shell_command":
             return "shell"
+        case "list_cells", "notebook_list_cells", "cells_list":
+            return "cell_list"
+        case "read_cell", "notebook_read_cell", "get_cell":
+            return "cell_read"
+        case "create_cell", "add_cell", "insert_cell", "notebook_create_cell":
+            return "cell_create"
+        case "update_cell", "edit_cell", "modify_cell", "notebook_update_cell":
+            return "cell_update"
+        case "delete_cell", "remove_cell", "notebook_delete_cell":
+            return "cell_delete"
+        case "run_cell", "execute_cell", "notebook_run_cell":
+            return "cell_run"
         case "list_dir", "list_directory", "ls", "list_files", "dir", "tree":
             return "list_directory_tree"
         case "grep", "ripgrep", "rg", "search_files", "search_in_files", "code_search", "grep_files":
             return "grep_search"
+        case "codebase_search", "semantic_search", "search_codebase", "codebase_retrieval", "workspace_search":
+            return "codebase_search"
         case "glob", "find_by_name", "find_files", "search_by_name", "glob_search":
             return "file_search"
         case "mkdir", "make_directory":
@@ -221,6 +260,7 @@ class AgentToolBox: ObservableObject {
             ("old_text", ["old_str", "old_string", "Target", "target", "search", "find_text"]),
             ("new_text", ["new_str", "new_string", "Replacement", "replacement", "replace_text"]),
             ("content", ["file_text", "Content", "contents", "new_content"]),
+            ("query", ["Query", "search_query", "question", "concept"]),
             ("pattern", ["Query", "Pattern", "glob", "regex", "search_term"]),
             ("start_line", ["StartLine", "offset", "line_start", "from_line"]),
             ("end_line", ["EndLine", "limit", "line_end", "to_line"])
@@ -237,7 +277,7 @@ class AgentToolBox: ObservableObject {
         }
 
         // Coerce integer parameters that may arrive as strings (e.g. from XML/DSML tool calls)
-        for intKey in ["max_depth", "start_line", "end_line", "timeout", "page"] {
+        for intKey in ["max_depth", "start_line", "end_line", "timeout", "page", "max_results", "max_tokens"] {
             if let strVal = normalized[intKey] as? String,
                let parsedInt = Int(strVal.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 normalized[intKey] = parsedInt
@@ -263,14 +303,14 @@ class AgentToolBox: ObservableObject {
             throw ToolBoxError.toolNotFound(rawToolName)
         }
         
-        let executionWorkspace = workspaceRoot
+        let executionWorkspace = effectiveWorkspaceRoot
         var resolvedParams = Self.normalizeToolParams(params)
-        // Default directory/path to workspaceRoot for workspace-wide inspection tools when omitted
-        if let root = workspaceRoot, !root.isEmpty {
+        // Default directory/path to effectiveWorkspaceRoot for workspace-wide inspection tools when omitted
+        if let root = executionWorkspace, !root.isEmpty {
             if ["list_directory_tree", "git_status"].contains(toolName),
                resolvedParams["path"] == nil && resolvedParams["directory"] == nil {
                 resolvedParams["path"] = root
-            } else if ["grep_search", "file_search", "find_symbol"].contains(toolName),
+            } else if ["grep_search", "file_search", "find_symbol", "codebase_search", "repo_map"].contains(toolName),
                       resolvedParams["directory"] == nil && resolvedParams["path"] == nil {
                 resolvedParams["directory"] = root
             }
@@ -281,39 +321,19 @@ class AgentToolBox: ObservableObject {
         }()
         
         if !isRemoteTarget {
-            // Auto-resolve relative paths against local workspaceRoot
-            if let root = workspaceRoot {
-                let resolvePath = { (p: String) -> String in
-                    let trimmedP = p.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmedP.isEmpty || trimmedP == "." || trimmedP == "./" {
-                        return root
-                    }
-                    for containerPrefix in ["/workspace/", "/workspace", "/project/", "/project", "/repo/", "/repo"] {
-                        if trimmedP == containerPrefix {
-                            return root
-                        }
-                        if containerPrefix.hasSuffix("/") && trimmedP.hasPrefix(containerPrefix) {
-                            let rel = String(trimmedP.dropFirst(containerPrefix.count))
-                            return rel.isEmpty ? root : (root as NSString).appendingPathComponent(rel)
-                        }
-                    }
-                    if trimmedP.hasPrefix("/") { return trimmedP }
-                    if trimmedP.hasPrefix("~") { return (trimmedP as NSString).expandingTildeInPath }
-                    let cleanRel = trimmedP.hasPrefix("./") ? String(trimmedP.dropFirst(2)) : trimmedP
-                    return (root as NSString).appendingPathComponent(cleanRel)
-                }
-                
+            // Auto-resolve relative paths against local effectiveWorkspaceRoot
+            if executionWorkspace != nil {
                 for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-                    if let path = resolvedParams[key] as? String { resolvedParams[key] = resolvePath(path) }
+                    if let path = resolvedParams[key] as? String { resolvedParams[key] = resolveLocalToolPath(path) }
                 }
                 if let pathsStr = resolvedParams["paths"] as? String {
                     let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                    resolvedParams["paths"] = paths.map { resolvePath($0) }.joined(separator: ",")
+                    resolvedParams["paths"] = paths.map { resolveLocalToolPath($0) }.joined(separator: ",")
                 }
             }
             
             // Validate every declared local path, including list and rename arguments.
-            let isReadOnlyFS = ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "file_search"].contains(toolName)
+            let isReadOnlyFS = ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "file_search", "find_symbol", "codebase_search", "repo_map"].contains(toolName)
             for key in ["path", "directory", "old_path", "new_path", "cwd"] {
                 if let path = resolvedParams[key] as? String { try validateSandbox(path, allowGlobalReadOnly: isReadOnlyFS) }
             }
@@ -331,7 +351,7 @@ class AgentToolBox: ObservableObject {
             for key in ["path", "directory", "old_path", "new_path", "cwd"] {
                 if let path = params[key] as? String {
                     // Do not forward local macOS /Users/... workspace path to remote Linux server
-                    if let localRoot = workspaceRoot, path.hasPrefix(localRoot) {
+                    if let localRoot = executionWorkspace, path.hasPrefix(localRoot) {
                         let rel = path.replacingOccurrences(of: localRoot, with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                         resolvedParams[key] = rel.isEmpty ? cleanBase : "\(cleanBase)/\(rel)"
                     } else {
@@ -353,7 +373,7 @@ class AgentToolBox: ObservableObject {
         }
         
         try Task.checkCancellation()
-        guard workspaceRoot == executionWorkspace else {
+        guard effectiveWorkspaceRoot == executionWorkspace else {
             throw ToolBoxError.executionFailed("Workspace changed while awaiting tool approval")
         }
 
@@ -366,15 +386,31 @@ class AgentToolBox: ObservableObject {
             }
             return true
         }()
+        if !isRemoteTarget && (toolName == "file_read" || toolName == "multi_file_read") {
+            if let readPath = resolvedParams["path"] as? String {
+                AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: readPath)
+            }
+            if let readPaths = resolvedParams["paths"] as? [String] {
+                for p in readPaths {
+                    AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: p)
+                }
+            }
+        }
         if !isRemoteTarget && isMutatingCall {
+            // Flush any unsaved editor buffers across all windows before checkpointing and mutating
+            for key in ["path", "old_path", "new_path"] {
+                if let targetFile = resolvedParams[key] as? String {
+                    AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: targetFile)
+                }
+            }
             // Feature #4: Scope Lock & Protected Files Guard enforcement
             for key in ["path", "old_path", "new_path"] {
                 if let targetFile = resolvedParams[key] as? String,
-                   let blockReason = WorkspaceScopeGuard.shared.validateMutationAllowed(path: targetFile, workspaceRoot: workspaceRoot) {
+                   let blockReason = WorkspaceScopeGuard.shared.validateMutationAllowed(path: targetFile, workspaceRoot: executionWorkspace) {
                     throw ToolBoxError.executionFailed(blockReason)
                 }
             }
-            if let patchText = resolvedParams["patch"] as? String, let root = workspaceRoot {
+            if let patchText = resolvedParams["patch"] as? String, let root = executionWorkspace {
                 for line in patchText.components(separatedBy: "\n") {
                     let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                     var relPath: String? = nil
@@ -387,20 +423,21 @@ class AgentToolBox: ObservableObject {
                     }
                     if let rel = relPath, !rel.isEmpty {
                         let absPath = rel.hasPrefix("/") ? rel : (root as NSString).appendingPathComponent(rel)
-                        if let blockReason = WorkspaceScopeGuard.shared.validateMutationAllowed(path: absPath, workspaceRoot: workspaceRoot) {
+                        AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: absPath)
+                        if let blockReason = WorkspaceScopeGuard.shared.validateMutationAllowed(path: absPath, workspaceRoot: executionWorkspace) {
                             throw ToolBoxError.executionFailed(blockReason)
                         }
                     }
                 }
             }
-            AutoCommitService.shared.workspaceRoot = workspaceRoot
+            AutoCommitService.shared.workspaceRoot = executionWorkspace
             let targetPath = resolvedParams["path"] as? String ?? resolvedParams["directory"] as? String
             await AutoCommitService.shared.createCheckpoint(toolName: toolName, targetPath: targetPath)
         }
         
         let startTime = Date()
         let cacheKey = executionCacheKey(toolName: toolName, params: resolvedParams) + (isRemoteTarget ? "::remote" : "::local")
-        let cacheable = ["file_read", "grep_search", "list_directory_tree", "git_status", "find_symbol", "multi_file_read", "get_diagnostics", "science_inspect", "alphafold_input_validate"].contains(toolName)
+        let cacheable = ["file_read", "grep_search", "codebase_search", "repo_map", "list_directory_tree", "git_status", "find_symbol", "multi_file_read", "get_diagnostics", "science_inspect", "alphafold_input_validate"].contains(toolName)
         if cacheable, let cached = readCache[cacheKey], Date().timeIntervalSince(cached.date) < readCacheTTL {
             TokenOptimizer.shared.recordContextCache(hit: true, tokens: TokenOptimizer.shared.estimateTokens(cached.value))
             return cached.value
@@ -427,15 +464,24 @@ class AgentToolBox: ObservableObject {
                 readCache.removeAll(keepingCapacity: true)
                 if let path = resolvedParams["path"] as? String {
                     TokenOptimizer.shared.invalidateFileRead(path: path)
+                    RepoMapService.shared.invalidateFile(path)
                 } else {
                     TokenOptimizer.shared.beginTurnLoop()
+                    RepoMapService.shared.invalidateCache(workspace: executionWorkspace)
                 }
                 if !isRemoteTarget, let path = resolvedParams["path"] as? String {
                     AutoCommitService.shared.modifiedFiles.insert(path)
-                    // Feature #7: 1-Click Secret & API Key Leak Shield audit on modified source files
-                    if let updatedContent = try? String(contentsOfFile: path, encoding: .utf8),
-                       let secretWarning = SecretShieldMonitor.shared.inspectFileWrite(content: updatedContent, filePath: path) {
-                        result += secretWarning
+                    AppState.reloadAllOpenBuffersFromDisk(path: path)
+                    if let updatedContent = try? String(contentsOfFile: path, encoding: .utf8) {
+                        // Feature #7: 1-Click Secret & API Key Leak Shield audit on modified source files
+                        if let secretWarning = SecretShieldMonitor.shared.inspectFileWrite(content: updatedContent, filePath: path) {
+                            result += secretWarning
+                        }
+                        // Automatic Post-Edit Syntax & Live LSP Diagnostics Verification
+                        let diagNote = await PostEditSyntaxVerifier.verify(content: updatedContent, filePath: path)
+                        if !diagNote.isEmpty {
+                            result += diagNote
+                        }
                     }
                     if RemoteWorkspaceManager.shared.currentWorkspace != nil {
                         await RemoteWorkspaceManager.shared.syncFile(localURL: URL(fileURLWithPath: path))
@@ -453,6 +499,43 @@ class AgentToolBox: ObservableObject {
             executionHistory.append(execution)
             throw error
         }
+    }
+
+    func resolveLocalToolPath(_ p: String) -> String {
+        let trimmedP = p.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let root = effectiveWorkspaceRoot, !root.isEmpty else {
+            return trimmedP.hasPrefix("~") ? (trimmedP as NSString).expandingTildeInPath : trimmedP
+        }
+        if trimmedP.isEmpty || trimmedP == "." || trimmedP == "./" {
+            return root
+        }
+        let rawResolved: String
+        var matchedContainer = false
+        var containerResult = root
+        for containerPrefix in ["/workspace/", "/workspace", "/project/", "/project", "/repo/", "/repo"] {
+            if trimmedP == containerPrefix {
+                matchedContainer = true
+                containerResult = root
+                break
+            }
+            if containerPrefix.hasSuffix("/") && trimmedP.hasPrefix(containerPrefix) {
+                let rel = String(trimmedP.dropFirst(containerPrefix.count))
+                matchedContainer = true
+                containerResult = rel.isEmpty ? root : (root as NSString).appendingPathComponent(rel)
+                break
+            }
+        }
+        if matchedContainer {
+            rawResolved = containerResult
+        } else if trimmedP.hasPrefix("/") {
+            rawResolved = trimmedP
+        } else if trimmedP.hasPrefix("~") {
+            rawResolved = (trimmedP as NSString).expandingTildeInPath
+        } else {
+            let cleanRel = trimmedP.hasPrefix("./") ? String(trimmedP.dropFirst(2)) : trimmedP
+            rawResolved = (root as NSString).appendingPathComponent(cleanRel)
+        }
+        return WorkspaceStoragePaths.redirectWorkspaceDotMicrocodePathIfNeeded(rawResolved, workspaceRoot: root)
     }
 
     nonisolated static func posixQuote(_ value: String) -> String {
@@ -669,8 +752,13 @@ class AgentToolBox: ObservableObject {
     // MARK: - Sandbox Validation
     
     private func validateSandbox(_ path: String, allowGlobalReadOnly: Bool = false) throws {
-        guard let root = workspaceRoot, !root.isEmpty else {
+        guard let root = effectiveWorkspaceRoot, !root.isEmpty else {
             throw ToolBoxError.executionFailed("Open a workspace before accessing files")
+        }
+        // Always permit read/write inside the active workspace's isolated ~/.microcode/workspaces/<id>/ state folder
+        let activeStateDir = WorkspaceStoragePaths.workspaceStateDirectory(for: root).path
+        if WorkspacePathPolicy.contains(path, in: activeStateDir) {
+            return
         }
         if allowGlobalReadOnly {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -930,8 +1018,8 @@ struct AgentPlanTool: AgentTool {
 
     @MainActor
     private func mirrorTaskMarkdown(_ nodes: [AgentKernelPlanNode]) throws {
-        guard let workspace = AgentToolBox.shared.workspaceRoot else { return }
-        let directory = URL(fileURLWithPath: workspace, isDirectory: true).appendingPathComponent(".microcode", isDirectory: true)
+        guard let workspace = AgentToolBox.shared.effectiveWorkspaceRoot else { return }
+        let directory = WorkspaceStoragePaths.workspaceStateDirectory(for: workspace)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let lines = nodes.map { node -> String in
@@ -974,9 +1062,8 @@ struct AgentPlanTool: AgentTool {
 
     @MainActor
     private func markTaskNodeComplete(_ nodeID: String) throws {
-        guard let workspace = AgentToolBox.shared.workspaceRoot else { return }
-        let target = URL(fileURLWithPath: workspace, isDirectory: true)
-            .appendingPathComponent(".microcode/task.md")
+        guard let workspace = AgentToolBox.shared.effectiveWorkspaceRoot else { return }
+        let target = WorkspaceStoragePaths.managedStateFile(named: "task.md", workspacePath: workspace)
         guard var markdown = try? String(contentsOf: target, encoding: .utf8) else { return }
         markdown = markdown.replacingOccurrences(of: "- [ ] **\(nodeID)**", with: "- [x] **\(nodeID)**")
         try AgentPrivacyGuard.safeWrite(content: markdown, to: target)
@@ -1039,7 +1126,7 @@ struct DeviceRuntimeTool: AgentTool {
         guard let operation = params["operation"] as? String else {
             throw ToolBoxError.invalidParams("operation is required")
         }
-        let defaultWorkspace = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let defaultWorkspace = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         let workspace = params["workspace"] as? String ?? defaultWorkspace
         
         let x = params["x"] as? Int ?? (params["x"] as? Double).map { Int($0) }
@@ -1369,10 +1456,15 @@ struct PreviewControlTool: AgentTool {
 
             case "set_viewport":
                 guard let vp = viewport else {
-                    throw ToolBoxError.invalidParams("viewport is required ('responsive', 'desktop', 'tablet', 'mobile')")
+                    throw ToolBoxError.invalidParams("viewport is required ('responsive', 'desktop', 'tablet', 'mobile', 'iphone_duo_outer', 'iphone_duo_inner')")
                 }
                 runtime.targetViewport = vp
-                return "✅ WebApp Preview viewport set to: \(vp)"
+                let lowerVP = vp.lowercased()
+                if lowerVP.contains("duo") || lowerVP.contains("จอนอก") || lowerVP.contains("จอใน") {
+                    let targetDuoMode: IPhoneDuoDisplayMode = (lowerVP.contains("inner") || lowerVP.contains("unfold") || lowerVP.contains("จอใน")) ? .inner : .outer
+                    Task { await runtime.setIPhoneDuoDisplayMode(targetDuoMode) }
+                }
+                return "✅ Preview viewport set to: \(vp)"
 
             case "status":
                 PreviewDockService.shared.ensureDefaultTabsIfEmpty()
@@ -1451,6 +1543,12 @@ struct EditorControlTool: AgentTool {
                 let ws = appState.activeTerminalDirectory
                 let fullPath = path.hasPrefix("/") ? path : (ws as NSString).appendingPathComponent(path)
                 appState.showingWelcomeHome = false
+                let lowerPath = fullPath.lowercased()
+                if lowerPath.hasSuffix(".ipynb") || lowerPath.hasSuffix(".mic") || lowerPath.hasSuffix(".mcnb") {
+                    appState.switchToMode(.notebook)
+                    NotebookViewModel.shared.loadNotebook(from: URL(fileURLWithPath: fullPath))
+                    return "✅ Opened notebook in Cell Mode: \(fullPath)"
+                }
                 appState.switchToMode(.code)
                 Task { @MainActor in
                     await appState.loadFile(url: URL(fileURLWithPath: fullPath))
@@ -2053,6 +2151,138 @@ enum FileEditMatchResult {
     case ambiguous(Int)
 }
 
+/// Fast, zero-subprocess Post-Edit Structural & LSP Diagnostic Verifier
+@MainActor
+enum PostEditSyntaxVerifier {
+    private static let braceCheckedExtensions: Set<String> = [
+        "swift", "rs", "ts", "tsx", "js", "jsx", "go", "c", "cpp", "h", "hpp",
+        "m", "mm", "java", "kt", "cs", "ar"
+    ]
+
+    static func verify(content: String, filePath: String) async -> String {
+        let url = URL(fileURLWithPath: filePath).standardizedFileURL
+        let ext = url.pathExtension.lowercased()
+        var warnings: [String] = []
+
+        // 1. Check for unresolved git conflict markers
+        if content.contains("\n<<<<<<< ") || content.hasPrefix("<<<<<<< ") || content.contains("\n>>>>>>> ") {
+            warnings.append("Unresolved merge conflict markers (`<<<<<<<` / `>>>>>>>`) detected.")
+        }
+
+        // 2. JSON strict syntax validation
+        if ext == "json", let data = content.data(using: .utf8) {
+            do {
+                _ = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+            } catch {
+                warnings.append("Invalid JSON syntax: \(error.localizedDescription)")
+            }
+        }
+
+        // 3. Fast lexical brace/paren/bracket balance check for C-family / Swift / Rust / TS files
+        if braceCheckedExtensions.contains(ext), content.utf8.count <= 512_000 {
+            if let balanceIssue = checkDelimiterBalance(content) {
+                warnings.append(balanceIssue)
+            }
+        }
+
+        // 4. Live Post-Edit LSP Sync (`didOpen`/`didChange` + `didSave`) & Fresh Diagnostics (Severity 1 = Error)
+        if let freshDiags = await LSPManager.shared.syncAndAwaitFreshDiagnostics(
+            fileURL: url,
+            content: content,
+            timeoutMs: 220,
+            startServerIfNeeded: false
+        ) {
+            let errors = freshDiags.filter { $0.severity == 1 }
+            if !errors.isEmpty {
+                let preview = errors.prefix(4).map { d in
+                    "Line \(d.range.start.line + 1): \(d.message)"
+                }.joined(separator: "; ")
+                warnings.append("LSP Errors (\(errors.count)): \(preview)")
+            }
+        }
+
+        guard !warnings.isEmpty else {
+            return ""
+        }
+        return "\n⚠️ [Post-Edit Syntax/LSP Check on \(url.lastPathComponent)]: " + warnings.joined(separator: " | ") + " — Please inspect and fix immediately."
+    }
+
+    private static func checkDelimiterBalance(_ source: String) -> String? {
+        var stack: [(char: Character, line: Int)] = []
+        let chars = Array(source)
+        let count = chars.count
+        var i = 0
+        var line = 1
+
+        while i < count {
+            let c = chars[i]
+            if c == "\n" {
+                line += 1
+                i += 1
+                continue
+            }
+            // Skip line comments //
+            if c == "/", i + 1 < count, chars[i + 1] == "/" {
+                i += 2
+                while i < count && chars[i] != "\n" { i += 1 }
+                continue
+            }
+            // Skip block comments /* ... */
+            if c == "/", i + 1 < count, chars[i + 1] == "*" {
+                i += 2
+                while i + 1 < count && !(chars[i] == "*" && chars[i + 1] == "/") {
+                    if chars[i] == "\n" { line += 1 }
+                    i += 1
+                }
+                i += 2
+                continue
+            }
+            // Skip triple-quoted or single-line strings
+            if c == "\"" {
+                if i + 2 < count && chars[i + 1] == "\"" && chars[i + 2] == "\"" {
+                    i += 3
+                    while i + 2 < count && !(chars[i] == "\"" && chars[i + 1] == "\"" && chars[i + 2] == "\"") {
+                        if chars[i] == "\\" {
+                            i += 2
+                            continue
+                        }
+                        if chars[i] == "\n" { line += 1 }
+                        i += 1
+                    }
+                    i += 3
+                    continue
+                } else {
+                    i += 1
+                    while i < count && chars[i] != "\"" && chars[i] != "\n" {
+                        if chars[i] == "\\" {
+                            i += 2
+                            continue
+                        }
+                        i += 1
+                    }
+                    if i < count && chars[i] == "\"" { i += 1 }
+                    continue
+                }
+            }
+            // Check structural delimiters (focus on curly braces `{}` which are unambiguous across regex/char literals)
+            if c == "{" {
+                stack.append((c, line))
+            } else if c == "}" {
+                if stack.isEmpty {
+                    return "Unexpected closing '}' at line \(line) (no matching '{')"
+                }
+                _ = stack.removeLast()
+            }
+            i += 1
+        }
+
+        if let unclosed = stack.last {
+            return "Unclosed '\(unclosed.char)' opened at line \(unclosed.line) (\(stack.count) unclosed brace(s) at EOF)"
+        }
+        return nil
+    }
+}
+
 func smartReplaceInContent(_ content: String, oldText rawOld: String, newText rawNew: String) -> FileEditMatchResult {
     // Strip accidental line number prefixes (e.g. "123: ") if model copied from file_read
     func stripLineNumberPrefixes(_ text: String) -> String {
@@ -2067,12 +2297,51 @@ func smartReplaceInContent(_ content: String, oldText rawOld: String, newText ra
             $0.replacingOccurrences(of: #"^\s*\d+:\s?"#, with: "", options: .regularExpression)
         }.joined(separator: "\n")
     }
+
+    func leadingWhitespace(of line: String) -> String {
+        var prefix = ""
+        for ch in line {
+            if ch == " " || ch == "\t" {
+                prefix.append(ch)
+            } else {
+                break
+            }
+        }
+        return prefix
+    }
+
+    /// Re-indents `replacementLines` so its base indentation matches `targetLines` relative to `oldLines`.
+    func reindentReplacementLines(
+        _ replacementLines: [String],
+        oldLines: [String],
+        matchedTargetLines: ArraySlice<String>
+    ) -> [String] {
+        guard let firstNonEmptyIdx = oldLines.firstIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+              let targetFirstLine = matchedTargetLines.dropFirst(firstNonEmptyIdx).first ?? matchedTargetLines.first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else {
+            return replacementLines
+        }
+        let sourceIndent = leadingWhitespace(of: oldLines[firstNonEmptyIdx])
+        let targetIndent = leadingWhitespace(of: targetFirstLine)
+        guard sourceIndent != targetIndent else { return replacementLines }
+
+        return replacementLines.map { line in
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                return ""
+            }
+            if !sourceIndent.isEmpty && line.hasPrefix(sourceIndent) {
+                return targetIndent + String(line.dropFirst(sourceIndent.count))
+            } else if sourceIndent.isEmpty {
+                return targetIndent + line
+            }
+            return line
+        }
+    }
     
     let oldText = stripLineNumberPrefixes(rawOld.replacingOccurrences(of: "\r\n", with: "\n"))
     let newText = stripLineNumberPrefixes(rawNew.replacingOccurrences(of: "\r\n", with: "\n"))
     let normalizedContent = content.replacingOccurrences(of: "\r\n", with: "\n")
     
-    // 1. Exact match
+    // Tier 1: Exact substring match
     var searchRange = normalizedContent.startIndex..<normalizedContent.endIndex
     var exactRanges: [Range<String.Index>] = []
     while let range = normalizedContent.range(of: oldText, range: searchRange) {
@@ -2087,14 +2356,14 @@ func smartReplaceInContent(_ content: String, oldText rawOld: String, newText ra
         return .ambiguous(exactRanges.count)
     }
     
-    // 2. Line-by-line whitespace-tolerant matching
     let contentLines = normalizedContent.components(separatedBy: "\n")
     let oldLines = oldText.components(separatedBy: "\n")
+    let replacementLines = newText.components(separatedBy: "\n")
     guard !oldLines.isEmpty, oldLines.count <= contentLines.count else {
         return .notFound
     }
     
-    // First try trailing-whitespace-insensitive match
+    // Tier 2: Trailing-whitespace-normalized line match
     let rtrimmedOld = oldLines.map { $0.replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression) }
     var matchedIndices: [Int] = []
     let maxStart = contentLines.count - oldLines.count
@@ -2111,35 +2380,118 @@ func smartReplaceInContent(_ content: String, oldText rawOld: String, newText ra
             matchedIndices.append(startIdx)
         }
     }
+    if matchedIndices.count == 1, let matchStart = matchedIndices.first {
+        var updatedLines = contentLines
+        updatedLines.replaceSubrange(matchStart..<(matchStart + oldLines.count), with: replacementLines)
+        return .updated(updatedLines.joined(separator: "\n"))
+    } else if matchedIndices.count > 1 {
+        return .ambiguous(matchedIndices.count)
+    }
     
-    // Second fallback: both leading and trailing whitespace normalized (trimmed non-empty lines)
-    if matchedIndices.isEmpty {
-        let trimmedOld = oldLines.map { $0.trimmingCharacters(in: .whitespaces) }
-        // Require at least one non-empty line to avoid matching blank lines
-        if trimmedOld.contains(where: { !$0.isEmpty }) {
-            for startIdx in 0...maxStart {
-                var matches = true
-                for offset in 0..<oldLines.count {
-                    let candidate = contentLines[startIdx + offset].trimmingCharacters(in: .whitespaces)
-                    if candidate != trimmedOld[offset] {
-                        matches = false
-                        break
-                    }
+    // Tier 3a: Indentation-insensitive match with automatic target indentation preservation
+    let trimmedOld = oldLines.map { $0.trimmingCharacters(in: .whitespaces) }
+    if trimmedOld.contains(where: { !$0.isEmpty }) {
+        for startIdx in 0...maxStart {
+            var matches = true
+            for offset in 0..<oldLines.count {
+                let candidate = contentLines[startIdx + offset].trimmingCharacters(in: .whitespaces)
+                if candidate != trimmedOld[offset] {
+                    matches = false
+                    break
                 }
-                if matches {
-                    matchedIndices.append(startIdx)
-                }
+            }
+            if matches {
+                matchedIndices.append(startIdx)
             }
         }
     }
     
     if matchedIndices.count == 1, let matchStart = matchedIndices.first {
         var updatedLines = contentLines
-        let replacementLines = newText.components(separatedBy: "\n")
-        updatedLines.replaceSubrange(matchStart..<(matchStart + oldLines.count), with: replacementLines)
+        let matchRange = matchStart..<(matchStart + oldLines.count)
+        let reindented = reindentReplacementLines(replacementLines, oldLines: oldLines, matchedTargetLines: contentLines[matchRange])
+        updatedLines.replaceSubrange(matchRange, with: reindented)
         return .updated(updatedLines.joined(separator: "\n"))
     } else if matchedIndices.count > 1 {
         return .ambiguous(matchedIndices.count)
+    }
+
+    // Tier 3b: Blank-line-collapsed & Fuzzy Context Anchor match
+    // Handles cases where the model omitted/added blank lines inside old_text or had minor drift on 1 interior line.
+    let oldNonEmpty = trimmedOld.filter { !$0.isEmpty }
+    if oldNonEmpty.count >= 2 {
+        let contentTrimmed = contentLines.map { $0.trimmingCharacters(in: .whitespaces) }
+        // Map each non-empty line in contentLines to its original line index
+        var nonEmptyContent: [(lineIdx: Int, text: String)] = []
+        nonEmptyContent.reserveCapacity(contentLines.count)
+        for (idx, t) in contentTrimmed.enumerated() where !t.isEmpty {
+            nonEmptyContent.append((idx, t))
+        }
+
+        if nonEmptyContent.count >= oldNonEmpty.count {
+            var collapsedRanges: [ClosedRange<Int>] = []
+            let maxNEStart = nonEmptyContent.count - oldNonEmpty.count
+            for neStart in 0...maxNEStart {
+                var allMatch = true
+                for k in 0..<oldNonEmpty.count {
+                    if nonEmptyContent[neStart + k].text != oldNonEmpty[k] {
+                        allMatch = false
+                        break
+                    }
+                }
+                if allMatch {
+                    let firstLineIdx = nonEmptyContent[neStart].lineIdx
+                    let lastLineIdx = nonEmptyContent[neStart + oldNonEmpty.count - 1].lineIdx
+                    // Sanity bound: don't span across huge unrelated gaps
+                    if (lastLineIdx - firstLineIdx) <= oldLines.count + 8 {
+                        collapsedRanges.append(firstLineIdx...lastLineIdx)
+                    }
+                }
+            }
+
+            if collapsedRanges.count == 1, let range = collapsedRanges.first {
+                var updatedLines = contentLines
+                let reindented = reindentReplacementLines(replacementLines, oldLines: oldLines, matchedTargetLines: contentLines[range])
+                updatedLines.replaceSubrange(range, with: reindented)
+                return .updated(updatedLines.joined(separator: "\n"))
+            } else if collapsedRanges.count > 1 {
+                return .ambiguous(collapsedRanges.count)
+            }
+
+            // Fuzzy interior anchor match for blocks of >= 4 non-empty lines where first & last anchors match 100%
+            // and >= 85% of interior lines match uniquely.
+            if oldNonEmpty.count >= 4 {
+                var fuzzyRanges: [ClosedRange<Int>] = []
+                let firstAnchor = oldNonEmpty.first!
+                let lastAnchor = oldNonEmpty.last!
+                for neStart in 0...maxNEStart {
+                    guard nonEmptyContent[neStart].text == firstAnchor,
+                          nonEmptyContent[neStart + oldNonEmpty.count - 1].text == lastAnchor else {
+                        continue
+                    }
+                    var matchedLinesCount = 2 // first & last anchors
+                    for k in 1..<(oldNonEmpty.count - 1) {
+                        if nonEmptyContent[neStart + k].text == oldNonEmpty[k] {
+                            matchedLinesCount += 1
+                        }
+                    }
+                    let ratio = Double(matchedLinesCount) / Double(oldNonEmpty.count)
+                    if ratio >= 0.85 {
+                        let firstLineIdx = nonEmptyContent[neStart].lineIdx
+                        let lastLineIdx = nonEmptyContent[neStart + oldNonEmpty.count - 1].lineIdx
+                        if (lastLineIdx - firstLineIdx) <= oldLines.count + 6 {
+                            fuzzyRanges.append(firstLineIdx...lastLineIdx)
+                        }
+                    }
+                }
+                if fuzzyRanges.count == 1, let range = fuzzyRanges.first {
+                    var updatedLines = contentLines
+                    let reindented = reindentReplacementLines(replacementLines, oldLines: oldLines, matchedTargetLines: contentLines[range])
+                    updatedLines.replaceSubrange(range, with: reindented)
+                    return .updated(updatedLines.joined(separator: "\n"))
+                }
+            }
+        }
     }
     
     return .notFound
@@ -2197,7 +2549,7 @@ struct GrepSearchTool: AgentTool {
     
     func execute(params: [String: Any]) async throws -> String {
         let patternOpt = (params["pattern"] as? String) ?? (params["query"] as? String)
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
         guard let pattern = patternOpt, !pattern.isEmpty,
               let directory = directoryOpt, !directory.isEmpty else {
@@ -2261,7 +2613,7 @@ struct ListDirectoryTreeTool: AgentTool {
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         guard let path = (params["path"] as? String) ?? (params["directory"] as? String) ?? defaultRoot else {
             throw ToolBoxError.invalidParams("path is required")
         }
@@ -2319,7 +2671,7 @@ struct FileSearchTool: AgentTool {
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
         let patternOpt = (params["pattern"] as? String) ?? (params["query"] as? String)
         guard let directory = directoryOpt, !directory.isEmpty,
@@ -2369,23 +2721,48 @@ struct FileSearchTool: AgentTool {
 
 struct GetDiagnosticsTool: AgentTool {
     let name = "get_diagnostics"
-    let description = "Get current editor diagnostics (errors, warnings) for a file via LSP."
+    let description = "Get current editor diagnostics (errors, warnings) for a file via LSP and live syntax verifier."
     let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Absolute path to the file", required: true)
+        ToolParameter(name: "path", type: "string", description: "Path to the file (absolute or workspace-relative)", required: true)
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        guard let path = params["path"] as? String else {
+        guard let rawPath = params["path"] as? String else {
             throw ToolBoxError.invalidParams("Missing 'path'")
         }
         
-        let url = URL(fileURLWithPath: path)
+        let resolvedPath: String = await MainActor.run {
+            let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let absPath: String
+            if trimmed.hasPrefix("/") {
+                absPath = trimmed
+            } else if let ws = AgentToolBox.shared.effectiveWorkspaceRoot {
+                absPath = (ws as NSString).appendingPathComponent(trimmed)
+            } else {
+                absPath = trimmed
+            }
+            AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: absPath)
+            return URL(fileURLWithPath: absPath).standardizedFileURL.path
+        }
+
+        let url = URL(fileURLWithPath: resolvedPath).standardizedFileURL
         let uri = url.absoluteString
-        
-        return await MainActor.run {
-            if let diagnostics = LSPManager.shared.fileDiagnostics[uri], !diagnostics.isEmpty {
+        let diskContent = try? String(contentsOf: url, encoding: .utf8)
+
+        return await Task { @MainActor () -> String in
+            var diagnostics: [LSPDiagnostic]? = nil
+            if let content = diskContent {
+                diagnostics = await LSPManager.shared.syncAndAwaitFreshDiagnostics(
+                    fileURL: url,
+                    content: content,
+                    timeoutMs: 850,
+                    startServerIfNeeded: true
+                )
+            }
+            let effectiveDiags = diagnostics ?? LSPManager.shared.fileDiagnostics[uri] ?? []
+            if !effectiveDiags.isEmpty {
                 var output = "Diagnostics for \(url.lastPathComponent):\n\n"
-                for diag in diagnostics {
+                for diag in effectiveDiags {
                     let severityStr: String
                     switch diag.severity {
                     case 1: severityStr = "ERROR"
@@ -2399,43 +2776,66 @@ struct GetDiagnosticsTool: AgentTool {
                     output += "[\(severityStr)] Line \(line):\(char) - \(diag.message)\n"
                 }
                 return output
-            } else {
-                return "No diagnostics or issues found for \(url.lastPathComponent)."
             }
-        }
+            if let content = diskContent {
+                let syntaxNote = await PostEditSyntaxVerifier.verify(content: content, filePath: resolvedPath)
+                if !syntaxNote.isEmpty {
+                    return syntaxNote.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            return "No diagnostics or issues found for \(url.lastPathComponent)."
+        }.value
     }
 }
 
 /// Central registry to track and manage local development servers
-/// (e.g. `npm run dev`, `vite`, `next dev`, `python -m http.server`)
-/// spawned by the AI Agent or user tools in the background.
+/// (e.g. `npm run dev`, `vite`, `next dev`, `python -m http.server`, `dotnet run`, `cargo run`)
+/// spawned by the AI Agent or user tools in the background, isolated per workspace.
 public final class DevServerRegistry: @unchecked Sendable {
     public static let shared = DevServerRegistry()
     private let lock = NSLock()
-    private var processes: [Int32: (command: String, process: Process, startedAt: Date)] = [:]
+    private var processes: [Int32: (command: String, workspacePath: String, process: Process, startedAt: Date)] = [:]
     
     private init() {}
+
+    private func canonicalize(_ path: String?) -> String {
+        guard let p = path, !p.isEmpty else { return "" }
+        return URL(fileURLWithPath: p).standardizedFileURL.path
+    }
+
+    private func matchesWorkspace(_ entryWorkspace: String, filterWorkspace: String) -> Bool {
+        if filterWorkspace.isEmpty || entryWorkspace.isEmpty { return true }
+        return entryWorkspace == filterWorkspace
+            || entryWorkspace.hasPrefix(filterWorkspace + "/")
+            || filterWorkspace.hasPrefix(entryWorkspace + "/")
+    }
     
-    public func register(process: Process, command: String) {
+    public func register(process: Process, command: String, workspacePath: String? = nil) {
+        let resolvedWs = canonicalize(workspacePath ?? AgentExecutionContext.workspaceRoot)
         lock.lock()
         defer { lock.unlock() }
         let pid = process.processIdentifier
-        processes[pid] = (command: command, process: process, startedAt: Date())
+        processes[pid] = (command: command, workspacePath: resolvedWs, process: process, startedAt: Date())
     }
     
-    public func hasRunningServer() -> Bool {
+    public func hasRunningServer(inWorkspace workspacePath: String? = nil) -> Bool {
+        let filterWs = canonicalize(workspacePath ?? AgentExecutionContext.workspaceRoot)
         lock.lock()
         defer { lock.unlock() }
         processes = processes.filter { $0.value.process.isRunning }
-        return !processes.isEmpty
+        return processes.values.contains { matchesWorkspace($0.workspacePath, filterWorkspace: filterWs) }
     }
     
-    public func activeServers() -> [(pid: Int32, command: String, uptime: TimeInterval)] {
+    public func activeServers(inWorkspace workspacePath: String? = nil) -> [(pid: Int32, command: String, uptime: TimeInterval)] {
+        let filterWs = canonicalize(workspacePath ?? AgentExecutionContext.workspaceRoot)
         lock.lock()
         defer { lock.unlock() }
         processes = processes.filter { $0.value.process.isRunning }
         let now = Date()
-        return processes.map { (pid: $0.key, command: $0.value.command, uptime: now.timeIntervalSince($0.value.startedAt)) }
+        return processes.compactMap { key, val in
+            guard matchesWorkspace(val.workspacePath, filterWorkspace: filterWs) else { return nil }
+            return (pid: key, command: val.command, uptime: now.timeIntervalSince(val.startedAt))
+        }
     }
     
     public func terminate(pid: Int32) {
@@ -2443,8 +2843,22 @@ public final class DevServerRegistry: @unchecked Sendable {
         let item = processes.removeValue(forKey: pid)
         lock.unlock()
         if let proc = item?.process, proc.isRunning {
-            proc.terminate()
-            kill(pid, SIGTERM)
+            ShellProcessTree.terminateTree(process: proc, forceKillAfter: 0.8)
+        }
+    }
+
+    public func terminateAll(inWorkspace workspacePath: String) {
+        let filterWs = canonicalize(workspacePath)
+        guard !filterWs.isEmpty else { return }
+        lock.lock()
+        var toTerminate: [Process] = []
+        for (pid, entry) in processes where matchesWorkspace(entry.workspacePath, filterWorkspace: filterWs) {
+            toTerminate.append(entry.process)
+            processes.removeValue(forKey: pid)
+        }
+        lock.unlock()
+        for proc in toTerminate where proc.isRunning {
+            ShellProcessTree.terminateTree(process: proc, forceKillAfter: 0.8)
         }
     }
     
@@ -2456,10 +2870,108 @@ public final class DevServerRegistry: @unchecked Sendable {
         
         for item in procs {
             if item.process.isRunning {
-                item.process.terminate()
-                kill(item.process.processIdentifier, SIGTERM)
+                ShellProcessTree.terminateTree(process: item.process, forceKillAfter: 0.8)
             }
         }
+    }
+}
+
+/// Manages full descendant process tree termination and non-blocking pipe draining on macOS
+/// so child compilers/servers (`dotnet`, `MSBuild`, `node`, `rustc`, `GradleDaemon`) never become orphans or deadlock pipe EOF.
+private enum ShellProcessTree {
+    static func descendantPIDs(of rootPID: Int32) -> [Int32] {
+        guard rootPID > 1 else { return [] }
+        let selfPID = getpid()
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var size: Int = 0
+        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+        let capacity = (size / MemoryLayout<kinfo_proc>.stride) + 32
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: max(1, capacity))
+        var actualSize = procs.count * MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, 4, &procs, &actualSize, nil, 0) == 0 else { return [] }
+        let actualCount = actualSize / MemoryLayout<kinfo_proc>.stride
+
+        var childrenByParent: [Int32: [Int32]] = [:]
+        for idx in 0..<actualCount {
+            let pid = procs[idx].kp_proc.p_pid
+            let ppid = procs[idx].kp_eproc.e_ppid
+            if pid > 1 && pid != selfPID && ppid > 0 {
+                childrenByParent[ppid, default: []].append(pid)
+            }
+        }
+
+        var descendants: [Int32] = []
+        var visited: Set<Int32> = [rootPID, selfPID]
+        var queue: [Int32] = [rootPID]
+        var cursor = 0
+        while cursor < queue.count {
+            let current = queue[cursor]
+            cursor += 1
+            if let kids = childrenByParent[current] {
+                for kid in kids where !visited.contains(kid) {
+                    visited.insert(kid)
+                    descendants.append(kid)
+                    queue.append(kid)
+                }
+            }
+        }
+        return descendants
+    }
+
+    static func terminateTree(process: Process, forceKillAfter: TimeInterval = 0.8) {
+        let rootPID = process.processIdentifier
+        guard rootPID > 1, rootPID != getpid() else { return }
+        // Snapshot descendants BEFORE signaling rootPID so parent-child ppid links have not reparented to launchd (PID 1).
+        let descendants = descendantPIDs(of: rootPID)
+        for childPID in descendants.reversed() {
+            _ = kill(childPID, SIGTERM)
+        }
+        if process.isRunning {
+            process.terminate()
+        }
+        _ = kill(rootPID, SIGTERM)
+
+        let allTargets = descendants.reversed() + [rootPID]
+        if forceKillAfter <= 0 {
+            for targetPID in allTargets where kill(targetPID, 0) == 0 {
+                _ = kill(targetPID, SIGKILL)
+            }
+        } else {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + forceKillAfter) {
+                for targetPID in allTargets where kill(targetPID, 0) == 0 {
+                    _ = kill(targetPID, SIGKILL)
+                }
+            }
+        }
+    }
+
+    /// Drains any buffered bytes already present in a pipe without blocking indefinitely if a background daemon
+    /// (such as `dotnet` VBCSCompiler or `GradleDaemon`) inherited the write end of stdout/stderr.
+    static func drainAvailableBytesNonBlocking(from handle: FileHandle, initialTimeoutMs: Int32 = 25) -> Data {
+        let fd = handle.fileDescriptor
+        guard fd >= 0 else { return Data() }
+        var collected = Data()
+        var buffer = [UInt8](repeating: 0, count: 16_384)
+        var timeoutMs = initialTimeoutMs
+        var iterations = 0
+        while iterations < 256 {
+            iterations += 1
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = Darwin.poll(&pfd, 1, timeoutMs)
+            guard ready > 0 else { break }
+            if (pfd.revents & Int16(POLLIN)) != 0 {
+                let bytesRead = Darwin.read(fd, &buffer, buffer.count)
+                if bytesRead > 0 {
+                    collected.append(buffer, count: bytesRead)
+                    timeoutMs = 5
+                } else {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+        return collected
     }
 }
 
@@ -2589,7 +3101,7 @@ struct ShellCommandTool: AgentTool {
         env["LANG"] = "en_US.UTF-8"
         env["COPYFILE_DISABLE"] = "1"
         // Auto-resolve working directory (cwd)
-        let currentWorkspace = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let currentWorkspace = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         let rawCwd = params["cwd"] as? String
         let resolvedCwd: String
         if let rawCwd = rawCwd, !rawCwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2651,14 +3163,50 @@ struct ShellCommandTool: AgentTool {
         }
     }
     
+    private static func isCompiledNativeLauncherSegment(_ segment: String) -> Bool {
+        let metadataFlags = ["--help", " -h", "--version", " -v", "--show-bin-path", "--list-devices", "--info"]
+        if metadataFlags.contains(where: { segment.contains($0) }) {
+            return false
+        }
+        let nativeLaunchPrefixes = [
+            "swift run",
+            "dotnet run",
+            "dotnet watch",
+            "cargo run",
+            "go run ",
+            "flutter run",
+            "gradle run",
+            "./gradlew run",
+            "gradlew run",
+            "mvn javafx:run",
+            "mvn spring-boot:run",
+            "./mvnw spring-boot:run"
+        ]
+        return nativeLaunchPrefixes.contains { prefix in
+            segment == prefix || segment.hasPrefix(prefix + " ") || (prefix.hasSuffix(" ") && segment.hasPrefix(prefix))
+        }
+    }
+
+    private func isCompiledAppLauncher(command: String) -> Bool {
+        let normalized = command
+            .lowercased()
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+        let segments = normalized
+            .components(separatedBy: CharacterSet(charactersIn: ";&"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard let lastSegment = segments.last else { return false }
+        return Self.isCompiledNativeLauncherSegment(lastSegment)
+    }
+
     private func isDevServerOrDaemon(command: String, params: [String: Any]) -> Bool {
         if params["is_daemon"] as? Bool == true || params["background"] as? Bool == true {
             return true
         }
         let lower = command.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = lower.replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "\"", with: "")
-        if (normalized == "swift run" || normalized.hasPrefix("swift run ") || normalized.hasSuffix("&& swift run") || normalized.contains("&& swift run "))
-            && !normalized.contains("--help") && !normalized.contains("--version") && !normalized.contains("--show-bin-path") {
+        if isCompiledAppLauncher(command: command) {
             return true
         }
         let devPatterns = [
@@ -2669,7 +3217,10 @@ struct ShellCommandTool: AgentTool {
             "bun dev", "bun run dev",
             "python -m http.server", "python3 -m http.server",
             "webpack serve", "webpack-dev-server", "live-server", "http-server",
-            "flutter run -d chrome", "cargo watch", "uvicorn"
+            "cargo watch", "uvicorn", "gunicorn", "flask run",
+            "manage.py runserver", "streamlit run", "ng serve",
+            "astro dev", "nuxt dev", "expo start", "npx expo start",
+            "nodemon", "tsx watch", "ts-node-dev", "rails server", "php artisan serve"
         ]
         return devPatterns.contains { pattern in
             normalized == pattern || normalized.contains(pattern)
@@ -2689,8 +3240,12 @@ struct ShellCommandTool: AgentTool {
         let collector = ProcessOutputCollector()
         let readinessMarkers = [
             "http://localhost:",
+            "https://localhost:",
             "http://127.0.0.1:",
+            "https://127.0.0.1:",
             "http://0.0.0.0:",
+            "Now listening on:",
+            "Application started.",
             "Local:",
             "Network:",
             "ready in",
@@ -2703,7 +3258,9 @@ struct ShellCommandTool: AgentTool {
             "press h + enter to show help",
             "webpack compiled",
             "Build complete!",
-            "Build of product"
+            "Build of product",
+            "Running `",
+            "Flutter run key commands"
         ]
         
         stdoutHandle.readabilityHandler = { handle in
@@ -2729,7 +3286,6 @@ struct ShellCommandTool: AgentTool {
         }
         
         try process.run()
-        let pid = process.processIdentifier
         
         NotificationCenter.default.post(
             name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
@@ -2741,17 +3297,22 @@ struct ShellCommandTool: AgentTool {
             ]
         )
         
-        let isSwiftRun = command.lowercased().replacingOccurrences(of: "'", with: "").contains("swift run")
-        let maxStartupWait: TimeInterval = isSwiftRun ? 30.0 : 3.5
+        let isCompiledLauncher = isCompiledAppLauncher(command: command)
+        let maxStartupWait: TimeInterval = isCompiledLauncher ? 20.0 : 4.0
+        let settleDelay: TimeInterval = isCompiledLauncher ? 1.5 : 0.8
         let startTime = Date()
         var readySince: Date? = nil
         while Date().timeIntervalSince(startTime) < maxStartupWait {
+            if Task.isCancelled {
+                ShellProcessTree.terminateTree(process: process, forceKillAfter: 0.3)
+                break
+            }
             if !process.isRunning {
                 break
             }
             if collector.ready {
                 if readySince == nil { readySince = Date() }
-                if let rs = readySince, Date().timeIntervalSince(rs) >= (isSwiftRun ? 1.2 : 0.8) {
+                if let rs = readySince, Date().timeIntervalSince(rs) >= settleDelay {
                     break
                 }
             }
@@ -2794,7 +3355,8 @@ struct ShellCommandTool: AgentTool {
         }
         
         // App or dev server is healthy and running in background
-        DevServerRegistry.shared.register(process: process, command: command)
+        let pid = process.processIdentifier
+        DevServerRegistry.shared.register(process: process, command: command, workspacePath: targetCwd)
         
         stdoutHandle.readabilityHandler = nil
         stderrHandle.readabilityHandler = nil
@@ -2854,7 +3416,6 @@ struct ShellCommandTool: AgentTool {
         }
         
         try process.run()
-        let pid = process.processIdentifier
         
         NotificationCenter.default.post(
             name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
@@ -2871,34 +3432,30 @@ struct ShellCommandTool: AgentTool {
         
         while process.isRunning {
             if Task.isCancelled {
-                process.terminate()
-                kill(pid, SIGKILL)
+                ShellProcessTree.terminateTree(process: process, forceKillAfter: 0.25)
                 break
             }
             if Date().timeIntervalSince(startTime) > Double(timeout) {
                 timedOut = true
-                process.terminate()
-                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
-                    if process.isRunning {
-                        kill(pid, SIGKILL)
-                    }
-                }
+                ShellProcessTree.terminateTree(process: process, forceKillAfter: 1.0)
                 break
             }
             try? await Task.sleep(nanoseconds: 15_000_000)
         }
         
         // Immediately disarm readabilityHandlers before reading any remaining buffered bytes.
-        // Never call process.waitUntilExit() on a Swift Concurrency cooperative thread,
-        // as -[NSConcreteTask waitUntilExit] spins CFRunLoopInMode and deadlocks when no RunLoop is servicing it.
+        // Never call process.waitUntilExit() or blocking readToEnd() here: background compiler daemons
+        // (e.g. dotnet VBCSCompiler / GradleDaemon) can inherit stdout/stderr pipes and keep EOF open indefinitely.
         stdoutHandle.readabilityHandler = nil
         stderrHandle.readabilityHandler = nil
         
         if !timedOut && !Task.isCancelled {
-            if let remOut = try? stdoutHandle.readToEnd(), !remOut.isEmpty {
+            let remOut = ShellProcessTree.drainAvailableBytesNonBlocking(from: stdoutHandle)
+            if !remOut.isEmpty {
                 stdoutCollector.appendData(remOut)
             }
-            if let remErr = try? stderrHandle.readToEnd(), !remErr.isEmpty {
+            let remErr = ShellProcessTree.drainAvailableBytesNonBlocking(from: stderrHandle)
+            if !remErr.isEmpty {
                 stderrCollector.appendData(remErr)
             }
         }
@@ -2959,7 +3516,7 @@ struct ShellCommandTool: AgentTool {
     private func executeRemote(command: String, server: RemoteConnectionConfig, params: [String: Any]) async throws -> String {
         var rawCwd = (params["cwd"] as? String) ?? ""
         let (localRoot, remoteWsPath) = await MainActor.run {
-            (AgentToolBox.shared.workspaceRoot, RemoteWorkspaceManager.shared.currentWorkspace?.remotePath)
+            (AgentToolBox.shared.effectiveWorkspaceRoot, RemoteWorkspaceManager.shared.currentWorkspace?.remotePath)
         }
         if let localRoot = localRoot, rawCwd.hasPrefix(localRoot) {
             rawCwd = remoteWsPath ?? ""
@@ -3239,16 +3796,16 @@ struct RenameFileTool: AgentTool {
 
 struct FindSymbolTool: AgentTool {
     let name = "find_symbol"
-    let description = "Find function, class, struct, or other symbol definitions in the workspace. Uses grep to search for common code patterns."
+    let description = "Find function, class, struct, protocol, enum definitions and call-site references in the workspace. Ranks symbol declarations above call sites."
     let parameters = [
         ToolParameter(name: "symbol", type: "string", description: "Symbol name to find (function, class, struct name)", required: true),
-        ToolParameter(name: "directory", type: "string", description: "Directory to search in", required: true),
+        ToolParameter(name: "directory", type: "string", description: "Directory to search in (optional, defaults to active workspace)", required: false),
         ToolParameter(name: "type", type: "string", description: "Symbol type: function, class, struct, enum, or all (default: all)", required: false)
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        let symbolOpt = (params["symbol"] as? String) ?? (params["query"] as? String)
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let symbolOpt = (params["symbol"] as? String) ?? (params["query"] as? String) ?? (params["pattern"] as? String)
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
         guard let symbol = symbolOpt, !symbol.isEmpty,
               let directory = directoryOpt, !directory.isEmpty else {
@@ -3256,50 +3813,11 @@ struct FindSymbolTool: AgentTool {
         }
         
         let symbolType = params["type"] as? String ?? "all"
-        let combinedPattern: String
-        switch symbolType {
-        case "function":
-            combinedPattern = "(func|fn|def|function)\\s+\\b\(symbol)\\b"
-        case "class":
-            combinedPattern = "(class|interface|actor)\\s+\\b\(symbol)\\b"
-        case "struct":
-            combinedPattern = "struct\\s+\\b\(symbol)\\b"
-        case "enum":
-            combinedPattern = "enum\\s+\\b\(symbol)\\b"
-        default:
-            combinedPattern = "\\b\(symbol)\\b"
-        }
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-        var args = ["-rn", "--color=never", "-I", "-E"]
-        for dir in GrepSearchTool.excludedDirs {
-            args.append("--exclude-dir=\(dir)")
-        }
-        args.append(contentsOf: ["-m", "25", "-e", combinedPattern, directory])
-        process.arguments = args
-        
-        let pipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = pipe
-        process.standardError = stderrPipe
-        
-        try process.run()
-        
-        async let stdoutData = Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }.value
-        async let stderrData = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
-        let data = await stdoutData
-        _ = await stderrData
-        
-        while process.isRunning {
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        
-        let output = String(data: data, encoding: .utf8) ?? ""
-        if output.isEmpty {
-            return "No symbols matching '\(symbol)' found in \(directory)"
-        }
+        let output = await HybridCodebaseSearchEngine.shared.searchSymbolDefinitionsAndReferences(
+            symbol: symbol,
+            symbolType: symbolType,
+            directory: directory
+        )
         return output.count > 100_000 ? String(output.prefix(100_000)) + "\n... (results truncated)" : output
     }
 }
@@ -3476,7 +3994,7 @@ struct ApplyPatchTool: AgentTool {
             throw ToolBoxError.invalidParams("patch is required")
         }
 
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot } ?? FileManager.default.currentDirectoryPath
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot } ?? FileManager.default.currentDirectoryPath
         if patchText.contains("*** Begin Patch") || patchText.contains("*** Update File:") || patchText.contains("*** Add File:") {
             return try applyCodexV4APatch(patchText, workspaceRoot: defaultRoot)
         } else {
@@ -3823,7 +4341,7 @@ class MCPClient: ObservableObject {
     /// Ensures MCP Server process is booted and its tools are populated and registered
     /// before an Agent or SubAgent executes its tool schema extraction.
     func ensureConnected(workspacePath: String? = nil, timeoutSeconds: TimeInterval = 2.0) async {
-        let ws = workspacePath ?? activeWorkspacePath ?? AgentToolBox.shared.workspaceRoot ?? FileManager.default.currentDirectoryPath
+        let ws = workspacePath ?? activeWorkspacePath ?? AgentToolBox.shared.effectiveWorkspaceRoot ?? FileManager.default.currentDirectoryPath
         if !isConnected || activeWorkspacePath != ws {
             start(workspacePath: ws)
         }
@@ -4127,15 +4645,311 @@ struct PlaygroundRunTool: AgentTool {
     }
 }
 
+// MARK: - Interactive Notebook Cell Tools (Cell Mode Agent Integration)
+
+private enum NotebookToolHelper {
+    static func parseInt(_ raw: Any?) -> Int? {
+        if let i = raw as? Int { return i }
+        if let d = raw as? Double { return Int(d) }
+        if let s = raw as? String { return Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
+    }
+
+    static func parseBool(_ raw: Any?) -> Bool {
+        if let b = raw as? Bool { return b }
+        if let i = raw as? Int { return i != 0 }
+        if let s = raw as? String {
+            return ["true", "1", "yes"].contains(s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+        return false
+    }
+
+    @MainActor
+    static func ensureActiveNotebook() -> NotebookModel {
+        let vm = NotebookViewModel.shared
+        if let nb = vm.activeNotebook {
+            return nb
+        }
+        if let first = vm.notebooks.first {
+            vm.activeNotebookId = first.id
+            return first
+        }
+        let created = NotebookModel(name: "Agent Notebook")
+        vm.notebooks.append(created)
+        vm.activeNotebookId = created.id
+        return created
+    }
+
+    @MainActor
+    static func resolveCell(in notebook: NotebookModel, params: [String: Any]) -> (index: Int, cell: NotebookCellModel)? {
+        if let idStr = (params["cell_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !idStr.isEmpty,
+           let idx = notebook.cells.firstIndex(where: { $0.id.uuidString.caseInsensitiveCompare(idStr) == .orderedSame }) {
+            return (idx, notebook.cells[idx])
+        }
+        if let num = parseInt(params["cell_number"] ?? params["index"]),
+           num >= 1, num <= notebook.cells.count {
+            return (num - 1, notebook.cells[num - 1])
+        }
+        return nil
+    }
+
+    static func waitForCellExecution(cell: NotebookCellModel, cellNumber: Int, timeoutSeconds: TimeInterval = 120) async -> String {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if Task.isCancelled { break }
+            let stillRunning = await MainActor.run { cell.isExecuting || cell.isQueued }
+            if !stillRunning { break }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+        return await MainActor.run {
+            let lang = cell.language.rawValue
+            let execNum = cell.executionCount.map { "[\($0)]" } ?? "[*]"
+            let durSuffix = cell.telemetry.map { " in \($0.formattedDuration)" } ?? ""
+            var report = "Cell #\(cellNumber) \(execNum) (\(lang)) finished\(durSuffix).\n"
+            if cell.isExecuting || cell.isQueued {
+                report += "Status: Still running/queued in background after \(Int(timeoutSeconds))s.\n"
+            }
+            if !cell.output.isEmpty {
+                let out = cell.output.count > 6000 ? String(cell.output.prefix(6000)) + "\n... (truncated)" : cell.output
+                report += "Output:\n\(out)\n"
+            } else {
+                report += "Output: (empty stdout)\n"
+            }
+            if let inlineDF = cell.inlineDataFrame {
+                report += "Inline DataFrame `\(inlineDF.variableName)` (\(inlineDF.totalRows) × \(inlineDF.totalCols)) — columns: \(inlineDF.columns.prefix(20).joined(separator: ", "))\n"
+            } else if cell.isDataFrame, let df = cell.dataFramePath {
+                report += "DataFrame rendered: \(df)\n"
+            }
+            if !cell.outputImages.isEmpty {
+                report += "Generated plots/artifacts: \(cell.outputImages.map(\.path).joined(separator: ", "))\n"
+            }
+            return report
+        }
+    }
+}
+
+struct CellListTool: AgentTool {
+    let name = "cell_list"
+    let description = "List all cells, languages, tags, execution counts, output previews, and attached data files in the active Cell Mode notebook."
+    let parameters: [ToolParameter] = []
+
+    func execute(params: [String: Any]) async throws -> String {
+        await MainActor.run {
+            let vm = NotebookViewModel.shared
+            let nb = NotebookToolHelper.ensureActiveNotebook()
+            var lines: [String] = []
+            lines.append("Notebook: \(nb.name) (\(nb.cells.count) cells, cwd: \(vm.workingDirectory.path))")
+            if !nb.dataFiles.isEmpty {
+                lines.append("Attached Datasets: " + nb.dataFiles.map { "\($0.name) (\($0.url.path))" }.joined(separator: ", "))
+            }
+            for (idx, cell) in nb.cells.enumerated() {
+                let sel = (cell.id == vm.selectedCellId) ? " [SELECTED]" : ""
+                let tag = cell.tag.isEmpty ? "" : " [tag:\(cell.tag)]"
+                let exec = cell.executionCount.map { "#\($0)" } ?? "unrun"
+                let firstLine = cell.content.components(separatedBy: .newlines).first ?? ""
+                let preview = String(firstLine.prefix(70))
+                let outInfo = cell.output.isEmpty ? "no-output" : "output:\(cell.output.count)chars"
+                lines.append("Cell #\(idx + 1) (id:\(cell.id.uuidString)) | \(cell.type.rawValue) | \(cell.language.rawValue) | \(exec) | \(outInfo)\(sel)\(tag) | \(preview)")
+            }
+            return lines.joined(separator: "\n")
+        }
+    }
+}
+
+struct CellReadTool: AgentTool {
+    let name = "cell_read"
+    let description = "Read the complete source code, stdout/stderr output, and generated plot paths of a notebook cell by 1-based cell_number or cell_id."
+    let parameters = [
+        ToolParameter(name: "cell_number", type: "integer", description: "1-based cell number to inspect (e.g. 1 for first cell)", required: false),
+        ToolParameter(name: "cell_id", type: "string", description: "Optional UUID of the cell", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        try await MainActor.run {
+            let nb = NotebookToolHelper.ensureActiveNotebook()
+            guard let (idx, cell) = NotebookToolHelper.resolveCell(in: nb, params: params) else {
+                throw ToolBoxError.invalidParams("Valid cell_number (1...\(nb.cells.count)) or cell_id is required.")
+            }
+            var res = "Cell #\(idx + 1) (id: \(cell.id.uuidString))\n"
+            res += "Type: \(cell.type.rawValue) | Language: \(cell.language.rawValue) | Tag: \(cell.tag.isEmpty ? "(none)" : cell.tag)\n"
+            res += "Code:\n```\(cell.language.fileExtension)\n\(cell.content)\n```\n"
+            if !cell.output.isEmpty {
+                res += "Output:\n```\n\(cell.output)\n```\n"
+            } else {
+                res += "Output: (none)\n"
+            }
+            if !cell.outputImages.isEmpty {
+                res += "Images: \(cell.outputImages.map(\.path).joined(separator: ", "))\n"
+            }
+            return res
+        }
+    }
+}
+
+struct CellCreateTool: AgentTool {
+    let name = "cell_create"
+    let description = "Create a new cell in the active Cell Mode notebook with code or markdown, optional position, and optional immediate execution."
+    let parameters = [
+        ToolParameter(name: "code", type: "string", description: "Source code or markdown content for the new cell", required: true),
+        ToolParameter(name: "language", type: "string", description: "Cell language (python, r, julia, sql, ardium, rust, go, cpp, objc, java, rmarkdown, latex)", required: false),
+        ToolParameter(name: "type", type: "string", description: "Cell type: 'code' (default), 'markdown', 'raw', or 'agent'", required: false),
+        ToolParameter(name: "after_cell_number", type: "integer", description: "Insert after this 1-based cell number (0 inserts at top; omit to append at end)", required: false),
+        ToolParameter(name: "tag", type: "string", description: "Optional tag label for selective execution", required: false),
+        ToolParameter(name: "auto_run", type: "boolean", description: "If true, immediately execute the newly created code cell and return its output", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        let content = (params["code"] as? String) ?? (params["content"] as? String) ?? ""
+        let langRaw = (params["language"] as? String) ?? "python"
+        let typeRaw = ((params["type"] as? String) ?? "code").lowercased()
+        let tag = (params["tag"] as? String) ?? ""
+        let autoRun = NotebookToolHelper.parseBool(params["auto_run"])
+        let afterNum = NotebookToolHelper.parseInt(params["after_cell_number"])
+
+        let (createdCell, cellNumber) = await MainActor.run { () -> (NotebookCellModel, Int) in
+            let vm = NotebookViewModel.shared
+            let nb = NotebookToolHelper.ensureActiveNotebook()
+            let cellType: NotebookCellModel.CellType = {
+                switch typeRaw {
+                case "markdown", "md": return .markdown
+                case "raw": return .raw
+                case "agent", "ai": return .agent
+                default: return .code
+                }
+            }()
+            let language = CellLanguage.from(fenceTag: langRaw) ?? .python
+            let newCell = NotebookCellModel(type: cellType, language: language, content: content)
+            newCell.tag = tag
+
+            let insertIndex: Int
+            if let after = afterNum {
+                insertIndex = max(0, min(after, nb.cells.count))
+            } else {
+                insertIndex = nb.cells.count
+            }
+            nb.cells.insert(newCell, at: insertIndex)
+            vm.selectedCellId = newCell.id
+            nb.modifiedAt = Date()
+            vm.scheduleAutoSave()
+            if autoRun && (cellType == .code || cellType == .agent) {
+                vm.runCell(newCell)
+            }
+            return (newCell, insertIndex + 1)
+        }
+
+        if autoRun {
+            let runReport = await NotebookToolHelper.waitForCellExecution(cell: createdCell, cellNumber: cellNumber)
+            return "Created Cell #\(cellNumber) and executed:\n\(runReport)"
+        }
+        return "Created Cell #\(cellNumber) (id: \(createdCell.id.uuidString), language: \(createdCell.language.rawValue))."
+    }
+}
+
+struct CellUpdateTool: AgentTool {
+    let name = "cell_update"
+    let description = "Update an existing notebook cell's code/content, language, or tag by 1-based cell_number or cell_id, with optional immediate execution."
+    let parameters = [
+        ToolParameter(name: "cell_number", type: "integer", description: "1-based cell number to update", required: false),
+        ToolParameter(name: "cell_id", type: "string", description: "Optional UUID of the cell to update", required: false),
+        ToolParameter(name: "code", type: "string", description: "Updated code or markdown content", required: true),
+        ToolParameter(name: "language", type: "string", description: "Optional updated cell language", required: false),
+        ToolParameter(name: "tag", type: "string", description: "Optional updated cell tag", required: false),
+        ToolParameter(name: "auto_run", type: "boolean", description: "If true, immediately execute the cell after updating", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let newContent = (params["code"] as? String) ?? (params["content"] as? String) else {
+            throw ToolBoxError.invalidParams("code is required")
+        }
+        let langRaw = params["language"] as? String
+        let tagRaw = params["tag"] as? String
+        let autoRun = NotebookToolHelper.parseBool(params["auto_run"])
+
+        let (targetCell, cellNumber) = try await MainActor.run { () -> (NotebookCellModel, Int) in
+            let vm = NotebookViewModel.shared
+            let nb = NotebookToolHelper.ensureActiveNotebook()
+            guard let (idx, cell) = NotebookToolHelper.resolveCell(in: nb, params: params) else {
+                throw ToolBoxError.invalidParams("Valid cell_number (1...\(nb.cells.count)) or cell_id is required.")
+            }
+            cell.recordAgentEditBaseline(previousContent: cell.content, source: "AI Agent")
+            cell.content = newContent
+            if let l = langRaw, let resolvedLang = CellLanguage.from(fenceTag: l) {
+                cell.language = resolvedLang
+            }
+            if let t = tagRaw {
+                cell.tag = t
+            }
+            vm.selectedCellId = cell.id
+            nb.modifiedAt = Date()
+            vm.scheduleAutoSave()
+            if autoRun && (cell.type == .code || cell.type == .agent) {
+                vm.runCell(cell)
+            }
+            return (cell, idx + 1)
+        }
+
+        if autoRun {
+            let runReport = await NotebookToolHelper.waitForCellExecution(cell: targetCell, cellNumber: cellNumber)
+            return "Updated Cell #\(cellNumber) and executed:\n\(runReport)"
+        }
+        return "Updated Cell #\(cellNumber) (language: \(targetCell.language.rawValue))."
+    }
+}
+
+struct CellDeleteTool: AgentTool {
+    let name = "cell_delete"
+    let description = "Delete a cell from the active Cell Mode notebook by 1-based cell_number or cell_id."
+    let parameters = [
+        ToolParameter(name: "cell_number", type: "integer", description: "1-based cell number to delete", required: false),
+        ToolParameter(name: "cell_id", type: "string", description: "Optional UUID of the cell to delete", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        try await MainActor.run {
+            let vm = NotebookViewModel.shared
+            let nb = NotebookToolHelper.ensureActiveNotebook()
+            guard let (idx, cell) = NotebookToolHelper.resolveCell(in: nb, params: params) else {
+                throw ToolBoxError.invalidParams("Valid cell_number (1...\(nb.cells.count)) or cell_id is required.")
+            }
+            vm.deleteCell(cell)
+            return "Deleted Cell #\(idx + 1). Remaining cells: \(nb.cells.count)."
+        }
+    }
+}
+
 struct CellRunTool: AgentTool {
     let name = "cell_run"
-    let description = "Run code within an interactive notebook cell or playground in any supported programming language."
+    let description = "Execute an existing notebook cell in Cell Mode by 1-based cell_number or cell_id (updating live Notebook output & plots), OR run a standalone code snippet if code + language are provided."
     let parameters = [
-        ToolParameter(name: "code", type: "string", description: "Source code to run in cell", required: true),
-        ToolParameter(name: "language", type: "string", description: "Language of the cell", required: true)
+        ToolParameter(name: "cell_number", type: "integer", description: "1-based cell number in the active notebook to execute", required: false),
+        ToolParameter(name: "cell_id", type: "string", description: "Optional UUID of the notebook cell to execute", required: false),
+        ToolParameter(name: "code", type: "string", description: "Optional standalone source code (or updated code if cell_number is also provided)", required: false),
+        ToolParameter(name: "language", type: "string", description: "Language when running standalone code (e.g. python, r, julia, sql, rust, go, cpp, ardium)", required: false)
     ]
-    
+
     func execute(params: [String: Any]) async throws -> String {
+        let hasCellTarget = params["cell_number"] != nil || params["cell_id"] != nil || params["index"] != nil
+        if hasCellTarget {
+            let (targetCell, cellNumber) = try await MainActor.run { () -> (NotebookCellModel, Int) in
+                let vm = NotebookViewModel.shared
+                let nb = NotebookToolHelper.ensureActiveNotebook()
+                guard let (idx, cell) = NotebookToolHelper.resolveCell(in: nb, params: params) else {
+                    throw ToolBoxError.invalidParams("Valid cell_number (1...\(nb.cells.count)) or cell_id is required.")
+                }
+                if let overrideCode = params["code"] as? String, !overrideCode.isEmpty {
+                    cell.content = overrideCode
+                }
+                if let langRaw = params["language"] as? String, let resolvedLang = CellLanguage.from(fenceTag: langRaw) {
+                    cell.language = resolvedLang
+                }
+                vm.selectedCellId = cell.id
+                vm.runCell(cell)
+                return (cell, idx + 1)
+            }
+            return await NotebookToolHelper.waitForCellExecution(cell: targetCell, cellNumber: cellNumber)
+        }
+
         return try await PlaygroundRunTool().execute(params: params)
     }
 }
@@ -4204,7 +5018,7 @@ struct InvokeSubagentTool: AgentTool {
         let ownedPaths = ownedStr.isEmpty ? [] : ownedStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         
         let instance = await MainActor.run {
-            let ws = AgentToolBox.shared.workspaceRoot
+            let ws = AgentToolBox.shared.effectiveWorkspaceRoot
             return SubAgentHarness.shared.invokeSubagent(
                 typeName: typeName,
                 role: role,
@@ -4304,7 +5118,7 @@ struct SkillEngineTool: AgentTool {
     func execute(params: [String: Any]) async throws -> String {
         let action = (params["action"] as? String ?? "match").lowercased()
         let query = params["query"] as? String ?? ""
-        let ws = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let ws = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         
         switch action {
         case "match", "search", "list":
@@ -4388,7 +5202,7 @@ struct MCPOrchestratorTool: AgentTool {
     
     func execute(params: [String: Any]) async throws -> String {
         let action = (params["action"] as? String ?? "status").lowercased()
-        let ws = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let ws = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         
         switch action {
         case "status", "list":
@@ -4449,7 +5263,7 @@ struct SwarmOrchestratorTool: AgentTool {
     
     func execute(params: [String: Any]) async throws -> String {
         let action = (params["action"] as? String ?? "status").lowercased()
-        let ws = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let ws = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         
         switch action {
         case "ceo_squad", "ceo", "executive_squad":

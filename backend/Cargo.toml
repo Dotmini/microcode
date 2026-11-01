@@ -160,6 +160,11 @@ opt-level = 1           # Basic optimization (much smaller than default 0)
 debug = 1               # Line tables only (not full debug info)
 split-debuginfo = "unpacked"  # macOS: keep DWARF out of the binary
 
+[profile.test]
+opt-level = 1
+debug = 1
+split-debuginfo = "unpacked"
+
 [profile.release]
 ## This binary ships inside the macOS application, so optimize the
 ## distribution artifact for disk footprint. The prior speed-oriented profile

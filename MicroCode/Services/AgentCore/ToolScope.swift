@@ -63,8 +63,8 @@ struct ToolScope {
         // Core
         "file_read": .core, "file_write": .core, "replace_in_file": .core,
         "multi_replace_in_file": .core, "apply_patch": .core,
-        "grep_search": .core, "shell": .core, "git_status": .core,
-        "skill_engine": .core,
+        "grep_search": .core, "codebase_search": .core, "shell": .core, "git_status": .core,
+        "skill_engine": .core, "pns_nervous_system": .core,
         // MCP & Orchestration
         "mcp_orchestrator": .mcp,
         // Navigation

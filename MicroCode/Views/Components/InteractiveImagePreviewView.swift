@@ -114,17 +114,25 @@ struct InteractiveImagePreviewView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 18)
+
+                PreviewCloseTabButton()
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+            .background({
+                let theme = AppState.shared?.appTheme ?? .dark
+                return theme.isGlass ? Color.clear : Color(nsColor: theme.panelBackground)
+            }())
             
             Divider()
             
             // Main Image Canvas
             GeometryReader { geo in
                 ZStack {
-                    Color(nsColor: .textBackgroundColor).opacity(0.85)
+                    {
+                        let theme = AppState.shared?.appTheme ?? .dark
+                        return theme.isGlass ? Color.clear : Color(nsColor: theme.editorBackground)
+                    }()
                     
                     if let img = image {
                         ZStack(alignment: .topLeading) {
@@ -312,10 +320,14 @@ struct InteractiveImagePreviewView: View {
             }
         }
         .onAppear {
-            loadImage()
+            loadImage(from: url)
         }
-        .onChange(of: url) { _ in
-            loadImage()
+        .onChange(of: url) { newURL in
+            scale = 1.0
+            offset = .zero
+            selectedRegions.removeAll()
+            activeDraftRect = nil
+            loadImage(from: newURL)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
             guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
@@ -368,12 +380,13 @@ struct InteractiveImagePreviewView: View {
         activeDraftRect = nil
     }
     
-    private func loadImage() {
+    private func loadImage(from targetURL: URL? = nil) {
+        let resolvedURL = targetURL ?? url
         DispatchQueue.global(qos: .userInitiated).async {
-            if let img = NSImage(contentsOf: url) {
+            if let img = NSImage(contentsOf: resolvedURL) {
                 let size = img.size
                 var sizeText = ""
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: resolvedURL.path),
                    let bytes = attrs[.size] as? Int64 {
                     sizeText = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
                 }

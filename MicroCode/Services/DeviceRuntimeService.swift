@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import Darwin
 import Combine
 import AppKit
 import ImageIO
@@ -123,6 +124,7 @@ struct RuntimeDevice: Identifiable, Hashable {
     let isReadyForLaunch: Bool
     let preflightMessage: String?
     let kind: RuntimeDeviceKind
+    let deviceTypeIdentifier: String?
 
     init(
         id: String,
@@ -132,7 +134,8 @@ struct RuntimeDevice: Identifiable, Hashable {
         runtime: String,
         isReadyForLaunch: Bool = true,
         preflightMessage: String? = nil,
-        kind: RuntimeDeviceKind = .generic
+        kind: RuntimeDeviceKind = .generic,
+        deviceTypeIdentifier: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -142,20 +145,73 @@ struct RuntimeDevice: Identifiable, Hashable {
         self.isReadyForLaunch = isReadyForLaunch
         self.preflightMessage = preflightMessage
         self.kind = kind
+        self.deviceTypeIdentifier = deviceTypeIdentifier
     }
 
     var isAppleSimulator: Bool { platform == .ios && kind == .simulator }
     var isPhysicalAppleDevice: Bool { platform == .ios && kind == .physical }
+    var isIPhoneDuoFamily: Bool {
+        guard isAppleSimulator else { return false }
+        if name.localizedCaseInsensitiveContains("iPhone Duo") { return true }
+        if let dt = deviceTypeIdentifier, dt.localizedCaseInsensitiveContains("iPhone-Duo") { return true }
+        return false
+    }
+    var isIPhoneDuoUnfoldedVariant: Bool {
+        guard isIPhoneDuoFamily else { return false }
+        if name.localizedCaseInsensitiveContains("Unfolded") { return true }
+        if let dt = deviceTypeIdentifier, dt.localizedCaseInsensitiveContains("Unfolded") { return true }
+        return false
+    }
+    var isIPhoneDuoFoldedVariant: Bool {
+        guard isIPhoneDuoFamily, !isIPhoneDuoUnfoldedVariant else { return false }
+        if name.localizedCaseInsensitiveContains("Folded") { return true }
+        if let dt = deviceTypeIdentifier, dt.localizedCaseInsensitiveContains("Folded") { return true }
+        return false
+    }
+    var isIPhoneDuoDualDisplay: Bool {
+        isIPhoneDuoFamily && !isIPhoneDuoUnfoldedVariant && !isIPhoneDuoFoldedVariant
+    }
     var appleSimulatorFamily: AppleSimulatorFamily? {
         guard isAppleSimulator else { return nil }
         return AppleSimulatorFamily(name: name, runtime: runtime)
     }
-    var previewTitle: String { appleSimulatorFamily?.previewTitle ?? "Apple Simulator" }
+    var previewTitle: String {
+        if isIPhoneDuoFamily { return "iPhone Duo" }
+        return appleSimulatorFamily?.previewTitle ?? "Apple Simulator"
+    }
     var displaySymbolName: String { appleSimulatorFamily?.symbolName ?? platform.icon }
     var isBooted: Bool {
         isPhysicalAppleDevice || state.caseInsensitiveCompare("booted") == .orderedSame || state.caseInsensitiveCompare("device") == .orderedSame
     }
     var detail: String { runtime.isEmpty ? state : "\(state) · \(runtime)" }
+}
+
+/// Represents a hardware SimDeviceType profile dynamically detected on the user's Mac
+/// via `simctl list devicetypes -j` paired with an installed `SimRuntime`.
+struct DetectedAppleSimulatorModel: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let productFamily: String
+    let bundlePath: String
+    let modelIdentifier: String?
+    let runtimeIdentifier: String
+    let runtimeName: String
+    let restrictedAliases: [String]
+    let isNativelySupportedByRuntime: Bool
+
+    var family: AppleSimulatorFamily {
+        let pf = productFamily.lowercased()
+        if pf.contains("watch") { return .watch }
+        if pf.contains("tv") { return .tv }
+        if pf.contains("ipad") { return .iPad }
+        if pf.contains("vision") { return .vision }
+        if pf.contains("iphone") { return .iPhone }
+        return AppleSimulatorFamily(name: name, runtime: runtimeName)
+    }
+
+    var isIPhoneDuo: Bool {
+        name.localizedCaseInsensitiveContains("iPhone Duo") || id.localizedCaseInsensitiveContains("iPhone-Duo")
+    }
 }
 
 struct GUIProjectDescriptor: Equatable {
@@ -252,6 +308,8 @@ final class DeviceRuntimeService: ObservableObject {
     @Published var showingEmbeddedAppleDock = false
     @Published var showingDeviceRuntimeSheet = false
     @Published var showingMobileDevTools = false
+    @Published var iPhoneDuoDisplayMode: IPhoneDuoDisplayMode = .outer
+    @Published private(set) var detectedAppleModels: [DetectedAppleSimulatorModel] = []
 
     /// Universal App Hot Reload state (Xcode, Android Gradle, Flutter, React Native, Expo)
     @Published var isAutoHotReloadEnabled: Bool = true
@@ -405,25 +463,27 @@ final class DeviceRuntimeService: ObservableObject {
 
     /// Selects a default Apple Simulator target in the UI without booting it or spawning processes.
     func selectDefaultAppleSimulatorIfNeeded() {
-        if let selected = selectedDevice, selected.isAppleSimulator {
+        if let selected = selectedDevice, selected.isAppleSimulator, !detectedAppleModels.isEmpty {
             return
         }
-        if let preferred = devices.first(where: { $0.isAppleSimulator && $0.isBooted })
+        if selectedDevice?.isAppleSimulator != true,
+           let preferred = devices.first(where: { $0.isAppleSimulator && $0.isBooted })
             ?? devices.first(where: { $0.isAppleSimulator && $0.appleSimulatorFamily == .iPhone })
             ?? devices.first(where: { $0.isAppleSimulator }) {
             selectedDeviceID = preferred.id
-            return
         }
-        Task { @MainActor in
-            let simDevices = await listAppleSimulators()
-            guard !simDevices.isEmpty else { return }
-            self.devices.removeAll { $0.isAppleSimulator }
-            self.devices.append(contentsOf: simDevices)
-            if self.selectedDevice?.isAppleSimulator != true {
-                let preferred = simDevices.first(where: { $0.isBooted })
-                    ?? simDevices.first(where: { $0.appleSimulatorFamily == .iPhone })
-                    ?? simDevices.first
-                self.selectedDeviceID = preferred?.id
+        if detectedAppleModels.isEmpty || !devices.contains(where: { $0.isAppleSimulator && !$0.isIPhoneDuoFamily }) {
+            Task { @MainActor in
+                let simDevices = await listAppleSimulators()
+                guard !simDevices.isEmpty else { return }
+                self.devices.removeAll { $0.isAppleSimulator }
+                self.devices.append(contentsOf: simDevices)
+                if self.selectedDevice?.isAppleSimulator != true {
+                    let preferred = simDevices.first(where: { $0.isBooted })
+                        ?? simDevices.first(where: { $0.appleSimulatorFamily == .iPhone })
+                        ?? simDevices.first
+                    self.selectedDeviceID = preferred?.id
+                }
             }
         }
     }
@@ -710,9 +770,14 @@ final class DeviceRuntimeService: ObservableObject {
             
         case .ios:
             if !device.isBooted {
-                _ = try await command("/usr/bin/xcrun", ["simctl", "boot", device.id], directory: nil)
+                _ = try await simctlCommand(["boot", device.id])
             }
-            _ = try await command("/usr/bin/xcrun", ["simctl", "io", device.id, "screenshot", destinationPath], directory: nil)
+            var screenshotArgs = ["io", device.id, "screenshot"]
+            if device.isIPhoneDuoDualDisplay {
+                screenshotArgs += ["--display=\(iPhoneDuoDisplayMode == .inner ? "3" : "1")"]
+            }
+            screenshotArgs.append(destinationPath)
+            _ = try await simctlCommand(screenshotArgs)
             return "📸 [iOS] Screenshot saved to \(destinationPath)"
             
         case .macOS:
@@ -731,10 +796,10 @@ final class DeviceRuntimeService: ObservableObject {
             
         case .ios:
             if !device.isBooted {
-                _ = try await command("/usr/bin/xcrun", ["simctl", "boot", device.id], directory: nil)
-                _ = try await command("/usr/bin/xcrun", ["simctl", "bootstatus", device.id, "-b"], directory: nil)
+                _ = try await simctlCommand(["boot", device.id])
+                _ = try await simctlCommand(["bootstatus", device.id, "-b"])
             }
-            let res = try await command("/usr/bin/xcrun", ["simctl", "launch", device.id, identifier], directory: nil)
+            let res = try await simctlCommand(["launch", device.id, identifier])
             return "🚀 [iOS] Launched bundle \(identifier) on \(device.name):\n\(res.output)"
             
         case .macOS:
@@ -756,9 +821,9 @@ final class DeviceRuntimeService: ObservableObject {
             
         case .ios:
             if !device.isBooted {
-                _ = try await command("/usr/bin/xcrun", ["simctl", "boot", device.id], directory: nil)
+                _ = try await simctlCommand(["boot", device.id])
             }
-            let res = try await command("/usr/bin/xcrun", ["simctl", "install", device.id, packagePath], directory: nil)
+            let res = try await simctlCommand(["install", device.id, packagePath])
             return "📦 [iOS] Installed app bundle \(packagePath) on \(device.name):\n\(res.output)"
             
         case .macOS:
@@ -777,8 +842,63 @@ final class DeviceRuntimeService: ObservableObject {
     }
 
     var selectedDevice: RuntimeDevice? { devices.first(where: { $0.id == selectedDeviceID }) }
-    var selectedApplePreviewTitle: String { selectedDevice?.previewTitle ?? "Apple Simulator" }
-    var selectedApplePreviewSymbolName: String { selectedDevice?.displaySymbolName ?? "iphone" }
+    var selectedApplePreviewTitle: String {
+        guard let selectedDevice else { return "Apple Simulator" }
+        if selectedDevice.isIPhoneDuoFamily {
+            let modeLabel = iPhoneDuoDisplayMode == .inner ? "จอใน · Inner" : "จอนอก · Outer"
+            return "iPhone Duo (\(modeLabel))"
+        }
+        return selectedDevice.isAppleSimulator ? selectedDevice.name : selectedDevice.previewTitle
+    }
+    var selectedApplePreviewSymbolName: String {
+        if let selectedDevice, selectedDevice.isIPhoneDuoFamily {
+            return iPhoneDuoDisplayMode == .inner ? "iphone-duo-inner" : "iphone-duo-outer"
+        }
+        return selectedDevice?.displaySymbolName ?? "iphone"
+    }
+    var selectedAppleToolbarTitle: String {
+        guard let selectedDevice, selectedDevice.isAppleSimulator else { return "iPhone Sim" }
+        return selectedDevice.isIPhoneDuoFamily ? "iPhone Duo" : selectedDevice.name
+    }
+    var appleSimulators: [RuntimeDevice] { devices.filter { $0.isAppleSimulator } }
+    var representativeIPhoneDuoSimulator: RuntimeDevice? {
+        let duoCandidates = appleSimulators.filter { $0.isIPhoneDuoFamily }
+        guard !duoCandidates.isEmpty else { return nil }
+        return (iPhoneDuoDisplayMode == .inner
+            ? duoCandidates.first(where: { $0.isIPhoneDuoUnfoldedVariant })
+            : duoCandidates.first(where: { $0.isIPhoneDuoFoldedVariant }))
+            ?? duoCandidates.first(where: { $0.isBooted })
+            ?? duoCandidates.first
+    }
+    var pickerAppleSimulators: [RuntimeDevice] {
+        let nonDuo = appleSimulators.filter { !$0.isIPhoneDuoFamily }
+        if let duo = representativeIPhoneDuoSimulator {
+            return [duo] + nonDuo
+        }
+        return nonDuo
+    }
+    var pickerIPhoneSimulators: [RuntimeDevice] {
+        appleSimulators.filter { !$0.isIPhoneDuoFamily && $0.appleSimulatorFamily == .iPhone }
+    }
+    var pickerIPadSimulators: [RuntimeDevice] {
+        appleSimulators.filter { $0.appleSimulatorFamily == .iPad }
+    }
+    var pickerOtherAppleSimulators: [RuntimeDevice] {
+        appleSimulators.filter {
+            guard let fam = $0.appleSimulatorFamily else { return false }
+            return fam != .iPhone && fam != .iPad
+        }
+    }
+    var detectedIPhoneModels: [DetectedAppleSimulatorModel] {
+        detectedAppleModels.filter { $0.family == .iPhone && !$0.isIPhoneDuo }
+    }
+    var detectedIPadModels: [DetectedAppleSimulatorModel] {
+        detectedAppleModels.filter { $0.family == .iPad }
+    }
+    var detectedOtherAppleModels: [DetectedAppleSimulatorModel] {
+        detectedAppleModels.filter { $0.family != .iPhone && $0.family != .iPad }
+    }
+    var isSelectedDeviceIPhoneDuo: Bool { selectedDevice?.isIPhoneDuoFamily == true }
 
     /// Attaches MicroCode's native device surface to a genuine Android device.
     /// ADB is the documented, authenticated control channel; no process or RAM
@@ -890,18 +1010,54 @@ final class DeviceRuntimeService: ObservableObject {
             self.showingEmbeddedDeviceDock = true
             PreviewDockService.shared.activateTabWithoutSideEffects(id: "ios")
         }
-        if selectedDevice?.isAppleSimulator != true {
-            selectDefaultAppleSimulatorIfNeeded()
+        if selectedDevice?.isAppleSimulator != true || selectedDevice?.isReadyForLaunch == false {
+            let previousWasDuo = selectedDevice?.isIPhoneDuoFamily == true
+            let previousName = selectedDevice?.name
+            let refreshed = await listAppleSimulators()
+            if !refreshed.isEmpty {
+                devices.removeAll { $0.isAppleSimulator }
+                devices.append(contentsOf: refreshed)
+                if previousWasDuo,
+                   let matchingDuo = refreshed.first(where: {
+                       $0.isReadyForLaunch && (iPhoneDuoDisplayMode == .inner ? $0.isIPhoneDuoUnfoldedVariant : $0.isIPhoneDuoFoldedVariant)
+                   }) ?? refreshed.first(where: { $0.isIPhoneDuoFamily && !$0.isIPhoneDuoDualDisplay && $0.isReadyForLaunch }) {
+                    selectedDeviceID = matchingDuo.id
+                } else if let prevName = previousName,
+                          let sameNamed = refreshed.first(where: { $0.name == prevName && $0.isReadyForLaunch }) {
+                    selectedDeviceID = sameNamed.id
+                } else if selectedDevice?.isAppleSimulator != true || selectedDevice?.isReadyForLaunch == false {
+                    let preferred = refreshed.first(where: { $0.isBooted && $0.isReadyForLaunch && !$0.isIPhoneDuoDualDisplay })
+                        ?? refreshed.first(where: { $0.isIPhoneDuoFoldedVariant && $0.isReadyForLaunch })
+                        ?? refreshed.first(where: { $0.isIPhoneDuoFamily && !$0.isIPhoneDuoDualDisplay && $0.isReadyForLaunch })
+                        ?? refreshed.first(where: { $0.isReadyForLaunch && !$0.isIPhoneDuoDualDisplay })
+                        ?? refreshed.first
+                    selectedDeviceID = preferred?.id
+                }
+            }
         }
-        guard let device = selectedDevice, device.isAppleSimulator else {
+        guard var device = selectedDevice, device.isAppleSimulator else {
             statusMessage = "Choose an Apple Simulator first."
             return
         }
+        let targetDisplayMode: IPhoneDuoDisplayMode = device.isIPhoneDuoFamily ? iPhoneDuoDisplayMode : .outer
+        if device.isIPhoneDuoFamily {
+            if let headlessDuo = await resolveHeadlessIPhoneDuoDevice(for: targetDisplayMode) {
+                device = headlessDuo
+                selectedDeviceID = headlessDuo.id
+            } else if device.isIPhoneDuoDualDisplay {
+                let errMsg = "Could not prepare headless iPhone Duo (\(targetDisplayMode.shortLabel)). Check free disk space for CoreSimulator and Retry."
+                statusMessage = errMsg
+                ServeSimService.shared.reportPreflightFailure(errMsg)
+                appendOutput(errMsg)
+                return
+            }
+        }
+
         // A warm preview must be an attach, not another boot + stream spawn.
         // This is the normal path after the first click and is effectively
         // immediate while preserving the existing iPhone/iPad frame.
-        if ServeSimService.shared.isShowing(simulatorID: device.id) {
-            statusMessage = "Interactive \(device.previewTitle) is already ready beside Chat: \(device.name)."
+        if ServeSimService.shared.isShowing(simulatorID: device.id, displayMode: targetDisplayMode) {
+            statusMessage = "Interactive \(selectedApplePreviewTitle) is already ready beside Chat: \(device.name)."
             return
         }
         let task = Task { @MainActor in
@@ -914,13 +1070,17 @@ final class DeviceRuntimeService: ObservableObject {
                 guard self.showingEmbeddedAppleDock, self.showingEmbeddedDeviceDock else { return }
                 NativeSimulatorBridgeService.shared.stop()
                 AppleSimulatorCaptureService.shared.stop()
-                await ServeSimService.shared.start(simulatorID: device.id, simulatorName: device.name)
+                await ServeSimService.shared.start(
+                    simulatorID: device.id,
+                    simulatorName: device.name,
+                    displayMode: targetDisplayMode
+                )
                 guard !Task.isCancelled, self.showingEmbeddedAppleDock else {
                     await ServeSimService.shared.stop()
                     return
                 }
                 if ServeSimService.shared.isActive {
-                    self.statusMessage = "Interactive \(device.previewTitle) is ready beside Chat: \(device.name)."
+                    self.statusMessage = "Interactive \(self.selectedApplePreviewTitle) is ready beside Chat."
                 } else {
                     self.statusMessage = ServeSimService.shared.statusMessage
                     self.appendOutput(self.statusMessage)
@@ -928,12 +1088,218 @@ final class DeviceRuntimeService: ObservableObject {
             } catch is CancellationError {
                 self.statusMessage = "Simulator launch cancelled."
             } catch {
-                self.statusMessage = error.localizedDescription
-                self.appendOutput(error.localizedDescription)
+                let errMsg = error.localizedDescription
+                self.statusMessage = errMsg
+                ServeSimService.shared.reportPreflightFailure(errMsg)
+                self.appendOutput(errMsg)
             }
         }
         iosConnectionTask = task
         await task.value
+    }
+
+    /// Switches iPhone Duo between Outer Cover Display (จอนอก · 466×678 pt / 1398×2034 px) and
+    /// Unfolded Inner Main Display (จอใน · 951×669 pt / 669×951 pt, 2007×2853 px).
+    func setIPhoneDuoDisplayMode(_ mode: IPhoneDuoDisplayMode) async {
+        iPhoneDuoDisplayMode = mode
+        if selectedDevice?.isIPhoneDuoFamily != true,
+           let duo = devices.first(where: { $0.isIPhoneDuoFamily }) {
+            selectedDeviceID = duo.id
+        }
+        if let resolved = await resolveHeadlessIPhoneDuoDevice(for: mode) {
+            selectedDeviceID = resolved.id
+        }
+        guard let target = selectedDevice, target.isIPhoneDuoFamily else { return }
+        mode.persist(for: target.id)
+        if ServeSimService.shared.isActive
+            || target.isBooted
+            || ServeSimService.shared.connectionState == .failed
+            || showingEmbeddedAppleDock
+            || PreviewDockService.shared.activeTab?.kind == .ios {
+            await startEmbeddedAppleSimulator()
+        } else {
+            statusMessage = "iPhone Duo set to \(mode.shortLabel) (\(mode.resolutionLabel))."
+        }
+    }
+
+    func selectAppleSimulator(_ device: RuntimeDevice, autoStartIfActive: Bool = true) async {
+        let previousDevice = selectedDevice
+        let newTarget: RuntimeDevice
+        if device.isIPhoneDuoFamily {
+            if let resolved = await resolveHeadlessIPhoneDuoDevice(for: iPhoneDuoDisplayMode) {
+                newTarget = resolved
+            } else {
+                newTarget = device
+            }
+        } else {
+            newTarget = device
+        }
+        selectedDeviceID = newTarget.id
+
+        // If switching away from a MicroCode-booted simulator to a different non-Duo model
+        // (or from a non-Duo model to iPhone Duo), shut down the old MicroCode-booted instance
+        // in the background so RAM & CPU stay lean.
+        if let prev = previousDevice,
+           prev.id != newTarget.id,
+           microCodeBootedSimulatorIDs.contains(prev.id),
+           !(prev.isIPhoneDuoFamily && newTarget.isIPhoneDuoFamily) {
+            microCodeBootedSimulatorIDs.remove(prev.id)
+            let oldID = prev.id
+            Task { [weak self] in
+                _ = try? await self?.simctlCommand(["shutdown", oldID], timeoutSeconds: 8.0)
+            }
+        }
+
+        if autoStartIfActive && (ServeSimService.shared.isActive || isWorking || ServeSimService.shared.connectionState == .failed) {
+            await startEmbeddedAppleSimulator()
+        } else {
+            statusMessage = "Selected \(selectedApplePreviewTitle) (\(newTarget.runtime))."
+        }
+    }
+
+    /// Selects an existing simulator matching a hardware model detected on the user's Mac,
+    /// or automatically bridges + creates + selects (and optionally boots) it in 1 click.
+    func selectOrProvisionDetectedModel(_ model: DetectedAppleSimulatorModel, autoStartIfActive: Bool = true) async {
+        if model.isIPhoneDuo {
+            if let duo = await resolveHeadlessIPhoneDuoDevice(for: iPhoneDuoDisplayMode) {
+                await selectAppleSimulator(duo, autoStartIfActive: autoStartIfActive)
+            } else {
+                await createIPhoneDuoSimulator()
+                if autoStartIfActive && (ServeSimService.shared.isActive || ServeSimService.shared.connectionState == .failed) {
+                    await startEmbeddedAppleSimulator()
+                }
+            }
+            return
+        }
+
+        if let existing = appleSimulators.first(where: {
+            $0.isReadyForLaunch && $0.name.caseInsensitiveCompare(model.name) == .orderedSame
+        }) {
+            await selectAppleSimulator(existing, autoStartIfActive: autoStartIfActive)
+            return
+        }
+
+        isWorking = true
+        statusMessage = "Provisioning \(model.name) (\(model.runtimeName))…"
+        let effectiveTypeID = await Task.detached(priority: .utility) {
+            Self.ensureBridgedDeviceTypeIfNeeded(for: model)
+        }.value
+
+        do {
+            let created = try await simctlCommand(
+                ["create", model.name, effectiveTypeID, model.runtimeIdentifier],
+                timeoutSeconds: 18.0
+            )
+            let createdUDID = created.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let updated = await listAppleSimulators()
+            if !updated.isEmpty {
+                devices.removeAll { $0.isAppleSimulator }
+                devices.append(contentsOf: updated)
+            }
+            isWorking = false
+            if let target = updated.first(where: { $0.id == createdUDID })
+                ?? updated.first(where: { $0.name.caseInsensitiveCompare(model.name) == .orderedSame }) {
+                await selectAppleSimulator(target, autoStartIfActive: autoStartIfActive)
+            }
+        } catch {
+            isWorking = false
+            statusMessage = "Could not create \(model.name): \(error.localizedDescription)"
+            appendOutput(statusMessage)
+        }
+    }
+
+    func createIPhoneDuoSimulator() async {
+        isWorking = true
+        defer { isWorking = false }
+        await Task.detached(priority: .utility) {
+            Self.ensureHeadlessIPhoneDuoProfilesInstalled()
+        }.value
+        if let created = await resolveHeadlessIPhoneDuoDevice(for: iPhoneDuoDisplayMode) {
+            selectedDeviceID = created.id
+            statusMessage = "Created \(created.previewTitle) (\(created.runtime))."
+        } else {
+            statusMessage = "Could not create iPhone Duo Simulator. Ensure Xcode 27.1+ iOS Simulator runtime is installed."
+            appendOutput(statusMessage)
+        }
+    }
+
+    /// Resolves a crash-free single-integrated-display iPhone19,4 simulator for headless
+    /// iOS 27.1+ rendering (`iPhone-Duo-Folded` 1398×2034 for Outer, `iPhone-Duo-Unfolded`
+    /// 2007×2853 for Inner), auto-creating the device if needed and shutting down any
+    /// headless dual-integrated-display `iPhone-Duo` instance whose `backboardd` crashes without Simulator.app.
+    private func resolveHeadlessIPhoneDuoDevice(for mode: IPhoneDuoDisplayMode) async -> RuntimeDevice? {
+        await Task.detached(priority: .utility) {
+            Self.reconcileCoreSimulatorStorage()
+        }.value
+
+        // Shut down any stock dual-display iPhone Duo (whose backboardd crashes headlessly)
+        // as well as the opposite Folded/Unfolded variant so only the active display uses RAM
+        // and serve-sim binds unambiguously to the requested display.
+        for candidate in devices where candidate.isIPhoneDuoFamily && candidate.isBooted {
+            let isOppositeVariant = (mode == .inner && candidate.isIPhoneDuoFoldedVariant)
+                || (mode == .outer && candidate.isIPhoneDuoUnfoldedVariant)
+            if candidate.isIPhoneDuoDualDisplay || isOppositeVariant {
+                microCodeBootedSimulatorIDs.remove(candidate.id)
+                _ = try? await simctlCommand(["shutdown", candidate.id], timeoutSeconds: 8.0)
+            }
+        }
+
+        let matchesRequestedVariant: (RuntimeDevice) -> Bool = { sim in
+            guard sim.isReadyForLaunch else { return false }
+            return mode == .inner ? sim.isIPhoneDuoUnfoldedVariant : sim.isIPhoneDuoFoldedVariant
+        }
+
+        if let existing = devices.first(where: matchesRequestedVariant) {
+            mode.persist(for: existing.id)
+            return existing
+        }
+
+        // Refresh device catalog in case CoreSimulator storage just switched to LocalFallback.
+        let refreshedBeforeCreate = await listAppleSimulators()
+        if !refreshedBeforeCreate.isEmpty {
+            devices.removeAll { $0.isAppleSimulator }
+            devices.append(contentsOf: refreshedBeforeCreate)
+            for candidate in refreshedBeforeCreate where candidate.isIPhoneDuoFamily && candidate.isBooted {
+                let isOppositeVariant = (mode == .inner && candidate.isIPhoneDuoFoldedVariant)
+                    || (mode == .outer && candidate.isIPhoneDuoUnfoldedVariant)
+                if candidate.isIPhoneDuoDualDisplay || isOppositeVariant {
+                    microCodeBootedSimulatorIDs.remove(candidate.id)
+                    _ = try? await simctlCommand(["shutdown", candidate.id], timeoutSeconds: 8.0)
+                }
+            }
+            if let existing = refreshedBeforeCreate.first(where: matchesRequestedVariant) {
+                mode.persist(for: existing.id)
+                return existing
+            }
+        }
+
+        await Task.detached(priority: .utility) {
+            Self.ensureHeadlessIPhoneDuoProfilesInstalled()
+        }.value
+
+        let deviceName = mode == .inner ? "iPhone Duo (Unfolded)" : "iPhone Duo (Folded)"
+        let deviceTypeID = mode == .inner
+            ? "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo-Unfolded"
+            : "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo-Folded"
+        let createArgs: [String]
+        if let duoRuntimeID = detectedAppleModels.first(where: \.isIPhoneDuo)?.runtimeIdentifier {
+            createArgs = ["create", deviceName, deviceTypeID, duoRuntimeID]
+        } else {
+            createArgs = ["create", deviceName, deviceTypeID]
+        }
+        _ = try? await simctlCommand(createArgs, timeoutSeconds: 18.0)
+
+        let updated = await listAppleSimulators()
+        if !updated.isEmpty {
+            devices.removeAll { $0.isAppleSimulator }
+            devices.append(contentsOf: updated)
+        }
+        let resolved = updated.first(where: matchesRequestedVariant)
+            ?? updated.first(where: { $0.isIPhoneDuoFamily && !$0.isIPhoneDuoDualDisplay && $0.isReadyForLaunch })
+        if let resolved {
+            mode.persist(for: resolved.id)
+        }
+        return resolved
     }
 
     /// Schedules an automatic debounced Hot Reload when a workspace source file is saved by the Editor or AI Agent.
@@ -1161,10 +1527,11 @@ final class DeviceRuntimeService: ObservableObject {
                 try? pkill.run()
                 pkill.waitUntilExit()
 
+                let simctl = Self.resolvedSimctlInvocation(["shutdown"])
                 for simID in idsToShutdown {
                     let proc = Process()
-                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-                    proc.arguments = ["simctl", "shutdown", simID]
+                    proc.executableURL = URL(fileURLWithPath: simctl.executable)
+                    proc.arguments = simctl.prefixArgs + [simID]
                     proc.standardOutput = FileHandle.nullDevice
                     proc.standardError = FileHandle.nullDevice
                     try? proc.run()
@@ -1516,12 +1883,26 @@ final class DeviceRuntimeService: ObservableObject {
             try Task.checkCancellation()
             if !device.isBooted {
                 microCodeBootedSimulatorIDs.insert(device.id)
-                _ = try await command("/usr/bin/xcrun", ["simctl", "boot", device.id], directory: nil)
+            }
+            do {
+                _ = try await simctlCommand(["boot", device.id], timeoutSeconds: 30.0)
+            } catch {
+                if !error.localizedDescription.localizedCaseInsensitiveContains("current state: Booted") {
+                    throw error
+                }
             }
             try Task.checkCancellation()
-            // `boot` only starts CoreSimulator.  Wait for SpringBoard before
-            // handing the destination to xcodebuild/install/launch.
-            _ = try await command("/usr/bin/xcrun", ["simctl", "bootstatus", device.id, "-b"], directory: nil)
+            // `boot` was already requested above. Monitor boot completion WITHOUT `-b`
+            // because passing `-b` after `simctl boot` can remain blocked on Xcode 27+
+            // even after the simulator reaches the Booted state.
+            do {
+                _ = try await simctlCommand(["bootstatus", device.id], timeoutSeconds: 60.0)
+            } catch {
+                let liveSimulators = await listAppleSimulators()
+                guard liveSimulators.contains(where: { $0.id == device.id && $0.isBooted }) else {
+                    throw error
+                }
+            }
             try Task.checkCancellation()
             statusMessage = "\(device.previewTitle) is ready: \(device.name)."
         case .android:
@@ -1634,8 +2015,8 @@ final class DeviceRuntimeService: ObservableObject {
                 appendOutput(installed.output)
                 launched = try await command("/usr/bin/xcrun", ["devicectl", "device", "process", "launch", "--device", device.id, "--terminate-existing", bundleID], directory: project.root)
             } else {
-                _ = try await command("/usr/bin/xcrun", ["simctl", "install", device.id, appURL.path], directory: project.root)
-                launched = try await command("/usr/bin/xcrun", ["simctl", "launch", "--terminate-running-process", device.id, bundleID], directory: project.root)
+                _ = try await simctlCommand(["install", device.id, appURL.path], directory: project.root)
+                launched = try await simctlCommand(["launch", "--terminate-running-process", device.id, bundleID], directory: project.root)
             }
             appendOutput(launched.output)
             statusMessage = "Installed and launched \(scheme) on \(device.isPhysicalAppleDevice ? "physical device" : device.previewTitle): \(device.name)."
@@ -1690,23 +2071,688 @@ final class DeviceRuntimeService: ObservableObject {
         throw ToolBoxError.executionFailed("\(technology) can run on iPhone and iPad simulators. \(family.previewTitle) remains available for interactive Preview; build a native Xcode target to deploy to it.")
     }
 
-    private func listAppleSimulators() async -> [RuntimeDevice] {
+    private func listAppleSimulators(allowAutoSeed: Bool = true) async -> [RuntimeDevice] {
         struct Response: Decodable { let devices: [String: [Device]] }
-        struct Device: Decodable { let name: String; let udid: String; let state: String; let isAvailable: Bool? }
-        guard let result = try? await command("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "-j"], directory: nil),
+        struct Device: Decodable {
+            let name: String
+            let udid: String
+            let state: String
+            let isAvailable: Bool?
+            let deviceTypeIdentifier: String?
+            let dataPath: String?
+        }
+        await Task.detached(priority: .utility) {
+            Self.reconcileCoreSimulatorStorage()
+            Self.ensureHeadlessIPhoneDuoProfilesInstalled()
+        }.value
+
+        let discoveredCatalog = await discoverAppleMachineModels()
+        if !discoveredCatalog.isEmpty {
+            self.detectedAppleModels = discoveredCatalog
+        }
+
+        guard let result = try? await simctlCommand(["list", "devices", "available", "-j"]),
               let response = try? JSONDecoder().decode(Response.self, from: Data(result.output.utf8)) else { return [] }
-        return response.devices.flatMap { runtime, list in
-            list.filter { $0.isAvailable ?? true }.map {
-                RuntimeDevice(
-                    id: $0.udid,
-                    name: $0.name,
+        let storagePreflight = Self.appleSimulatorStoragePreflight()
+        var mapped: [RuntimeDevice] = response.devices.flatMap { runtime, list in
+            list.filter { $0.isAvailable ?? true }.map { item in
+                let dataExists = item.dataPath.map { FileManager.default.fileExists(atPath: $0) } ?? true
+                let isReady = storagePreflight.isReady && (dataExists || storagePreflight.brokenVolume == nil)
+                let preflight = isReady ? nil : storagePreflight.message
+                return RuntimeDevice(
+                    id: item.udid,
+                    name: item.name,
                     platform: .ios,
-                    state: $0.state,
+                    state: isReady ? item.state : "Volume Offline",
                     runtime: runtime.replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.", with: ""),
-                    kind: .simulator
+                    isReadyForLaunch: isReady,
+                    preflightMessage: preflight,
+                    kind: .simulator,
+                    deviceTypeIdentifier: item.deviceTypeIdentifier
                 )
             }
         }
+
+        // If the active Devices directory only has iPhone Duo (e.g. fresh LocalFallback or
+        // restricted beta runtime), automatically seed a rich lineup of classic + modern
+        // iPhone & iPad simulators detected directly on this Mac so all standard models
+        // are immediately selectable alongside iPhone Duo.
+        let nonDuoReadyCount = mapped.filter { !$0.isIPhoneDuoFamily && $0.isReadyForLaunch }.count
+        if allowAutoSeed && storagePreflight.isReady && nonDuoReadyCount < 6 && !discoveredCatalog.isEmpty {
+            let seededAny = await seedDefaultDetectedSimulators(existing: mapped, catalog: discoveredCatalog)
+            if seededAny {
+                mapped = await listAppleSimulators(allowAutoSeed: false)
+            }
+        }
+
+        // Remove redundant stock dual-display iPhone Duo rows from UI listings when headless Folded/Unfolded exist
+        let hasHeadlessDuo = mapped.contains { $0.isIPhoneDuoFoldedVariant || $0.isIPhoneDuoUnfoldedVariant }
+        let filtered = hasHeadlessDuo ? mapped.filter { !$0.isIPhoneDuoDualDisplay } : mapped
+
+        // Sort booted first, then crash-free single-display iPhone Duo (Folded / Unfolded), then newest iPhones & iPads
+        let catalogRank: [String: Int] = Dictionary(
+            uniqueKeysWithValues: discoveredCatalog.enumerated().map { ($0.element.name.lowercased(), $0.offset) }
+        )
+        return filtered.sorted { lhs, rhs in
+            if lhs.isBooted != rhs.isBooted { return lhs.isBooted }
+            let lhsHeadlessDuo = lhs.isIPhoneDuoFoldedVariant || lhs.isIPhoneDuoUnfoldedVariant
+            let rhsHeadlessDuo = rhs.isIPhoneDuoFoldedVariant || rhs.isIPhoneDuoUnfoldedVariant
+            if lhsHeadlessDuo != rhsHeadlessDuo { return lhsHeadlessDuo }
+            if lhs.isIPhoneDuoFamily != rhs.isIPhoneDuoFamily { return lhs.isIPhoneDuoFamily }
+            if lhs.appleSimulatorFamily != rhs.appleSimulatorFamily {
+                let order = AppleSimulatorFamily.previewOrder
+                let lIdx = lhs.appleSimulatorFamily.flatMap(order.firstIndex(of:)) ?? order.count
+                let rIdx = rhs.appleSimulatorFamily.flatMap(order.firstIndex(of:)) ?? order.count
+                if lIdx != rIdx { return lIdx < rIdx }
+            }
+            let lRank = catalogRank[lhs.name.lowercased()] ?? Int.max
+            let rRank = catalogRank[rhs.name.lowercased()] ?? Int.max
+            if lRank != rRank { return lRank < rRank }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    /// Dynamically discovers all SimDeviceTypes and SimRuntimes installed on the user's Mac.
+    private func discoverAppleMachineModels() async -> [DetectedAppleSimulatorModel] {
+        struct DeviceTypesResponse: Decodable {
+            struct Item: Decodable {
+                let name: String
+                let identifier: String
+                let bundlePath: String?
+                let productFamily: String?
+                let modelIdentifier: String?
+            }
+            let devicetypes: [Item]
+        }
+        struct RuntimesResponse: Decodable {
+            struct SupportedType: Decodable {
+                let identifier: String
+            }
+            struct RuntimeItem: Decodable {
+                let identifier: String
+                let name: String
+                let version: String?
+                let platform: String?
+                let isAvailable: Bool?
+                let bundlePath: String?
+                let supportedDeviceTypes: [SupportedType]?
+            }
+            let runtimes: [RuntimeItem]
+        }
+
+        async let dtCall = try? simctlCommand(["list", "devicetypes", "-j"], timeoutSeconds: 12.0)
+        async let rtCall = try? simctlCommand(["list", "runtimes", "-j"], timeoutSeconds: 12.0)
+        guard let dtRes = await dtCall,
+              let rtRes = await rtCall,
+              let dtDecoded = try? JSONDecoder().decode(DeviceTypesResponse.self, from: Data(dtRes.output.utf8)),
+              let rtDecoded = try? JSONDecoder().decode(RuntimesResponse.self, from: Data(rtRes.output.utf8)) else {
+            return []
+        }
+
+        let availableRuntimes = rtDecoded.runtimes.filter { $0.isAvailable ?? true }
+        guard !availableRuntimes.isEmpty else { return [] }
+
+        struct RuntimeContext {
+            let identifier: String
+            let name: String
+            let platform: String
+            let supportedIDs: Set<String>
+            let restrictedAliases: [String]
+        }
+
+        let contexts: [RuntimeContext] = availableRuntimes.map { rt in
+            var restricted: [String] = []
+            if let bp = rt.bundlePath {
+                let profPath = bp + "/Contents/Resources/profile.plist"
+                if let dict = NSDictionary(contentsOfFile: profPath),
+                   let aliases = dict["restrictedToDeviceTypes"] as? [String] {
+                    restricted = aliases
+                }
+            }
+            return RuntimeContext(
+                identifier: rt.identifier,
+                name: rt.name,
+                platform: (rt.platform ?? "iOS").lowercased(),
+                supportedIDs: Set((rt.supportedDeviceTypes ?? []).map(\.identifier)),
+                restrictedAliases: restricted
+            )
+        }
+
+        // Pick newest runtime per platform (simctl lists newest or sort by version descending)
+        func preferredRuntime(forPlatformKey key: String) -> RuntimeContext? {
+            contexts
+                .filter { $0.platform == key }
+                .sorted { $0.identifier.localizedStandardCompare($1.identifier) == .orderedDescending }
+                .first
+        }
+
+        let iosRuntime = preferredRuntime(forPlatformKey: "ios")
+        let watchRuntime = preferredRuntime(forPlatformKey: "watchos")
+        let tvRuntime = preferredRuntime(forPlatformKey: "tvos")
+        let visionRuntime = preferredRuntime(forPlatformKey: "xros") ?? preferredRuntime(forPlatformKey: "visionos")
+
+        var seenNames = Set<String>()
+        var models: [DetectedAppleSimulatorModel] = []
+
+        for dt in dtDecoded.devicetypes {
+            if dt.identifier.contains(".MicroCode.") { continue }
+            if dt.identifier.hasSuffix("-Folded") || dt.identifier.hasSuffix("-Unfolded") { continue }
+            if dt.name.contains("(Folded)") || dt.name.contains("(Unfolded)") { continue }
+            guard let bundlePath = dt.bundlePath, FileManager.default.fileExists(atPath: bundlePath) else { continue }
+
+            let familyRaw = dt.productFamily ?? (dt.name.contains("iPad") ? "iPad" : "iPhone")
+            let familyLower = familyRaw.lowercased()
+            if familyLower.contains("ipod") { continue }
+
+            let targetRuntime: RuntimeContext?
+            if familyLower.contains("watch") {
+                targetRuntime = watchRuntime
+            } else if familyLower.contains("tv") {
+                targetRuntime = tvRuntime
+            } else if familyLower.contains("vision") {
+                targetRuntime = visionRuntime
+            } else {
+                targetRuntime = iosRuntime
+            }
+            guard let rt = targetRuntime else { continue }
+
+            // Clean RAM-tier suffix duplicates (e.g. prefer "iPad Pro 13-inch (M5)" once instead of 8GB + 16GB clones)
+            let cleanName = dt.name
+                .replacingOccurrences(of: " (16GB)", with: "")
+                .replacingOccurrences(of: " (12GB)", with: "")
+                .replacingOccurrences(of: " (8GB)", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let dedupKey = "\(familyLower)::\(cleanName.lowercased())"
+            guard !seenNames.contains(dedupKey) else { continue }
+            seenNames.insert(dedupKey)
+
+            let nativelySupported = rt.supportedIDs.contains(dt.identifier)
+            // Only offer non-native models when we know the runtime's restrictedToDeviceTypes alias so bridging is guaranteed to succeed
+            guard nativelySupported || !rt.restrictedAliases.isEmpty else { continue }
+
+            models.append(DetectedAppleSimulatorModel(
+                id: dt.identifier,
+                name: cleanName,
+                productFamily: familyRaw,
+                bundlePath: bundlePath,
+                modelIdentifier: dt.modelIdentifier,
+                runtimeIdentifier: rt.identifier,
+                runtimeName: rt.name,
+                restrictedAliases: rt.restrictedAliases,
+                isNativelySupportedByRuntime: nativelySupported
+            ))
+        }
+
+        return models
+    }
+
+    /// Seeds a curated set of flagship + classic iPhone & iPad simulators detected on the user's Mac
+    /// whenever the active CoreSimulator `Devices` directory has fewer than 6 non-Duo simulators.
+    private func seedDefaultDetectedSimulators(
+        existing: [RuntimeDevice],
+        catalog: [DetectedAppleSimulatorModel]
+    ) async -> Bool {
+        let existingNames = Set(existing.map { $0.name.lowercased() })
+
+        let nonDuoIPhones = catalog.filter { $0.family == .iPhone && !$0.isIPhoneDuo }
+        let iPads = catalog.filter { $0.family == .iPad }
+
+        var desired: [DetectedAppleSimulatorModel] = []
+        // 1. Top 6 modern iPhones detected on this Mac (e.g. iPhone 18 Pro/Max, iPhone 17 Pro/Max, iPhone Air, iPhone 17)
+        for model in nonDuoIPhones.prefix(6) where !desired.contains(model) {
+            desired.append(model)
+        }
+        // 2. Classic / earlier generations detected on this Mac (iPhone 16 Pro, iPhone 15 Pro, iPhone SE)
+        let classicKeywords = ["iPhone 16 Pro", "iPhone 16", "iPhone 15 Pro", "iPhone SE"]
+        for kw in classicKeywords {
+            if let match = nonDuoIPhones.first(where: { $0.name == kw || $0.name.hasPrefix(kw + " (") }),
+               !desired.contains(match) {
+                desired.append(match)
+            }
+        }
+        // 3. Top 4 diverse iPads detected on this Mac (Pro 13, Pro 11, Air, mini)
+        let iPadCategories = ["iPad Pro 13", "iPad Pro (12.9", "iPad Pro 11", "iPad Pro (11", "iPad Air 11", "iPad Air", "iPad mini", "iPad ("]
+        for cat in iPadCategories {
+            if desired.filter({ $0.family == .iPad }).count >= 4 { break }
+            if let match = iPads.first(where: { $0.name.hasPrefix(cat) }),
+               !desired.contains(match) {
+                desired.append(match)
+            }
+        }
+        for model in iPads.prefix(3) where desired.filter({ $0.family == .iPad }).count < 3 && !desired.contains(model) {
+            desired.append(model)
+        }
+
+        let toCreate = desired.filter { !existingNames.contains($0.name.lowercased()) }
+        guard !toCreate.isEmpty else { return false }
+
+        // Bridge any restricted profiles in one batch before restarting CoreSimulatorService once
+        let bridgedMap: [String: String] = await Task.detached(priority: .utility) {
+            var map: [String: String] = [:]
+            var wroteAnyProfile = false
+            for model in toCreate {
+                let (effectiveID, didWrite) = Self.bridgeDeviceTypeBundle(for: model, restartDaemon: false)
+                map[model.id] = effectiveID
+                if didWrite { wroteAnyProfile = true }
+            }
+            if wroteAnyProfile {
+                Self.restartCoreSimulatorDaemon()
+                Thread.sleep(forTimeInterval: 0.6)
+            }
+            return map
+        }.value
+
+        var createdAny = false
+        for model in toCreate {
+            let typeID = bridgedMap[model.id] ?? model.id
+            if (try? await simctlCommand(["create", model.name, typeID, model.runtimeIdentifier], timeoutSeconds: 12.0)) != nil {
+                createdAny = true
+            }
+        }
+        return createdAny
+    }
+
+    private nonisolated static func ensureBridgedDeviceTypeIfNeeded(for model: DetectedAppleSimulatorModel) -> String {
+        bridgeDeviceTypeBundle(for: model, restartDaemon: true).effectiveTypeID
+    }
+
+    private nonisolated static func bridgeDeviceTypeBundle(
+        for model: DetectedAppleSimulatorModel,
+        restartDaemon: Bool
+    ) -> (effectiveTypeID: String, didWriteNewBundle: Bool) {
+        if model.isNativelySupportedByRuntime || model.restrictedAliases.isEmpty {
+            return (model.id, false)
+        }
+        let fm = FileManager.default
+        let slug = model.id.split(separator: ".").last.map(String.init) ?? model.name.replacingOccurrences(of: " ", with: "-")
+        let bridgedID = "com.apple.CoreSimulator.SimDeviceType.MicroCode.\(slug)"
+        let userProfilesDir = NSHomeDirectory() + "/Library/Developer/CoreSimulator/Profiles/DeviceTypes"
+        let bundleFileName = (model.bundlePath as NSString).lastPathComponent
+        let destBundle = userProfilesDir + "/" + bundleFileName
+        let infoPath = destBundle + "/Contents/Info.plist"
+
+        if fm.fileExists(atPath: infoPath),
+           let existingInfo = NSDictionary(contentsOfFile: infoPath),
+           (existingInfo["CFBundleIdentifier"] as? String) == bridgedID {
+            // Ensure createByDefaultForRuntimeVersions is stripped so CoreSimulator doesn't duplicate on restart
+            let profPath = destBundle + "/Contents/Resources/profile.plist"
+            if let profDict = NSMutableDictionary(contentsOfFile: profPath),
+               profDict["createByDefaultForRuntimeVersions"] != nil {
+                profDict.removeObject(forKey: "createByDefaultForRuntimeVersions")
+                profDict.write(toFile: profPath, atomically: true)
+            }
+            return (bridgedID, false)
+        }
+
+        guard fm.fileExists(atPath: model.bundlePath) else {
+            return (model.id, false)
+        }
+        try? fm.createDirectory(atPath: userProfilesDir, withIntermediateDirectories: true)
+        try? fm.removeItem(atPath: destBundle)
+        guard (try? fm.copyItem(atPath: model.bundlePath, toPath: destBundle)) != nil else {
+            return (model.id, false)
+        }
+
+        if let infoDict = NSMutableDictionary(contentsOfFile: infoPath) {
+            infoDict["CFBundleIdentifier"] = bridgedID
+            infoDict["CFBundleName"] = model.name
+            infoDict.write(toFile: infoPath, atomically: true)
+        }
+
+        let profPath = destBundle + "/Contents/Resources/profile.plist"
+        if let profDict = NSMutableDictionary(contentsOfFile: profPath) {
+            profDict.removeObject(forKey: "createByDefaultForRuntimeVersions")
+            var aliases = (profDict["aliases"] as? [String]) ?? []
+            for req in model.restrictedAliases where !aliases.contains(req) {
+                aliases.append(req)
+            }
+            profDict["aliases"] = aliases
+            let features = ((profDict["supportedFeatures"] as? NSDictionary)?.mutableCopy() as? NSMutableDictionary) ?? NSMutableDictionary()
+            features["com.apple.CoreSimulator.framebuffer.27"] = true
+            profDict["supportedFeatures"] = features
+            profDict.write(toFile: profPath, atomically: true)
+        }
+
+        if restartDaemon {
+            restartCoreSimulatorDaemon()
+            Thread.sleep(forTimeInterval: 0.6)
+        }
+        return (bridgedID, true)
+    }
+
+    /// Ensures single-integrated-display `iPhone Duo (Folded)` (1398×2034 · Outer) and
+    /// `iPhone Duo (Unfolded)` (2007×2853 · Inner) SimDeviceType bundles exist in
+    /// `~/Library/Developer/CoreSimulator/Profiles/DeviceTypes` so headless `simctl boot`
+    /// runs `SpringBoard` and `backboardd` cleanly on iOS 27.1+ without `Simulator.app`.
+    private nonisolated static func ensureHeadlessIPhoneDuoProfilesInstalled() {
+        let fm = FileManager.default
+        let stockPath = "/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone Duo.simdevicetype"
+        guard fm.fileExists(atPath: stockPath) else { return }
+
+        let userProfilesDir = NSHomeDirectory() + "/Library/Developer/CoreSimulator/Profiles/DeviceTypes"
+        let specs: [(
+            bundleName: String,
+            bundleID: String,
+            chromeID: String,
+            maskID: String,
+            width: Int,
+            height: Int,
+            cornerLL: Int,
+            cornerLR: Int,
+            cornerUL: Int,
+            cornerUR: Int
+        )] = [
+            (
+                bundleName: "iPhone Duo (Folded)",
+                bundleID: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo-Folded",
+                chromeID: "com.apple.dt.devicekit.chrome.phone15",
+                maskID: "1C896A2B-F0D7-405C-8D0F-66E4B80AD044",
+                width: 1398,
+                height: 2034,
+                cornerLL: 8,
+                cornerLR: 59,
+                cornerUL: 8,
+                cornerUR: 59
+            ),
+            (
+                bundleName: "iPhone Duo (Unfolded)",
+                bundleID: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo-Unfolded",
+                chromeID: "com.apple.dt.devicekit.chrome.phone14",
+                maskID: "BF0DC480-5EE2-4EC1-B02B-C75E94759832",
+                width: 2007,
+                height: 2853,
+                cornerLL: 55,
+                cornerLR: 55,
+                cornerUL: 55,
+                cornerUR: 55
+            )
+        ]
+
+        var installedNewProfile = false
+        for spec in specs {
+            let destBundle = userProfilesDir + "/\(spec.bundleName).simdevicetype"
+            if fm.fileExists(atPath: destBundle + "/Contents/Info.plist") {
+                continue
+            }
+            try? fm.createDirectory(atPath: userProfilesDir, withIntermediateDirectories: true)
+            try? fm.removeItem(atPath: destBundle)
+            guard (try? fm.copyItem(atPath: stockPath, toPath: destBundle)) != nil else { continue }
+
+            let infoPath = destBundle + "/Contents/Info.plist"
+            if let infoDict = NSMutableDictionary(contentsOfFile: infoPath) {
+                infoDict["CFBundleIdentifier"] = spec.bundleID
+                infoDict["CFBundleName"] = spec.bundleName
+                infoDict.write(toFile: infoPath, atomically: true)
+            }
+
+            let profilePath = destBundle + "/Contents/Resources/profile.plist"
+            if let profileDict = NSMutableDictionary(contentsOfFile: profilePath) {
+                profileDict["chromeIdentifier"] = spec.chromeID
+                profileDict["framebufferMask"] = spec.maskID
+                profileDict.write(toFile: profilePath, atomically: true)
+            }
+
+            let capPath = destBundle + "/Contents/Resources/capabilities.plist"
+            if let rootDict = NSMutableDictionary(contentsOfFile: capPath),
+               let capDict = (rootDict["capabilities"] as? NSDictionary)?.mutableCopy() as? NSMutableDictionary {
+                capDict["marketing-name"] = spec.bundleName
+                capDict["subtype"] = spec.height
+                capDict["memoryClass"] = 8
+                if let artwork = (capDict["ArtworkTraits"] as? NSDictionary)?.mutableCopy() as? NSMutableDictionary {
+                    artwork["ArtworkDeviceSubType"] = spec.height
+                    artwork["DevicePerformanceMemoryClass"] = 8
+                    capDict["ArtworkTraits"] = artwork
+                }
+                if let screenDims = (capDict["ScreenDimensionsCapability"] as? NSDictionary)?.mutableCopy() as? NSMutableDictionary {
+                    screenDims["main-screen-width"] = spec.width
+                    screenDims["main-screen-height"] = spec.height
+                    capDict["ScreenDimensionsCapability"] = screenDims
+                }
+                let singleDisplay: NSDictionary = [
+                    "chromeIdentifier": spec.chromeID,
+                    "colorspace": "P3",
+                    "cornerRadiusLL": spec.cornerLL,
+                    "cornerRadiusLR": spec.cornerLR,
+                    "cornerRadiusUL": spec.cornerUL,
+                    "cornerRadiusUR": spec.cornerUR,
+                    "deviceName": "primary",
+                    "displayName": "LCD",
+                    "displayType": "integrated",
+                    "framebufferMaskIdentifier": spec.maskID,
+                    "hasDigitizer": true,
+                    "hdpi": 460,
+                    "height": spec.height,
+                    "nativeOrientation": 0,
+                    "nativeRotation": 0,
+                    "powerState": 1,
+                    "refreshRate": 60,
+                    "scale": 3,
+                    "screenID": 1,
+                    "surfaceType": 1,
+                    "vdpi": 460,
+                    "width": spec.width
+                ]
+                capDict["displays"] = [singleDisplay]
+                rootDict["capabilities"] = capDict
+                rootDict.write(toFile: capPath, atomically: true)
+            }
+            installedNewProfile = true
+        }
+
+        if installedNewProfile {
+            restartCoreSimulatorDaemon()
+        }
+    }
+
+    /// Validates that a CoreSimulator directory resides on a mounted, writable filesystem
+    /// with POSIX ownership enabled (`!MNT_IGNORE_OWNERSHIP`) and at least 1.5 GB free space.
+    /// External volumes mounted with `noowners` or near-zero free space cause `simctl create`
+    /// and headless SpringBoard launches to fail with `NSPOSIXErrorDomain Code=22 (EINVAL)`.
+    private nonisolated static func isHealthyCoreSimulatorDirectory(_ path: String) -> (healthy: Bool, reason: String?) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else {
+            return (false, "directory is unmounted or missing")
+        }
+        var fs = Darwin.statfs()
+        guard path.withCString({ statfs($0, &fs) }) == 0 else {
+            return (false, "unable to inspect volume filesystem")
+        }
+        if (fs.f_flags & UInt32(MNT_RDONLY)) != 0 {
+            return (false, "volume is mounted read-only")
+        }
+        if (fs.f_flags & UInt32(MNT_IGNORE_OWNERSHIP)) != 0 {
+            return (false, "volume has Ignore Ownership (noowners) enabled, which breaks CoreSimulator device creation")
+        }
+        let freeBytes = UInt64(fs.f_bavail) * UInt64(fs.f_bsize)
+        let minFreeBytes: UInt64 = 1_500_000_000 // 1.5 GB minimum headroom for CoreSimulator caches & runtime state
+        if freeBytes < minFreeBytes {
+            let freeMB = freeBytes / (1024 * 1024)
+            return (false, "low free space (\(freeMB) MB available; at least 1.5 GB required)")
+        }
+        return (true, nil)
+    }
+
+    /// Automatically switches CoreSimulator storage symlinks (Devices, Caches, Temp, Logs)
+    /// to a local fallback directory when an external SSD (e.g. /Volumes/AeroIOSBuild) is
+    /// unplugged, mounted with `noowners`, or out of disk space — and seamlessly restores
+    /// the external symlinks only when the drive is reconnected AND passes health checks.
+    private nonisolated static func reconcileCoreSimulatorStorage() {
+        let home = NSHomeDirectory()
+        let csRoot = home + "/Library/Developer/CoreSimulator"
+        let metaPath = csRoot + "/.microcode-external-links.json"
+        let fallbackRoot = csRoot + "/LocalFallback"
+        let fm = FileManager.default
+
+        let managedLinks: [(key: String, linkPath: String)] = [
+            ("Devices", csRoot + "/Devices"),
+            ("Caches", csRoot + "/Caches"),
+            ("Temp", csRoot + "/Temp"),
+            ("Logs", home + "/Library/Logs/CoreSimulator")
+        ]
+
+        var savedExternal: [String: String] = [:]
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: metaPath)),
+           let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+            savedExternal = decoded
+        }
+
+        var hasUnmountedExternalLink = false
+        var hasUnhealthyExternalLink = false
+        var brokenVolumeNames: Set<String> = []
+        var isUsingLocalFallback = false
+
+        for item in managedLinks {
+            guard let dest = try? fm.destinationOfSymbolicLink(atPath: item.linkPath) else { continue }
+            if dest.contains("/LocalFallback/") {
+                isUsingLocalFallback = true
+            } else {
+                savedExternal[item.key] = dest
+                if !fm.fileExists(atPath: item.linkPath) {
+                    hasUnmountedExternalLink = true
+                    let parts = dest.split(separator: "/").map(String.init)
+                    if parts.count >= 2 && parts[0] == "Volumes" {
+                        brokenVolumeNames.insert(parts[1])
+                    }
+                } else if !isHealthyCoreSimulatorDirectory(item.linkPath).healthy {
+                    hasUnhealthyExternalLink = true
+                }
+            }
+        }
+
+        // 1. If currently on LocalFallback, restore external links ONLY when the external
+        //    volume is online AND passes POSIX ownership + free-space health checks.
+        if isUsingLocalFallback,
+           let extDevices = savedExternal["Devices"],
+           isHealthyCoreSimulatorDirectory(extDevices).healthy {
+            let allExternalTargetsHealthy = managedLinks.allSatisfy { item in
+                guard let extTarget = savedExternal[item.key] else { return true }
+                try? fm.createDirectory(atPath: extTarget, withIntermediateDirectories: true)
+                return isHealthyCoreSimulatorDirectory(extTarget).healthy
+            }
+            guard allExternalTargetsHealthy else { return }
+
+            var restoredAny = false
+            for item in managedLinks {
+                guard let extTarget = savedExternal[item.key] else { continue }
+                if (try? fm.destinationOfSymbolicLink(atPath: item.linkPath)) != extTarget {
+                    try? fm.removeItem(atPath: item.linkPath)
+                    if ((try? fm.createSymbolicLink(atPath: item.linkPath, withDestinationPath: extTarget)) != nil) {
+                        restoredAny = true
+                    }
+                }
+            }
+            if restoredAny {
+                restartCoreSimulatorDaemon()
+            }
+            return
+        }
+
+        guard hasUnmountedExternalLink || hasUnhealthyExternalLink else { return }
+
+        // 2. If unmounted, try auto-mounting attached APFS volume(s) once before falling back locally.
+        if hasUnmountedExternalLink {
+            for vol in brokenVolumeNames {
+                let mountProc = Process()
+                mountProc.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+                mountProc.arguments = ["mount", vol]
+                mountProc.standardOutput = FileHandle.nullDevice
+                mountProc.standardError = FileHandle.nullDevice
+                if (try? mountProc.run()) != nil {
+                    mountProc.waitUntilExit()
+                }
+            }
+        }
+
+        let stillNeedsFallback = managedLinks.contains { item in
+            guard let dest = try? fm.destinationOfSymbolicLink(atPath: item.linkPath),
+                  !dest.contains("/LocalFallback/") else { return false }
+            return !isHealthyCoreSimulatorDirectory(item.linkPath).healthy
+        }
+        guard stillNeedsFallback else { return }
+
+        // 3. Persist external symlink targets and switch all external symlinks together to LocalFallback.
+        if !savedExternal.isEmpty,
+           let encoded = try? JSONSerialization.data(withJSONObject: savedExternal, options: [.prettyPrinted, .sortedKeys]) {
+            try? fm.createDirectory(atPath: csRoot, withIntermediateDirectories: true)
+            try? encoded.write(to: URL(fileURLWithPath: metaPath), options: .atomic)
+        }
+
+        var switchedAny = false
+        for item in managedLinks {
+            guard let dest = try? fm.destinationOfSymbolicLink(atPath: item.linkPath),
+                  !dest.contains("/LocalFallback/") else { continue }
+            let fbTarget = fallbackRoot + "/" + item.key
+            try? fm.createDirectory(atPath: fbTarget, withIntermediateDirectories: true)
+            try? fm.createDirectory(atPath: (item.linkPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try? fm.removeItem(atPath: item.linkPath)
+            if ((try? fm.createSymbolicLink(atPath: item.linkPath, withDestinationPath: fbTarget)) != nil) {
+                switchedAny = true
+            }
+        }
+
+        if switchedAny {
+            restartCoreSimulatorDaemon()
+        }
+    }
+
+    private nonisolated static func restartCoreSimulatorDaemon() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        proc.arguments = ["-9", "com.apple.CoreSimulator.CoreSimulatorService"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        if (try? proc.run()) != nil {
+            proc.waitUntilExit()
+        }
+    }
+
+    private nonisolated static func appleSimulatorStoragePreflight() -> (isReady: Bool, brokenVolume: String?, message: String?) {
+        reconcileCoreSimulatorStorage()
+        let devicesDir = NSHomeDirectory() + "/Library/Developer/CoreSimulator/Devices"
+        let fm = FileManager.default
+        if let dest = try? fm.destinationOfSymbolicLink(atPath: devicesDir), !fm.fileExists(atPath: devicesDir) {
+            let parts = dest.split(separator: "/").map(String.init)
+            let volumeName = (parts.count >= 2 && parts[0] == "Volumes") ? "/Volumes/\(parts[1])" : dest
+            return (
+                false,
+                volumeName,
+                "CoreSimulator Devices directory points to unmounted external drive (\(volumeName)). Mount \(volumeName) to boot iOS Sim, or test immediately in Web Preview → iPhone Duo (Outer / Inner)."
+            )
+        }
+        return (true, nil, nil)
+    }
+
+    private nonisolated static func resolvedSimctlInvocation(_ simctlArgs: [String]) -> (executable: String, prefixArgs: [String]) {
+        let systemSimctl = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl"
+        let devDirProc = Process()
+        let pipe = Pipe()
+        devDirProc.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        devDirProc.arguments = ["-p"]
+        devDirProc.standardOutput = pipe
+        devDirProc.standardError = FileHandle.nullDevice
+        if (try? devDirProc.run()) != nil {
+            devDirProc.waitUntilExit()
+            let devDir = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let xcodeSimctl = "\(devDir)/usr/bin/simctl"
+            if FileManager.default.isExecutableFile(atPath: xcodeSimctl) {
+                return (xcodeSimctl, simctlArgs)
+            }
+        }
+        if FileManager.default.isExecutableFile(atPath: systemSimctl) {
+            return (systemSimctl, simctlArgs)
+        }
+        return ("/usr/bin/xcrun", ["simctl"] + simctlArgs)
+    }
+
+    private nonisolated func simctlCommand(
+        _ simctlArgs: [String],
+        directory: URL? = nil,
+        timeoutSeconds: TimeInterval = 30.0
+    ) async throws -> CommandResult {
+        let resolved = Self.resolvedSimctlInvocation(simctlArgs)
+        return try await command(resolved.executable, resolved.prefixArgs, directory: directory, timeoutSeconds: timeoutSeconds)
     }
 
     /// Uses the active Xcode's CoreDevice inventory rather than an old

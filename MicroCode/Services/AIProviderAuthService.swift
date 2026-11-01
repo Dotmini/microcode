@@ -42,7 +42,7 @@ struct AIProviderConfig: Identifiable, Codable, Equatable {
 // MARK: - Provider Metadata
 
 enum AIProviderMeta: String, CaseIterable, Identifiable {
-    case openai, anthropic, deepseek, gemini, openrouter, groq, mistral, kimi, perplexity, perch, typhoon, cerebras, together, fireworks, minimax, nvidia, grok, codex, qwen, glm
+    case openai, anthropic, deepseek, gemini, tokenme, openrouter, groq, mistral, kimi, perplexity, perch, typhoon, cerebras, together, fireworks, minimax, nvidia, grok, codex, qwen, glm
     
     var id: String { rawValue }
     
@@ -52,6 +52,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return "Claude (Anthropic)"
         case .deepseek: return "DeepSeek"
         case .gemini: return "Google Gemini"
+        case .tokenme: return "TokenMe (9ARM)"
         case .openrouter: return "OpenRouter"
         case .groq: return "Groq (LPU Inference)"
         case .mistral: return "Mistral AI & Codestral"
@@ -83,6 +84,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .kimi: return "moon.stars.fill"
         case .perplexity: return "magnifyingglass.circle.fill"
         case .perch: return "bird.fill"
+        case .tokenme: return "cpu.fill"
         case .typhoon: return "hurricane"
         case .cerebras: return "memorychip.fill"
         case .together: return "square.stack.3d.up.fill"
@@ -108,6 +110,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .kimi: return .cyan
         case .perplexity: return .teal
         case .perch: return .mint
+        case .tokenme: return .cyan
         case .typhoon: return .purple
         case .cerebras: return .pink
         case .together: return .blue
@@ -133,6 +136,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .kimi: return "sk-"
         case .perplexity: return "pplx-"
         case .perch: return "perch-"
+        case .tokenme: return ""
         case .typhoon: return "sk-"
         case .cerebras: return "csk-"
         case .together: return ""
@@ -157,6 +161,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .kimi: return "https://api.moonshot.ai/v1"
         case .perplexity: return "https://api.perplexity.ai"
         case .perch: return UserDefaults.standard.string(forKey: "perch_base_url") ?? "https://api.perchai.app/v1"
+        case .tokenme: return UserDefaults.standard.string(forKey: "tokenme_base_url") ?? "https://api.tokenme.limited/api/v1"
         case .typhoon: return "https://api.opentyphoon.ai/v1"
         case .cerebras: return "https://api.cerebras.ai/v1"
         case .together: return "https://api.together.xyz/v1"
@@ -182,7 +187,8 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .kimi: return ["Kimi-K2.7-Code", "kimi-k2-0711-preview", "kimi-latest", "moonshot-v1-128k"]
         case .perplexity: return ["sonar-reasoning-pro", "sonar-pro", "sonar-reasoning", "sonar"]
         case .perch: return ["perch-1-pro", "perch-coder-v2", "perch-1-fast", "perch-reasoning-r1"]
-        case .typhoon: return ["typhoon-v2.5-30b-a3b-instruct", "typhoon-v2.1-12b-instruct", "typhoon-v2-70b-instruct", "typhoon-v2-r1-70b-preview"]
+        case .tokenme: return ["deepseek-ai/deepseek-v4-flash-0731", "unsloth/qwen3.8-27b-nvfp4"]
+        case .typhoon: return ["typhoon-v2.5-30b-a3b-instruct"]
         case .cerebras: return ["qwen-3-coder-480b", "llama-3.3-70b", "qwen-3-32b", "llama3.1-8b"]
         case .together: return ["Qwen/Qwen3-235B-A22B-fp8-tput", "deepseek-ai/DeepSeek-R1", "meta-llama/Llama-3.3-70B-Instruct-Turbo"]
         case .fireworks: return ["accounts/fireworks/models/deepseek-v3", "accounts/fireworks/models/deepseek-r1", "accounts/fireworks/models/qwen3-235b-a22b"]
@@ -222,6 +228,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .kimi: return .kimi
         case .perplexity: return .perplexity
         case .perch: return .perch
+        case .tokenme: return .tokenme
         case .typhoon: return .typhoon
         case .cerebras: return .cerebras
         case .together: return .together
@@ -366,7 +373,9 @@ class AIProviderAuthService: ObservableObject {
                 return try await validateGemini(apiKey: apiKey)
             case .perplexity, .perch, .minimax:
                 return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            case .openrouter, .groq, .mistral, .kimi, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
+            case .typhoon:
+                return try await validateTyphoon(apiKey: apiKey, baseURL: meta.baseURL)
+            case .tokenme, .openrouter, .groq, .mistral, .kimi, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
                 return try await validateOpenAI(apiKey: apiKey, baseURL: meta.baseURL)
             }
         } catch {
@@ -379,6 +388,23 @@ class AIProviderAuthService: ObservableObject {
         var request = URLRequest(url: URL(string: "\(baseURL)/models")!)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 10
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    private func validateTyphoon(apiKey: String, baseURL: String) async throws -> Bool {
+        // OpenTyphoon's GET /v1/models is public (does not check Authorization), so validate via 1-token POST /chat/completions.
+        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "model": "typhoon-v2.5-30b-a3b-instruct",
+            "max_tokens": 1,
+            "messages": [["role": "user", "content": "hi"]]
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 12
         let (_, response) = try await URLSession.shared.data(for: request)
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
@@ -410,25 +436,37 @@ class AIProviderAuthService: ObservableObject {
             switch meta {
             case .perplexity, .minimax:
                 return meta.defaultModels
-            case .openai, .codex, .deepseek, .openrouter, .groq, .mistral, .kimi, .perch, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
+            case .openai, .codex, .deepseek, .tokenme, .openrouter, .groq, .mistral, .kimi, .perch, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
                 var request = URLRequest(url: URL(string: "\(meta.baseURL)/models")!)
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                 request.timeoutInterval = 10
                 let (data, response) = try await URLSession.shared.data(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let models = json["data"] as? [[String: Any]] {
+                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                      let rawJSON = try? JSONSerialization.jsonObject(with: data) else { return nil }
+                let models: [[String: Any]]?
+                if let topArray = rawJSON as? [[String: Any]] {
+                    models = topArray
+                } else if let json = rawJSON as? [String: Any] {
+                    models = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]])
+                } else {
+                    models = nil
+                }
+                if let models {
                     let ids = models.compactMap { $0["id"] as? String }
                         .filter { id in
+                            let lower = id.lowercased()
+                            if lower.contains("ocr") || lower.contains("asr") || lower.contains("embed") || lower.contains("whisper") || lower.contains("tts") || lower.contains("moderation") || lower.contains("rerank") {
+                                return false
+                            }
                             switch meta {
                             case .openai, .codex:
-                                let lower = id.lowercased()
                                 return (lower.contains("gpt-4") || lower.contains("gpt-3.5") || lower.contains("o1") || lower.contains("o3") || lower.contains("chatgpt")) &&
-                                    !lower.contains("transcribe") && !lower.contains("audio") && !lower.contains("tts") && !lower.contains("embed") && !lower.contains("moderation") && !lower.contains("realtime") && !lower.hasPrefix("ft:")
-                            case .deepseek: return id.contains("deepseek")
-                            case .grok: return id.contains("grok")
-                            case .qwen: return id.contains("qwen")
-                            case .glm: return id.contains("glm")
+                                    !lower.contains("transcribe") && !lower.contains("audio") && !lower.contains("realtime") && !lower.hasPrefix("ft:")
+                            case .deepseek: return lower.contains("deepseek")
+                            case .grok: return lower.contains("grok")
+                            case .qwen: return lower.contains("qwen")
+                            case .glm: return lower.contains("glm")
+                            case .typhoon: return !AIModelCatalog.legacyStaleModelIDs.contains(lower)
                             default: return true
                             }
                         }

@@ -44,9 +44,17 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private var activeWorkspacePath: String = ""
     private var initializeReqId: Int?
     private var sessionNewReqId: Int?
+    /// True when `.geminiCLI` transparently bridges personal OAuth / AGY-exclusive models (`gemini-4-argon*`) via `agy`.
+    private var activeTurnUsesAGYBridge: Bool = false
+    private var didRetryGeminiViaAGY: Bool = false
+    /// Tracks whether `ClaudeCodeStreamParser` already emitted incremental `stream_event` text/thinking deltas in the current turn.
+    private var didReceiveClaudeStreamDelta: Bool = false
     
     /// Returns true if this agent configuration uses standard JSON-RPC 2.0 Agent Client Protocol (ACP v1)
     var isStandardACPProtocol: Bool {
+        if activeTurnUsesAGYBridge {
+            return false
+        }
         if config.type == .goose {
             return true // `goose acp` natively speaks ACP v1 JSON-RPC 2.0 over stdio
         }
@@ -62,7 +70,19 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     init(config: ACPAgentConfig) {
         self.id = config.id
-        self.config = config
+        var sanitized = config
+        if !sanitized.type.supportsEffortFlag {
+            sanitized.arguments = ACPAgentConfig.stripEffortArguments(sanitized.arguments)
+        }
+        self.config = sanitized
+    }
+
+    func syncConfig(_ updated: ACPAgentConfig) {
+        var sanitized = updated
+        if !sanitized.type.supportsEffortFlag {
+            sanitized.arguments = ACPAgentConfig.stripEffortArguments(sanitized.arguments)
+        }
+        self.config = sanitized
     }
 
     func updatePermissionMode(_ mode: ACPPermissionMode) {
@@ -86,6 +106,15 @@ class ACPAgentSession: ObservableObject, Identifiable {
         if let proc = process, proc.isRunning {
             let pid = proc.processIdentifier
             proc.terminationHandler = nil
+            // Terminate any child MCP / node / npx processes spawned by this ACP CLI first
+            if pid > 0 {
+                let reaper = Process()
+                reaper.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                reaper.arguments = ["-TERM", "-P", "\(pid)"]
+                reaper.standardOutput = FileHandle.nullDevice
+                reaper.standardError = FileHandle.nullDevice
+                try? reaper.run()
+            }
             proc.terminate()
             // Also terminate child process group if spawned via node/bun shim
             if pid > 0 {
@@ -136,15 +165,25 @@ class ACPAgentSession: ObservableObject, Identifiable {
         
         // Clean up any existing one-shot process first
         terminateCurrentProcess()
-        let generation = processGeneration
+        self.didRetryGeminiViaAGY = false
+        self.activeTurnUsesAGYBridge = false
         
-        state = .connecting
-        self.recentStderr = ""
-        self.codexCompletion = nil
-        self.pendingAcpPromptText = isStandardACPProtocol ? task : nil
+        // Pre-flight check for `@google/gemini-cli`:
+        // Google deprecated personal OAuth (`oauth-personal` / `Gemini Code Assist for individuals`) in `@google/gemini-cli`
+        // (`IneligibleTierError: migrate to Antigravity`) and AGY-exclusive models (`gemini-4-argon*`) are hosted on `agy`.
+        // When no direct Gemini API / Vertex / Enterprise project credentials exist and `agy` is installed, bridge transparently.
+        var useAGYBridge = false
+        var resolvedExecutable: String?
+        if config.type == .geminiCLI && !isStandardACPProtocol,
+           let agyPath = Self.resolveAGYBridgePathIfNeeded(requestedModel: model, configEnv: config.environment) {
+            useAGYBridge = true
+            resolvedExecutable = agyPath
+        } else {
+            resolvedExecutable = ACPHostService.resolveExecutablePath(config.command)
+        }
         
         // Resolve and validate executable path before spawning
-        guard let resolvedExecutable = ACPHostService.resolveExecutablePath(config.command) else {
+        guard let executablePath = resolvedExecutable else {
             let errMsg: String
             switch config.type {
             case .codexEngine:
@@ -155,6 +194,8 @@ class ACPAgentSession: ObservableObject, Identifiable {
                 errMsg = "Antigravity CLI is not installed (executable '\(config.command)' not found). Install via 'curl -fsSL https://antigravity.google/install.sh | bash'."
             case .openCode:
                 errMsg = "OpenCode CLI is not installed (executable '\(config.command)' not found). Install via 'curl -fsSL https://opencode.ai/install | bash'."
+            case .githubCopilot:
+                errMsg = "GitHub Copilot CLI is not installed. Run 'npm install -g @github/copilot' or 'gh copilot' in Terminal once to install it."
             default:
                 errMsg = "CLI executable '\(config.command)' for \(config.type.displayName) was not found in PATH or standard system directories. Please ensure it is installed and executable."
             }
@@ -165,15 +206,43 @@ class ACPAgentSession: ObservableObject, Identifiable {
             return
         }
         
+        if config.type == .zedEngine && !isStandardACPProtocol && URL(fileURLWithPath: executablePath).lastPathComponent == "zed" {
+            let errMsg = "Zed CLI ('\(executablePath)') is a GUI editor launcher and does not execute headless AI prompts. Please select Antigravity (AGY), Claude Code, OpenAI Codex, Gemini CLI, or OpenCode."
+            state = .error(errMsg)
+            print("[ACP] \(errMsg)")
+            eventContinuation?.yield(.error(errMsg))
+            eventContinuation?.finish()
+            return
+        }
+        
+        launchSubprocess(executablePath: executablePath, task: task, workspacePath: workspacePath, useAGYBridge: useAGYBridge, isRetry: false)
+    }
+    
+    private func launchSubprocess(executablePath: String, task: String, workspacePath: String, useAGYBridge: Bool, isRetry: Bool) {
+        if isRetry {
+            terminateCurrentProcess()
+        }
+        self.activeTurnUsesAGYBridge = useAGYBridge
+        if config.type == .agy || useAGYBridge {
+            Self.sanitizeAGYMCPConfigsIfNeeded()
+        }
+        let generation = processGeneration
+        
+        state = .connecting
+        self.recentStderr = ""
+        self.codexCompletion = nil
+        self.didReceiveClaudeStreamDelta = false
+        self.pendingAcpPromptText = isStandardACPProtocol ? task : nil
+        
         let process = Process()
         let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
         
         // Configure process based on agent type
-        configureProcess(process, executablePath: resolvedExecutable, task: task, workspacePath: workspacePath)
+        configureProcess(process, executablePath: executablePath, task: task, workspacePath: workspacePath)
         
-        // Non-ACP CLI tools (`claude -p`, `agy --print`, `opencode run`, `codex exec`, `aider --message`)
+        // Non-ACP CLI tools (`claude -p`, `agy --print`, `opencode run`, `codex exec`, `gemini -p`, `aider --message`)
         // expect stdin EOF immediately when the prompt is passed via CLI arguments.
         process.standardInput = isStandardACPProtocol ? stdin : FileHandle.nullDevice
         process.standardOutput = stdout
@@ -184,12 +253,13 @@ class ACPAgentSession: ObservableObject, Identifiable {
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
         self.ndjsonParser.reset()
-        self.streamingText = ""
-        self.events = []
-        self.pendingPermissions = []
-        
-        // Immediate progress event so UI is never blank
-        eventContinuation?.yield(.progress(ACPProgress(id: UUID().uuidString, step: 1, total: nil, message: "⚡ Connecting to \(config.name)...")))
+        if !isRetry {
+            self.streamingText = ""
+            self.events = []
+            self.pendingPermissions = []
+            // Immediate progress event so UI is never blank
+            eventContinuation?.yield(.progress(ACPProgress(id: UUID().uuidString, step: 1, total: nil, message: "⚡ Connecting to \(config.name)...")))
+        }
         
         // Handle stdout — NDJSON stream
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
@@ -260,8 +330,34 @@ class ACPAgentSession: ObservableObject, Identifiable {
                     )))
                 } else {
                     let snippet = self.recentStderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    // Automatic runtime migration when `@google/gemini-cli` rejects deprecated personal OAuth (`IneligibleTierError`)
+                    let isGeminiOAuthDeprecated = self.config.type == .geminiCLI
+                        && !self.activeTurnUsesAGYBridge
+                        && (snippet.contains("IneligibleTierError") || snippet.contains("no longer supported for Gemini Code Assist"))
+                    if isGeminiOAuthDeprecated && !self.didRetryGeminiViaAGY,
+                       let agyPath = ACPHostService.resolveExecutablePath("agy") {
+                        self.didRetryGeminiViaAGY = true
+                        self.eventContinuation?.yield(.progress(ACPProgress(
+                            id: UUID().uuidString,
+                            step: 1,
+                            total: nil,
+                            message: "↪ Migrating Gemini CLI OAuth session to Google Antigravity (AGY)..."
+                        )))
+                        self.launchSubprocess(
+                            executablePath: agyPath,
+                            task: task,
+                            workspacePath: workspacePath,
+                            useAGYBridge: true,
+                            isRetry: true
+                        )
+                        return
+                    }
+                    
                     let errMsg: String
-                    if !snippet.isEmpty {
+                    if isGeminiOAuthDeprecated {
+                        errMsg = "Google deprecated personal OAuth in `@google/gemini-cli` (IneligibleTierError). Add a Gemini API Key in Settings → AI & Agent → Direct API Key, or install Google Antigravity CLI (`agy`)."
+                    } else if !snippet.isEmpty {
                         errMsg = "Process exited with code \(exitCode):\n\(snippet)"
                     } else if !self.streamingText.isEmpty {
                         // Emit partial streaming text if exit was non-zero but content was already produced
@@ -292,7 +388,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
             state = isStandardACPProtocol ? .initializing : .running(taskId: UUID().uuidString)
             taskStartTime = Date()
             startTimer()
-            print("[ACP] Started \(config.type.displayName) agent (ACP v1 JSON-RPC: \(isStandardACPProtocol))")
+            print("[ACP] Started \(config.type.displayName) agent (ACP v1 JSON-RPC: \(isStandardACPProtocol), AGY bridge: \(useAGYBridge))")
             
             if isStandardACPProtocol {
                 let initId = jsonRpcIdCounter
@@ -434,6 +530,15 @@ class ACPAgentSession: ObservableObject, Identifiable {
             if env["GEMINI_API_KEY"] == nil { env["GEMINI_API_KEY"] = geminiKey }
             if env["GOOGLE_API_KEY"] == nil { env["GOOGLE_API_KEY"] = geminiKey }
         }
+        if !(env["GEMINI_API_KEY"] ?? "").isEmpty && env["GEMINI_DEFAULT_AUTH_TYPE"] == nil {
+            env["GEMINI_DEFAULT_AUTH_TYPE"] = "gemini-api-key"
+        }
+        if (env["TERM"] ?? "").isEmpty || env["TERM"] == "dumb" {
+            env["TERM"] = "xterm-256color"
+        }
+        if env["COLORTERM"] == nil {
+            env["COLORTERM"] = "truecolor"
+        }
         if !openaiKey.isEmpty && env["OPENAI_API_KEY"] == nil {
             env["OPENAI_API_KEY"] = openaiKey
         }
@@ -465,8 +570,10 @@ class ACPAgentSession: ObservableObject, Identifiable {
             }
         }
         
+        let effectiveType: ACPAgentType = activeTurnUsesAGYBridge ? .agy : config.type
+        
         // If continuing an ongoing AGY session within MicroCode, inject our dedicated conversation ID
-        if config.type == .agy, let sid = self.sessionId {
+        if effectiveType == .agy, let sid = self.sessionId {
             env["ANTIGRAVITY_CONVERSATION_ID"] = sid
         }
         
@@ -475,65 +582,82 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
         process.environment = env
         
+        let safeExtraArgs = effectiveType.supportsEffortFlag
+            ? config.arguments
+            : ACPAgentConfig.stripEffortArguments(config.arguments)
+        
         // If launched in standard ACP 1.0 JSON-RPC mode, pass only the ACP flags (prompt is sent over JSON-RPC stdio)
         if isStandardACPProtocol {
-            if config.type == .goose && !config.arguments.contains("acp") {
-                process.arguments = ["acp"] + config.arguments
+            if effectiveType == .goose && !safeExtraArgs.contains("acp") {
+                process.arguments = ["acp"] + safeExtraArgs
             } else {
-                process.arguments = config.arguments
+                process.arguments = safeExtraArgs
             }
             return
         }
         
         // Build arguments based on agent type (CLI fallback mode)
-        switch config.type {
+        switch effectiveType {
         case .claudeCode:
             process.arguments = buildClaudeCodeArgs(task: task, model: self.model)
         case .agy:
-            process.arguments = buildAGYArgs(task: task, model: self.model)
+            process.arguments = buildAGYArgs(task: task, model: self.model, extraArgs: safeExtraArgs)
         case .openCode:
-            process.arguments = buildOpenCodeArgs(task: task, model: self.model)
+            process.arguments = buildOpenCodeArgs(task: task, model: self.model, extraArgs: safeExtraArgs)
         case .codexEngine:
             process.arguments = CodexProcessArguments.build(
                 task: task, model: self.model, sessionID: sessionId,
-                permissionMode: config.permissionMode, extra: config.arguments
+                permissionMode: config.permissionMode, extra: safeExtraArgs
             )
-        case .geminiCLI, .qwenCode:
+        case .geminiCLI:
             var args = ["-p", task, "--output-format", "stream-json", "--yolo"]
-            if let model = self.model, !model.isEmpty {
+            if let sanitizedModel = Self.sanitizeGeminiCLIModel(self.model) {
+                args += ["-m", sanitizedModel]
+            }
+            args += safeExtraArgs
+            process.arguments = args
+        case .qwenCode:
+            var args = ["-p", task, "--output-format", "stream-json", "--yolo"]
+            if let model = self.model, !model.isEmpty, model.lowercased().contains("qwen") {
                 args += ["-m", model]
             }
-            args += config.arguments
+            args += safeExtraArgs
             process.arguments = args
         case .cursorAgent:
             var args = ["-p", task, "--output-format", "stream-json", "--force"]
-            if let model = self.model, !model.isEmpty {
+            if let model = self.model, !model.isEmpty,
+               !model.contains("/"), !model.lowercased().contains("argon"), !model.lowercased().contains("5-5") {
                 args += ["--model", model]
             }
-            args += config.arguments
+            args += safeExtraArgs
             process.arguments = args
         case .githubCopilot:
-            var args = ["-p", task, "--allow-all-tools"]
-            if let model = self.model, !model.isEmpty {
+            var args: [String] = []
+            if URL(fileURLWithPath: executablePath).lastPathComponent == "gh" {
+                args.append("copilot")
+            }
+            args += ["-p", task, "--allow-all-tools"]
+            if let model = self.model, !model.isEmpty,
+               !model.contains("/"), !model.lowercased().contains("argon"), !model.lowercased().contains("5-5") {
                 args += ["--model", model]
             }
-            args += config.arguments
+            args += safeExtraArgs
             process.arguments = args
         case .goose:
-            process.arguments = ["acp"] + config.arguments
+            process.arguments = ["acp"] + safeExtraArgs
         case .cline:
             var args = [task]
             if config.permissionMode == .fullAuto {
                 args.append("--auto-approve")
             }
-            args += config.arguments
+            args += safeExtraArgs
             process.arguments = args
         case .aider:
-            process.arguments = buildAiderArgs(task: task)
+            process.arguments = buildAiderArgs(task: task, extraArgs: safeExtraArgs)
         case .custom:
-            process.arguments = config.arguments + [task]
+            process.arguments = safeExtraArgs + [task]
         case .zedEngine:
-            var args = config.arguments
+            var args = safeExtraArgs
             if let model = self.model, !model.isEmpty {
                 args += ["--model", model]
             }
@@ -551,15 +675,37 @@ class ACPAgentSession: ObservableObject, Identifiable {
             "--verbose"
         ]
         
-        if let rawModel = model, !rawModel.isEmpty {
+        var resolvedModelAlias: String? = nil
+        if let rawModel = model?.trimmingCharacters(in: .whitespacesAndNewlines), !rawModel.isEmpty {
             let lower = rawModel.lowercased()
             let sanitizedModel: String?
-            if lower.contains("5-5") || lower.contains("argon") || lower.contains("gemini") || lower.contains("gpt") || lower.contains("/") {
-                // Non-Anthropic or AGY-exclusive model IDs are mapped to standard Claude CLI aliases
-                sanitizedModel = lower.contains("opus") ? "opus" : "sonnet"
+            if lower == "auto" || lower == "default" {
+                sanitizedModel = nil
+            } else if lower.contains("5-5")
+                || lower.hasSuffix("-thinking")
+                || lower.hasSuffix("-high")
+                || lower.hasSuffix("-medium")
+                || lower.hasSuffix("-low")
+                || lower.contains("argon")
+                || lower.contains("gemini")
+                || lower.contains("gemma")
+                || lower.contains("gpt")
+                || lower.contains("deepseek")
+                || lower.contains("qwen")
+                || lower.contains("glm")
+                || lower.contains("/") {
+                // Non-Anthropic or AGY-exclusive tiered model IDs map to official Claude CLI aliases
+                if lower.contains("opus") {
+                    sanitizedModel = "opus"
+                } else if lower.contains("haiku") {
+                    sanitizedModel = "haiku"
+                } else {
+                    sanitizedModel = "sonnet"
+                }
             } else {
                 sanitizedModel = rawModel
             }
+            resolvedModelAlias = sanitizedModel
             if let m = sanitizedModel {
                 args += ["--model", m]
             }
@@ -573,68 +719,348 @@ class ACPAgentSession: ObservableObject, Identifiable {
             args += ["--resume", sid]
         }
         
-        // Extra user-defined arguments
-        args += config.arguments
+        // Haiku models do not support `--effort` in Claude Code CLI
+        if let m = resolvedModelAlias?.lowercased(), m.contains("haiku") {
+            args += ACPAgentConfig.stripEffortArguments(config.arguments)
+        } else {
+            args += config.arguments
+        }
         
         return args
     }
     
     /// Build AGY CLI arguments (print mode with stream-json output)
-    private func buildAGYArgs(task: String, model: String? = nil) -> [String] {
+    /// Note: `agy` model slugs (`gemini-4-argon-low`, `claude-opus-5-5-high`, `gpt-oss-120b-medium`, etc.)
+    /// already encode their reasoning effort tier directly. Passing `--effort` causes `agy` to exit with code 1
+    /// (`conflicts with --effort` or `--effort is not supported for model`), so `--effort` must never be passed.
+    private func buildAGYArgs(task: String, model: String? = nil, extraArgs: [String]? = nil) -> [String] {
         var args = [
             "--output-format", "stream-json",
             "--disable-slash-commands",
             "--dangerously-skip-permissions"
         ]
         
-        let resolvedModel: String = {
-            guard let raw = model?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !raw.isEmpty,
-                  !raw.contains("/"),
-                  raw != "gemini-3-flash-agent" else {
-                return "gemini-3.8-flash-low"
-            }
-            return raw
-        }()
+        let resolvedModel = Self.normalizeAGYModel(model)
         args += ["--model", resolvedModel]
-        
-        // Fast reasoning effort by default: match model tier suffix (low/medium/high)
-        if !config.arguments.contains("--effort") {
-            if resolvedModel.contains("high") {
-                args += ["--effort", "high"]
-            } else if resolvedModel.contains("medium") {
-                args += ["--effort", "medium"]
-            } else {
-                args += ["--effort", "low"]
-            }
-        }
         
         // If continuing an established MicroCode ACP conversation, resume it:
         if let sid = sessionId {
             args += ["--conversation", sid]
         }
         
-        // Extra user-defined arguments
-        args += config.arguments
+        // Extra user-defined arguments (always stripped of `--effort` to prevent AGY tier conflicts)
+        let userExtra = ACPAgentConfig.stripEffortArguments(extraArgs ?? config.arguments)
+        args += userExtra
         
         args.append("--print=\(task)")
         
         return args
     }
     
+    /// Normalizes MicroCode catalog model IDs into exact model slugs accepted by `agy --model`
+    nonisolated static func normalizeAGYModel(_ rawModel: String?) -> String {
+        guard let raw = rawModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              !raw.contains("/"),
+              raw != "gemini-3-flash-agent" else {
+            return "gemini-3.8-flash-low"
+        }
+        let lower = raw.lowercased()
+        
+        // Exact live AGY model families (`agy models`)
+        if lower.hasPrefix("gemini-4-argon-")
+            && ["gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"].contains(lower) {
+            return lower
+        }
+        if lower.hasPrefix("gemini-3.8-flash-")
+            && ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"].contains(lower) {
+            return lower
+        }
+        if lower.hasPrefix("claude-opus-5-5-")
+            && ["claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high"].contains(lower) {
+            return lower
+        }
+        if lower.hasPrefix("claude-sonnet-5-5-")
+            && ["claude-sonnet-5-5-low", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-high"].contains(lower) {
+            return lower
+        }
+        if lower.hasPrefix("gpt-oss-") {
+            return lower
+        }
+        
+        // Map any legacy/stale Claude model IDs (e.g. `claude-opus-4-6-thinking`, `claude-sonnet-4-6`, `opus`, `sonnet`)
+        if lower.contains("claude") || lower == "opus" || lower == "sonnet" || lower == "haiku" {
+            let tier: String
+            if lower.hasSuffix("-low") {
+                tier = "low"
+            } else if lower.hasSuffix("-medium") {
+                tier = "medium"
+            } else {
+                tier = "high"
+            }
+            if lower.contains("opus") {
+                return "claude-opus-5-5-\(tier)"
+            }
+            if lower.contains("haiku") {
+                return "claude-sonnet-5-5-low"
+            }
+            return "claude-sonnet-5-5-\(tier)"
+        }
+        
+        switch lower {
+        case "gemini-4-argon", "gemini-4-argon-pro", "gemini-4-argon-ultra":
+            return "gemini-4-argon-high"
+        case "gemini-3.8-pro", "gemini-3.7-pro", "gemini-3.6-pro", "gemini-3.5-pro",
+             "gemini-3.1-pro", "gemini-3.1-pro-preview", "gemini-3-pro", "gemini-3-pro-preview", "gemini-2.5-pro":
+            return "gemini-4-argon-medium"
+        case "gemini-3.8-flash", "gemini-3.8-flash-tiered":
+            return "gemini-3.8-flash-high"
+        case "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-3-flash-preview", "gemini-2.5-flash":
+            return "gemini-3.8-flash-medium"
+        case "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite":
+            return "gemini-3.8-flash-low"
+        default:
+            if lower.contains("argon") || lower.contains("pro") {
+                return "gemini-4-argon-medium"
+            }
+            return "gemini-3.8-flash-low"
+        }
+    }
+    
+    /// Sanitizes MicroCode catalog model IDs into valid `@google/gemini-cli` (`-m`) model aliases
+    nonisolated static func sanitizeGeminiCLIModel(_ rawModel: String?) -> String? {
+        guard let raw = rawModel?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        let lower = raw.lowercased()
+        let exactSupported: Set<String> = [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-pro-preview-customtools",
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash",
+            "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it"
+        ]
+        if exactSupported.contains(lower) {
+            return lower
+        }
+        if lower == "gemini-3.1-pro" {
+            return "gemini-3.1-pro-preview"
+        }
+        if lower == "gemini-3-pro" {
+            return "gemini-3-pro-preview"
+        }
+        if lower == "gemini-3-flash" {
+            return "gemini-3-flash-preview"
+        }
+        if lower.hasPrefix("gemini-3.8-flash") {
+            return "gemini-3.8-flash"
+        }
+        if lower.contains("flash-lite") {
+            return "gemini-2.5-flash-lite"
+        }
+        if lower.contains("flash") {
+            return "gemini-2.5-flash"
+        }
+        // Map AGY-exclusive (`gemini-4-argon*`) or non-Gemini leftover IDs to Gemini CLI's flagship default
+        return "gemini-2.5-pro"
+    }
+    
+    /// Disables broken or unauthenticated `mcp-remote` OAuth MCP entries in AGY's `mcp_config.json`
+    /// before headless print-mode execution so `agy --print` never pops up surprise browser OAuth tabs
+    /// (e.g. `canva.com` via `npx mcp-remote`) or stalls indefinitely at `Agent is preparing response...`.
+    nonisolated static func sanitizeAGYMCPConfigsIfNeeded() {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        
+        // Check if `mcp-remote` has any completed OAuth token file (`*_tokens.json`) under `~/.mcp-auth`
+        let hasMcpRemoteToken: Bool = {
+            let authDir = home.appendingPathComponent(".mcp-auth")
+            guard let enumerator = fm.enumerator(at: authDir, includingPropertiesForKeys: nil) else {
+                return false
+            }
+            for case let fileURL as URL in enumerator {
+                if fileURL.lastPathComponent.hasSuffix("_tokens.json") {
+                    return true
+                }
+            }
+            return false
+        }()
+        
+        let configPaths = [
+            home.appendingPathComponent(".gemini/config/mcp_config.json"),
+            home.appendingPathComponent(".gemini/antigravity/mcp_config.json")
+        ]
+        
+        for configURL in configPaths {
+            guard let data = try? Data(contentsOf: configURL),
+                  var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  var servers = root["mcpServers"] as? [String: [String: Any]] else {
+                continue
+            }
+            var parked = (root["_disabledMcpServers"] as? [String: [String: Any]]) ?? [:]
+            var mutated = false
+            for (name, var entry) in Array(servers) {
+                // Note: `agy mcp disable` sets `"disabled": true`, which `agy mcp list` shows as disabled,
+                // but `agy --print`'s runtime MCP spawner ignores `"disabled": true` unless parked outside `"mcpServers"`.
+                let explicitlyDisabled = (entry["disabled"] as? Bool) == true
+                let cmd = (entry["command"] as? String) ?? ""
+                let args = (entry["args"] as? [String]) ?? []
+                let serverUrl = (entry["serverUrl"] as? String) ?? ""
+                let envDict = (entry["env"] as? [String: String]) ?? [:]
+                
+                // 1. Unauthenticated `mcp-remote` entries trigger interactive browser OAuth popups and block headless stdio forever
+                let usesMcpRemote = cmd.contains("mcp-remote") || args.contains(where: { $0.contains("mcp-remote") })
+                let shouldDisableMcpRemote = usesMcpRemote && !hasMcpRemoteToken
+                
+                // 2. Placeholder template credentials (e.g. `xoxb-YOUR_SLACK_BOT_TOKEN`)
+                let hasPlaceholderEnv = envDict.values.contains { val in
+                    let upper = val.uppercased()
+                    return upper.contains("YOUR_SLACK_")
+                        || upper.contains("YOUR_API_KEY")
+                        || upper.contains("YOUR_TOKEN")
+                        || upper.hasPrefix("<YOUR_")
+                }
+                
+                // 3. Unexpanded `${...}` URL template variables (e.g. `https://dataproc-${REGION}.googleapis.com/mcp`)
+                let hasUnexpandedUrlVar = serverUrl.contains("${")
+                
+                // 4. Missing absolute script/executable paths on disk (e.g. removed IDE extension `mcp_proxy_bundle.js`)
+                let hasMissingAbsoluteFile: Bool = {
+                    if cmd.hasPrefix("/") && !fm.fileExists(atPath: cmd) {
+                        return true
+                    }
+                    for arg in args where arg.hasPrefix("/") && !arg.contains("=") {
+                        if !fm.fileExists(atPath: arg) {
+                            return true
+                        }
+                    }
+                    return false
+                }()
+                
+                if explicitlyDisabled || shouldDisableMcpRemote || hasPlaceholderEnv || hasUnexpandedUrlVar || hasMissingAbsoluteFile {
+                    entry["disabled"] = true
+                    parked[name] = entry
+                    servers.removeValue(forKey: name)
+                    mutated = true
+                    print("[ACP/AGY] Parked blocking/disabled MCP server '\(name)' into _disabledMcpServers in \(configURL.lastPathComponent)")
+                }
+            }
+            
+            if mutated {
+                root["mcpServers"] = servers
+                root["_disabledMcpServers"] = parked
+                if let outData = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
+                    try? outData.write(to: configURL, options: .atomic)
+                }
+            }
+        }
+    }
+    
+    /// Returns the `agy` executable path when `.geminiCLI` would fail due to deprecated personal OAuth (`IneligibleTierError`)
+    /// or when an AGY-exclusive model (`gemini-4-argon*`) is requested without direct Gemini API credentials.
+    nonisolated static func resolveAGYBridgePathIfNeeded(requestedModel: String?, configEnv: [String: String]) -> String? {
+        let procEnv = ProcessInfo.processInfo.environment
+        let storedGeminiKey = (UserDefaults.standard.string(forKey: "gemini_api_key") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasDirectGeminiCreds = !storedGeminiKey.isEmpty
+            || !(configEnv["GEMINI_API_KEY"] ?? procEnv["GEMINI_API_KEY"] ?? "").isEmpty
+            || !(configEnv["GOOGLE_API_KEY"] ?? procEnv["GOOGLE_API_KEY"] ?? "").isEmpty
+            || !(configEnv["GOOGLE_CLOUD_PROJECT"] ?? procEnv["GOOGLE_CLOUD_PROJECT"] ?? "").isEmpty
+            || !(configEnv["GOOGLE_CLOUD_PROJECT_ID"] ?? procEnv["GOOGLE_CLOUD_PROJECT_ID"] ?? "").isEmpty
+            || (configEnv["GOOGLE_GENAI_USE_VERTEXAI"] ?? procEnv["GOOGLE_GENAI_USE_VERTEXAI"]) == "true"
+            || (configEnv["GOOGLE_GENAI_USE_VERTEXAI"] ?? procEnv["GOOGLE_GENAI_USE_VERTEXAI"]) == "1"
+            || UserDefaults.standard.bool(forKey: "use9RouterForHarnesses")
+        
+        guard !hasDirectGeminiCreds else {
+            return nil
+        }
+        
+        let selectedAuthType: String = {
+            let settingsURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".gemini/settings.json")
+            guard let data = try? Data(contentsOf: settingsURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return ""
+            }
+            if let sec = json["security"] as? [String: Any],
+               let auth = sec["auth"] as? [String: Any],
+               let sel = auth["selectedType"] as? String {
+                return sel
+            }
+            return (json["selectedAuthType"] as? String) ?? ""
+        }()
+        
+        let modelLower = (requestedModel ?? "").lowercased()
+        let isAGYExclusiveModel = modelLower.contains("argon")
+            || modelLower.hasPrefix("gemini-3.8-flash-")
+            || modelLower.hasPrefix("claude-")
+            || modelLower.hasPrefix("gpt-oss-")
+        
+        // Only bridge pre-flight when personal OAuth (deprecated in `@google/gemini-cli`), unconfigured auth, or AGY-exclusive model is active
+        if selectedAuthType == "oauth-personal" || selectedAuthType.isEmpty || isAGYExclusiveModel {
+            return ACPHostService.resolveExecutablePath("agy")
+        }
+        return nil
+    }
+    
+    /// Verified active free default model on OpenCode (`opencode run --format json`)
+    nonisolated static let fallbackOpenCodeFreeModel = "opencode/mimo-v2.6-flash-free"
+    
+    /// Retired or broken OpenCode free model slugs that return `Unexpected server error`
+    nonisolated static let retiredOpenCodeModels: Set<String> = [
+        "opencode/glm-5.3-flash-free",
+        "opencode/nemotron-3.5-lightning-free",
+        "opencode/ling-3.1-flash-free",
+        "opencode/step-5-preview-free",
+        "opencode/nemotron-3-ultra-free"
+    ]
+    
+    /// Resolves a valid OpenCode `provider/model` slug, preferring active free models when unauthenticated.
+    nonisolated static func resolveOpenCodeModel(
+        _ rawModel: String?,
+        discoveredModels: [String] = [],
+        isAuthenticated: Bool = true
+    ) -> String {
+        let validDiscovered = discoveredModels.filter { $0.contains("/") && !retiredOpenCodeModels.contains($0.lowercased()) }
+        if let raw = rawModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty,
+           raw.contains("/"),
+           !retiredOpenCodeModels.contains(raw.lowercased()) {
+            if !isAuthenticated && !raw.lowercased().contains("free") {
+                if validDiscovered.contains(fallbackOpenCodeFreeModel) {
+                    return fallbackOpenCodeFreeModel
+                }
+                return validDiscovered.first(where: { $0.lowercased().contains("free") }) ?? fallbackOpenCodeFreeModel
+            }
+            if validDiscovered.isEmpty || validDiscovered.contains(raw) {
+                return raw
+            }
+        }
+        if validDiscovered.contains(fallbackOpenCodeFreeModel) {
+            return fallbackOpenCodeFreeModel
+        }
+        if let firstFree = validDiscovered.first(where: { $0.lowercased().contains("free") }) {
+            return firstFree
+        }
+        return validDiscovered.first ?? fallbackOpenCodeFreeModel
+    }
+    
     /// Build OpenCode CLI arguments
-    private func buildOpenCodeArgs(task: String, model: String? = nil) -> [String] {
+    private func buildOpenCodeArgs(task: String, model: String? = nil, extraArgs: [String]? = nil) -> [String] {
         var args = [
             "run",
             "--format", "json"
         ]
         
-        let resolvedModel: String
-        if let model = model, !model.isEmpty, model.contains("/"), !model.contains("nemotron-3.5-lightning-free") {
-            resolvedModel = model
-        } else {
-            resolvedModel = "opencode/glm-5.3-flash-free"
-        }
+        let resolvedModel = Self.resolveOpenCodeModel(model)
         args += ["-m", resolvedModel]
         
         // If continuing an established MicroCode ACP session, resume it:
@@ -642,14 +1068,15 @@ class ACPAgentSession: ObservableObject, Identifiable {
             args += ["-s", sid]
         }
         
+        let userExtra = extraArgs ?? ACPAgentConfig.stripEffortArguments(config.arguments)
         args += [task]
-        args += config.arguments.filter { $0 != "--auto" }
+        args += userExtra.filter { $0 != "--auto" }
         
         return args
     }
     
     /// Build Aider CLI arguments
-    private func buildAiderArgs(task: String) -> [String] {
+    private func buildAiderArgs(task: String, extraArgs: [String]? = nil) -> [String] {
         var args = [
             "--no-auto-commits",
             "--no-git"
@@ -660,7 +1087,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         args += ["--message", task]
         
         // Extra user-defined arguments
-        args += config.arguments
+        args += (extraArgs ?? ACPAgentConfig.stripEffortArguments(config.arguments))
         
         return args
     }
@@ -687,21 +1114,53 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
         
         // 2. Vendor-specific CLI NDJSON stream parsers
+        let effectiveType: ACPAgentType = activeTurnUsesAGYBridge ? .agy : config.type
+        let frameType = json["type"] as? String ?? ""
         var parsedEvents: [ACPStreamEvent] = []
-        switch config.type {
+        switch effectiveType {
         case .claudeCode:
-            parsedEvents = ClaudeCodeStreamParser.parseAll(json)
+            parsedEvents = ClaudeCodeStreamParser.parseAll(
+                json,
+                includeAssistantTextAndThinking: !didReceiveClaudeStreamDelta
+            )
+            if frameType == "stream_event" {
+                for ev in parsedEvents {
+                    if case .text(let t) = ev, !t.isEmpty { didReceiveClaudeStreamDelta = true }
+                    if case .thinking(let th) = ev, !th.isEmpty { didReceiveClaudeStreamDelta = true }
+                }
+            } else if frameType == "assistant" || frameType == "user" {
+                if parsedEvents.contains(where: {
+                    if case .toolCall = $0 { return true }
+                    if case .toolResult = $0 { return true }
+                    return false
+                }) {
+                    didReceiveClaudeStreamDelta = false
+                }
+            }
         case .agy:
             if let ev = AGYStreamParser.parse(json) { parsedEvents = [ev] }
+        case .geminiCLI:
+            if let ev = GeminiCLIStreamParser.parse(json) ?? AGYStreamParser.parse(json) {
+                parsedEvents = [ev]
+            }
         case .openCode:
             if let ev = OpenCodeStreamParser.parse(json) { parsedEvents = [ev] }
         case .codexEngine:
             if let ev = CodexStreamParser.parse(json) { parsedEvents = [ev] }
         default:
-            let claudeEvs = ClaudeCodeStreamParser.parseAll(json)
+            let claudeEvs = ClaudeCodeStreamParser.parseAll(
+                json,
+                includeAssistantTextAndThinking: !didReceiveClaudeStreamDelta
+            )
             if !claudeEvs.isEmpty {
                 parsedEvents = claudeEvs
-            } else if let ev = AGYStreamParser.parse(json) ?? OpenCodeStreamParser.parse(json) {
+                if frameType == "stream_event" {
+                    for ev in claudeEvs {
+                        if case .text(let t) = ev, !t.isEmpty { didReceiveClaudeStreamDelta = true }
+                        if case .thinking(let th) = ev, !th.isEmpty { didReceiveClaudeStreamDelta = true }
+                    }
+                }
+            } else if let ev = GeminiCLIStreamParser.parse(json) ?? AGYStreamParser.parse(json) ?? OpenCodeStreamParser.parse(json) {
                 parsedEvents = [ev]
             }
         }
@@ -995,18 +1454,61 @@ class ACPHostService: ObservableObject {
         return nil
     }
     
+    /// Resolves the genuine headless AI CLI binary for a given `ACPAgentType`,
+    /// avoiding false positives like GUI editor launchers (`/Users/.../zed`) or bare `gh` without Copilot CLI installed.
+    nonisolated static func resolveAgentBinary(for type: ACPAgentType) -> String? {
+        switch type {
+        case .githubCopilot:
+            if let standalone = resolveExecutablePath("copilot") {
+                return standalone
+            }
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            for ghManaged in [
+                "\(home)/.local/share/gh/copilot/copilot",
+                "\(home)/.local/share/gh/copilot"
+            ] {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: ghManaged, isDirectory: &isDir),
+                   !isDir.boolValue,
+                   FileManager.default.isExecutableFile(atPath: ghManaged) {
+                    return ghManaged
+                }
+            }
+            return nil
+        case .zedEngine:
+            // Standard `zed` CLI only opens files in Zed.app GUI and rejects `--model`.
+            // Only detect if a true ACP server binary is installed.
+            return resolveExecutablePath("zed-acp")
+        case .custom:
+            return nil
+        default:
+            let command = type.defaultCommand
+            guard !command.isEmpty else { return nil }
+            return resolveExecutablePath(command)
+        }
+    }
+    
     /// Detect a single agent type
     private func detectAgent(_ type: ACPAgentType) {
-        let command = type.defaultCommand
-        guard !command.isEmpty else { return }
-        
-        if let path = Self.resolveExecutablePath(command) {
+        if let path = Self.resolveAgentBinary(for: type) {
             detectedAgents[type] = path
             print("[ACP] Detected \(type.displayName) at \(path)")
             if let existingIdx = registeredConfigs.firstIndex(where: { $0.type == type }) {
+                var didMutate = false
                 let existingCmd = registeredConfigs[existingIdx].command
                 if !FileManager.default.isExecutableFile(atPath: existingCmd) || existingCmd.contains(".plugin-appserver/codex-cli") {
                     registeredConfigs[existingIdx].command = path
+                    didMutate = true
+                }
+                if !type.supportsEffortFlag {
+                    let stripped = ACPAgentConfig.stripEffortArguments(registeredConfigs[existingIdx].arguments)
+                    if stripped != registeredConfigs[existingIdx].arguments {
+                        registeredConfigs[existingIdx].arguments = stripped
+                        didMutate = true
+                    }
+                }
+                if didMutate {
+                    sessions[registeredConfigs[existingIdx].id]?.syncConfig(registeredConfigs[existingIdx])
                     saveConfigs()
                 }
             } else {
@@ -1023,11 +1525,16 @@ class ACPHostService: ObservableObject {
     
     /// Register a new agent configuration (1-click connect)
     func registerAgent(_ config: ACPAgentConfig) {
-        if let idx = registeredConfigs.firstIndex(where: { $0.id == config.id }) {
-            registeredConfigs[idx] = config
-        } else {
-            registeredConfigs.append(config)
+        var sanitized = config
+        if !sanitized.type.supportsEffortFlag {
+            sanitized.arguments = ACPAgentConfig.stripEffortArguments(sanitized.arguments)
         }
+        if let idx = registeredConfigs.firstIndex(where: { $0.id == sanitized.id }) {
+            registeredConfigs[idx] = sanitized
+        } else {
+            registeredConfigs.append(sanitized)
+        }
+        sessions[sanitized.id]?.syncConfig(sanitized)
         saveConfigs()
     }
 
@@ -1066,11 +1573,12 @@ class ACPHostService: ObservableObject {
             if !FileManager.default.isExecutableFile(atPath: updated.command) {
                 updated.command = path
             }
-            if let effort = effort, !effort.isEmpty, effort.lowercased() != "agent default" {
-                var args = updated.arguments.filter { $0 != "--effort" && $0 != "low" && $0 != "medium" && $0 != "high" }
+            var args = ACPAgentConfig.stripEffortArguments(updated.arguments)
+            if type.supportsEffortFlag,
+               let effort = effort, !effort.isEmpty, effort.lowercased() != "agent default" {
                 args += ["--effort", effort.lowercased()]
-                updated.arguments = args
             }
+            updated.arguments = args
             registerAgent(updated)
             activeAgentId = updated.id
             return updated
@@ -1078,7 +1586,8 @@ class ACPHostService: ObservableObject {
         
         // Create new config
         var config = ACPAgentConfig.defaultConfig(for: type, command: path)
-        if let effort = effort, !effort.isEmpty, effort.lowercased() != "agent default" {
+        if type.supportsEffortFlag,
+           let effort = effort, !effort.isEmpty, effort.lowercased() != "agent default" {
             config.arguments += ["--effort", effort.lowercased()]
         }
         registerAgent(config)
@@ -1091,6 +1600,7 @@ class ACPHostService: ObservableObject {
     /// Send a task to the active external agent
     func getOrCreateSession(for config: ACPAgentConfig) -> ACPAgentSession {
         if let existing = sessions[config.id] {
+            existing.syncConfig(config)
             return existing
         }
         let session = ACPAgentSession(config: config)
@@ -1147,13 +1657,40 @@ class ACPHostService: ObservableObject {
     private func loadConfigs() {
         if let data = UserDefaults.standard.data(forKey: configKey),
            var configs = try? JSONDecoder().decode([ACPAgentConfig].self, from: data) {
+            var didHeal = false
+            let beforeCount = configs.count
+            // Purge false-positive auto-detected GUI launchers (`zed`) or bare `gh` when Copilot CLI is absent
+            configs.removeAll { cfg in
+                let base = URL(fileURLWithPath: cfg.command).lastPathComponent
+                if cfg.type == .zedEngine && base == "zed" {
+                    return true
+                }
+                if cfg.type == .githubCopilot && base == "gh" && Self.resolveAgentBinary(for: .githubCopilot) == nil {
+                    return true
+                }
+                return false
+            }
+            if configs.count != beforeCount {
+                didHeal = true
+            }
             for i in configs.indices {
                 if (!FileManager.default.isExecutableFile(atPath: configs[i].command) || configs[i].command.contains(".plugin-appserver/codex-cli")),
-                   let healed = Self.resolveExecutablePath(configs[i].type.defaultCommand) {
+                   let healed = Self.resolveAgentBinary(for: configs[i].type) {
                     configs[i].command = healed
+                    didHeal = true
+                }
+                if !configs[i].type.supportsEffortFlag {
+                    let stripped = ACPAgentConfig.stripEffortArguments(configs[i].arguments)
+                    if stripped != configs[i].arguments {
+                        configs[i].arguments = stripped
+                        didHeal = true
+                    }
                 }
             }
             registeredConfigs = configs
+            if didHeal {
+                saveConfigs()
+            }
         }
     }
 }

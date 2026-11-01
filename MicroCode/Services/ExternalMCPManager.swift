@@ -264,9 +264,37 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             if let key = cacheKey {
                 readCache[key] = (output, Date())
             }
+            let tract = PNSGanglionRouter.classifyMCPTract(serverName: serverName, toolName: name)
+            PNSGanglionRouter.shared.recordMCPImpulse(serverName: serverName, tract: tract)
+            PNSOrchestrator.shared.recordSynapticFeedback(
+                taskPrompt: "\(serverName) \(name)",
+                tract: tract,
+                targetNodeId: "mcp__\(serverName)__\(name)",
+                projectPath: AgentToolBox.shared.effectiveWorkspaceRoot,
+                succeeded: true,
+                tokensUsed: max(60, output.count / 4),
+                latencyMs: elapsedMs
+            )
             return output
         } catch {
             errorCount += 1
+            let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+            let tract = PNSGanglionRouter.classifyMCPTract(serverName: serverName, toolName: name)
+            PNSOrchestrator.shared.recordSynapticFeedback(
+                taskPrompt: "\(serverName) \(name)",
+                tract: tract,
+                targetNodeId: "mcp__\(serverName)__\(name)",
+                projectPath: AgentToolBox.shared.effectiveWorkspaceRoot,
+                succeeded: false,
+                tokensUsed: 80,
+                latencyMs: elapsedMs,
+                regressionPenalty: 1.2
+            )
+            _ = PNSGanglionRouter.shared.evaluateSpinalReflex(
+                toolOrProviderName: "mcp__\(serverName)__\(name)",
+                targetHint: serverName,
+                errorMessage: error.localizedDescription
+            )
             throw error
         }
     }
@@ -407,6 +435,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
                         self.availableTools = parsedTools
                         self.registerToolsWithAgent()
                         ExternalMCPManager.shared.refreshToolCountNow()
+                        PNSGanglionRouter.shared.syncManifestsFromExternalMCP()
                     }
                 }
             case .failure(let err):
@@ -573,30 +602,25 @@ class ExternalMCPManager: ObservableObject {
         return tools
     }
     
-    /// Semantic Eager/Lazy MCP Tool Router:
-    /// Always keeps `mcp__local__*` eager, and if external MCP tools exceed 12,
-    /// dynamically selects the Top-12 prompt-relevant external MCP tools so the context window never bloats.
+    /// PNS Two-Stage Hierarchical Ganglion MCP Router:
+    /// Always keeps `mcp__local__*` eager, and routes `MCP_1 ... MCP_xx` through specialized Nerve Tracts
+    /// modulated by Hebbian Synaptic Myelination weights (`W_e`) + lazy awakening of hibernated MCP processes.
     func eagerExternalToolNames(forPrompt prompt: String, maxExternalTools: Int = 12) -> Set<String> {
-        let externalTools = allTools
-        if externalTools.count <= maxExternalTools {
-            return Set(externalTools.map { "mcp__\($0.serverName)__\($0.tool.name)" })
-        }
-        let tokens = prompt.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count >= 3 }
-        let scored: [(name: String, score: Int)] = externalTools.map { entry in
-            let fullName = "mcp__\(entry.serverName)__\(entry.tool.name)"
-            let hay = "\(entry.serverName) \(entry.tool.name) \(entry.tool.description)".lowercased()
-            var s = 1
-            for tok in tokens {
-                if entry.serverName.lowercased().contains(tok) { s += 15 }
-                if entry.tool.name.lowercased().contains(tok) { s += 12 }
-                if hay.contains(tok) { s += 5 }
+        let ws = AgentToolBox.shared.effectiveWorkspaceRoot
+        return PNSGanglionRouter.shared.selectActiveSynapticTools(
+            forPrompt: prompt,
+            workspacePath: ws,
+            allowedTracts: nil,
+            maxTools: maxExternalTools,
+            synapseLookup: { category, tract, nodeId, proj in
+                PNSOrchestrator.shared.lookupSynapse(
+                    taskCategory: category,
+                    tract: tract,
+                    targetNodeId: nodeId,
+                    projectPath: proj
+                )
             }
-            return (fullName, s)
-        }.sorted { $0.score > $1.score }
-        
-        return Set(scored.prefix(maxExternalTools).map(\.name))
+        )
     }
     
     /// Autonomous On-The-Fly MCP Server Synthesis:
@@ -618,7 +642,7 @@ class ExternalMCPManager: ObservableObject {
         
         let rootDir: URL
         if let ws = workspacePath, !ws.isEmpty {
-            rootDir = URL(fileURLWithPath: ws).appendingPathComponent(".microcode/mcp", isDirectory: true)
+            rootDir = WorkspaceStoragePaths.managedStateFile(named: "mcp", workspacePath: ws)
         } else {
             rootDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".microcode/mcp", isDirectory: true)
         }

@@ -37,6 +37,7 @@ private final class VerticalOnlyClipView: NSClipView {
 struct AuthenticFileTree: NSViewRepresentable {
     @Binding var fileTree: [FileNode]
     let revision: UInt64
+    var searchQuery: String = ""
     var backgroundColor: NSColor = .clear
     var onAction: (FileTreeAction) -> Void
     
@@ -53,6 +54,8 @@ struct AuthenticFileTree: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.horizontalScrollElasticity = .none
         scrollView.autohidesScrollers = true
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(top: 4, left: 0, bottom: 12, right: 0)
         
         let outlineView = NSOutlineView()
         scrollView.drawsBackground = backgroundColor.alphaComponent > 0
@@ -103,8 +106,10 @@ struct AuthenticFileTree: NSViewRepresentable {
             }
         }
         
-        if context.coordinator.needsReload(revision: revision, currentTreeCount: fileTree.count) {
-            context.coordinator.syncTree(fileTree: fileTree, in: outlineView, scrollView: nsView)
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayedNodes = context.coordinator.filteredNodes(from: fileTree, query: trimmedQuery)
+        if context.coordinator.needsReload(revision: revision, currentTreeCount: displayedNodes.count, searchQuery: trimmedQuery) {
+            context.coordinator.syncTree(fileTree: displayedNodes, in: outlineView, scrollView: nsView, isSearching: !trimmedQuery.isEmpty)
         }
     }
     
@@ -114,6 +119,7 @@ struct AuthenticFileTree: NSViewRepresentable {
         var parent: AuthenticFileTree
         var rootItems: [FileNodeWrapper] = []
         var lastRevision: UInt64?
+        var lastSearchQuery: String = ""
         weak var outlineView: NSOutlineView?
         
         // Expansion and scroll stability tracking
@@ -141,9 +147,31 @@ struct AuthenticFileTree: NSViewRepresentable {
             self.rootItems = items
         }
         
-        func needsReload(revision: UInt64, currentTreeCount: Int) -> Bool {
-            if lastRevision != revision || rootItems.count != currentTreeCount {
+        func filteredNodes(from nodes: [FileNode], query: String) -> [FileNode] {
+            guard !query.isEmpty else { return nodes }
+            let q = query.lowercased()
+            return nodes.compactMap { node in
+                if node.isDirectory {
+                    let matchingChildren = filteredNodes(from: node.children, query: q)
+                    if node.name.lowercased().contains(q) || !matchingChildren.isEmpty {
+                        var copy = node
+                        if !matchingChildren.isEmpty {
+                            copy.children = matchingChildren
+                            copy.hasLoadedChildren = true
+                        }
+                        return copy
+                    }
+                    return nil
+                } else {
+                    return node.name.lowercased().contains(q) ? node : nil
+                }
+            }
+        }
+        
+        func needsReload(revision: UInt64, currentTreeCount: Int, searchQuery: String) -> Bool {
+            if lastRevision != revision || rootItems.count != currentTreeCount || lastSearchQuery != searchQuery {
                 lastRevision = revision
+                lastSearchQuery = searchQuery
                 return true
             }
             return false
@@ -201,9 +229,10 @@ struct AuthenticFileTree: NSViewRepresentable {
         
         // MARK: - Tree Sync (Preserving Scroll and Preventing Jump-to-Top)
         
-        func syncTree(fileTree: [FileNode], in outlineView: NSOutlineView, scrollView: NSScrollView) {
+        func syncTree(fileTree: [FileNode], in outlineView: NSOutlineView, scrollView: NSScrollView, isSearching: Bool = false) {
             // 1. FAST PATH: A specific target folder just loaded its children asynchronously
-            if let targetId = targetFolderId,
+            if !isSearching,
+               let targetId = targetFolderId,
                let targetWrapper = findWrapper(byId: targetId, in: rootItems),
                let updatedNode = findNode(byId: targetId, in: fileTree),
                updatedNode.hasLoadedChildren && !targetWrapper.node.hasLoadedChildren {
@@ -251,9 +280,19 @@ struct AuthenticFileTree: NSViewRepresentable {
             
             outlineView.reloadData()
             
-            if idsToRestore.isEmpty {
-                for item in newItems where item.node.isDirectory {
-                    outlineView.expandItem(item)
+            if isSearching {
+                isRestoringExpansion = true
+                for item in newItems where item.node.isDirectory && !item.node.children.isEmpty {
+                    outlineView.expandItem(item, expandChildren: true)
+                }
+                isRestoringExpansion = false
+            } else if idsToRestore.isEmpty {
+                // Only auto-expand if the tree has a single root wrapper directory;
+                // never auto-expand all top-level subfolders (which floods loadChildren and jumps to bottom).
+                if newItems.count == 1, let singleRoot = newItems.first, singleRoot.node.isDirectory {
+                    isRestoringExpansion = true
+                    outlineView.expandItem(singleRoot)
+                    isRestoringExpansion = false
                 }
             } else {
                 restoreExpansion(outlineView, ids: idsToRestore)
@@ -262,25 +301,26 @@ struct AuthenticFileTree: NSViewRepresentable {
             outlineView.layoutSubtreeIfNeeded()
             
             // Restore scroll: Prioritize target folder, then selected item, then top item, then saved Y
-            let priorityTargetId = targetFolderId ?? selectedItemId
+            let priorityTargetId = isSearching ? nil : (targetFolderId ?? selectedItemId)
             if let targetId = priorityTargetId,
                let wrapper = findWrapper(byId: targetId, in: rootItems),
                outlineView.row(forItem: wrapper) >= 0 {
                 scrollItemIntoView(wrapper, in: outlineView)
-            } else if let topId = topItemId,
+            } else if !isSearching,
+                      let topId = topItemId,
                       let topWrapper = findWrapper(byId: topId, in: rootItems),
                       outlineView.row(forItem: topWrapper) >= 0 {
                 let row = outlineView.row(forItem: topWrapper)
                 outlineView.scrollRowToVisible(row)
             } else {
                 let maxScrollY = max(0, outlineView.frame.height - scrollView.contentView.bounds.height)
-                let clampedY = max(0, min(savedScrollY, maxScrollY))
+                let clampedY = isSearching ? 0 : max(0, min(savedScrollY, maxScrollY))
                 scrollView.contentView.scroll(to: NSPoint(x: 0, y: clampedY))
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             }
             
             DispatchQueue.main.async { [weak self, weak outlineView] in
-                guard let self = self, let ov = outlineView else { return }
+                guard let self = self, let ov = outlineView, !isSearching else { return }
                 if let targetId = self.targetFolderId,
                    let wrapper = self.findWrapper(byId: targetId, in: self.rootItems) {
                     self.scrollItemIntoView(wrapper, in: ov)

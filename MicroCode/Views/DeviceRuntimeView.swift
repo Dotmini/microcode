@@ -109,14 +109,53 @@ struct DeviceRuntimeView: View {
                 Text("Install the required Xcode Simulator runtime (iPhone, iPad, Watch, or TV), pair physical devices in Xcode Device Hub, or install Android Studio with an AVD. Then refresh.")
                     .font(.system(size: 11)).foregroundColor(.secondary)
             } else {
-                Picker("Run destination", selection: $runtime.selectedDeviceID) {
-                    ForEach(runtime.devices) { device in
-                        Label("\(device.name) — \(device.detail)", systemImage: device.displaySymbolName)
-                            .tag(Optional(device.id))
+                HStack(spacing: 8) {
+                    Picker("Run destination", selection: $runtime.selectedDeviceID) {
+                        ForEach(runtime.devices) { device in
+                            Label("\(device.name) — \(device.detail)", systemImage: device.displaySymbolName)
+                                .tag(Optional(device.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+
+                    if !runtime.detectedAppleModels.isEmpty {
+                        Menu {
+                            if !runtime.detectedIPhoneModels.isEmpty {
+                                Menu("iPhone (\(runtime.detectedIPhoneModels.count) รุ่น)") {
+                                    ForEach(runtime.detectedIPhoneModels) { model in
+                                        Button("\(model.name) (\(model.runtimeName))") {
+                                            Task { await runtime.selectOrProvisionDetectedModel(model, autoStartIfActive: false) }
+                                        }
+                                    }
+                                }
+                            }
+                            if !runtime.detectedIPadModels.isEmpty {
+                                Menu("iPad (\(runtime.detectedIPadModels.count) รุ่น)") {
+                                    ForEach(runtime.detectedIPadModels) { model in
+                                        Button("\(model.name) (\(model.runtimeName))") {
+                                            Task { await runtime.selectOrProvisionDetectedModel(model, autoStartIfActive: false) }
+                                        }
+                                    }
+                                }
+                            }
+                            if !runtime.detectedOtherAppleModels.isEmpty {
+                                Menu("Watch / TV / Vision (\(runtime.detectedOtherAppleModels.count) รุ่น)") {
+                                    ForEach(runtime.detectedOtherAppleModels) { model in
+                                        Button("\(model.name) (\(model.runtimeName))") {
+                                            Task { await runtime.selectOrProvisionDetectedModel(model, autoStartIfActive: false) }
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("เพิ่มรุ่นจากเครื่องนี้…", systemImage: "plus.circle")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .menuStyle(.borderedButton)
+                        .fixedSize()
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
 
                 if let selected = runtime.devices.first(where: { $0.id == runtime.selectedDeviceID }),
                    let preflight = selected.preflightMessage {

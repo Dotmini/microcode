@@ -113,14 +113,16 @@ enum StudioCategory: String, CaseIterable, Identifiable {
 }
 
 enum StudioTool: Int, CaseIterable, Identifiable {
-    case sketchEditor = 0      // Code & Firmware (NEW!)
+    case sketchEditor = 0      // Code & Firmware
     case serialMonitor = 1     // Telemetry
-    case sensorPlotter = 2     // Telemetry (Dedicated High-Speed Plotter)
-    case pinoutDiagram = 3     // Silicon
-    case flashPartitions = 4   // Silicon
-    case toolchainFlasher = 5  // Provision
-    case crashDecoder = 6      // Provision
-    case wirelessOTA = 7       // Provision (Wireless OTA & IoT Discovery)
+    case sensorPlotter = 2     // Telemetry (Dedicated High-Speed Plotter + vDSP FFT)
+    case pinoutDiagram = 3     // Silicon + Live Electrical DRC
+    case elfMemoryProfiler = 4 // Real ELF Section & Symbol Map Profiler
+    case flashPartitions = 5   // Silicon
+    case toolchainFlasher = 6  // Provision
+    case crashDecoder = 7      // Real DWARF addr2line Crash Symbolicator
+    case wirelessOTA = 8       // Real mDNS NWBrowser + ESPOTA/HTTP OTA
+    case bleInspector = 9      // Real CoreBluetooth GATT + Nordic UART (NUS)
     
     var id: Int { rawValue }
     
@@ -128,7 +130,7 @@ enum StudioTool: Int, CaseIterable, Identifiable {
         switch self {
         case .sketchEditor, .serialMonitor, .sensorPlotter:
             return .develop
-        case .pinoutDiagram, .flashPartitions, .toolchainFlasher, .crashDecoder, .wirelessOTA:
+        case .pinoutDiagram, .elfMemoryProfiler, .flashPartitions, .toolchainFlasher, .crashDecoder, .wirelessOTA, .bleInspector:
             return .hardware
         }
     }
@@ -139,10 +141,12 @@ enum StudioTool: Int, CaseIterable, Identifiable {
         case .serialMonitor: return "Serial Terminal & Raw Hex"
         case .sensorPlotter: return "High-Speed Sensor Plotter"
         case .pinoutDiagram: return "Interactive GPIO Pinout"
+        case .elfMemoryProfiler: return "ELF Memory & Symbol Map"
         case .flashPartitions: return "Flash Memory & Partitions"
         case .toolchainFlasher: return "Hardware Flasher (Smart Arbiter)"
         case .crashDecoder: return "Crash & Panic Decoder"
         case .wirelessOTA: return "Wireless OTA & IoT Discovery"
+        case .bleInspector: return "BLE GATT & Wireless NUS"
         }
     }
     
@@ -152,10 +156,12 @@ enum StudioTool: Int, CaseIterable, Identifiable {
         case .serialMonitor: return "terminal"
         case .sensorPlotter: return "waveform.path.ecg"
         case .pinoutDiagram: return "cpu"
+        case .elfMemoryProfiler: return "memorychip"
         case .flashPartitions: return "square.split.3x1"
         case .toolchainFlasher: return "bolt"
         case .crashDecoder: return "ladybug"
         case .wirelessOTA: return "antenna.radiowaves.left.and.right"
+        case .bleInspector: return "dot.radiowaves.left.and.right"
         }
     }
     
@@ -165,10 +171,12 @@ enum StudioTool: Int, CaseIterable, Identifiable {
         case .serialMonitor: return "Terminal"
         case .sensorPlotter: return "Plotter"
         case .pinoutDiagram: return "Pinout"
+        case .elfMemoryProfiler: return "ELF Memory"
         case .flashPartitions: return "Partitions"
         case .toolchainFlasher: return "Flasher"
         case .crashDecoder: return "Crash Decoder"
         case .wirelessOTA: return "Wireless OTA"
+        case .bleInspector: return "BLE & NUS"
         }
     }
 }
@@ -356,18 +364,20 @@ struct EmbeddedStudioView: View {
     @State private var isArbiterActive: Bool = false
     @State private var arbiterMessage: String = ""
     
-    // Dedicated High-Speed Plotter State
+    // Dedicated High-Speed Plotter & Real Accelerate vDSP FFT State
     @State private var plotterIsRunning: Bool = true
     @State private var plotterTimebaseMs: Double = 50.0
     @State private var showCh1: Bool = true
     @State private var showCh2: Bool = true
     @State private var showCh3: Bool = true
     @State private var autoRangeEnabled: Bool = true
-    @State private var testSignalActive: Bool = false
-    @State private var testSignalTimer: AnyCancellable? = nil
+    @State private var showFFTSpectrum: Bool = false
+    @State private var telemetryHistoryBuffer: [WaveformSample] = []
+    @State private var firstTelemetryTimestamp: TimeInterval = 0
+    @State private var latestTelemetryTimestamp: TimeInterval = 0
     
-    // Wireless OTA & IoT Discovery State
-    @State private var otaTargetIp: String = "192.168.1.142"
+    // Wireless OTA & IoT Discovery State (Real Network.framework mDNS + ESPOTA/HTTP)
+    @State private var otaTargetIp: String = ""
     @State private var otaTargetPort: String = "3232"
     @State private var otaPassword: String = ""
     @State private var otaBinaryPath: String = ""
@@ -375,7 +385,7 @@ struct EmbeddedStudioView: View {
     @State private var isOtaFlashing: Bool = false
     @State private var otaLog: String = ""
     @State private var selectedOtaNode: WirelessOtaNode? = nil
-    @State private var otaDiscoveredNodes: [WirelessOtaNode] = [] // Populated by real mDNS discovery when implemented
+    @State private var otaDiscoveredNodes: [WirelessOtaNode] = []
     
     // MARK: - Embedded Sketch & IDE State
     @State private var editorLanguage: EmbeddedSourceLanguage = .cpp
@@ -383,6 +393,9 @@ struct EmbeddedStudioView: View {
     @State private var editorFilePath: String = "main.cpp"
     @State private var isCompilingToBoard: Bool = false
     @State private var buildLogOutput: String = ""
+    @State private var missingToolchainHint: String? = nil
+    @State private var lastConnectedLocationID: UInt32? = nil
+    @State private var isDecodingCrash: Bool = false
     @State private var editorConsoleTab: Int = 0 // 0: Build & Flash Log, 1: Live Realtime Execution
     @State private var editorDrawerHeight: CGFloat = 220
     @State private var showBottomDrawer: Bool = true
@@ -391,6 +404,11 @@ struct EmbeddedStudioView: View {
     @State private var showLeftSidebar: Bool = true
     @State private var showAIAgentPanel: Bool = false
     @ObservedObject private var envManager = EmbeddedEnvManager.shared
+    @ObservedObject private var usbDaemon = IOKitUSBHotplugDaemon.shared
+    @ObservedObject private var toolchainService = EmbeddedToolchainService.shared
+    @ObservedObject private var elfService = ELFMemoryAndDwarfService.shared
+    @ObservedObject private var iotDiscovery = IoTNetworkDiscoveryService.shared
+    @ObservedObject private var bleService = BLEHardwareInspectorService.shared
 
     @Environment(\.colorScheme) private var colorScheme
     
@@ -466,6 +484,13 @@ struct EmbeddedStudioView: View {
                         dedicatedSensorPlotterView
                     case .pinoutDiagram:
                         technicalEngineeringPinoutView
+                    case .elfMemoryProfiler:
+                        EmbeddedELFMemoryProfilerView(
+                            selectedBoard: selectedBoard,
+                            isCompiling: isCompilingToBoard,
+                            isDark: isDark,
+                            onTriggerCompile: { runCompileOnly() }
+                        )
                     case .flashPartitions:
                         flashPartitionsView
                     case .toolchainFlasher:
@@ -474,6 +499,8 @@ struct EmbeddedStudioView: View {
                         crashDecoderView
                     case .wirelessOTA:
                         wirelessOtaView
+                    case .bleInspector:
+                        EmbeddedBLEInspectorView(isDark: isDark)
                     }
                 }
             }
@@ -504,15 +531,42 @@ struct EmbeddedStudioView: View {
             EmbeddedEnvSheet()
         }
         .onAppear {
-            scanRealSerialPorts()
             initInitialState()
-            // Auto-select GPIO 2 as default inspected pin
             selectedPin = rightPins.first(where: { $0.gpioIndex == 2 })
             envManager.analyzeIncludes(code: editorSourceCode)
             envManager.autoResolveAndInstallDependencies(code: editorSourceCode)
-        }
-        .onReceive(Timer.publish(every: 2.5, on: .main, in: .common).autoconnect()) { _ in
+            wireRealHardwareServices()
+            usbDaemon.refreshNow()
             scanRealSerialPorts()
+        }
+        .onChange(of: selectedBoard) { newBoard in
+            EmbeddedStudioController.shared.activeBoard = newBoard
+        }
+        .onChange(of: editorLanguage) { newLang in
+            EmbeddedStudioController.shared.activeLanguage = newLang
+        }
+        .onChange(of: selectedPort) { newPort in
+            EmbeddedStudioController.shared.activePortPath = newPort?.path
+            if let path = newPort?.path,
+               let dev = usbDaemon.devices.first(where: { $0.calloutPath == path }) {
+                lastConnectedLocationID = dev.locationID
+            }
+        }
+        .onChange(of: iotDiscovery.discoveredNodes) { nodes in
+            otaDiscoveredNodes = nodes.map(\.wirelessOtaNode)
+            if otaTargetIp.isEmpty, let first = nodes.first {
+                otaTargetIp = first.ipAddress
+                otaTargetPort = "\(first.port)"
+            }
+        }
+        .onChange(of: iotDiscovery.isBrowsing) { browsing in
+            isOtaScanning = browsing
+        }
+        .onChange(of: elfService.latestFirmwareBinPath) { newBin in
+            if let bin = newBin, !bin.isEmpty {
+                if otaBinaryPath.isEmpty { otaBinaryPath = bin }
+                if flashBinaryPath.isEmpty { flashBinaryPath = bin }
+            }
         }
         .onDisappear {
             disconnectRealSerial()
@@ -730,6 +784,39 @@ struct EmbeddedStudioView: View {
                                     }
                                 }
                             }
+                        }
+
+                        if !usbDaemon.bootloaderVolumes.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(usbDaemon.bootloaderVolumes) { vol in
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "externaldrive.fill.badge.checkmark")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.green)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(vol.volumeName)
+                                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.primary)
+                                            Text(vol.boardFamily)
+                                                .font(.system(size: 8, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        Text("BOOTSEL")
+                                            .font(.system(size: 7, weight: .bold, design: .monospaced))
+                                            .foregroundColor(.green)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(Color.green.opacity(0.15))
+                                            .cornerRadius(3)
+                                    }
+                                    .padding(7)
+                                    .background(cardBg)
+                                    .cornerRadius(5)
+                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.green.opacity(0.4), lineWidth: 1))
+                                }
+                            }
+                            .padding(.top, 2)
                         }
                     }
                     
@@ -1429,8 +1516,56 @@ struct EmbeddedStudioView: View {
                 Spacer()
                 
                 if showBottomDrawer {
+                    if editorConsoleTab == 0, let rep = elfService.latestReport {
+                        Button(action: { selectedTool = .elfMemoryProfiler }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "memorychip")
+                                    .font(.system(size: 8))
+                                Text(String(format: "ELF: %.1fKB Flash (%.0f%%) · %.1fKB RAM (%.0f%%)",
+                                            Double(rep.flashUsedBytes) / 1024.0,
+                                            rep.flashPercent,
+                                            Double(rep.ramUsedBytes) / 1024.0,
+                                            rep.ramPercent))
+                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(cardBg)
+                            .foregroundColor(.primary)
+                            .cornerRadius(4)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(cardBorderColor, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open real ELF Section & Top-25 Symbol Memory Profiler")
+                    }
+
+                    if editorConsoleTab == 0 && (missingToolchainHint != nil || toolchainService.isInstallingCore) {
+                        Button(action: { installMissingBoardCore() }) {
+                            HStack(spacing: 4) {
+                                if toolchainService.isInstallingCore {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                        .scaleEffect(0.65)
+                                } else {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .font(.system(size: 8.5))
+                                }
+                                Text(toolchainService.isInstallingCore ? "INSTALLING CORE..." : "INSTALL \(selectedBoard.rawValue.uppercased()) TOOLCHAIN")
+                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(toolchainService.isInstallingCore)
+                        .help(missingToolchainHint ?? "Download and install real cross-compiler core")
+                    }
+
                     // AI Quick Action Button
-                    if editorConsoleTab == 0 && (buildLogOutput.contains("error:") || buildLogOutput.contains("[ERROR]")) {
+                    if editorConsoleTab == 0 && (buildLogOutput.contains("error:") || buildLogOutput.contains("[ERROR]") || buildLogOutput.contains("[FAILED]")) {
                         Button(action: {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 showAIAgentPanel = true
@@ -1958,384 +2093,278 @@ struct EmbeddedStudioView: View {
         }
     }
     
-    private func runCompileOnly() {
+    // MARK: - 100% Zero-Mock Hardware Service Wiring, Cross-Compilation & Hardware Flashing
+
+    private func wireRealHardwareServices() {
+        let ctrl = EmbeddedStudioController.shared
+        ctrl.activeBoard = selectedBoard
+        ctrl.activeLanguage = editorLanguage
+        ctrl.activePortPath = selectedPort?.path
+        ctrl.getSourceCode = { self.editorSourceCode }
+        ctrl.setSourceCode = { newCode in
+            self.editorSourceCode = newCode
+            self.envManager.analyzeIncludes(code: newCode)
+        }
+        ctrl.getRecentSerialLines = { limit in
+            self.consoleEntries.suffix(limit).map { "[\($0.tag)] \($0.content)" }
+        }
+        ctrl.sendSerialLine = { cmd in
+            guard self.isConnected && self.serialFileDescriptor >= 0 else { return false }
+            self.sendHardwareRawCommand(cmd)
+            return true
+        }
+        ctrl.triggerCompileUI = {
+            await self.performCompileAsync()
+        }
+        ctrl.triggerFlashUI = {
+            await self.performFlashAsync()
+        }
+
+        // Event-driven IOKit USB hotplug + VID:PID silicon suggestion + LocationID auto-reconnect
+        usbDaemon.onDevicesChanged = { devices in
+            let ports = devices.map(\.RealSerialPortValue)
+            self.availablePorts = ports
+
+            if let cur = self.selectedPort {
+                if !ports.contains(where: { $0.path == cur.path }) {
+                    // Check if same physical USB port re-enumerated under a new /dev/cu.* node after board reset
+                    if let loc = self.lastConnectedLocationID,
+                       let rebound = devices.first(where: { $0.locationID == loc }) {
+                        let wasOpen = self.isConnected
+                        if wasOpen { self.disconnectRealSerial() }
+                        self.selectedPort = rebound.RealSerialPortValue
+                        if wasOpen && !self.isArbiterActive {
+                            self.connectRealSerial()
+                        }
+                    } else {
+                        if self.isConnected { self.disconnectRealSerial() }
+                        self.selectedPort = ports.first
+                    }
+                }
+            } else if let firstDev = devices.first {
+                self.selectedPort = firstDev.RealSerialPortValue
+                self.lastConnectedLocationID = firstDev.locationID
+                if let suggested = firstDev.suggestedBoard, self.selectedBoard != suggested {
+                    self.appendConsoleEntry(
+                        tag: "USB",
+                        text: "Detected \(firstDev.siliconSummary) (\(firstDev.vidPidHex ?? "USB")) → Suggested target: \(suggested.rawValue)",
+                        isError: false
+                    )
+                }
+            }
+        }
+
+        // Wireless CoreBluetooth Nordic UART (NUS) -> Live Serial & 60fps Oscilloscope Bridge
+        bleService.onNUSLineReceived = { line in
+            self.appendConsoleEntry(tag: "BLE-NUS", text: line, isError: false)
+            self.parseTelemetryFromSerial(line: line)
+        }
+    }
+
+    private func installMissingBoardCore() {
         withAnimation(.easeInOut(duration: 0.15)) {
             showBottomDrawer = true
         }
-        isCompilingToBoard = true
         editorConsoleTab = 0
-        buildLogOutput = ""
-        
-        let startTimestamp = currentTimestamp()
-        buildLogOutput += "[\(startTimestamp)] [COMPILE] Verifying source syntax for \(editorLanguage.rawValue)\n"
-        buildLogOutput += "[\(startTimestamp)] [TARGET] \(selectedBoard.rawValue) [\(selectedBoard.mcuSummary)]\n"
-        
-        let tempDir = "/tmp/microcode_sketch"
-        try? FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
-        let filePath = "\(tempDir)/\(editorFilePath)"
-        
-        // Deploy all synthetic embedded stubs (Arduino.h, freertos/FreeRTOS.h, task.h, queue.h, esp_log.h, driver/gpio.h, etc.)
-        EmbeddedEnvManager.shared.deploySyntheticEmbeddedHeaders(into: tempDir)
-        EmbeddedEnvManager.shared.autoResolveAndInstallDependencies(code: editorSourceCode)
-
-        do {
-            try editorSourceCode.write(toFile: filePath, atomically: true, encoding: .utf8)
-            buildLogOutput += "[FS] Code synced to \(filePath)\n"
-        } catch {
-            buildLogOutput += "[ERROR] Could not write file: \(error.localizedDescription)\n"
-            isCompilingToBoard = false
-            return
-        }
-        
-        // Scenario A: If ESP-IDF is configured and board is ESP32, run transient CMake idf.py build
-        if selectedBoard.isEsp32Family && EmbeddedEnvManager.shared.isEspIdfConfigured && (editorLanguage == .cpp || editorLanguage == .c) {
-            buildLogOutput += "[ESP-IDF] Native ESP-IDF Build Engine active: \(EmbeddedEnvManager.shared.idfPath)\n"
-            buildLogOutput += "[CMAKE] Scaffolding transient CMake project in /tmp/microcode_esp_idf_project...\n"
-            let target = selectedBoard.idfTarget ?? "esp32s3"
-            let projectDir = EmbeddedEnvManager.shared.generateTransientEspIdfProject(sourceCode: editorSourceCode, targetBoard: target)
-            
-            EmbeddedEnvManager.shared.buildEspIdfProject(projectDir: projectDir, targetBoard: target, onOutput: { chunk in
-                DispatchQueue.main.async {
-                    self.buildLogOutput += chunk
-                }
-            }, completion: { success, code in
-                DispatchQueue.main.async {
-                    self.isCompilingToBoard = false
-                    if success {
-                        self.buildLogOutput += "\n[SUCCESS] ESP-IDF CMake build completed successfully (Exit 0)!\n"
-                        self.buildLogOutput += "[INFO] Firmware binary generated in build/microcode_sketch.bin. Ready to flash.\n"
-                    } else {
-                        self.buildLogOutput += "\n[ERROR] ESP-IDF build failed with exit code \(code).\n"
-                    }
-                }
-            })
-            return
-        }
-        
-        // Scenario B: LLVM Clang++ AST syntax verification with FreeRTOS synthetic stubs + manual include paths
-        DispatchQueue.global(qos: .userInitiated).async {
-            let compiler = "/Users/dotmini/.swiftly/bin/clang++"
-            if (self.editorLanguage == .cpp || self.editorLanguage == .c || self.editorLanguage == .arduino) && FileManager.default.fileExists(atPath: compiler) {
-                var args = ["-fsyntax-only", "-std=c++17", "-I\(tempDir)", "-D__MICROCODE_EMBEDDED__=1"]
-                args.append(contentsOf: EmbeddedEnvManager.shared.getEspIdfIncludeFlags())
-                args.append(filePath)
-                
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: compiler)
-                p.arguments = args
-                let pipe = Pipe()
-                p.standardError = pipe
-                p.standardOutput = pipe
-                try? p.run()
-                p.waitUntilExit()
-                let errData = pipe.fileHandleForReading.readDataToEndOfFile()
-                let errStr = String(data: errData, encoding: .utf8) ?? ""
-                
-                DispatchQueue.main.async {
-                    if !errStr.isEmpty {
-                        self.buildLogOutput += errStr + "\n"
-                    } else {
-                        self.buildLogOutput += "[SUCCESS] C/C++ AST syntax verified cleanly. 0 errors.\n"
-                        self.buildLogOutput += "[STUB] FreeRTOS & ESP-IDF components resolved via synthetic stubs + include paths.\n"
-                        self.buildLogOutput += "[MEMORY ESTIMATE] Flash: ~312 KB | SRAM: ~42 KB\n"
-                    }
-                    self.isCompilingToBoard = false
-                }
-            } else if self.editorLanguage == .objc {
-                let compiler = "/Users/dotmini/.swiftly/bin/clang"
-                if FileManager.default.fileExists(atPath: compiler) {
-                    let p = Process()
-                    p.executableURL = URL(fileURLWithPath: compiler)
-                    p.arguments = ["-fsyntax-only", "-fobjc-arc", "-framework", "Foundation", filePath]
-                    let pipe = Pipe()
-                    p.standardError = pipe
-                    p.standardOutput = pipe
-                    try? p.run()
-                    p.waitUntilExit()
-                    let errData = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let errStr = String(data: errData, encoding: .utf8) ?? ""
-                    DispatchQueue.main.async {
-                        if !errStr.isEmpty {
-                            self.buildLogOutput += errStr + "\n"
-                        } else {
-                            self.buildLogOutput += "[SUCCESS] Objective-C source verified cleanly. 0 errors.\n"
-                        }
-                        self.isCompilingToBoard = false
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self.buildLogOutput += "[SUCCESS] Objective-C syntax checked.\n"
-                        self.isCompilingToBoard = false
-                    }
-                }
-            } else if self.editorLanguage == .rust {
-                let rustc = "/Users/dotmini/.cargo/bin/rustc"
-                if FileManager.default.fileExists(atPath: rustc) {
-                    let p = Process()
-                    p.executableURL = URL(fileURLWithPath: rustc)
-                    p.arguments = ["--emit=metadata", "--crate-type=staticlib", "--out-dir=/tmp/microcode_sketch", filePath]
-                    let pipe = Pipe()
-                    p.standardError = pipe
-                    p.standardOutput = pipe
-                    try? p.run()
-                    p.waitUntilExit()
-                    let errData = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let errStr = String(data: errData, encoding: .utf8) ?? ""
-                    DispatchQueue.main.async {
-                        if !errStr.isEmpty {
-                            self.buildLogOutput += errStr + "\n"
-                        } else {
-                            self.buildLogOutput += "[SUCCESS] Rust crate check passed. 0 errors.\n"
-                        }
-                        self.isCompilingToBoard = false
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self.buildLogOutput += "[SUCCESS] Rust source verified.\n"
-                        self.isCompilingToBoard = false
-                    }
-                }
-            } else {
-                DispatchQueue.main.async {
-                    self.buildLogOutput += "[SUCCESS] Source verified. 0 syntax errors detected.\n"
-                    self.buildLogOutput += "[INFO] Ready to flash to board via 'RUN DIRECT TO BOARD'.\n"
-                    self.isCompilingToBoard = false
-                }
+        Task { @MainActor in
+            let ok = await toolchainService.installToolchainCore(for: selectedBoard) { chunk in
+                self.buildLogOutput += chunk
+            }
+            if ok {
+                self.missingToolchainHint = nil
+                _ = await self.performCompileAsync()
             }
         }
     }
 
-    
-    private func runDirectToBoard() {
+    private func runCompileOnly() {
+        Task { @MainActor in
+            _ = await performCompileAsync()
+        }
+    }
+
+    @discardableResult
+    private func performCompileAsync() async -> FirmwareCompileOutcome {
         withAnimation(.easeInOut(duration: 0.15)) {
             showBottomDrawer = true
         }
-        guard let port = selectedPort else {
-            editorConsoleTab = 0
-            buildLogOutput = "[ERROR] No physical USB hardware selected.\nPlease select a board port from the sidebar first.\n"
-            return
-        }
-        
         isCompilingToBoard = true
+        missingToolchainHint = nil
         editorConsoleTab = 0
         buildLogOutput = ""
-        
-        let startTimestamp = currentTimestamp()
-        buildLogOutput += "[\(startTimestamp)] [TASK] Initiating Direct-to-Board Flash Pipeline\n"
-        buildLogOutput += "[\(startTimestamp)] [TARGET] Board: \(selectedBoard.rawValue) (\(selectedBoard.mcuSummary))\n"
-        buildLogOutput += "[\(startTimestamp)] [PORT] Hardware Bus: \(port.path) (\(port.name))\n"
-        buildLogOutput += "[\(startTimestamp)] [LANG] Source Language: \(editorLanguage.rawValue)\n"
-        
-        // Step 1: Write file to /tmp/microcode_sketch/ and deploy synthetic stubs
-        let tempDir = "/tmp/microcode_sketch"
-        try? FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
-        let filePath = "\(tempDir)/\(editorFilePath)"
-        EmbeddedEnvManager.shared.deploySyntheticEmbeddedHeaders(into: tempDir)
-        EmbeddedEnvManager.shared.autoResolveAndInstallDependencies(code: editorSourceCode)
-        
-        do {
-            try editorSourceCode.write(toFile: filePath, atomically: true, encoding: .utf8)
-            buildLogOutput += "[FS] Wrote source file: \(filePath) (\(editorSourceCode.count) bytes)\n"
-        } catch {
-            buildLogOutput += "[ERROR] Failed to write sketch to disk: \(error.localizedDescription)\n"
-            isCompilingToBoard = false
-            return
-        }
-        
-        // Step 2: Use Smart Port Arbiter to yield serial port
-        executeWithSmartArbiter(operationName: "Direct Flash to \(selectedBoard.rawValue)") { completion in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let esptoolPath = "/opt/homebrew/bin/esptool.py"
-                
-                // Perform quick host-side syntax validation if toolchain exists
-                if self.editorLanguage == .cpp || self.editorLanguage == .c || self.editorLanguage == .arduino {
-                    let compiler = "/Users/dotmini/.swiftly/bin/clang++"
-                    if FileManager.default.fileExists(atPath: compiler) {
-                        DispatchQueue.main.async {
-                            self.buildLogOutput += "[COMPILE] Validating syntax with LLVM Clang++...\n"
-                        }
-                        let p = Process()
-                        p.executableURL = URL(fileURLWithPath: compiler)
-                        var args = ["-fsyntax-only", "-std=c++17", "-I\(tempDir)", "-D__MICROCODE_EMBEDDED__=1"]
-                        args.append(contentsOf: EmbeddedEnvManager.shared.getEspIdfIncludeFlags())
-                        args.append(filePath)
-                        p.arguments = args
-                        let pipe = Pipe()
-                        p.standardError = pipe
-                        p.standardOutput = pipe
-                        try? p.run()
-                        p.waitUntilExit()
-                        let errData = pipe.fileHandleForReading.readDataToEndOfFile()
-                        if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
-                            DispatchQueue.main.async {
-                                self.buildLogOutput += "[LINT] \(errStr.prefix(500))\n"
-                            }
-                        } else {
-                            DispatchQueue.main.async {
-                                self.buildLogOutput += "[COMPILE] Syntax verification: 0 errors detected.\n"
-                            }
-                        }
-                    }
-                } else if self.editorLanguage == .rust {
-                    let rustc = "/Users/dotmini/.cargo/bin/rustc"
-                    if FileManager.default.fileExists(atPath: rustc) {
-                        DispatchQueue.main.async {
-                            self.buildLogOutput += "[RUSTC] Validating Rust source with rustc --emit=metadata...\n"
-                        }
-                        let p = Process()
-                        p.executableURL = URL(fileURLWithPath: rustc)
-                        p.arguments = ["--emit=metadata", "--crate-type=staticlib", "--out-dir=/tmp/microcode_sketch", filePath]
-                        let pipe = Pipe()
-                        p.standardError = pipe
-                        p.standardOutput = pipe
-                        try? p.run()
-                        p.waitUntilExit()
-                        let errData = pipe.fileHandleForReading.readDataToEndOfFile()
-                        if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
-                            DispatchQueue.main.async {
-                                self.buildLogOutput += "[RUSTC] \(errStr.prefix(500))\n"
-                            }
-                        }
-                    }
-                } else if self.editorLanguage == .micropython {
-                    let pyPath = "/opt/homebrew/opt/python@3.11/libexec/bin/python3"
-                    if FileManager.default.fileExists(atPath: pyPath) {
-                        DispatchQueue.main.async {
-                            self.buildLogOutput += "[PYTHON] Checking Python syntax with py_compile...\n"
-                        }
-                        let p = Process()
-                        p.executableURL = URL(fileURLWithPath: pyPath)
-                        p.arguments = ["-m", "py_compile", filePath]
-                        let pipe = Pipe()
-                        p.standardError = pipe
-                        p.standardOutput = pipe
-                        try? p.run()
-                        p.waitUntilExit()
-                        let errData = pipe.fileHandleForReading.readDataToEndOfFile()
-                        if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
-                            DispatchQueue.main.async {
-                                self.buildLogOutput += "[SYNTAX ERR] \(errStr)\n"
-                            }
-                        } else {
-                            DispatchQueue.main.async {
-                                self.buildLogOutput += "[PYTHON] MicroPython script syntax OK.\n"
-                            }
-                        }
-                    }
-                }
-                
-                // Step 3: Check if ESP-IDF CMake flasher is available
-                if self.selectedBoard.isEsp32Family && EmbeddedEnvManager.shared.isEspIdfConfigured {
-                    DispatchQueue.main.async {
-                        self.buildLogOutput += "[ARBITER] Bus acquired. Invoking ESP-IDF CMake Flasher (idf.py flash)...\n"
-                        self.buildLogOutput += "[IDF] Source: \(EmbeddedEnvManager.shared.idfPath)\n"
-                    }
-                    let target = self.selectedBoard.idfTarget ?? "esp32s3"
-                    let projectDir = EmbeddedEnvManager.shared.generateTransientEspIdfProject(sourceCode: self.editorSourceCode, targetBoard: target)
-                    EmbeddedEnvManager.shared.flashEspIdfProject(projectDir: projectDir, port: port.path, baud: "460800", onOutput: { chunk in
-                        DispatchQueue.main.async {
-                            self.buildLogOutput += chunk
-                        }
-                    }, completion: { success, exitCode in
-                        DispatchQueue.main.async {
-                            if success {
-                                self.buildLogOutput += "\n[SUCCESS] ESP-IDF Firmware flashed to \(self.selectedBoard.rawValue)!\n"
-                                self.buildLogOutput += "[RESET] Hard resetting board via RTS/DTR pin...\n"
-                                self.buildLogOutput += "[READY] Switching to LIVE REALTIME EXECUTION console tab...\n"
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                                    self.editorConsoleTab = 1
-                                }
-                            } else {
-                                self.buildLogOutput += "\n[WARN] idf.py flash exited with code \(exitCode).\n"
-                            }
-                            self.isCompilingToBoard = false
-                            completion()
-                        }
-                    })
-                    return
-                }
-                
-                // Fallback Step 3: Hardware direct communication and flash via real esptool
-                if FileManager.default.fileExists(atPath: esptoolPath) && (self.selectedBoard == .esp32s3 || self.selectedBoard == .esp32c3) {
-                    DispatchQueue.main.async {
-                        self.buildLogOutput += "[ARBITER] Bus acquired. Syncing with ROM bootloader on \(port.path)...\n"
-                        self.buildLogOutput += "[INFO] Tip: Configure IDF_PATH in ENV sheet to build full native ESP-IDF binary.\n"
-                    }
 
-                    
-                    let proc = Process()
-                    proc.executableURL = URL(fileURLWithPath: esptoolPath)
-                    proc.arguments = ["--port", port.path, "--baud", "460800", "flash_id"]
-                    
-                    let pipe = Pipe()
-                    proc.standardOutput = pipe
-                    proc.standardError = pipe
-                    
-                    do {
-                        try proc.run()
-                        
-                        let handle = pipe.fileHandleForReading
-                        var streamData = Data()
-                        while proc.isRunning {
-                            let chunk = handle.availableData
-                            if !chunk.isEmpty {
-                                streamData.append(chunk)
-                                if let str = String(data: chunk, encoding: .utf8) {
-                                    DispatchQueue.main.async {
-                                        self.buildLogOutput += str
-                                    }
-                                }
-                            }
-                            usleep(25000)
-                        }
-                        
-                        let rem = handle.readDataToEndOfFile()
-                        if let str = String(data: rem, encoding: .utf8), !str.isEmpty {
-                            DispatchQueue.main.async {
-                                self.buildLogOutput += str
-                            }
-                        }
-                        
-                        proc.waitUntilExit()
-                        let exitCode = proc.terminationStatus
-                        
-                        DispatchQueue.main.async {
-                            if exitCode == 0 {
-                                self.buildLogOutput += "\n[SUCCESS] Hardware handshake & bootloader verification successful!\n"
-                                self.buildLogOutput += "[RESET] Hard resetting board via RTS/DTR pin...\n"
-                                self.buildLogOutput += "[READY] Switching to LIVE REALTIME EXECUTION console tab...\n"
-                                
-                                // Auto-switch to Live Realtime Execution console tab
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                                    self.editorConsoleTab = 1
-                                }
-                            } else {
-                                self.buildLogOutput += "\n[WARN] Flasher process exited with code \(exitCode).\n"
-                            }
-                            self.isCompilingToBoard = false
-                            completion()
-                        }
-                    } catch {
-                        DispatchQueue.main.async {
-                            self.buildLogOutput += "\n[ERROR] Failed to run flasher: \(error.localizedDescription)\n"
-                            self.isCompilingToBoard = false
-                            completion()
-                        }
-                    }
-                } else {
-                    // Other boards or toolchain
-                    DispatchQueue.main.async {
-                        self.buildLogOutput += "[BUILD] Finished compilation for \(self.selectedBoard.rawValue).\n"
-                        self.buildLogOutput += "[FLASH] Binary verified and prepared at \(filePath).\n"
-                        self.isCompilingToBoard = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            self.editorConsoleTab = 1
-                        }
-                        completion()
-                    }
-                }
+        let ts = currentTimestamp()
+        buildLogOutput += "[\(ts)] [COMPILE] Starting Zero-Mock cross-compilation (\(editorLanguage.rawValue))\n"
+        buildLogOutput += "[\(ts)] [TARGET]  \(selectedBoard.rawValue) [\(selectedBoard.mcuSummary)]\n"
+
+        // Live Pin Conflict & Datasheet Electrical DRC pre-flight check
+        let drc = PinConflictDRCAnalyzer.analyze(code: editorSourceCode, board: selectedBoard)
+        if !drc.warnings.isEmpty {
+            for w in drc.warnings {
+                buildLogOutput += "[PIN DRC \(w.severity)] GPIO \(w.gpio): \(w.message)\n"
             }
         }
+
+        envManager.analyzeIncludes(code: editorSourceCode)
+        envManager.autoResolveAndInstallDependencies(code: editorSourceCode)
+
+        // Specialized bare-metal Rust / Ardium verification when selected
+        if editorLanguage == .rust {
+            let outcome = await compileEmbeddedRustAsync()
+            isCompilingToBoard = false
+            return outcome
+        } else if editorLanguage == .ardium {
+            let outcome = await compileEmbeddedArdiumAsync()
+            isCompilingToBoard = false
+            return outcome
+        }
+
+        let outcome = await toolchainService.compileFirmware(
+            sourceCode: editorSourceCode,
+            language: editorLanguage,
+            board: selectedBoard,
+            workspaceURL: appState.workspaceFolder,
+            onLog: { chunk in
+                self.buildLogOutput += chunk
+            }
+        )
+
+        missingToolchainHint = outcome.missingToolchainHint
+        if let bin = outcome.binaryPath {
+            otaBinaryPath = bin
+            flashBinaryPath = bin
+        }
+        isCompilingToBoard = false
+        return outcome
+    }
+
+    private func compileEmbeddedRustAsync() async -> FirmwareCompileOutcome {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard let rustc = EmbeddedToolchainService.locateExecutable(names: ["rustc"], extraDirs: ["\(home)/.cargo/bin"]) else {
+            let msg = "[TOOLCHAIN MISSING] `rustc` not found. Install Rust via https://rustup.rs to cross-compile Embedded Rust firmware.\n"
+            buildLogOutput += msg
+            return FirmwareCompileOutcome(success: false, backend: nil, elfPath: nil, binaryPath: nil, memoryReport: nil, missingToolchainHint: msg, fullLog: buildLogOutput)
+        }
+        let triple: String
+        switch selectedBoard {
+        case .esp32s3: triple = "xtensa-esp32s3-none-elf"
+        case .esp32c3: triple = "riscv32imc-unknown-none-elf"
+        case .picoW: triple = "thumbv6m-none-eabi"
+        case .arduinoUnoR4, .stm32f4: triple = "thumbv7em-none-eabihf"
+        }
+        let projDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/MicroCodeEmbedded/rust-\(triple)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: projDir, withIntermediateDirectories: true)
+        let rsFile = projDir.appendingPathComponent("main.rs")
+        let outObj = projDir.appendingPathComponent("libfirmware.a")
+        try? editorSourceCode.write(to: rsFile, atomically: true, encoding: .utf8)
+
+        buildLogOutput += "[RUSTC] Cross-compiling \(rsFile.path) → --target \(triple)...\n"
+        let (code, out) = await EmbeddedToolchainService.streamProcess(
+            executable: rustc,
+            args: ["--target", triple, "--crate-type=staticlib", "-C", "opt-level=s", "-o", outObj.path, rsFile.path],
+            cwd: projDir,
+            env: EmbeddedToolchainService.buildSubprocessEnvironment(),
+            onChunk: { self.buildLogOutput += $0 }
+        )
+        if code != 0 && out.contains("can't find crate for `core`") {
+            buildLogOutput += "\n[RUST TARGET HINT] Run `rustup target add \(triple)` (or `espup install` for Xtensa ESP32-S3) to install the bare-metal core library.\n"
+        }
+        return FirmwareCompileOutcome(success: code == 0, backend: nil, elfPath: nil, binaryPath: code == 0 ? outObj.path : nil, memoryReport: nil, missingToolchainHint: nil, fullLog: buildLogOutput)
+    }
+
+    private func compileEmbeddedArdiumAsync() async -> FirmwareCompileOutcome {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard let ardiumBin = EmbeddedToolchainService.locateExecutable(names: ["ardium", "ardiumc"], extraDirs: ["\(home)/.microcode/runtimes/ardium/bin", "\(home)/.ardium/bin"]) else {
+            let msg = "[TOOLCHAIN MISSING] `ardium` compiler binary not found on PATH. Install Ardium v2.3 toolchain to compile `.ar` embedded modules.\n"
+            buildLogOutput += msg
+            return FirmwareCompileOutcome(success: false, backend: nil, elfPath: nil, binaryPath: nil, memoryReport: nil, missingToolchainHint: nil, fullLog: buildLogOutput)
+        }
+        let projDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/MicroCodeEmbedded/ardium", isDirectory: true)
+        try? FileManager.default.createDirectory(at: projDir, withIntermediateDirectories: true)
+        let arFile = projDir.appendingPathComponent("main.ar")
+        try? editorSourceCode.write(to: arFile, atomically: true, encoding: .utf8)
+
+        let (code, _) = await EmbeddedToolchainService.streamProcess(
+            executable: ardiumBin,
+            args: ["check", arFile.path],
+            cwd: projDir,
+            env: EmbeddedToolchainService.buildSubprocessEnvironment(),
+            onChunk: { self.buildLogOutput += $0 }
+        )
+        return FirmwareCompileOutcome(success: code == 0, backend: nil, elfPath: nil, binaryPath: nil, memoryReport: nil, missingToolchainHint: nil, fullLog: buildLogOutput)
+    }
+
+    private func runDirectToBoard() {
+        Task { @MainActor in
+            _ = await performFlashAsync()
+        }
+    }
+
+    @discardableResult
+    private func performFlashAsync() async -> Bool {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            showBottomDrawer = true
+        }
+        usbDaemon.scanBootloaderVolumes()
+        let hasUF2Bootloader = (selectedBoard == .picoW) && !usbDaemon.bootloaderVolumes.isEmpty
+
+        guard selectedPort != nil || hasUF2Bootloader else {
+            editorConsoleTab = 0
+            buildLogOutput = "[ERROR] No physical USB microcontroller or UF2 BOOTSEL volume detected.\nPlug a board into macOS via USB first (Zero-Mock hardware verification active).\n"
+            return false
+        }
+
+        let targetPortPath = selectedPort?.path ?? usbDaemon.bootloaderVolumes.first?.path ?? ""
+        isCompilingToBoard = true
+        missingToolchainHint = nil
+        editorConsoleTab = 0
+        buildLogOutput = ""
+
+        let ts = currentTimestamp()
+        buildLogOutput += "[\(ts)] [FLASH] Initiating Real Cross-Compile & Hardware Upload Pipeline\n"
+        buildLogOutput += "[\(ts)] [BOARD] \(selectedBoard.rawValue) (\(selectedBoard.mcuSummary))\n"
+        buildLogOutput += "[\(ts)] [PORT]  \(targetPortPath)\n"
+
+        // Yield active POSIX serial FD via Smart Port Arbiter before touching bootloader
+        let wasSerialOpen = isConnected
+        if wasSerialOpen {
+            isArbiterActive = true
+            arbiterMessage = "Smart Arbiter: Yielded \(targetPortPath) for firmware upload"
+            disconnectRealSerial()
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+
+        let flashSucceeded = await toolchainService.flashToBoard(
+            sourceCode: editorSourceCode,
+            language: editorLanguage,
+            board: selectedBoard,
+            portPath: targetPortPath,
+            workspaceURL: appState.workspaceFolder,
+            onLog: { chunk in
+                self.buildLogOutput += chunk
+            }
+        )
+
+        isCompilingToBoard = false
+        usbDaemon.refreshNow()
+
+        if wasSerialOpen || (flashSucceeded && selectedPort != nil) {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            if selectedPort != nil {
+                connectRealSerial()
+            }
+            isArbiterActive = false
+            arbiterMessage = "Smart Arbiter: Serial monitor connected to live board."
+        } else {
+            isArbiterActive = false
+        }
+
+        if flashSucceeded {
+            editorConsoleTab = 1
+        }
+        return flashSucceeded
     }
     
     private func sendEditorLiveCommand() {
@@ -2695,33 +2724,43 @@ struct EmbeddedStudioView: View {
                 
                 Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 16)
                 
-                // Auto-Range Toggle
+                // Auto-Range & Apple Accelerate vDSP FFT Toggles
                 Toggle("AUTO-RANGE", isOn: $autoRangeEnabled)
                     .toggleStyle(.button)
                     .controlSize(.mini)
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                 
-                // Test Signal Generator (Simulates live sensors when no physical sensor is attached)
-                Button(action: { toggleTestSignalGenerator() }) {
+                Toggle("vDSP FFT SPECTRUM", isOn: $showFFTSpectrum)
+                    .toggleStyle(.button)
+                    .controlSize(.mini)
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                
+                Button(action: { exportTelemetryToCellMode() }) {
                     HStack(spacing: 4) {
-                        Image(systemName: testSignalActive ? "antenna.radiowaves.left.and.right" : "bolt.horizontal")
-                        Text(testSignalActive ? "SIMULATOR: ACTIVE" : "GENERATE TEST SIGNAL")
+                        Image(systemName: "arrow.up.right.square")
+                        Text("EXPORT CSV → CELL MODE (\(telemetryHistoryBuffer.count))")
                     }
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(testSignalActive ? Color.white.opacity(0.25) : Color.white.opacity(0.06))
-                    .foregroundColor(testSignalActive ? .white : Color(white: 0.7))
+                    .background(telemetryHistoryBuffer.isEmpty ? Color.white.opacity(0.04) : Color.white.opacity(0.16))
+                    .foregroundColor(telemetryHistoryBuffer.isEmpty ? Color(white: 0.4) : .white)
                     .cornerRadius(3)
                 }
                 .buttonStyle(.plain)
+                .disabled(telemetryHistoryBuffer.isEmpty)
                 
                 Spacer()
                 
                 // Clear Buffer
                 Button(action: {
                     waveformSamples.removeAll()
+                    telemetryHistoryBuffer.removeAll()
                     sampleClock = 0
+                    firstTelemetryTimestamp = 0
+                    latestTelemetryTimestamp = 0
+                    telemetryMin = 0.0
+                    telemetryMax = 1.0
                 }) {
                     HStack(spacing: 3) {
                         Image(systemName: "trash")
@@ -2742,7 +2781,7 @@ struct EmbeddedStudioView: View {
             
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
             
-            // Full Screen Oscilloscope Canvas
+            // Full Screen Oscilloscope Canvas (Zero-Mock Physical Serial & BLE NUS Only)
             GeometryReader { geo in
                 ZStack {
                     Canvas { context, size in
@@ -2755,34 +2794,91 @@ struct EmbeddedStudioView: View {
                             Image(systemName: "waveform.path")
                                 .font(.system(size: 28))
                                 .foregroundColor(Color(white: 0.2))
-                            Text("AWAITING SENSOR TELEMETRY")
+                            Text("AWAITING PHYSICAL SENSOR TELEMETRY")
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                                 .foregroundColor(Color(white: 0.5))
-                            Text("Connect microcontroller sending CSV (e.g. 25.4, 60.2, 1013.2) or click 'GENERATE TEST SIGNAL' to preview")
+                            Text("Connect a physical USB microcontroller (/dev/cu.*) or BLE Nordic UART peripheral streaming numeric/CSV telemetry (e.g. >voltage:3.30,temp:24.5)")
                                 .font(.system(size: 9, design: .monospaced))
                                 .foregroundColor(Color(white: 0.35))
                                 .multilineTextAlignment(.center)
-                            
-                            Button(action: { toggleTestSignalGenerator() }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "play.fill")
-                                    Text("START SIMULATED HARDWARE STREAM")
-                                }
-                                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Color.white)
-                                .foregroundColor(.black)
-                                .cornerRadius(4)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.top, 4)
+                                .frame(maxWidth: 520)
                         }
                     }
                 }
             }
             .background(Color.black)
+            
+            if showFFTSpectrum {
+                Rectangle().fill(Color.white.opacity(0.1)).frame(height: 1)
+                fftSpectrumPanel
+            }
         }
+    }
+    
+    private var fftSpectrumPanel: some View {
+        let dt = max(0.05, latestTelemetryTimestamp - firstTelemetryTimestamp)
+        let estSampleRate = telemetryHistoryBuffer.count > 2 ? Double(telemetryHistoryBuffer.count - 1) / dt : 20.0
+        let spectrum = TelemetryFFTAnalyzer.computeSpectrum(
+            samples: telemetryHistoryBuffer.map(\.raw1),
+            sampleRateHz: estSampleRate
+        )
+        
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                HStack(spacing: 5) {
+                    Image(systemName: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white)
+                    Text("APPLE ACCELERATE vDSP HANNING-WINDOWED FFT (CH1)")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                }
+                
+                Spacer()
+                
+                if let spec = spectrum {
+                    Text(String(format: "PEAK: %.2f Hz (MAG %.3f)", spec.dominantFrequencyHz, spec.dominantMagnitude))
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                    Text(String(format: "RMS: %.3f", spec.rms))
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundColor(Color(white: 0.7))
+                    Text(String(format: "FS ≈ %.1f Hz", estSampleRate))
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundColor(Color(white: 0.55))
+                } else {
+                    Text("Collecting real samples (\(telemetryHistoryBuffer.count)/32 minimum for Radix-2 FFT)...")
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundColor(Color(white: 0.5))
+                }
+            }
+            
+            if let spec = spectrum, !spec.bins.isEmpty {
+                let topBins = Array(spec.bins.prefix(48))
+                let maxMag = max(topBins.map(\.magnitude).max() ?? 0.001, 0.0001)
+                HStack(alignment: .bottom, spacing: 2) {
+                    ForEach(Array(topBins.enumerated()), id: \.offset) { _, bin in
+                        let norm = CGFloat(min(1.0, max(0.03, bin.magnitude / maxMag)))
+                        VStack(spacing: 2) {
+                            Spacer(minLength: 0)
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(abs(bin.hz - spec.dominantFrequencyHz) < 0.001 ? Color.white : Color.white.opacity(0.42))
+                                .frame(height: max(3, norm * 76))
+                        }
+                        .help(String(format: "%.2f Hz: %.4f", bin.hz, bin.magnitude))
+                    }
+                }
+                .frame(height: 82)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(Color.black)
+                .cornerRadius(4)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.08), lineWidth: 1))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(white: 0.05))
     }
     
     private func channelStatCard(label: String, value: Double?, style: String) -> some View {
@@ -2951,8 +3047,65 @@ struct EmbeddedStudioView: View {
                 Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
                 
                 if let pin = selectedPin {
+                    let drc = PinConflictDRCAnalyzer.analyze(code: editorSourceCode, board: selectedBoard)
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
+                            // LIVE SOURCE-TO-PINOUT ELECTRICAL DRC CARD
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Image(systemName: drc.warnings.isEmpty ? "checkmark.shield" : "exclamationmark.triangle.fill")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.white)
+                                    Text("LIVE FIRMWARE SOURCE DRC (\(drc.activeGPIOs.count) ACTIVE GPIOS)")
+                                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.white)
+                                    Spacer()
+                                    Text(drc.warnings.isEmpty ? "DRC CLEAN" : "\(drc.warnings.count) HAZARD(S)")
+                                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1.5)
+                                        .background(drc.warnings.isEmpty ? Color.white.opacity(0.1) : Color.white)
+                                        .foregroundColor(drc.warnings.isEmpty ? .white : .black)
+                                        .cornerRadius(2)
+                                }
+                                
+                                if drc.activeGPIOs.isEmpty {
+                                    Text("No GPIO calls detected in active Sketch Editor source.")
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(Color(white: 0.45))
+                                } else {
+                                    let summary = drc.activeGPIOs.sorted(by: { $0.key < $1.key })
+                                        .map { "GPIO\($0.key) [\($0.value.joined(separator: "+"))]" }
+                                        .joined(separator: "  •  ")
+                                    Text(summary)
+                                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                                        .foregroundColor(Color(white: 0.85))
+                                }
+                                
+                                ForEach(drc.warnings) { warn in
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text(warn.severity)
+                                            .font(.system(size: 7, weight: .bold, design: .monospaced))
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(Color.white)
+                                            .foregroundColor(.black)
+                                            .cornerRadius(2)
+                                        Text(warn.message)
+                                            .font(.system(size: 9, design: .monospaced))
+                                            .foregroundColor(.white)
+                                    }
+                                    .padding(6)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color.white.opacity(0.08))
+                                    .cornerRadius(4)
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.white.opacity(0.04))
+                            .cornerRadius(6)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(drc.warnings.isEmpty ? Color.white.opacity(0.1) : Color.white.opacity(0.45), lineWidth: 1))
+                            
                             // Selected Pin Title Card
                             HStack(spacing: 12) {
                                 ZStack {
@@ -3313,13 +3466,46 @@ struct EmbeddedStudioView: View {
     
     private var crashDecoderView: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("ESP32 BACKTRACE & REGISTER DECODER")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(.white)
-                Text("Demangles ESP-IDF panic register dumps into source functions (Xtensa Architecture)")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(Color(white: 0.5))
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DWARF ELF CRASH, GURU MEDITATION & HARDFAULT DECODER")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                    Text("Symbolicates Xtensa / RISC-V / ARM Cortex-M PC addresses via real <arch>-addr2line & llvm-symbolizer against compiled .elf")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(Color(white: 0.5))
+                }
+                
+                Spacer()
+                
+                if let elfPath = elfService.latestELFPath {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(.white)
+                        Text("DWARF ELF: \((elfPath as NSString).lastPathComponent)")
+                            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.1))
+                    .cornerRadius(3)
+                } else {
+                    Button(action: { runCompileOnly() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "hammer")
+                            Text("COMPILE SKETCH FOR DWARF .ELF")
+                        }
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.08))
+                        .foregroundColor(Color(white: 0.8))
+                        .cornerRadius(3)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
@@ -3336,8 +3522,12 @@ struct EmbeddedStudioView: View {
                 HStack(spacing: 8) {
                     Button(action: { decodeBacktrace() }) {
                         HStack(spacing: 4) {
-                            Image(systemName: "play.fill")
-                            Text("DECODE BACKTRACE")
+                            if isDecodingCrash {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "play.fill")
+                            }
+                            Text(isDecodingCrash ? "SYMBOLICATING..." : "DECODE BACKTRACE")
                         }
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .padding(.horizontal, 10)
@@ -3347,6 +3537,7 @@ struct EmbeddedStudioView: View {
                         .cornerRadius(3)
                     }
                     .buttonStyle(.plain)
+                    .disabled(isDecodingCrash)
                     
                     Button(action: { pasteCrashTraceFromClipboard() }) {
                         HStack(spacing: 4) {
@@ -3425,6 +3616,7 @@ struct EmbeddedStudioView: View {
                         Button("CLEAR") {
                             rawTraceInput = ""
                             decodedTraceResult = ""
+                            elfService.latestDecodedFrames.removeAll()
                         }
                         .font(.system(size: 8, design: .monospaced))
                         .buttonStyle(.plain)
@@ -3434,8 +3626,41 @@ struct EmbeddedStudioView: View {
             }
             .padding(.horizontal, 16)
             
+            let resolvedFrames = elfService.latestDecodedFrames.filter { $0.filePath != nil }
+            if !resolvedFrames.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Text("JUMP TO SOURCE:")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.5))
+                        ForEach(resolvedFrames) { frame in
+                            if let path = frame.filePath {
+                                let base = (path as NSString).lastPathComponent
+                                let loc = frame.lineNumber != nil ? "\(base):\(frame.lineNumber!)" : base
+                                Button(action: { openSymbolicatedCrashFrame(frame) }) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "arrow.up.forward.app")
+                                            .font(.system(size: 8))
+                                        Text("#\(frame.index) \(frame.functionName) — \(loc)")
+                                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.white.opacity(0.12))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(3)
+                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.22), lineWidth: 1))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+            
             ScrollView {
-                Text(decodedTraceResult.isEmpty ? "Waiting for panic dump or backtrace. Paste raw log, import file, or pull from active Serial Console." : decodedTraceResult)
+                Text(decodedTraceResult.isEmpty ? "Waiting for panic dump or backtrace. Paste raw log, import file, or pull from active Serial Console (Guru Meditation & HardFault crashes on Serial are auto-captured)." : decodedTraceResult)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(Color(white: 0.9))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -3665,10 +3890,10 @@ struct EmbeddedStudioView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.white)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("WIRELESS OTA & MDNS IOT DISCOVERY")
+                        Text("WIRELESS OTA & REAL BONJOUR/MDNS IOT DISCOVERY")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .foregroundColor(.white)
-                        Text("Deploy firmware wirelessly over Wi-Fi / LAN without physical USB cable")
+                        Text("Real Network.framework NWBrowser (_arduino._tcp, _esphomelib._tcp, _mqtt._tcp, _http._tcp) + ESPOTA UDP/TCP & HTTP Multipart OTA")
                             .font(.system(size: 8, design: .monospaced))
                             .foregroundColor(Color(white: 0.5))
                     }
@@ -3678,8 +3903,8 @@ struct EmbeddedStudioView: View {
                 
                 Button(action: { scanWirelessOtaNodes() }) {
                     HStack(spacing: 4) {
-                        Image(systemName: isOtaScanning ? "rays" : "arrow.triangle.2.circlepath")
-                        Text(isOtaScanning ? "DISCOVERING..." : "SCAN LOCAL NETWORK (MDNS)")
+                        Image(systemName: iotDiscovery.isBrowsing ? "rays" : "arrow.triangle.2.circlepath")
+                        Text(iotDiscovery.isBrowsing ? "BROWSING MDNS..." : "SCAN LOCAL NETWORK (MDNS)")
                     }
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 9)
@@ -3698,64 +3923,86 @@ struct EmbeddedStudioView: View {
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
             
             HSplitView {
-                // Left: Discovered Nodes
+                // Left: Real Discovered mDNS Nodes
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("DISCOVERED IOT NODES ON LAN (\(otaDiscoveredNodes.count))")
+                        Text("DISCOVERED IOT NODES ON LAN (\(iotDiscovery.discoveredNodes.count))")
                             .font(.system(size: 9, weight: .bold, design: .monospaced))
                             .foregroundColor(Color(white: 0.6))
                         Spacer()
+                        if iotDiscovery.isBrowsing {
+                            ProgressView().controlSize(.mini)
+                        }
                     }
                     
-                    ScrollView {
-                        VStack(spacing: 6) {
-                            ForEach(otaDiscoveredNodes) { node in
-                                Button(action: {
-                                    selectedOtaNode = node
-                                    otaTargetIp = node.ip
-                                    otaTargetPort = "\(node.port)"
-                                }) {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "wifi")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(.white)
-                                        
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(node.name)
-                                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    if iotDiscovery.discoveredNodes.isEmpty {
+                        VStack(spacing: 8) {
+                            Spacer()
+                            Image(systemName: "wifi.router")
+                                .font(.system(size: 22))
+                                .foregroundColor(Color(white: 0.25))
+                            Text(iotDiscovery.isBrowsing ? "PROBING SUBNET VIA APPLE NWBROWSER..." : "NO MDNS IOT NODES DISCOVERED")
+                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                .foregroundColor(Color(white: 0.5))
+                            Text("Click 'SCAN LOCAL NETWORK (MDNS)' to query real Bonjour services (_arduino._tcp, _esphomelib._tcp, _mqtt._tcp, _http._tcp) or enter a target IPv4 manually on the right.")
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .foregroundColor(Color(white: 0.35))
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 12)
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 6) {
+                                ForEach(iotDiscovery.discoveredNodes) { node in
+                                    let isSelectedNode = (otaTargetIp == node.ipAddress && otaTargetPort == "\(node.port)")
+                                    Button(action: {
+                                        otaTargetIp = node.ipAddress
+                                        otaTargetPort = "\(node.port)"
+                                    }) {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "wifi")
+                                                .font(.system(size: 12))
                                                 .foregroundColor(.white)
-                                            HStack(spacing: 6) {
-                                                Text(node.ip + ":" + "\(node.port)")
-                                                    .font(.system(size: 9, design: .monospaced))
-                                                    .foregroundColor(Color(white: 0.6))
-                                                Text("•")
-                                                    .foregroundColor(Color(white: 0.3))
-                                                Text(node.board)
-                                                    .font(.system(size: 9, design: .monospaced))
-                                                    .foregroundColor(Color(white: 0.5))
+                                            
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(node.serviceName)
+                                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                                    .foregroundColor(.white)
+                                                HStack(spacing: 6) {
+                                                    Text("\(node.ipAddress):\(node.port)")
+                                                        .font(.system(size: 9, design: .monospaced))
+                                                        .foregroundColor(Color(white: 0.65))
+                                                    Text("•")
+                                                        .foregroundColor(Color(white: 0.3))
+                                                    Text(node.boardHint)
+                                                        .font(.system(size: 9, design: .monospaced))
+                                                        .foregroundColor(Color(white: 0.5))
+                                                }
+                                            }
+                                            
+                                            Spacer()
+                                            
+                                            VStack(alignment: .trailing, spacing: 2) {
+                                                Text(node.hostname)
+                                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                                    .foregroundColor(Color(white: 0.8))
+                                                Text(node.authRequired ? "AUTH REQUIRED" : node.serviceType)
+                                                    .font(.system(size: 8, design: .monospaced))
+                                                    .foregroundColor(Color(white: 0.55))
                                             }
                                         }
-                                        
-                                        Spacer()
-                                        
-                                        VStack(alignment: .trailing, spacing: 2) {
-                                            Text("\(node.rssi) dBm")
-                                                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                                .foregroundColor(.white)
-                                            Text(node.status)
-                                                .font(.system(size: 8, design: .monospaced))
-                                                .foregroundColor(Color(white: 0.6))
-                                        }
+                                        .padding(10)
+                                        .background(isSelectedNode ? Color.white.opacity(0.12) : Color.white.opacity(0.03))
+                                        .cornerRadius(5)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 5)
+                                                .stroke(isSelectedNode ? Color.white.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1)
+                                        )
                                     }
-                                    .padding(10)
-                                    .background(selectedOtaNode?.id == node.id ? Color.white.opacity(0.12) : Color.white.opacity(0.03))
-                                    .cornerRadius(5)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 5)
-                                            .stroke(selectedOtaNode?.id == node.id ? Color.white.opacity(0.3) : Color.white.opacity(0.08), lineWidth: 1)
-                                    )
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -3765,7 +4012,7 @@ struct EmbeddedStudioView: View {
                 
                 // Right: Target Deployment & Flasher
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("OVER-THE-AIR FIRMWARE DEPLOYMENT")
+                    Text("OVER-THE-AIR FIRMWARE DEPLOYMENT (ESPOTA / HTTP MULTIPART)")
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundColor(Color(white: 0.6))
                     
@@ -3786,7 +4033,7 @@ struct EmbeddedStudioView: View {
                             }
                             
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("PORT")
+                                Text("PORT (3232=ESPOTA, 80=HTTP)")
                                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                                     .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                                 TextField("3232", text: $otaTargetPort)
@@ -3797,12 +4044,12 @@ struct EmbeddedStudioView: View {
                                     .background(cardBg)
                                     .cornerRadius(3)
                                     .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
-                                    .frame(width: 70)
+                                    .frame(width: 110)
                             }
                         }
                         
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("SECURITY AUTH / PASSPHRASE (OPTIONAL)")
+                            Text("SECURITY AUTH / PASSPHRASE (OPTIONAL MD5 CHALLENGE / BEARER)")
                                 .font(.system(size: 8, weight: .bold, design: .monospaced))
                                 .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                             SecureField("Leave empty if node has no password", text: $otaPassword)
@@ -3816,9 +4063,20 @@ struct EmbeddedStudioView: View {
                         }
                         
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("FIRMWARE BINARY (.BIN)")
-                                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
+                            HStack {
+                                Text("FIRMWARE BINARY (.BIN)")
+                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                    .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
+                                Spacer()
+                                if let latestBin = elfService.latestFirmwareBinPath {
+                                    Button("USE COMPILED .BIN") {
+                                        otaBinaryPath = latestBin
+                                    }
+                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                    .foregroundColor(isDark ? .white : .black)
+                                    .buttonStyle(.plain)
+                                }
+                            }
                             HStack(spacing: 6) {
                                 TextField("/path/to/firmware.bin", text: $otaBinaryPath)
                                     .textFieldStyle(.plain)
@@ -3845,7 +4103,7 @@ struct EmbeddedStudioView: View {
                         Button(action: { runWirelessOtaFlash() }) {
                             HStack(spacing: 6) {
                                 Image(systemName: isOtaFlashing ? "rays" : "bolt.fill")
-                                Text(isOtaFlashing ? "UPLOADING FIRMWARE TO \(otaTargetIp)..." : "FLASH OVER-THE-AIR (OTA)")
+                                Text(isOtaFlashing ? "STREAMING REAL OTA TO \(otaTargetIp)..." : "FLASH OVER-THE-AIR (REAL ESPOTA / HTTP)")
                             }
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .frame(maxWidth: .infinity)
@@ -3864,11 +4122,12 @@ struct EmbeddedStudioView: View {
                     
                     // OTA Progress & Terminal Log
                     ScrollView {
-                        Text(otaLog.isEmpty ? "OTA deployment terminal standby. Discovered nodes will communicate via espota / HTTP OTA protocol." : otaLog)
+                        Text(otaLog.isEmpty ? "OTA deployment terminal standby. Port 3232/8266 uses real ESPOTA UDP invitation + MD5 + TCP streaming; Port 80/8080 uses HTTP Multipart POST /update." : otaLog)
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(isDark ? Color(white: 0.8) : Color(white: 0.2))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
+                            .textSelection(.enabled)
                     }
                     .background(consoleBg)
                     .cornerRadius(4)
@@ -3893,51 +4152,36 @@ struct EmbeddedStudioView: View {
     
     private func scanWirelessOtaNodes() {
         isOtaScanning = true
-        otaLog += "[mDNS] Scanning subnet for _arduino._tcp and _espota._tcp services...\n"
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            self.isOtaScanning = false
-            self.otaLog += "[mDNS] Discovered \(self.otaDiscoveredNodes.count) live IoT nodes on local Wi-Fi.\n"
+        iotDiscovery.startRealDiscovery(durationSeconds: 4.5) { chunk in
+            self.otaLog += chunk
+            self.otaDiscoveredNodes = self.iotDiscovery.discoveredNodes.map(\.wirelessOtaNode)
+            self.isOtaScanning = self.iotDiscovery.isBrowsing
         }
     }
     
     private func runWirelessOtaFlash() {
-        guard !otaBinaryPath.isEmpty, !otaTargetIp.isEmpty else { return }
+        let host = otaTargetIp.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bin = otaBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bin.isEmpty, !host.isEmpty else { return }
+        let portInt = Int(otaTargetPort.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 3232
         isOtaFlashing = true
-        otaLog += "[OTA] Initializing Wi-Fi OTA socket to \(otaTargetIp):\(otaTargetPort)...\n"
-        otaLog += "[OTA] Reading binary payload \(otaBinaryPath)...\n"
+        otaLog += "\n[\(currentTimestamp())] [OTA] Starting Zero-Mock wireless deployment to \(host):\(portInt)...\n"
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            self.otaLog += "[OTA] Authenticating with node security layer: OK\n"
-            self.otaLog += "[OTA] Sending OTA BEGIN packet (Size: 1,428,240 bytes)...\n"
-        }
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            self.otaLog += "[OTA] Flashing blocks [====================] 100% (2.1 MB/s)\n"
-            self.otaLog += "[OTA] Verifying SHA256 checksum: VALID\n"
-            self.otaLog += "[OTA] Node rebooting into new firmware slot: SUCCESS\n"
-            self.isOtaFlashing = false
-        }
-    }
-    
-    private func toggleTestSignalGenerator() {
-        if testSignalActive {
-            testSignalTimer?.cancel()
-            testSignalTimer = nil
-            testSignalActive = false
-        } else {
-            testSignalActive = true
-            testSignalTimer = Timer.publish(every: 0.05, on: .main, in: .common)
-                .autoconnect()
-                .sink { _ in
-                    guard self.plotterIsRunning else { return }
-                    self.sampleClock += 0.05
-                    let t = self.sampleClock
-                    let s1 = sin(t * 3.0) * 1.5 + 2.5
-                    let s2 = cos(t * 2.0) * 1.0 + 2.0
-                    let s3 = (t.truncatingRemainder(dividingBy: 2.0)) * 1.2
-                    self.parseTelemetryFromSerial(line: String(format: "%.2f, %.2f, %.2f", s1, s2, s3))
+        Task { @MainActor in
+            let ok = await iotDiscovery.performRealWirelessOTA(
+                binaryPath: bin,
+                targetHost: host,
+                targetPort: portInt,
+                password: otaPassword,
+                useHTTPMultipart: (portInt == 80 || portInt == 8080),
+                onLog: { chunk in
+                    self.otaLog += chunk
                 }
+            )
+            self.otaLog += ok
+                ? "[\(self.currentTimestamp())] [OTA SUCCESS] Firmware verified & target rebooted.\n"
+                : "[\(self.currentTimestamp())] [OTA FAILED] Target rejected or timed out during wireless upload.\n"
+            self.isOtaFlashing = false
         }
     }
     
@@ -3991,7 +4235,12 @@ struct EmbeddedStudioView: View {
     }
     
     private func pinSchematicRow(pin: PinDefinition, isLeft: Bool, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        HStack(spacing: 4) {
+        let drc = PinConflictDRCAnalyzer.analyze(code: editorSourceCode, board: selectedBoard)
+        let usedRoles = pin.gpioIndex.flatMap { drc.activeGPIOs[$0] }
+        let isUsedInCode = !(usedRoles?.isEmpty ?? true)
+        let hasWarning = pin.gpioIndex.map { g in drc.warnings.contains(where: { $0.gpio == g }) } ?? false
+        
+        return HStack(spacing: 4) {
             if !isLeft {
                 Text("\(pin.physicalPin)")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -4002,24 +4251,46 @@ struct EmbeddedStudioView: View {
             Button(action: action) {
                 HStack(spacing: 4) {
                     Text(pin.name)
-                        .font(.system(size: 9, weight: isSelected ? .bold : .medium, design: .monospaced))
+                        .font(.system(size: 9, weight: (isSelected || isUsedInCode) ? .bold : .medium, design: .monospaced))
                         .foregroundColor(.white)
+                        .lineLimit(1)
                     
-                    Text(pin.category)
-                        .font(.system(size: 7, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 3)
-                        .padding(.vertical, 1)
-                        .background(isSelected ? Color.white : Color.white.opacity(0.12))
-                        .foregroundColor(isSelected ? Color.black : Color.white)
-                        .cornerRadius(2)
+                    if hasWarning {
+                        Text("DRC!")
+                            .font(.system(size: 6.5, weight: .black, design: .monospaced))
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.white)
+                            .foregroundColor(.black)
+                            .cornerRadius(2)
+                    } else if isUsedInCode {
+                        Text("USED")
+                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(0.85))
+                            .foregroundColor(.black)
+                            .cornerRadius(2)
+                    } else {
+                        Text(pin.category)
+                            .font(.system(size: 7, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(isSelected ? Color.white : Color.white.opacity(0.12))
+                            .foregroundColor(isSelected ? Color.black : Color.white)
+                            .cornerRadius(2)
+                    }
                 }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
-                .frame(width: 112, alignment: isLeft ? .trailing : .leading)
+                .frame(width: 118, alignment: isLeft ? .trailing : .leading)
                 .contentShape(Rectangle())
-                .background(isSelected ? Color.white.opacity(0.2) : Color.white.opacity(0.04))
+                .background(isSelected ? Color.white.opacity(0.22) : (isUsedInCode ? Color.white.opacity(0.11) : Color.white.opacity(0.04)))
                 .cornerRadius(3)
-                .overlay(RoundedRectangle(cornerRadius: 3).stroke(isSelected ? Color.white : Color.white.opacity(0.1), lineWidth: 1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(isSelected ? Color.white : (hasWarning ? Color.white.opacity(0.85) : (isUsedInCode ? Color.white.opacity(0.45) : Color.white.opacity(0.1))), lineWidth: (isSelected || hasWarning) ? 1.3 : 1)
+                )
             }
             .buttonStyle(.plain)
             .simultaneousGesture(TapGesture().onEnded {
@@ -4193,142 +4464,27 @@ struct EmbeddedStudioView: View {
     
     private func scanRealSerialPorts() {
         isScanningPorts = true
-        DispatchQueue.global(qos: .utility).async {
-            var list: [RealSerialPort] = []
-            
-            // 1. Apple IOKit Hardware Registry: Query real physical USB serial hardware services
-            if let matching = IOServiceMatching(kIOSerialBSDServiceValue) {
-                var iterator: io_iterator_t = 0
-                let result = IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator)
-                if result == KERN_SUCCESS {
-                    var service = IOIteratorNext(iterator)
-                    while service != 0 {
-                        if let path = IORegistryEntryCreateCFProperty(service, kIOCalloutDeviceKey as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
-                            var parent: io_registry_entry_t = 0
-                            var isPhysicalUSB = false
-                            var usbProductName: String? = nil
-                            var usbVendorName: String? = nil
-                            
-                            var current = service
-                            IOObjectRetain(current)
-                            while IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) == KERN_SUCCESS {
-                                var className = [CChar](repeating: 0, count: 128)
-                                IOObjectGetClass(parent, &className)
-                                let name = String(cString: className)
-                                if name.contains("USB") {
-                                    isPhysicalUSB = true
-                                    if usbProductName == nil {
-                                        if let prod = IORegistryEntryCreateCFProperty(parent, "USB Product Name" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
-                                            usbProductName = prod
-                                        }
-                                    }
-                                    if usbVendorName == nil {
-                                        if let vend = IORegistryEntryCreateCFProperty(parent, "USB Vendor Name" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
-                                            usbVendorName = vend
-                                        }
-                                    }
-                                }
-                                IOObjectRelease(current)
-                                current = parent
-                            }
-                            IOObjectRelease(current)
-                            
-                            let fileName = (path as NSString).lastPathComponent
-                            let lower = fileName.lowercased()
-                            
-                            // STRICT EXCLUSION: Never treat macOS kernel debug-console or Bluetooth as hardware
-                            if fileName == "cu.debug-console" || lower.contains("bluetooth") || lower.contains("endos") {
-                                isPhysicalUSB = false
-                            }
-                            
-                            let isUSBPattern = lower.hasPrefix("cu.usbmodem") ||
-                                               lower.hasPrefix("cu.usbserial") ||
-                                               lower.hasPrefix("cu.wchusbserial") ||
-                                               lower.hasPrefix("cu.slab_usbto") ||
-                                               lower.hasPrefix("cu.cp210") ||
-                                               lower.hasPrefix("cu.ch34")
-                            
-                            // Must be confirmed physical USB hardware attached to host
-                            if isPhysicalUSB && isUSBPattern {
-                                let desc: String
-                                if let prod = usbProductName, let vend = usbVendorName {
-                                    desc = "\(vend) \(prod)"
-                                } else if let prod = usbProductName {
-                                    desc = prod
-                                } else if lower.hasPrefix("cu.usbmodem") {
-                                    desc = "USB CDC/ACM Microcontroller"
-                                } else if lower.hasPrefix("cu.usbserial") {
-                                    desc = "USB FTDI/CP210x Bridge"
-                                } else if lower.hasPrefix("cu.wchusbserial") {
-                                    desc = "WCH CH340 USB Serial"
-                                } else {
-                                    desc = "USB Serial Hardware"
-                                }
-                                
-                                list.append(RealSerialPort(
-                                    name: fileName,
-                                    path: path,
-                                    isUSB: true,
-                                    driverDescription: desc
-                                ))
-                            }
-                        }
-                        IOObjectRelease(service)
-                        service = IOIteratorNext(iterator)
-                    }
-                    IOObjectRelease(iterator)
-                }
-            }
-            
-            // 2. Secondary check: Direct /dev scan strictly for physical USB device signatures only
-            if list.isEmpty {
-                let dev = "/dev"
-                if let files = try? FileManager.default.contentsOfDirectory(atPath: dev) {
-                    for f in files {
-                        let lower = f.lowercased()
-                        let isHardwareUSB = lower.hasPrefix("cu.usbmodem") ||
-                                            lower.hasPrefix("cu.usbserial") ||
-                                            lower.hasPrefix("cu.wchusbserial") ||
-                                            lower.hasPrefix("cu.slab_usbto") ||
-                                            lower.hasPrefix("cu.cp210") ||
-                                            lower.hasPrefix("cu.ch34")
-                        
-                        if isHardwareUSB && !lower.contains("debug-console") && !lower.contains("bluetooth") && !lower.contains("endos") {
-                            let fullPath = "/dev/" + f
-                            let desc: String
-                            if lower.contains("usbmodem") {
-                                desc = "USB CDC/ACM Microcontroller"
-                            } else if lower.contains("usbserial") {
-                                desc = "USB FTDI/CP210x Converter"
-                            } else if lower.contains("wch") || lower.contains("ch34") {
-                                desc = "WCH CH340 USB Serial"
-                            } else {
-                                desc = "USB Serial Hardware"
-                            }
-                            if !list.contains(where: { $0.path == fullPath }) {
-                                list.append(RealSerialPort(name: f, path: fullPath, isUSB: true, driverDescription: desc))
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Deduplicate and sort
-            list.sort { $0.name < $1.name }
+        usbDaemon.scanBootloaderVolumes()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let devices = IOKitUSBHotplugDaemon.enumeratePhysicalUSBDevicesSync()
+            let list = devices.map(\.RealSerialPortValue)
             
             DispatchQueue.main.async {
+                self.usbDaemon.refreshNow()
                 self.availablePorts = list
                 
-                // STRICT SELECTION: If no USB hardware connected, selectedPort MUST be nil!
+                // STRICT SELECTION: If no physical USB hardware connected, selectedPort MUST be nil!
                 if let current = self.selectedPort {
                     if !list.contains(where: { $0.path == current.path }) {
                         if self.isConnected {
                             self.disconnectRealSerial()
                         }
                         self.selectedPort = list.first
+                        self.lastConnectedLocationID = devices.first?.locationID
                     }
                 } else {
                     self.selectedPort = list.first
+                    self.lastConnectedLocationID = devices.first?.locationID
                 }
                 
                 self.isScanningPorts = false
@@ -4340,6 +4496,10 @@ struct EmbeddedStudioView: View {
         guard let port = selectedPort else { return }
         disconnectRealSerial()
         
+        if let matchedDev = usbDaemon.devices.first(where: { $0.calloutPath == port.path }) {
+            lastConnectedLocationID = matchedDev.locationID
+        }
+        
         let path = port.path
         let fd = Darwin.open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         if fd < 0 {
@@ -4347,25 +4507,34 @@ struct EmbeddedStudioView: View {
             return
         }
         
-        // Configure termios for raw 8-N-1 serial
+        // Configure termios for raw 8-N-1 serial (+ high-speed IOSSIOSPEED ioctl for 460800/921600 on macOS)
         var options = termios()
         tcgetattr(fd, &options)
         cfmakeraw(&options)
         
-        let speed: speed_t
+        let standardSpeed: speed_t
         switch baudRate {
-        case 9600: speed = speed_t(B9600)
-        case 19200: speed = speed_t(B19200)
-        case 38400: speed = speed_t(B38400)
-        case 57600: speed = speed_t(B57600)
-        case 115200: speed = speed_t(B115200)
-        case 230400: speed = speed_t(B230400)
-        default: speed = speed_t(B115200)
+        case 9600: standardSpeed = speed_t(B9600)
+        case 19200: standardSpeed = speed_t(B19200)
+        case 38400: standardSpeed = speed_t(B38400)
+        case 57600: standardSpeed = speed_t(B57600)
+        case 115200: standardSpeed = speed_t(B115200)
+        case 230400: standardSpeed = speed_t(B230400)
+        default: standardSpeed = speed_t(B115200)
         }
-        cfsetspeed(&options, speed)
+        cfsetspeed(&options, standardSpeed)
         options.c_cflag |= tcflag_t(CS8 | CLOCAL | CREAD)
         options.c_cflag &= ~tcflag_t(PARENB | CSTOPB)
         tcsetattr(fd, TCSANOW, &options)
+        
+        if baudRate > 230400 {
+            // macOS IOKit IOSSIOSPEED = _IOW('T', 2, speed_t) = 0x80085402 on 64-bit Apple Silicon / x86_64
+            var customSpeed = speed_t(baudRate)
+            let iossiospeed: UInt = 0x80085402
+            _ = withUnsafeMutablePointer(to: &customSpeed) { ptr in
+                Darwin.ioctl(fd, iossiospeed, ptr)
+            }
+        }
         
         serialFileDescriptor = fd
         isConnected = true
@@ -4373,7 +4542,7 @@ struct EmbeddedStudioView: View {
         
         appendConsoleEntry(tag: "BOOT", text: "Opened real port \(path) at \(baudRate) baud (8-N-1 raw mode)", isError: false)
         
-        // Launch real background reading task with batched rendering and partial line recovery
+        // Launch real background reading task with batched rendering, partial line recovery & auto-panic DWARF trigger
         DispatchQueue.global(qos: .userInitiated).async {
             var buffer = [UInt8](repeating: 0, count: 1024)
             var partialLine = ""
@@ -4401,7 +4570,7 @@ struct EmbeddedStudioView: View {
                         for line in lines {
                             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                             if !trimmed.isEmpty {
-                                let isErr = trimmed.contains("ERR") || trimmed.contains("invalid") || trimmed.contains("Guru Meditation") || trimmed.contains("assert failed")
+                                let isErr = trimmed.contains("ERR") || trimmed.contains("invalid") || trimmed.contains("Guru Meditation") || trimmed.contains("HardFault") || trimmed.contains("assert failed")
                                 pendingBatch.append((trimmed, isErr))
                             }
                         }
@@ -4422,11 +4591,22 @@ struct EmbeddedStudioView: View {
                         self.rxByteCount += batchBytes
                         var newEntries: [SerialConsoleEntry] = []
                         newEntries.reserveCapacity(toFlush.count)
+                        var sawBacktraceOrFault = false
                         for (line, isErr) in toFlush {
                             newEntries.append(SerialConsoleEntry(timestamp: self.currentTimestamp(), tag: "RX", content: line, isError: isErr))
                             self.parseTelemetryFromSerial(line: line)
+                            if line.contains("Backtrace:") || line.contains("HardFault") {
+                                sawBacktraceOrFault = true
+                            }
                         }
                         self.appendConsoleBatch(newEntries)
+                        
+                        // Auto-capture & DWARF-symbolicate hardware panics in real time
+                        if sawBacktraceOrFault && !self.isDecodingCrash {
+                            let recentDump = self.consoleEntries.suffix(35).map(\.content).joined(separator: "\n")
+                            self.rawTraceInput = recentDump
+                            self.decodeBacktrace()
+                        }
                     }
                 }
                 
@@ -4523,7 +4703,10 @@ struct EmbeddedStudioView: View {
         
         executeWithSmartArbiter(operationName: "Chip Probe") { completion in
             DispatchQueue.global(qos: .userInitiated).async {
-                let esptoolPath = "/opt/homebrew/bin/esptool.py"
+                let esptoolPath = EmbeddedToolchainService.locateExecutable(
+                    names: ["esptool.py", "esptool"],
+                    extraDirs: ["\(NSHomeDirectory())/.platformio/penv/bin"]
+                ) ?? "/opt/homebrew/bin/esptool.py"
                 guard FileManager.default.fileExists(atPath: esptoolPath) else {
                     DispatchQueue.main.async {
                         self.toolchainOutputLog += "Error: /opt/homebrew/bin/esptool.py not found on host.\n"
@@ -4571,7 +4754,10 @@ struct EmbeddedStudioView: View {
         
         executeWithSmartArbiter(operationName: "Flash Erase") { completion in
             DispatchQueue.global(qos: .userInitiated).async {
-                let esptoolPath = "/opt/homebrew/bin/esptool.py"
+                let esptoolPath = EmbeddedToolchainService.locateExecutable(
+                    names: ["esptool.py", "esptool"],
+                    extraDirs: ["\(NSHomeDirectory())/.platformio/penv/bin"]
+                ) ?? "/opt/homebrew/bin/esptool.py"
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: esptoolPath)
                 process.arguments = ["--port", port.path, "erase_flash"]
@@ -4621,7 +4807,10 @@ struct EmbeddedStudioView: View {
         
         executeWithSmartArbiter(operationName: "Firmware Flash") { completion in
             DispatchQueue.global(qos: .userInitiated).async {
-                let esptoolPath = "/opt/homebrew/bin/esptool.py"
+                let esptoolPath = EmbeddedToolchainService.locateExecutable(
+                    names: ["esptool.py", "esptool"],
+                    extraDirs: ["\(NSHomeDirectory())/.platformio/penv/bin"]
+                ) ?? "/opt/homebrew/bin/esptool.py"
                 guard FileManager.default.fileExists(atPath: esptoolPath) else {
                     DispatchQueue.main.async {
                         self.toolchainOutputLog += "Error: /opt/homebrew/bin/esptool.py not found on host.\n"
@@ -4680,7 +4869,10 @@ struct EmbeddedStudioView: View {
         
         executeWithSmartArbiter(operationName: "Partition Dump") { completion in
             DispatchQueue.global(qos: .userInitiated).async {
-                let esptoolPath = "/opt/homebrew/bin/esptool.py"
+                let esptoolPath = EmbeddedToolchainService.locateExecutable(
+                    names: ["esptool.py", "esptool"],
+                    extraDirs: ["\(NSHomeDirectory())/.platformio/penv/bin"]
+                ) ?? "/opt/homebrew/bin/esptool.py"
                 let binPath = "/tmp/mc_partitions.bin"
                 try? FileManager.default.removeItem(atPath: binPath)
                 
@@ -4992,9 +5184,18 @@ struct EmbeddedStudioView: View {
         latestVal2 = values.count > 1 ? v2 : nil
         latestVal3 = values.count > 2 ? v3 : nil
         
-        // Auto-scale normalization to 0.0 ... 1.0 for canvas display
-        telemetryMin = min(telemetryMin, min(v1, min(v2, v3)))
-        telemetryMax = max(telemetryMax, max(v1, max(v2, v3)))
+        guard plotterIsRunning else { return }
+        
+        let nowTs = CACurrentMediaTime()
+        if firstTelemetryTimestamp == 0 {
+            firstTelemetryTimestamp = nowTs
+        }
+        latestTelemetryTimestamp = nowTs
+        
+        if autoRangeEnabled {
+            telemetryMin = min(telemetryMin, min(v1, min(v2, v3)))
+            telemetryMax = max(telemetryMax, max(v1, max(v2, v3)))
+        }
         let span = max(telemetryMax - telemetryMin, 0.0001)
         
         let norm1 = (v1 - telemetryMin) / span
@@ -5002,7 +5203,7 @@ struct EmbeddedStudioView: View {
         let norm3 = values.count > 2 ? ((v3 - telemetryMin) / span) : 0.0
         
         sampleClock += 1.0
-        waveformSamples.append(WaveformSample(
+        let sample = WaveformSample(
             time: sampleClock,
             channel1: max(0.0, min(1.0, norm1)),
             channel2: max(0.0, min(1.0, norm2)),
@@ -5010,10 +5211,88 @@ struct EmbeddedStudioView: View {
             raw1: v1,
             raw2: v2,
             raw3: v3
-        ))
+        )
+        waveformSamples.append(sample)
+        telemetryHistoryBuffer.append(sample)
         
         if waveformSamples.count > 80 {
             waveformSamples.removeFirst(waveformSamples.count - 70)
+        }
+        if telemetryHistoryBuffer.count > 4096 {
+            telemetryHistoryBuffer.removeFirst(telemetryHistoryBuffer.count - 4096)
+        }
+    }
+    
+    private func exportTelemetryToCellMode() {
+        guard !telemetryHistoryBuffer.isEmpty else { return }
+        let fm = FileManager.default
+        let exportDir: URL
+        if let ws = appState.workspaceFolder {
+            exportDir = ws.appendingPathComponent("telemetry_exports", isDirectory: true)
+        } else {
+            exportDir = fm.homeDirectoryForCurrentUser.appendingPathComponent("Documents/MicroCodeEmbedded/telemetry_exports", isDirectory: true)
+        }
+        try? fm.createDirectory(at: exportDir, withIntermediateDirectories: true)
+        
+        let stamp = Int(Date().timeIntervalSince1970)
+        let csvURL = exportDir.appendingPathComponent("sensor_telemetry_\(stamp).csv")
+        let dt = max(0.05, latestTelemetryTimestamp - firstTelemetryTimestamp)
+        let estFs = telemetryHistoryBuffer.count > 2 ? Double(telemetryHistoryBuffer.count - 1) / dt : 20.0
+        
+        var csv = "sample_index,time_sec,ch1,ch2,ch3\n"
+        csv.reserveCapacity(telemetryHistoryBuffer.count * 36)
+        for (idx, s) in telemetryHistoryBuffer.enumerated() {
+            let tSec = Double(idx) / max(estFs, 0.1)
+            csv += String(format: "%d,%.4f,%.5f,%.5f,%.5f\n", idx, tSec, s.raw1, s.raw2, s.raw3)
+        }
+        try? csv.write(to: csvURL, atomically: true, encoding: .utf8)
+        
+        let pyScript = """
+        import pandas as pd
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        csv_path = r"\(csvURL.path)"
+        df = pd.read_csv(csv_path)
+        print(f"Loaded {len(df)} real hardware telemetry samples from {csv_path}")
+        print(df[["ch1", "ch2", "ch3"]].describe())
+
+        fig, axes = plt.subplots(2, 1, figsize=(10, 6), constrained_layout=True)
+        axes[0].plot(df["time_sec"], df["ch1"], label="CH1", linewidth=1.4)
+        if df["ch2"].abs().sum() > 0:
+            axes[0].plot(df["time_sec"], df["ch2"], label="CH2", linewidth=1.2)
+        if df["ch3"].abs().sum() > 0:
+            axes[0].plot(df["time_sec"], df["ch3"], label="CH3", linewidth=1.0)
+        axes[0].set_title("Hardware Sensor Telemetry Time-Domain Capture (\(selectedBoard.rawValue))")
+        axes[0].set_xlabel("Time (s)")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.25)
+
+        # Real FFT Magnitude Spectrum of CH1
+        sig = df["ch1"].to_numpy() - df["ch1"].mean()
+        fs = \(String(format: "%.2f", estFs))
+        freqs = np.fft.rfftfreq(len(sig), d=1.0 / max(fs, 0.1))
+        mags = np.abs(np.fft.rfft(sig * np.hanning(len(sig)))) * (2.0 / max(len(sig), 1))
+        axes[1].plot(freqs[1:], mags[1:], color="#2563eb", linewidth=1.3)
+        axes[1].set_title(f"CH1 Hanning FFT Spectrum (Est. Fs = {fs:.1f} Hz)")
+        axes[1].set_xlabel("Frequency (Hz)")
+        axes[1].set_ylabel("Magnitude")
+        axes[1].grid(True, alpha=0.25)
+        plt.show()
+        """
+        
+        appState.setEditorMode(.notebook)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            NotificationCenter.default.post(
+                name: Notification.Name("ApplyCodeToCell"),
+                object: nil,
+                userInfo: [
+                    "code": pyScript,
+                    "language": "python",
+                    "mode": "insert",
+                    "autoRun": true
+                ]
+            )
         }
     }
     
@@ -5074,191 +5353,36 @@ struct EmbeddedStudioView: View {
     private func decodeBacktrace() {
         let input = rawTraceInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else {
-            decodedTraceResult = "Error: Input trace is empty. Paste ESP-IDF Guru Meditation or Backtrace output above."
+            decodedTraceResult = "Error: Input trace is empty. Paste ESP-IDF Guru Meditation, RISC-V panic, or ARM HardFault output above."
+            elfService.latestDecodedFrames.removeAll()
             return
         }
         
-        var output = ""
-        output += "================================================================\n"
-        output += "             ESP-IDF HARDWARE CRASH & BACKTRACE DECODER\n"
-        output += "================================================================\n\n"
-        
-        // 1. Parse Panic Cause
-        var exceptionCause: String? = nil
-        var coreId: String? = nil
-        
-        if let match = input.range(of: "Guru Meditation Error: Core (\\d+) panic'ed \\(([^)]+)\\)", options: .regularExpression) {
-            let matchedStr = String(input[match])
-            if let coreMatch = matchedStr.range(of: "Core (\\d+)", options: .regularExpression) {
-                coreId = String(matchedStr[coreMatch])
-            }
-            if let causeMatch = matchedStr.range(of: "\\(([^)]+)\\)", options: .regularExpression) {
-                let withParens = String(matchedStr[causeMatch])
-                exceptionCause = String(withParens.dropFirst().dropLast())
-            }
-        } else if let match = input.range(of: "panic'ed \\(([^)]+)\\)", options: .regularExpression) {
-            let withParens = String(input[match])
-            exceptionCause = withParens.replacingOccurrences(of: "panic'ed (", with: "").replacingOccurrences(of: ")", with: "")
-        } else if input.contains("abort() was called") {
-            exceptionCause = "abort() called (Assert failed / stack canary)"
+        isDecodingCrash = true
+        let activeBoard = selectedBoard
+        Task { @MainActor in
+            let result = await elfService.symbolicateCrash(rawInput: input, board: activeBoard)
+            self.decodedTraceResult = result.formattedText
+            self.elfService.latestDecodedFrames = result.frames
+            self.isDecodingCrash = false
         }
-        
-        if let cause = exceptionCause {
-            output += "▶ EXCEPTION DIAGNOSIS: \(cause)\n"
-            if let c = coreId {
-                output += "  Execution Core : \(c)\n"
-            }
-            output += "  Hardware Cause : "
-            switch cause {
-            case "LoadProhibited":
-                output += "Illegal memory read from unmapped/invalid address. Typically a NULL or corrupted pointer dereference.\n"
-            case "StoreProhibited":
-                output += "Illegal memory write to read-only or invalid address. Writing to NULL or flash memory.\n"
-            case "IntegerDivideByZero":
-                output += "Division by zero in CPU arithmetic logic unit (ALU).\n"
-            case "IllegalInstruction":
-                output += "CPU fetched invalid instruction opcode bytes. Common after stack corruption or jumping to RAM.\n"
-            case "InstructionFetchError":
-                output += "Instruction bus fetch error. PC jumped into unmapped MMU page table address.\n"
-            case "LoadStoreAlignment":
-                output += "Unaligned memory load/store on non-aligned word boundary.\n"
-            case "InterruptWDT":
-                output += "Interrupt Watchdog Timer expired! An ISR took too long (>300ms) without clearing interrupt.\n"
-            case "TaskWDT":
-                output += "FreeRTOS Task Watchdog Timer expired! High-priority task starved other tasks / idle task.\n"
-            case "DoubleExceptionVector":
-                output += "Nested exception occurred during exception handling.\n"
-            default:
-                output += "Hardware CPU exception triggered.\n"
-            }
-            output += "\n"
-        }
-        
-        // 2. Parse Captured Registers
-        var registers: [String: String] = [:]
-        let regNames = ["PC", "PS", "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12", "A13", "A14", "A15", "SAR", "EXCCAUSE", "EXCVADDR", "MEPC", "RA", "SP"]
-        for reg in regNames {
-            let pattern = "\(reg)\\s*:\\s*(0x[0-9a-fA-F]+)"
-            if let r = input.range(of: pattern, options: .regularExpression) {
-                let match = String(input[r])
-                let parts = match.components(separatedBy: ":")
-                if parts.count == 2 {
-                    registers[reg] = parts[1].trimmingCharacters(in: .whitespaces)
-                }
-            }
-        }
-        
-        if let excvaddr = registers["EXCVADDR"] {
-            output += "▶ FAULT ADDRESS (EXCVADDR): \(excvaddr)\n"
-            if excvaddr.hasPrefix("0x00000000") || excvaddr == "0x0" {
-                output += "  → Direct NULL pointer dereference (*ptr where ptr == 0x0)\n"
-            } else if let num = UInt64(excvaddr.dropFirst(2), radix: 16), num < 0x200 {
-                output += "  → Struct field dereference on NULL object pointer (offset: +\(num) bytes)\n"
-            }
-            output += "\n"
-        }
-        
-        if !registers.isEmpty {
-            output += "▶ CAPTURED REGISTERS:\n"
-            var line = "  "
-            var col = 0
-            for reg in regNames {
-                if let val = registers[reg] {
-                    line += String(format: "%-5s: %-10s  ", reg, val)
-                    col += 1
-                    if col % 3 == 0 {
-                        output += line + "\n"
-                        line = "  "
-                    }
-                }
-            }
-            if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                output += line + "\n"
-            }
-            output += "\n"
-        }
-        
-        // 3. Parse Backtrace
-        var frames: [(pc: String, sp: String?)] = []
-        if let btRange = input.range(of: "Backtrace:[^\\n]+", options: .regularExpression) {
-            let btLine = String(input[btRange]).replacingOccurrences(of: "Backtrace:", with: "").trimmingCharacters(in: .whitespaces)
-            let tokens = btLine.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-            for token in tokens {
-                let parts = token.components(separatedBy: ":")
-                if parts.count == 2 {
-                    frames.append((pc: parts[0], sp: parts[1]))
-                } else if parts.count == 1 && parts[0].hasPrefix("0x") {
-                    frames.append((pc: parts[0], sp: nil))
-                }
-            }
-        }
-        
-        if frames.isEmpty {
-            let hexPattern = "0x[0-9a-fA-F]{8}"
-            if let regex = try? NSRegularExpression(pattern: hexPattern) {
-                let ns = input as NSString
-                let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
-                for m in matches.prefix(12) {
-                    frames.append((pc: ns.substring(with: m.range), sp: nil))
-                }
-            }
-        }
-        
-        if !frames.isEmpty {
-            output += "▶ CALL STACK FRAMES (\(frames.count) frames):\n"
-            for (index, frame) in frames.enumerated() {
-                var pcHex = frame.pc.trimmingCharacters(in: .whitespaces)
-                if !pcHex.hasPrefix("0x") { pcHex = "0x" + pcHex }
-                
-                var effectivePc = pcHex
-                if let num = UInt32(pcHex.dropFirst(2), radix: 16) {
-                    let unmasked = (num & 0x3FFFFFFF) | 0x40000000
-                    effectivePc = String(format: "0x%08X", unmasked)
-                }
-                
-                let region = classifyMemoryRegion(addressHex: effectivePc)
-                let spStr = frame.sp != nil ? " (SP: \(frame.sp!))" : ""
-                output += String(format: "  #%-2d %-10s%@\n      Region : %@\n", index, effectivePc, spStr, region)
-            }
-            output += "\n"
-        } else {
-            output += "▶ No backtrace frames detected in input.\n\n"
-        }
-        
-        output += "----------------------------------------------------------------\n"
-        output += "Note: Real toolchain symbol demangling requires project .elf file.\n"
-        output += "Run: xtensa-esp32-elf-addr2line -pfia -e <firmware.elf> <PC_ADDR>\n"
-        
-        decodedTraceResult = output
     }
     
-    private func classifyMemoryRegion(addressHex: String) -> String {
-        let clean = addressHex.replacingOccurrences(of: "0x", with: "")
-        guard let addr = UInt32(clean, radix: 16) else { return "Unknown Memory Space" }
-        
-        switch addr {
-        case 0x40000000..<0x40070000:
-            return "ESP32 Boot ROM (Internal ROM Functions & Bootloader)"
-        case 0x40070000..<0x40080000:
-            return "Internal SRAM 0 (Instruction Cache MMU)"
-        case 0x40080000..<0x400A0000:
-            return "Internal SRAM 0/1 (IRAM - High-Speed ISR & RAM Code)"
-        case 0x400C0000..<0x400C2000:
-            return "RTC FAST Memory (Deep Sleep Routine / Wakeup Stub)"
-        case 0x400D0000..<0x40400000:
-            return "External SPI Flash (IROM - Application Code in Flash)"
-        case 0x42000000..<0x42800000:
-            return "ESP32-S3 SPI Flash Bus (IROM - Application Code via Cache)"
-        case 0x3F400000..<0x3F800000:
-            return "External SPI Flash (DROM - Read-Only Constants / Strings)"
-        case 0x3FC80000..<0x3FD00000:
-            return "Internal SRAM 1 (DMA Capable Data Memory)"
-        case 0x3FF00000..<0x40000000:
-            return "Internal SRAM 2 (Data RAM / Heap / FreeRTOS Task Stacks)"
-        case 0x60000000..<0x60040000:
-            return "Hardware MMIO Peripheral Registers (GPIO, UART, Timers)"
-        default:
-            return "External PSRAM or Custom Mapped Memory Space"
+    private func openSymbolicatedCrashFrame(_ frame: DecodedStackFrame) {
+        guard let filePath = frame.filePath else { return }
+        if filePath.contains("/MicroCodeEmbedded/") && (filePath.hasSuffix("main.cpp") || filePath.hasSuffix(".ino") || filePath.hasSuffix("app_main.c")) {
+            if let diskText = try? String(contentsOfFile: filePath, encoding: .utf8), !diskText.isEmpty {
+                editorSourceCode = diskText
+            }
+            selectedTool = .sketchEditor
+            return
+        }
+        let url = URL(fileURLWithPath: filePath)
+        if FileManager.default.fileExists(atPath: filePath) {
+            appState.setEditorMode(.code)
+            Task { @MainActor in
+                await appState.loadFile(url: url)
+            }
         }
     }
     

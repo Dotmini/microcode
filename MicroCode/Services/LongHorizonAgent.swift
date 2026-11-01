@@ -955,15 +955,13 @@ public class LongHorizonAgent: ObservableObject {
             try data.write(to: latestURL, options: .atomic)
         }
 
-        // 2. Project directory mirror (if workspace exists)
-        if let projectPath = task.projectPath {
-            let projectDir = URL(fileURLWithPath: projectPath).appendingPathComponent(".microcode/checkpoints")
-            if fm.fileExists(atPath: projectPath) {
-                try? fm.createDirectory(at: projectDir, withIntermediateDirectories: true)
-                let latestURL = projectDir.appendingPathComponent("latest_checkpoint.json")
-                if let data = try? JSONEncoder().encode(checkpoint) {
-                    try? data.write(to: latestURL, options: .atomic)
-                }
+        // 2. Per-workspace isolated checkpoint mirror (~/.microcode/workspaces/<id>/checkpoints)
+        if let projectPath = task.projectPath, fm.fileExists(atPath: projectPath) {
+            let projectDir = WorkspaceStoragePaths.managedStateFile(named: "checkpoints", workspacePath: projectPath)
+            try? fm.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let latestURL = projectDir.appendingPathComponent("latest_checkpoint.json")
+            if let data = try? JSONEncoder().encode(checkpoint) {
+                try? data.write(to: latestURL, options: .atomic)
             }
         }
     }

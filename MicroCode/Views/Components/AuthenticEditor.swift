@@ -64,25 +64,30 @@ struct AuthenticEditor: NSViewRepresentable {
             .foregroundColor: fg
         ]
         
-        // Set initial text
+        // Set initial text and gentle text inset so glyphs never touch the ruler border
+        textView.textContainerInset = NSSize(width: 6, height: 8)
         textView.string = text
+        
+        // Attach documentView BEFORE configuring verticalRulerView so NSScrollView
+        // tiles clipView and ruler geometry cleanly without overlapping the left 40pt.
+        scrollView.documentView = textView
         
         // Setup Line Numbers Ruler (Native ObjC++)
         let rulerView = AuthenticLineNumberRuler(scrollView: scrollView, orientation: .verticalRuler)
+        rulerView.clientView = textView
         rulerView.backgroundColor = currentTheme.editorBackground
         rulerView.textColor = currentTheme.commentColor
         rulerView.separatorColor = isDark ? NSColor(white: 1.0, alpha: 0.08) : NSColor(white: 0.0, alpha: 0.08)
         scrollView.verticalRulerView = rulerView
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
+        scrollView.tile()
         
         // Initial highlight
         context.coordinator.highlight(textView.textStorage, language: language)
         
         // Initialize Ghost Text Manager
         context.coordinator.ghostManager = GhostTextManager(textView: textView)
-        
-        scrollView.documentView = textView
         
         return scrollView
     }

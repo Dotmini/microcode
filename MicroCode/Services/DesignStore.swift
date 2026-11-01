@@ -164,7 +164,10 @@ class DesignStore: ObservableObject {
         guard let data = try? encoder.encode(project) else { return }
         
         let fm = FileManager.default
-        let dir = (AgentToolBox.shared.workspaceRoot ?? NSHomeDirectory()) + "/.microcode/designs"
+        let dir = WorkspaceStoragePaths.managedStateFile(
+            named: "designs",
+            workspacePath: AgentToolBox.shared.workspaceRoot
+        ).path
         try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let path = dir + "/\(project.name.replacingOccurrences(of: " ", with: "_")).json"
         try? data.write(to: URL(fileURLWithPath: path))

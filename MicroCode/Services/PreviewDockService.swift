@@ -81,6 +81,7 @@ public enum PreviewFileType {
             "env", "plist", "properties", "gradle", "cmake", "make", "dockerfile",
             "proto", "graphql", "gql", "ar", "zig", "v", "lua", "r", "rmd", "sas",
             "rb", "php", "pl", "ex", "exs", "erl", "hrl", "clj", "scala", "cs", "fs",
+            "csproj", "fsproj", "vbproj", "axaml", "xaml", "sln", "slnx", "props", "targets", "razor", "cshtml", "resx", "config",
             "sol", "metal", "glsl", "wgsl", "hlsl", "tex", "bib", "conf", "ini", "cfg",
             "gitignore", "dockerignore", "editorconfig", "eslintrc", "prettierrc", "babelrc"
         ]
@@ -125,8 +126,63 @@ public final class PreviewDockService: ObservableObject {
     
     // Quick comment dispatched from Image region selection into Agent Chat
     @Published public var pendingRegionComment: String? = nil
+
+    private struct WorkspaceDockSnapshot {
+        var tabs: [PreviewDockTabItem]
+        var activeTabId: String
+        var isVisible: Bool
+    }
+    private var activeWorkspaceKey: String = ""
+    private var workspaceDockSnapshots: [String: WorkspaceDockSnapshot] = [:]
+
     private init() {
         ensureDefaultTabsIfEmpty()
+    }
+
+    /// Isolates Right-Hand Preview Dock file & diff tabs per workspace so switching projects
+    /// restores each project's own open preview tabs without leaking files from another workspace.
+    public func switchWorkspace(to workspacePath: String?) {
+        let newKey = workspacePath.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? ""
+        guard newKey != activeWorkspaceKey else { return }
+
+        if !activeWorkspaceKey.isEmpty {
+            workspaceDockSnapshots[activeWorkspaceKey] = WorkspaceDockSnapshot(
+                tabs: openTabs,
+                activeTabId: activeTabId,
+                isVisible: isDockVisible
+            )
+            if workspaceDockSnapshots.count > 12,
+               let firstKey = workspaceDockSnapshots.keys.first(where: { $0 != activeWorkspaceKey && $0 != newKey }) {
+                workspaceDockSnapshots.removeValue(forKey: firstKey)
+            }
+        }
+
+        activeWorkspaceKey = newKey
+
+        if !newKey.isEmpty, let restored = workspaceDockSnapshots[newKey] {
+            openTabs = restored.tabs
+            activeTabId = restored.activeTabId
+            isDockVisible = restored.isVisible
+            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = restored.isVisible
+        } else {
+            // Keep any live running simulator tab, drop previous workspace's file/diff tabs
+            let liveRuntimeTabs = openTabs.filter { tab in
+                switch tab.id {
+                case "ios": return ServeSimService.shared.isActive
+                case "android": return DeviceRuntimeService.shared.isEmbeddedAndroidActive
+                default: return false
+                }
+            }
+            if !liveRuntimeTabs.isEmpty {
+                openTabs = liveRuntimeTabs
+                activeTabId = liveRuntimeTabs[0].id
+            } else {
+                openTabs = []
+                ensureDefaultTabsIfEmpty()
+                isDockVisible = false
+                DeviceRuntimeService.shared.showingEmbeddedDeviceDock = false
+            }
+        }
     }
     
     public func ensureDefaultTabsIfEmpty() {
@@ -206,11 +262,13 @@ public final class PreviewDockService: ObservableObject {
             let e = max(s, effectiveEnd ?? s)
             return s...e
         }()
+
+        if makeActive {
+            pruneIdleRuntimePlaceholderTabsWhenOpeningDocument()
+        }
         
         if let existingIdx = openTabs.firstIndex(where: { $0.id == tabId }) {
-            if let range {
-                openTabs[existingIdx].highlightRange = range
-            }
+            openTabs[existingIdx].highlightRange = range
             if makeActive {
                 activeTabId = openTabs[existingIdx].id
                 isDockVisible = true
@@ -252,6 +310,24 @@ public final class PreviewDockService: ObservableObject {
             syncWithDeviceRuntime()
         }
         TelemetryService.shared.recordFeature("Code Preview (\(normalizedURL.lastPathComponent))")
+    }
+
+    /// Removes unused default placeholder tabs (WebApp, iOS Sim, Android Emu) when opening a file/diff
+    /// so the file tab is immediately visible front-and-center instead of pushed off-screen.
+    private func pruneIdleRuntimePlaceholderTabsWhenOpeningDocument() {
+        let wasVisible = isVisible
+        openTabs.removeAll { tab in
+            switch tab.id {
+            case "web":
+                return !wasVisible || activeTabId != "web"
+            case "ios":
+                return !ServeSimService.shared.isActive && (!wasVisible || activeTabId != "ios")
+            case "android":
+                return !DeviceRuntimeService.shared.isEmbeddedAndroidActive && (!wasVisible || activeTabId != "android")
+            default:
+                return false
+            }
+        }
     }
 
     /// Resolves a file reference string (such as `file:///path/file.swift#L10-L20`, `+page.svelte #L1-256`, or relative workspace path)
@@ -296,7 +372,7 @@ public final class PreviewDockService: ObservableObject {
 
         let wsRoot = workspacePath
             ?? AgentService.shared.currentWorkspace
-            ?? AgentToolBox.shared.workspaceRoot
+            ?? AgentToolBox.shared.effectiveWorkspaceRoot
             ?? AppState.shared?.workspaceFolder?.path
 
         if let resolvedURL = Self.resolveFileURL(pathOrName: working, workspaceRoot: wsRoot) {
@@ -374,12 +450,18 @@ public final class PreviewDockService: ObservableObject {
 
     public func openDiff(id: String? = nil, title: String, oldContent: String, newContent: String, makeActive: Bool = true) {
         let tabId = id ?? "diff:\(title)"
-        if let existing = openTabs.first(where: { $0.id == tabId }) {
+        if makeActive {
+            pruneIdleRuntimePlaceholderTabsWhenOpeningDocument()
+        }
+        if let existingIdx = openTabs.firstIndex(where: { $0.id == tabId }) {
+            openTabs[existingIdx].title = title
+            openTabs[existingIdx].kind = .diff(id: tabId, title: title, oldContent: oldContent, newContent: newContent)
             if makeActive {
-                activeTabId = existing.id
+                activeTabId = openTabs[existingIdx].id
                 isDockVisible = true
                 DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
                 AppState.shared?.agenticContextVisible = false
+                syncWithDeviceRuntime()
             }
             return
         }
@@ -399,6 +481,7 @@ public final class PreviewDockService: ObservableObject {
             isDockVisible = true
             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
             AppState.shared?.agenticContextVisible = false
+            syncWithDeviceRuntime()
         }
     }
     
@@ -481,8 +564,9 @@ public final class PreviewDockService: ObservableObject {
         }
 
         if openTabs.isEmpty {
-            ensureDefaultTabsIfEmpty()
+            AppState.shared?.hidePreviewInspector()
             hideDock()
+            ensureDefaultTabsIfEmpty()
             return
         }
         
@@ -493,6 +577,15 @@ public final class PreviewDockService: ObservableObject {
                 activeTabId = last.id
             }
             syncWithDeviceRuntime()
+        }
+    }
+
+    public func closeActiveTabOrHideDock() {
+        if let activeId = activeTab?.id {
+            closeTab(id: activeId)
+        } else {
+            AppState.shared?.hidePreviewInspector()
+            hideDock()
         }
     }
     

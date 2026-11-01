@@ -59,11 +59,20 @@ final class LocalEcosystemDiscovery: ObservableObject {
     @Published private(set) var isScanning: Bool = false
     @Published private(set) var lastScanDate: Date?
     
-    private let userDefaultsCacheKey = "microcode_ecosystem_discovered_models_v5"
+    private let userDefaultsCacheKey = "microcode_ecosystem_discovered_models_v6"
+    private let legacyCacheKeyV5 = "microcode_ecosystem_discovered_models_v5"
     private let launchDate = Date()
+    private var loadedFromPersistedCache = false
     
     private init() {
+        UserDefaults.standard.removeObject(forKey: legacyCacheKeyV5)
         loadCachedEngines()
+        if !loadedFromPersistedCache {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                await self.refresh(force: true)
+            }
+        }
     }
     
     func models(for engineId: String) -> [AIModelDefinition] {
@@ -76,7 +85,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
     
     func refresh(force: Bool = false) async {
         guard !isScanning else { return }
-        if !force, Date().timeIntervalSince(launchDate) < 3.5, !engines.isEmpty {
+        if !force, loadedFromPersistedCache, Date().timeIntervalSince(launchDate) < 3.5, !engines.isEmpty {
             return
         }
         self.isScanning = true
@@ -84,9 +93,9 @@ final class LocalEcosystemDiscovery: ObservableObject {
             self.isScanning = false
         }
         
-        // Discover all installed CLI engines concurrently
-        async let agyTask = discoverAGY()
-        async let openCodeTask = discoverOpenCode()
+        // Discover all installed CLI engines concurrently (only spawn heavy external CLI processes when forced or uncached)
+        async let agyTask = discoverAGY(force: force)
+        async let openCodeTask = discoverOpenCode(force: force)
         let codexEngine = discoverCodex()
         let zedEngine = discoverZed()
         let geminiCLIEngine = discoverGeminiCLI()
@@ -123,23 +132,27 @@ final class LocalEcosystemDiscovery: ObservableObject {
     
     // MARK: - 1. Antigravity (AGY) Discovery
     
-    private func discoverAGY() async -> EcosystemEngineInfo {
-        let path = resolveBinary("agy") ?? resolveBinaryFast("agy")
+    private func discoverAGY(force: Bool = false) async -> EcosystemEngineInfo {
+        let path = resolveBinaryFast("agy") ?? resolveBinary("agy")
         let isInstalled = path != nil
         var models: [AIModelDefinition] = []
-        
-        if let path = path {
-            // Execute `agy models` via CLI (allow up to 25s because AGY queries remote live catalog)
+        let cachedModels = (engines.first(where: { $0.id == "agy" })?.models ?? []).filter {
+            let lower = $0.id.lowercased()
+            return !lower.contains("4-6") && !lower.hasSuffix("-thinking")
+        }
+
+        if let path = path, (force || !loadedFromPersistedCache || cachedModels.isEmpty) {
+            // Execute `agy models` via CLI only on explicit refresh or cold cache (avoids spawning Electron CLI on every app boot)
             let cliOutput = await runCommand(executable: path, arguments: ["models"], timeoutSeconds: 25.0)
             let parsed = parseAGYModelsOutput(cliOutput)
             if !parsed.isEmpty {
                 models = parsed
             }
         }
-        
-        // If CLI was momentarily unreachable, preserve previously discovered AGY models from cache
-        if models.isEmpty, let cached = engines.first(where: { $0.id == "agy" })?.models, !cached.isEmpty {
-            models = cached
+
+        // Preserve previously discovered AGY models from cache
+        if models.isEmpty, !cachedModels.isEmpty {
+            models = cachedModels
         }
         if models.isEmpty && isInstalled {
             models = Self.defaultAGYModels
@@ -163,18 +176,18 @@ final class LocalEcosystemDiscovery: ObservableObject {
     }
     
     static let defaultAGYModels: [AIModelDefinition] = [
-        AIModelDefinition(id: "gemini-3.8-flash-low", name: "Gemini 3 Flash (Low)", provider: "agy", badge: "FAST"),
-        AIModelDefinition(id: "gemini-3.8-flash-medium", name: "Gemini 3 Flash (Medium)", provider: "agy", badge: "FAST"),
-        AIModelDefinition(id: "gemini-3.8-flash-high", name: "Gemini 3 Flash (High)", provider: "agy", badge: "HIGH REASONING"),
-        AIModelDefinition(id: "gemini-4-argon-low", name: "Gemini 3.1 Pro (Low)", provider: "agy", badge: "FLAGSHIP"),
-        AIModelDefinition(id: "gemini-4-argon-medium", name: "Gemini 3.1 Pro (Medium)", provider: "agy", badge: "FLAGSHIP"),
-        AIModelDefinition(id: "gemini-4-argon-high", name: "Gemini 3.1 Pro (High)", provider: "agy", badge: "FLAGSHIP"),
-        AIModelDefinition(id: "claude-sonnet-5-5-low", name: "Claude Sonnet 4.6 (Low)", provider: "agy", badge: "PRO"),
-        AIModelDefinition(id: "claude-sonnet-5-5-medium", name: "Claude Sonnet 4.6 (Medium)", provider: "agy", badge: "PRO"),
-        AIModelDefinition(id: "claude-sonnet-5-5-high", name: "Claude Sonnet 4.6 (High)", provider: "agy", badge: "HIGH REASONING"),
-        AIModelDefinition(id: "claude-opus-5-5-low", name: "Claude Opus 4.6 (Low)", provider: "agy", badge: "REASONING"),
-        AIModelDefinition(id: "claude-opus-5-5-medium", name: "Claude Opus 4.6 (Medium)", provider: "agy", badge: "REASONING"),
-        AIModelDefinition(id: "claude-opus-5-5-high", name: "Claude Opus 4.6 (High)", provider: "agy", badge: "HIGH REASONING"),
+        AIModelDefinition(id: "gemini-4-argon-high", name: "Gemini 4 Argon (High)", provider: "agy", badge: "FLAGSHIP"),
+        AIModelDefinition(id: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)", provider: "agy", badge: "FLAGSHIP"),
+        AIModelDefinition(id: "gemini-4-argon-low", name: "Gemini 4 Argon (Low)", provider: "agy", badge: "FLAGSHIP"),
+        AIModelDefinition(id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", provider: "agy", badge: "HIGH REASONING"),
+        AIModelDefinition(id: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)", provider: "agy", badge: "FAST"),
+        AIModelDefinition(id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)", provider: "agy", badge: "FAST"),
+        AIModelDefinition(id: "claude-opus-5-5-high", name: "Claude Opus 5.5 (High)", provider: "agy", badge: "HIGH REASONING"),
+        AIModelDefinition(id: "claude-opus-5-5-medium", name: "Claude Opus 5.5 (Medium)", provider: "agy", badge: "REASONING"),
+        AIModelDefinition(id: "claude-opus-5-5-low", name: "Claude Opus 5.5 (Low)", provider: "agy", badge: "REASONING"),
+        AIModelDefinition(id: "claude-sonnet-5-5-high", name: "Claude Sonnet 5.5 (High)", provider: "agy", badge: "HIGH REASONING"),
+        AIModelDefinition(id: "claude-sonnet-5-5-medium", name: "Claude Sonnet 5.5 (Medium)", provider: "agy", badge: "PRO"),
+        AIModelDefinition(id: "claude-sonnet-5-5-low", name: "Claude Sonnet 5.5 (Low)", provider: "agy", badge: "PRO"),
         AIModelDefinition(id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", provider: "agy", badge: "AGY LIVE")
     ]
     
@@ -248,8 +261,8 @@ final class LocalEcosystemDiscovery: ObservableObject {
     
     // MARK: - 2. OpenCode Discovery
     
-    private func discoverOpenCode() async -> EcosystemEngineInfo {
-        let path = resolveBinary("opencode") ?? resolveBinaryFast("opencode")
+    private func discoverOpenCode(force: Bool = false) async -> EcosystemEngineInfo {
+        let path = resolveBinaryFast("opencode") ?? resolveBinary("opencode")
         let isInstalled = path != nil
         
         let authPath = FileManager.default.homeDirectoryForCurrentUser
@@ -262,7 +275,10 @@ final class LocalEcosystemDiscovery: ObservableObject {
         }
         
         var models: [AIModelDefinition] = []
-        if isInstalled, let path = path {
+        let cachedModels = (engines.first(where: { $0.id == "opencode" })?.models ?? []).filter {
+            !ACPAgentSession.retiredOpenCodeModels.contains($0.id.lowercased())
+        }
+        if isInstalled, let path = path, (force || !loadedFromPersistedCache || cachedModels.isEmpty) {
             let cliOutput = await runCommand(executable: path, arguments: ["models"], timeoutSeconds: 15.0)
             let ansiPattern = #"\u{001B}\[[0-9;]*[a-zA-Z]"#
             let cleanOutput = cliOutput.replacingOccurrences(of: ansiPattern, with: "", options: .regularExpression)
@@ -276,7 +292,10 @@ final class LocalEcosystemDiscovery: ObservableObject {
                       !trimmed.lowercased().contains("usage") else { continue }
                 
                 let parts = trimmed.split(separator: " ").map(String.init)
-                if let modelId = parts.first, modelId.contains("/"), !seen.contains(modelId) {
+                if let modelId = parts.first,
+                   modelId.contains("/"),
+                   !ACPAgentSession.retiredOpenCodeModels.contains(modelId.lowercased()),
+                   !seen.contains(modelId) {
                     seen.insert(modelId)
                     let displayName = parts.count > 1 ? parts.dropFirst().joined(separator: " ") : AIModelCatalog.formatModelName(modelId)
                     let isFree = modelId.lowercased().contains("free")
@@ -291,12 +310,25 @@ final class LocalEcosystemDiscovery: ObservableObject {
             }
         }
         
-        if models.isEmpty, let cached = engines.first(where: { $0.id == "opencode" })?.models, !cached.isEmpty {
-            models = cached
+        if models.isEmpty, !cachedModels.isEmpty {
+            models = cachedModels
+        }
+        if models.isEmpty && isInstalled {
+            models = [
+                AIModelDefinition(
+                    id: ACPAgentSession.fallbackOpenCodeFreeModel,
+                    name: "MiMo V2.6 Flash (Free)",
+                    provider: "opencode",
+                    badge: "FREE"
+                )
+            ]
         }
         
-        // Sort: Free models first
+        // Sort: verified primary free model first, then other free models, then authenticated models
         models.sort { a, b in
+            let aPrimary = a.id == ACPAgentSession.fallbackOpenCodeFreeModel
+            let bPrimary = b.id == ACPAgentSession.fallbackOpenCodeFreeModel
+            if aPrimary != bPrimary { return aPrimary }
             let aFree = a.id.lowercased().contains("free")
             let bFree = b.id.lowercased().contains("free")
             if aFree && !bFree { return true }
@@ -417,9 +449,15 @@ final class LocalEcosystemDiscovery: ObservableObject {
         var models: [AIModelDefinition] = []
         var seen = Set<String>()
         
-        // 1. Include any live Anthropic API models already fetched in AIModelCatalog
+        // 1. Include any live Anthropic API models already fetched in AIModelCatalog (excluding AGY-exclusive slugs)
         if let anthropicProv = AIModelCatalog.shared.provider("anthropic") {
             for m in anthropicProv.models where m.badge != "DEFAULT" {
+                let lower = m.id.lowercased()
+                guard !lower.contains("5-5"),
+                      !lower.hasSuffix("-thinking"),
+                      !lower.hasSuffix("-high"),
+                      !lower.hasSuffix("-medium"),
+                      !lower.hasSuffix("-low") else { continue }
                 if !seen.contains(m.id) {
                     seen.insert(m.id)
                     models.append(AIModelDefinition(
@@ -432,15 +470,15 @@ final class LocalEcosystemDiscovery: ObservableObject {
             }
         }
         
-        // 2. Include live Claude models discovered from AGY CLI (e.g. claude-opus-5-5-high, claude-sonnet-5-5-high)
-        for m in agyModels where m.id.lowercased().contains("claude") {
-            if !seen.contains(m.id) {
-                seen.insert(m.id)
+        // 2. Include standard Anthropic Claude Code concrete models when installed
+        for (modelId, label, badge) in Self.defaultClaudeCodeModels {
+            if !seen.contains(modelId) {
+                seen.insert(modelId)
                 models.append(AIModelDefinition(
-                    id: m.id,
-                    name: m.name,
+                    id: modelId,
+                    name: label,
                     provider: "claude_code",
-                    badge: m.id == activeModel ? "ACTIVE • \(m.badge)" : m.badge
+                    badge: modelId == activeModel ? "ACTIVE • \(badge)" : badge
                 ))
             }
         }
@@ -456,8 +494,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
         for (alias, label, badge) in [
             ("opus", "Claude Opus (Latest Alias)", "OPUS"),
             ("sonnet", "Claude Sonnet (Latest Alias)", "SONNET"),
-            ("haiku", "Claude Haiku (Latest Alias)", "HAIKU"),
-            ("auto", "Claude Code Auto", "DYNAMIC")
+            ("haiku", "Claude Haiku (Latest Alias)", "HAIKU")
         ] {
             if !seen.contains(alias) {
                 seen.insert(alias)
@@ -495,13 +532,19 @@ final class LocalEcosystemDiscovery: ObservableObject {
         )
     }
     
+    static let defaultClaudeCodeModels: [(String, String, String)] = [
+        ("claude-opus-4-6", "Claude Opus 4.6", "FLAGSHIP"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6", "PRO"),
+        ("claude-haiku-4-5", "Claude Haiku 4.5", "FAST")
+    ]
+    
     // MARK: - 5. Zed / ZCode Discovery
     
     private func discoverZed() -> EcosystemEngineInfo {
-        let path = resolveBinary("zed") ?? resolveBinaryFast("zed")
+        let acpBinaryPath = ACPHostService.resolveAgentBinary(for: .zedEngine)
         let home = FileManager.default.homeDirectoryForCurrentUser
         let zedSettings = home.appendingPathComponent(".config/zed/settings.json")
-        let isInstalled = path != nil || FileManager.default.fileExists(atPath: zedSettings.path)
+        let isInstalled = acpBinaryPath != nil
         
         var models: [AIModelDefinition] = []
         var seen = Set<String>()
@@ -551,13 +594,13 @@ final class LocalEcosystemDiscovery: ObservableObject {
             id: "zed",
             name: "Zed / ZCode Assistant",
             icon: "chevron.left.forwardslash.chevron.right",
-            binaryPath: path,
+            binaryPath: acpBinaryPath,
             isInstalled: isInstalled,
             isAuthenticated: isInstalled,
             activeModel: defaultModel ?? models.first?.id,
-            models: models,
+            models: isInstalled ? models : [],
             details: defaultModel != nil
-                ? "Zed settings from ~/.config/zed/settings.json (Default: \(defaultModel!))"
+                ? "Zed settings imported from ~/.config/zed/settings.json (Default: \(defaultModel!))"
                 : "Zed assistant settings (~/.config/zed/settings.json)"
         )
     }
@@ -577,8 +620,9 @@ final class LocalEcosystemDiscovery: ObservableObject {
         }
         let models: [AIModelDefinition] = isInstalled ? [
             AIModelDefinition(id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Gemini CLI)", provider: "gemini_cli", badge: "FLAGSHIP"),
-            AIModelDefinition(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Gemini CLI)", provider: "gemini_cli", badge: "FAST"),
-            AIModelDefinition(id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (Gemini CLI)", provider: "gemini_cli", badge: "PRO")
+            AIModelDefinition(id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview (Gemini CLI)", provider: "gemini_cli", badge: "PRO"),
+            AIModelDefinition(id: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Gemini CLI)", provider: "gemini_cli", badge: "FAST"),
+            AIModelDefinition(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Gemini CLI)", provider: "gemini_cli", badge: "FAST")
         ] : []
         return EcosystemEngineInfo(
             id: "gemini_cli",
@@ -619,8 +663,9 @@ final class LocalEcosystemDiscovery: ObservableObject {
     }
     
     private func discoverCopilot() -> EcosystemEngineInfo {
-        let path = resolveBinary("copilot") ?? resolveBinaryFast("copilot") ?? resolveBinary("gh") ?? resolveBinaryFast("gh")
+        let path = ACPHostService.resolveAgentBinary(for: .githubCopilot)
         let isInstalled = path != nil
+        let hasGH = (resolveBinaryFast("gh") ?? resolveBinary("gh")) != nil
         let models: [AIModelDefinition] = isInstalled ? [
             AIModelDefinition(id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6 (Copilot)", provider: "copilot", badge: "COPILOT PRO"),
             AIModelDefinition(id: "gpt-5.4", name: "GPT-5.4 (Copilot)", provider: "copilot", badge: "COPILOT"),
@@ -637,7 +682,9 @@ final class LocalEcosystemDiscovery: ObservableObject {
             models: models,
             details: isInstalled
                 ? "GitHub Copilot CLI (`\(path ?? "copilot")`) detected"
-                : "Install via `npm install -g @github/copilot` or `gh extension install github/gh-copilot`"
+                : (hasGH
+                    ? "GitHub CLI (`gh`) found — run `gh copilot` once in Terminal to install Copilot CLI"
+                    : "Install via `npm install -g @github/copilot` or `gh copilot`")
         )
     }
     
@@ -839,6 +886,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
     }
     
     private func saveCachedEngines(_ discovered: [EcosystemEngineInfo]) {
+        loadedFromPersistedCache = true
         if let data = try? JSONEncoder().encode(discovered) {
             UserDefaults.standard.set(data, forKey: userDefaultsCacheKey)
         }
@@ -849,6 +897,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: userDefaultsCacheKey),
            let cached = try? JSONDecoder().decode([EcosystemEngineInfo].self, from: data),
            !cached.isEmpty {
+            loadedFromPersistedCache = true
             self.engines = cached.map { eng in
                 if eng.id == "codex", let bp = eng.binaryPath, bp.contains(".plugin-appserver/codex-cli"),
                    let healed = resolveBinaryFast("codex") {
@@ -858,12 +907,37 @@ final class LocalEcosystemDiscovery: ObservableObject {
                         activeModel: eng.activeModel, models: eng.models, details: eng.details
                     )
                 }
-                if eng.id == "agy" && eng.models.isEmpty && eng.isInstalled {
+                if eng.id == "agy" {
+                    let validModels = eng.models.filter {
+                        let lower = $0.id.lowercased()
+                        return !lower.contains("4-6") && !lower.hasSuffix("-thinking")
+                    }
+                    let finalModels = validModels.isEmpty && eng.isInstalled ? Self.defaultAGYModels : validModels
                     return EcosystemEngineInfo(
                         id: eng.id, name: eng.name, icon: eng.icon, binaryPath: eng.binaryPath,
-                        isInstalled: eng.isInstalled, isAuthenticated: true,
-                        activeModel: Self.defaultAGYModels.first?.id, models: Self.defaultAGYModels, details: eng.details
+                        isInstalled: eng.isInstalled, isAuthenticated: eng.isInstalled && !finalModels.isEmpty,
+                        activeModel: finalModels.first?.id, models: finalModels, details: eng.details
                     )
+                }
+                if eng.id == "opencode" {
+                    let validModels = eng.models.filter {
+                        !ACPAgentSession.retiredOpenCodeModels.contains($0.id.lowercased())
+                    }
+                    return EcosystemEngineInfo(
+                        id: eng.id, name: eng.name, icon: eng.icon, binaryPath: eng.binaryPath,
+                        isInstalled: eng.isInstalled, isAuthenticated: eng.isAuthenticated,
+                        activeModel: validModels.first?.id ?? ACPAgentSession.fallbackOpenCodeFreeModel,
+                        models: validModels, details: eng.details
+                    )
+                }
+                if eng.id == "gemini_cli" {
+                    return discoverGeminiCLI()
+                }
+                if eng.id == "copilot" {
+                    return discoverCopilot()
+                }
+                if eng.id == "zed" {
+                    return discoverZed()
                 }
                 return eng
             }
@@ -874,6 +948,18 @@ final class LocalEcosystemDiscovery: ObservableObject {
         let codex = discoverCodex()
         let zed = discoverZed()
         let agyBin = resolveBinaryFast("agy")
+        let claudeBin = resolveBinaryFast("claude")
+        let openCodeBin = resolveBinaryFast("opencode")
+        let initialClaudeModels: [AIModelDefinition] = claudeBin != nil
+            ? Self.defaultClaudeCodeModels.map { AIModelDefinition(id: $0.0, name: $0.1, provider: "claude_code", badge: $0.2) } + [
+                AIModelDefinition(id: "opus", name: "Claude Opus (Latest Alias)", provider: "claude_code", badge: "OPUS"),
+                AIModelDefinition(id: "sonnet", name: "Claude Sonnet (Latest Alias)", provider: "claude_code", badge: "SONNET"),
+                AIModelDefinition(id: "haiku", name: "Claude Haiku (Latest Alias)", provider: "claude_code", badge: "HAIKU")
+            ]
+            : []
+        let initialOpenCodeModels: [AIModelDefinition] = openCodeBin != nil
+            ? [AIModelDefinition(id: ACPAgentSession.fallbackOpenCodeFreeModel, name: "MiMo V2.6 Flash (Free)", provider: "opencode", badge: "FREE")]
+            : []
         self.engines = [
             EcosystemEngineInfo(
                 id: "agy",
@@ -890,11 +976,11 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 id: "claude_code",
                 name: "Anthropic Claude Code",
                 icon: "command.square.fill",
-                binaryPath: resolveBinaryFast("claude"),
-                isInstalled: resolveBinaryFast("claude") != nil,
-                isAuthenticated: resolveBinaryFast("claude") != nil,
-                activeModel: nil,
-                models: [],
+                binaryPath: claudeBin,
+                isInstalled: claudeBin != nil,
+                isAuthenticated: claudeBin != nil,
+                activeModel: initialClaudeModels.first?.id,
+                models: initialClaudeModels,
                 details: "Reading ~/.claude/settings.json..."
             ),
             codex,
@@ -903,11 +989,11 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 id: "opencode",
                 name: "OpenCode",
                 icon: "laptopcomputer",
-                binaryPath: resolveBinaryFast("opencode"),
-                isInstalled: resolveBinaryFast("opencode") != nil,
+                binaryPath: openCodeBin,
+                isInstalled: openCodeBin != nil,
                 isAuthenticated: false,
-                activeModel: nil,
-                models: [],
+                activeModel: initialOpenCodeModels.first?.id,
+                models: initialOpenCodeModels,
                 details: "Fetching live models from `opencode models`..."
             ),
             discoverCursorAgent(),

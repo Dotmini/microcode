@@ -97,6 +97,8 @@ struct AIProviderBrandIcon: View {
             return "perplexity"
         case "perch", "perchai", "perch_ai", "perchcode", "perch_code":
             return "perch"
+        case "tokenme", "token_me", "tokenmelimited", "9arm":
+            return "tokenme"
         case "typhoon", "opentyphoon", "scb10x":
             return "typhoon"
         case "cerebras":
@@ -138,6 +140,7 @@ struct AIProviderBrandIcon: View {
             if rawKey.contains("cline") { return "cline" }
             if rawKey.contains("roo") { return "roo" }
             if rawKey.contains("qwen") { return "qwen" }
+            if rawKey.contains("tokenme") || rawKey.contains("token_me") { return "tokenme" }
             if rawKey.contains("deepseek") { return "deepseek" }
             if rawKey.contains("glm") || rawKey.contains("zhipu") { return "glm" }
             if rawKey.contains("grok") || rawKey.contains("xai") { return "grok" }
@@ -160,6 +163,11 @@ struct AIProviderBrandIcon: View {
             iconCache[resolvedKey] = img
             return img
         }
+        if resolvedKey == "tokenme" {
+            let img = makeTokenMeBrandImage()
+            iconCache[resolvedKey] = img
+            return img
+        }
         guard let base64 = base64Data[resolvedKey],
               let data = Data(base64Encoded: base64),
               let img = NSImage(data: data) else {
@@ -171,11 +179,33 @@ struct AIProviderBrandIcon: View {
     
     static func pngData(for provider: String) -> Data? {
         let resolvedKey = resolveKey(for: provider)
+        if resolvedKey == "tokenme" || resolvedKey == "perch",
+           let img = image(for: resolvedKey),
+           let tiff = img.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            return png
+        }
         if let base64 = base64Data[resolvedKey] ?? base64Data["microcode"],
            let data = Data(base64Encoded: base64) {
             return data
         }
         return nil
+    }
+
+    /// Official TokenMe (tokenme.limited / 9ARM) vector logomark rendered on an obsidian badge.
+    private static func makeTokenMeBrandImage() -> NSImage {
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="809 376 296 296">
+          <rect x="817" y="384" width="280" height="280" rx="64" fill="#121215" stroke="#383842" stroke-width="10"/>
+          <path fill="#FFFFFF" d="M1061.21,498.62c0-34.28-17.56-59.36-48.77-59.36-53.51,0-110.08,76.08-110.08,137.39,0,13.38,2.51,26.48,8.36,37.07,8.64,15.33,23.13,23.69,40.69,23.69,11.43,0,23.69-3.62,36.23-10.87,41.52-23.97,73.57-79.98,73.57-127.92ZM1000.18,463.23c7.52,40.97-26.2,108.69-74.97,126.53-6.69-46.54,30.93-111.75,74.97-126.53ZM934.97,609.54c43.2-17.28,88.07-73.85,88.07-134.61,0-4.46-.28-7.8-.84-11.7h.56c12.26,5.85,16.72,21.74,16.72,35.39,0,55.46-71.9,143.53-104.51,110.92ZM886.75,578.89c-3.34-7.25-6.13-16.16-6.13-28.43,0-50.72,48.49-117.61,85.84-117.61,3.34,0,5.85.56,8.92,1.39,6.41-5.3,15.89-8.64,24.52-9.75v-.56c-7.52-8.08-17-12.54-29.82-12.54-11.7,0-24.52,3.62-37.62,11.15-41.25,23.97-73.57,79.98-73.57,127.64,0,25.36,8.64,47.1,30.93,56.3l.56-.56c-3.62-10.31-4.18-18.95-3.62-27.03Z"/>
+        </svg>
+        """
+        if let img = NSImage(data: Data(svg.utf8)) {
+            img.size = NSSize(width: 64, height: 64)
+            return img
+        }
+        return NSImage(size: NSSize(width: 64, height: 64))
     }
 
     private static func makePerchBrandImage() -> NSImage {

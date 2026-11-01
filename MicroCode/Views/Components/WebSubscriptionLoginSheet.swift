@@ -29,6 +29,7 @@ struct WebSubscriptionLoginSheet: View {
     @State private var forceScanTrigger: (() -> Void)? = nil
     @State private var copilotUserCode: String? = nil
     @State private var copilotErrorMessage: String? = nil
+    @State private var manualKeyInput: String = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -109,9 +110,24 @@ struct WebSubscriptionLoginSheet: View {
                         if provider == .copilot {
                             startCopilotFlow()
                         } else {
+                            if tryConnectManualOrClipboardKey(allowClipboardFallback: true) {
+                                return
+                            }
                             isScanning = true
                             statusMessage = "Scanning session & connecting..."
                             forceScanTrigger?()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                if !isSuccess {
+                                    isScanning = false
+                                    if provider == .tokenme {
+                                        statusMessage = "Copy your tm_... key from TokenMe Console → API keys, or paste it in the bar below."
+                                    } else if provider.isAPIKeyBackedPortal {
+                                        statusMessage = "Copy your API key from the console below (or open in Safari/Chrome), then click Paste & Connect."
+                                    } else {
+                                        statusMessage = "No active session cookie detected yet. Sign in below, then click Connect Account."
+                                    }
+                                }
+                            }
                         }
                     }) {
                         HStack(spacing: 4) {
@@ -135,6 +151,78 @@ struct WebSubscriptionLoginSheet: View {
             .background(Color(nsColor: .windowBackgroundColor))
             
             Divider()
+            
+            // Quick API Key / Safari OAuth Bypass Bar for API-Key-Backed Portals (e.g. TokenMe Google/Discord Sign-In)
+            if provider.isAPIKeyBackedPortal && !isSuccess {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "key.horizontal.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.cyan)
+                        Text(provider == .tokenme
+                             ? "TokenMe uses Google/Discord OAuth & Bearer Keys (tm_...). Open Console in your browser to copy a key, or paste directly:"
+                             : "Google OAuth blocked in WebView? Open Console in your default browser, copy your API key, and paste below:")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button(action: {
+                            let url = provider == .tokenme
+                                ? URL(string: "https://www.tokenme.limited")!
+                                : provider.webLoginURL
+                            NSWorkspace.shared.open(url)
+                            statusMessage = "Opened \(provider.shortLabel) in browser — copy your API key, then click Paste & Connect."
+                        }) {
+                            Label("Open in Browser", systemImage: "safari")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    
+                    HStack(spacing: 8) {
+                        SecureField(
+                            provider == .tokenme
+                                ? "Paste TokenMe API key (tm_...) or cURL command..."
+                                : "Paste \(provider.shortLabel) API key or Bearer token...",
+                            text: $manualKeyInput
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .onSubmit {
+                            _ = tryConnectManualOrClipboardKey(allowClipboardFallback: false)
+                        }
+                        
+                        Button(action: {
+                            _ = tryConnectManualOrClipboardKey(allowClipboardFallback: true)
+                        }) {
+                            Label(manualKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Paste & Connect" : "Connect Key", systemImage: "doc.on.clipboard.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        
+                        let savedByok = (UserDefaults.standard.string(forKey: "\(provider.aiProviderID)_api_key") ?? "")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !savedByok.isEmpty && !SubscriptionAuthManager.isCorruptedToken(savedByok) {
+                            Button(action: {
+                                handleTokenDetected(token: savedByok, user: "\(provider.shortLabel) Subscription")
+                            }) {
+                                Label("Use Saved API Key", systemImage: "checkmark.seal.fill")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(Color.accentColor.opacity(0.06))
+                
+                Divider()
+            }
             
             // Copilot Device Code Prompt Banner
             if provider == .copilot, let code = copilotUserCode, !code.isEmpty {
@@ -264,8 +352,48 @@ struct WebSubscriptionLoginSheet: View {
         .onAppear {
             if provider == .copilot {
                 startCopilotFlow()
+            } else if provider == .tokenme {
+                statusMessage = "Copy your tm_... key from TokenMe Console (or click Paste & Connect / Use Saved API Key)."
             }
         }
+    }
+    
+    @discardableResult
+    private func tryConnectManualOrClipboardKey(allowClipboardFallback: Bool) -> Bool {
+        let typed = manualKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty {
+            let normalized = provider.isAPIKeyBackedPortal
+                ? SubscriptionAuthManager.normalizeBearerOrCurlToken(typed)
+                : typed
+            if normalized.count >= 16 && !normalized.contains(" ") && !SubscriptionAuthManager.isCorruptedToken(normalized) {
+                handleTokenDetected(token: normalized, user: "\(provider.shortLabel) Subscription")
+                return true
+            } else {
+                statusMessage = "Invalid token format — paste your real API key (e.g. tm_...)."
+                return false
+            }
+        }
+        guard allowClipboardFallback, provider.isAPIKeyBackedPortal,
+              let clip = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !clip.isEmpty else {
+            return false
+        }
+        let normalized = SubscriptionAuthManager.normalizeBearerOrCurlToken(clip)
+        guard !normalized.isEmpty,
+              !normalized.contains(" "),
+              !normalized.contains("\n"),
+              !normalized.hasPrefix("http"),
+              !SubscriptionAuthManager.isCorruptedToken(normalized) else {
+            return false
+        }
+        let knownPrefixes = ["tm_", "tkm_", "tk_", "tokenme_", "perch-", "sk-or-v1-", "gsk_", "pplx-", "xai-", "csk-", "fw_", "nvapi-", "sk-"]
+        let matchesPrefix = knownPrefixes.contains { normalized.hasPrefix($0) }
+        let looksLikeCurlExtraction = clip.contains("curl ") && clip.lowercased().contains("authorization:")
+        if matchesPrefix || looksLikeCurlExtraction {
+            handleTokenDetected(token: normalized, user: "\(provider.shortLabel) Subscription")
+            return true
+        }
+        return false
     }
     
     private func startCopilotFlow() {
@@ -304,6 +432,13 @@ struct WebSubscriptionLoginSheet: View {
             sessionToken: token,
             source: "Web Sign-In (1-Click)"
         )
+        SubscriptionAuthManager.shared.activeProvider = provider
+        UserDefaults.standard.set(provider.rawValue, forKey: "subscriptionActiveProvider")
+        UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+        UserDefaults.standard.set(provider.aiProviderID, forKey: "aiProvider")
+        if let firstModel = provider.modelInfos.first?.modelID {
+            UserDefaults.standard.set(firstModel, forKey: "aiModel")
+        }
         
         isSuccess = true
         isScanning = false
@@ -346,6 +481,36 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
         // Modern Safari User Agent for maximum compatibility with Google / Cloudflare / Anthropic logins
         config.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15 MicroCode/2.0"
         
+        // Hook navigator.clipboard.writeText & copy events on API-key portals (e.g. playground.opentyphoon.ai)
+        // so clicking "Copy Key" in a Next.js modal immediately triggers 1-Click Auto-Connect.
+        switch provider {
+        case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
+             .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
+            let clipboardHookJS = """
+            (() => {
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+                        navigator.clipboard.writeText = function(text) {
+                            if (typeof text === 'string' && text.trim().length >= 20) {
+                                window.__mcCopiedToken = text.trim();
+                            }
+                            return origWrite(text);
+                        };
+                    }
+                    document.addEventListener('copy', () => {
+                        const sel = String(window.getSelection ? window.getSelection() : '').trim();
+                        if (sel.length >= 20) { window.__mcCopiedToken = sel; }
+                    }, true);
+                } catch (e) {}
+            })();
+            """
+            let script = WKUserScript(source: clipboardHookJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+            config.userContentController.addUserScript(script)
+        default:
+            break
+        }
+        
         let wv = WKWebView(frame: .zero, configuration: config)
         if provider == .aipass {
             wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -353,6 +518,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
             wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
         }
         wv.navigationDelegate = context.coordinator
+        wv.uiDelegate = context.coordinator
         
         // Listen to real-time cookie changes
         config.websiteDataStore.httpCookieStore.add(context.coordinator)
@@ -383,7 +549,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
         // Handled via bindings
     }
     
-    class Coordinator: NSObject, WKNavigationDelegate, WKHTTPCookieStoreObserver {
+    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver {
         let parent: SubscriptionWKWebViewRepresentable
         private var pollTimer: Timer?
         private var isFound = false
@@ -525,7 +691,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                         return
                     }
                     
-                case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .typhoon,
+                case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
                      .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
                     if let webView = webView {
                         DispatchQueue.main.async {
@@ -630,15 +796,20 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 })()
                 """
                 
-            case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .typhoon,
+            case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
                  .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
                 let userLabel = parent.provider.shortLabel
+                let isTokenMe = parent.provider == .tokenme ? "true" : "false"
                 jsScript = """
                 (() => {
                     try {
-                        const inputs = Array.from(document.querySelectorAll('input, textarea, code, pre, span'));
+                        const isTokenMe = \(isTokenMe);
                         const patterns = [
                             /perch-[A-Za-z0-9_-]{20,}/,
+                            /tokenme_[A-Za-z0-9_-]{16,}/,
+                            /tkm_[A-Za-z0-9_-]{20,}/,
+                            /tm_[A-Za-z0-9_-]{20,}/,
+                            /tk_[A-Za-z0-9_-]{20,}/,
                             /sk-or-v1-[A-Za-z0-9]{32,}/,
                             /gsk_[A-Za-z0-9]{32,}/,
                             /pplx-[A-Za-z0-9]{24,}/,
@@ -648,9 +819,25 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                             /nvapi-[A-Za-z0-9_-]{24,}/,
                             /sk-[A-Za-z0-9_-]{28,}/
                         ];
+                        if (typeof window.__mcCopiedToken === 'string' && window.__mcCopiedToken.length >= 20) {
+                            const copied = window.__mcCopiedToken.trim();
+                            if (!copied.includes('...') && !copied.includes('•••') && !copied.includes('***') && !copied.includes('$TOKENME_API_KEY')) {
+                                for (const pat of patterns) {
+                                    const m = copied.match(pat);
+                                    if (m && m[0]) {
+                                        return JSON.stringify({ token: m[0], user: '\(userLabel) Member' });
+                                    }
+                                }
+                                if (isTokenMe && !copied.startsWith('http') && /^[A-Za-z0-9._-]{24,200}$/.test(copied)) {
+                                    return JSON.stringify({ token: copied, user: '\(userLabel) Member' });
+                                }
+                            }
+                        }
+                        const inputs = Array.from(document.querySelectorAll('input, textarea, code, pre, span, p, td, div'));
                         for (const el of inputs) {
+                            if (el.tagName === 'DIV' && el.children && el.children.length > 0) continue;
                             const val = (el.value || el.textContent || '').trim();
-                            if (!val || val.includes('...') || val.includes('•••') || val.includes('***')) continue;
+                            if (!val || val.length > 220 || val.includes('...') || val.includes('•••') || val.includes('***')) continue;
                             for (const pat of patterns) {
                                 const m = val.match(pat);
                                 if (m && m[0]) {
@@ -723,6 +910,18 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
             DispatchQueue.main.async {
                 self.parent.isLoading = false
             }
+        }
+        
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+                webView.load(URLRequest(url: url))
+            }
+            return nil
         }
     }
 }

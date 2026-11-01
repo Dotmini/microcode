@@ -41,10 +41,10 @@ struct InlineSubAgentCard: View {
                 if let badge = subagent.endpointBadge, !badge.isEmpty {
                     Text(badge)
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(.secondary)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
-                        .background(Color.accentColor.opacity(0.1))
+                        .background(Color.primary.opacity(0.05))
                         .cornerRadius(4)
                         .lineLimit(1)
                 }
@@ -208,10 +208,10 @@ struct SubAgentClusterRow: View {
             if let badge = subagent.endpointBadge, !badge.isEmpty {
                 Text(badge)
                     .font(.system(size: 8.5, design: .monospaced))
-                    .foregroundColor(.accentColor.opacity(0.9))
+                    .foregroundColor(.secondary)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
-                    .background(Color.accentColor.opacity(0.08))
+                    .background(Color.primary.opacity(0.05))
                     .cornerRadius(3)
                     .lineLimit(1)
             }
@@ -265,9 +265,9 @@ struct PlanApprovalInlineCard: View {
             VStack(alignment: .leading, spacing: 5) {
                 // Header Row (Compact, Responsive Formal IDE Header)
                 HStack(spacing: 6) {
-                    Image(systemName: plan.approvalState == .approved ? "checkmark.circle.fill" : "doc.text")
+                    Image(systemName: plan.approvalState == .approved ? "checkmark.circle" : "doc.text")
                         .font(.system(size: 11))
-                        .foregroundColor(plan.approvalState == .approved ? .green.opacity(0.85) : .secondary)
+                        .foregroundColor(.secondary)
                     
                     Text("Implementation Plan")
                         .font(.system(size: 11, weight: .semibold))
@@ -285,12 +285,12 @@ struct PlanApprovalInlineCard: View {
                     
                     Spacer(minLength: 4)
                     
-                    // Subtle Status Indicator (Minimal Dot + Text)
+                    // Subtle Status Indicator (Minimal Monochrome Dot + Text)
                     HStack(spacing: 4) {
                         Circle()
                             .fill(
-                                plan.approvalState == .approved ? Color.green.opacity(0.85) :
-                                (plan.approvalState == .rejected ? Color.red.opacity(0.85) : Color.orange.opacity(0.85))
+                                plan.approvalState == .approved ? Color.primary.opacity(0.75) :
+                                (plan.approvalState == .rejected ? Color.red.opacity(0.75) : Color.secondary.opacity(0.65))
                             )
                             .frame(width: 5, height: 5)
                         
@@ -453,7 +453,7 @@ struct PlanApprovalInlineCard: View {
     }
 }
 
-// MARK: - CEO & Specialist Squad Live Boardroom Inline Card
+// MARK: - Multi-Agent Team Orchestration Inline Card (AGY / Cursor Formal Design)
 
 struct CEOSquadBoardroomInlineView: View {
     @ObservedObject var harness = SubAgentHarness.shared
@@ -466,25 +466,29 @@ struct CEOSquadBoardroomInlineView: View {
     var body: some View {
         if !harness.interAgentDialogue.isEmpty || !harness.activeContracts.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                // Executive Boardroom Header
-                HStack(spacing: 8) {
-                    Image(systemName: "crown.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.orange)
+                // Formal IDE Orchestration Header (Monochrome, Zero Crown / Neon Colors)
+                HStack(spacing: 7) {
+                    Image(systemName: "square.stack.3d.up")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(.secondary)
                     
-                    Text(harness.activeSquadPreset?.name ?? "CEO & Specialist Squad")
-                        .font(.system(size: 11.5, weight: .bold))
+                    Text(cleanFormalText(harness.activeSquadPreset?.name ?? "Agent Team"))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.primary)
                         .lineLimit(1)
                     
                     if !harness.activeContracts.isEmpty {
-                        Text("\(approvedCount)/\(harness.activeContracts.count) Verified")
-                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                            .foregroundColor(approvedCount == harness.activeContracts.count ? .green : .orange)
+                        Text("\(approvedCount)/\(harness.activeContracts.count) verified")
+                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
                             .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background((approvedCount == harness.activeContracts.count ? Color.green : Color.orange).opacity(0.12))
+                            .padding(.vertical, 1.5)
+                            .background(Color.primary.opacity(0.05))
                             .cornerRadius(4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                            )
                     }
                     
                     Spacer()
@@ -492,17 +496,21 @@ struct CEOSquadBoardroomInlineView: View {
                     Button {
                         harness.showSquadBuilderSheet = true
                     } label: {
-                        HStack(spacing: 3) {
+                        HStack(spacing: 3.5) {
                             Image(systemName: "slider.horizontal.3")
                                 .font(.system(size: 9))
-                            Text("Squad Preset")
+                            Text("Configure")
                                 .font(.system(size: 9.5, weight: .medium))
                         }
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2.5)
-                        .background(Color.primary.opacity(0.05))
+                        .background(Color.primary.opacity(0.04))
                         .cornerRadius(4)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        )
                     }
                     .buttonStyle(.plain)
                     
@@ -512,7 +520,7 @@ struct CEOSquadBoardroomInlineView: View {
                         }
                     } label: {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 8.5, weight: .semibold))
                             .foregroundColor(.secondary)
                             .padding(4)
                     }
@@ -522,141 +530,175 @@ struct CEOSquadBoardroomInlineView: View {
                         harness.clearDialogueAndContracts()
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 8.5, weight: .bold))
+                            .font(.system(size: 8.5, weight: .medium))
                             .foregroundColor(.secondary.opacity(0.7))
                             .padding(4)
                     }
                     .buttonStyle(.plain)
-                    .help("Dismiss Boardroom feed")
+                    .help("Dismiss team activity")
                 }
                 
                 if isExpanded {
-                    // Active Task Contracts Strip
+                    // Active Task Contracts Strip (Clean Monochrome Pills)
                     if !harness.activeContracts.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 6) {
                                 ForEach(harness.activeContracts) { contract in
                                     HStack(spacing: 5) {
                                         Circle()
-                                            .fill(contractStatusColor(contract.status))
-                                            .frame(width: 6, height: 6)
-                                        Text(contract.role)
-                                            .font(.system(size: 10, weight: .semibold))
+                                            .fill(contractDotColor(contract.status))
+                                            .frame(width: 5, height: 5)
+                                        Text(cleanFormalText(contract.role))
+                                            .font(.system(size: 10, weight: .medium))
                                             .foregroundColor(.primary)
                                             .lineLimit(1)
-                                        Text("• \(contract.status.rawValue)")
+                                        Text("· \(contract.status.displayLabel)")
                                             .font(.system(size: 9, design: .monospaced))
-                                            .foregroundColor(contractStatusColor(contract.status))
+                                            .foregroundColor(.secondary)
                                             .lineLimit(1)
-                                        if !contract.ownedPaths.isEmpty {
-                                            Text("🔒 \(contract.ownedPaths.first ?? "")")
-                                                .font(.system(size: 8.5, design: .monospaced))
-                                                .foregroundColor(.secondary)
-                                                .lineLimit(1)
+                                        if let firstPath = contract.ownedPaths.first, !firstPath.isEmpty {
+                                            HStack(spacing: 2.5) {
+                                                Image(systemName: "lock")
+                                                    .font(.system(size: 7.5, weight: .medium))
+                                                Text(firstPath)
+                                                    .font(.system(size: 8.5, design: .monospaced))
+                                            }
+                                            .foregroundColor(.secondary.opacity(0.7))
+                                            .lineLimit(1)
                                         }
                                     }
                                     .padding(.horizontal, 7)
                                     .padding(.vertical, 4)
-                                    .background(Color.primary.opacity(0.04))
+                                    .background(Color.primary.opacity(0.035))
                                     .cornerRadius(5)
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 5)
-                                            .stroke(contractStatusColor(contract.status).opacity(0.25), lineWidth: 0.5)
+                                            .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
                                     )
                                 }
                             }
                         }
                     }
                     
-                    // Live Inter-Agent Dialogue Stream (CEO <-> Subordinates)
+                    // Live Inter-Agent Activity Stream (Formal Monochrome Rows)
                     if !harness.interAgentDialogue.isEmpty {
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: 4) {
                             ForEach(harness.interAgentDialogue.suffix(8)) { msg in
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text(kindIcon(msg.kind))
-                                        .font(.system(size: 10))
+                                HStack(alignment: .top, spacing: 7) {
+                                    Image(systemName: kindSymbol(msg.kind))
+                                        .font(.system(size: 9.5, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 12, height: 14)
                                     
                                     VStack(alignment: .leading, spacing: 2) {
                                         HStack(spacing: 4) {
-                                            Text(msg.senderRole)
-                                                .font(.system(size: 10, weight: .bold))
+                                            Text(cleanFormalRole(msg.senderRole))
+                                                .font(.system(size: 10, weight: .semibold))
                                                 .foregroundColor(.primary)
-                                            Text("[\(msg.senderBadge)]")
-                                                .font(.system(size: 8.5, design: .monospaced))
-                                                .foregroundColor(.accentColor)
+                                            if !msg.senderBadge.isEmpty {
+                                                Text(msg.senderBadge)
+                                                    .font(.system(size: 8.5, design: .monospaced))
+                                                    .foregroundColor(.secondary)
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 0.5)
+                                                    .background(Color.primary.opacity(0.04))
+                                                    .cornerRadius(3)
+                                            }
                                             Image(systemName: "arrow.right")
-                                                .font(.system(size: 7.5, weight: .bold))
+                                                .font(.system(size: 7, weight: .semibold))
+                                                .foregroundColor(.secondary.opacity(0.7))
+                                            Text(cleanFormalRole(msg.recipientRole))
+                                                .font(.system(size: 9.5, weight: .regular))
                                                 .foregroundColor(.secondary)
-                                            Text(msg.recipientRole)
-                                                .font(.system(size: 9.5, weight: .semibold))
-                                                .foregroundColor(.secondary)
+                                                .lineLimit(1)
                                             Spacer()
-                                            Text(msg.kind.rawValue)
-                                                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                                .foregroundColor(kindColor(msg.kind))
-                                                .padding(.horizontal, 4)
+                                            Text(msg.kind.displayLabel)
+                                                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                                .padding(.horizontal, 5)
                                                 .padding(.vertical, 1)
-                                                .background(kindColor(msg.kind).opacity(0.12))
+                                                .background(Color.primary.opacity(0.05))
                                                 .cornerRadius(3)
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 3)
+                                                        .stroke(Color.primary.opacity(0.07), lineWidth: 0.5)
+                                                )
                                         }
                                         
-                                        Text(msg.content)
+                                        Text(cleanFormalText(msg.content))
                                             .font(.system(size: 10))
-                                            .foregroundColor(.primary.opacity(0.88))
+                                            .foregroundColor(.secondary)
                                             .lineLimit(3)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
                                 }
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
-                                .background(Color.primary.opacity(0.025))
+                                .background(Color.primary.opacity(0.02))
                                 .cornerRadius(6)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
+                                )
                             }
                         }
                     }
                 }
             }
             .padding(10)
-            .background(Color.primary.opacity(0.03))
+            .background(Color.primary.opacity(0.025))
             .cornerRadius(8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.orange.opacity(0.22), lineWidth: 0.8)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             )
         }
     }
     
-    private func contractStatusColor(_ status: SubAgentTaskContract.ContractStatus) -> Color {
+    private func contractDotColor(_ status: SubAgentTaskContract.ContractStatus) -> Color {
         switch status {
-        case .pending: return .secondary
-        case .inProgress: return .blue
-        case .underReview: return .orange
-        case .revisionNeeded: return .red
-        case .approved: return .green
-        case .failed: return .red
+        case .inProgress, .underReview:
+            return Color.primary.opacity(0.85)
+        case .approved:
+            return Color.primary.opacity(0.55)
+        case .failed:
+            return Color.red.opacity(0.75)
+        case .pending, .revisionNeeded:
+            return Color.secondary.opacity(0.45)
         }
     }
     
-    private func kindIcon(_ kind: InterAgentMessage.MessageKind) -> String {
+    private func kindSymbol(_ kind: InterAgentMessage.MessageKind) -> String {
         switch kind {
-        case .briefing: return "📋"
-        case .delegation: return "👉"
-        case .peerSync: return "💬"
-        case .verificationPassed: return "🧪"
-        case .revisionRequested: return "🔄"
-        case .approved: return "✅"
+        case .briefing: return "list.bullet.rectangle"
+        case .delegation: return "arrow.turn.down.right"
+        case .peerSync: return "arrow.left.arrow.right"
+        case .verificationPassed: return "checkmark"
+        case .revisionRequested: return "arrow.clockwise"
+        case .approved: return "checkmark.circle"
         }
     }
     
-    private func kindColor(_ kind: InterAgentMessage.MessageKind) -> Color {
-        switch kind {
-        case .briefing: return .purple
-        case .delegation: return .blue
-        case .peerSync: return .cyan
-        case .verificationPassed: return .teal
-        case .revisionRequested: return .orange
-        case .approved: return .green
+    private func cleanFormalRole(_ raw: String) -> String {
+        var cleaned = cleanFormalText(raw)
+        if cleaned == "CEO" {
+            return "Lead"
         }
+        cleaned = cleaned.replacingOccurrences(of: "CEO (", with: "Lead (")
+        cleaned = cleaned.replacingOccurrences(of: "CEO & Specialist Squad", with: "Agent Team")
+        return cleaned
+    }
+    
+    private func cleanFormalText(_ raw: String) -> String {
+        let strippedTokens = ["👑", "👔", "✅", "👉", "🧪", "🔄", "📋", "🚀", "🔍", "🛠️", "🔒"]
+        var out = raw
+        for tok in strippedTokens {
+            out = out.replacingOccurrences(of: tok, with: "")
+        }
+        out = out.replacingOccurrences(of: "CEO & Specialist Squad", with: "Agent Team")
+        out = out.replacingOccurrences(of: "Claude CEO", with: "Claude")
+        out = out.replacingOccurrences(of: "ChatGPT CEO", with: "ChatGPT")
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -701,14 +743,14 @@ struct AgentSquadBuilderSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Top Bar
-            HStack {
-                Image(systemName: "crown.fill")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(.orange)
+            HStack(spacing: 10) {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundColor(.secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("CEO & Specialist Squad Preset Builder")
-                        .font(.system(size: 13.5, weight: .bold))
-                    Text("ผสมโมเดลข้ามค่าย (Claude + Gemini + ChatGPT + DeepSeek) ใช้ได้ทั้ง Sub, BYOK, AGY/ACP, Dotmini Cloud")
+                    Text("Multi-Agent Team Preset Builder")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Configure cross-provider orchestrator & specialist subagents (Subscription, BYOK, ACP, Local)")
                         .font(.system(size: 10.5))
                         .foregroundColor(.secondary)
                 }
@@ -727,16 +769,16 @@ struct AgentSquadBuilderSheet: View {
                 // Left Sidebar: Preset List
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("SQUAD PRESETS")
-                            .font(.system(size: 9.5, weight: .bold))
+                        Text("TEAM PRESETS")
+                            .font(.system(size: 9.5, weight: .semibold))
                             .foregroundColor(.secondary)
                         Spacer()
                         Button {
                             let newPreset = AgentSquadPreset(
                                 id: "custom_\(UUID().uuidString.prefix(8))",
-                                name: "My Custom Squad",
-                                subtitle: "Custom CEO + Specialist SubAgent Team",
-                                icon: "person.3.fill",
+                                name: "Custom Agent Team",
+                                subtitle: "Lead Orchestrator + Specialist Subagents",
+                                icon: "square.stack.3d.up",
                                 isBuiltIn: false,
                                 ceoEndpoint: AgentModelEndpoint(authSource: .auto, provider: "anthropic", model: "claude-sonnet-4-6"),
                                 subordinates: AgentSquadPreset.builtInPresets[0].subordinates
@@ -748,11 +790,11 @@ struct AgentSquadBuilderSheet: View {
                                 Image(systemName: "plus")
                                 Text("New")
                             }
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 10, weight: .medium))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(Color.accentColor.opacity(0.15))
-                            .foregroundColor(.accentColor)
+                            .background(Color.primary.opacity(0.06))
+                            .foregroundColor(.primary)
                             .cornerRadius(4)
                         }
                         .buttonStyle(.plain)
@@ -765,26 +807,27 @@ struct AgentSquadBuilderSheet: View {
                             ForEach(harness.squadPresets) { preset in
                                 let isSelected = draftPreset.id == preset.id
                                 let isActive = harness.activeSquadPresetId == preset.id
+                                let safeIcon = preset.icon == "crown.fill" ? "square.stack.3d.up" : preset.icon
                                 Button {
                                     selectPreset(preset)
                                 } label: {
                                     VStack(alignment: .leading, spacing: 3) {
                                         HStack {
-                                            Image(systemName: preset.icon)
+                                            Image(systemName: safeIcon)
                                                 .font(.system(size: 10.5))
-                                                .foregroundColor(isActive ? .orange : .secondary)
-                                            Text(preset.name)
-                                                .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                                                .foregroundColor(isActive ? .primary : .secondary)
+                                            Text(preset.name.replacingOccurrences(of: "CEO ", with: ""))
+                                                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
                                                 .foregroundColor(.primary)
                                                 .lineLimit(1)
                                             Spacer()
                                             if isActive {
                                                 Text("ACTIVE")
-                                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                                    .foregroundColor(.green)
+                                                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                                                    .foregroundColor(.secondary)
                                                     .padding(.horizontal, 4)
                                                     .padding(.vertical, 1)
-                                                    .background(Color.green.opacity(0.14))
+                                                    .background(Color.primary.opacity(0.07))
                                                     .cornerRadius(3)
                                             }
                                         }
@@ -795,8 +838,12 @@ struct AgentSquadBuilderSheet: View {
                                     }
                                     .padding(8)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(isSelected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.03))
+                                    .background(isSelected ? Color.primary.opacity(0.08) : Color.primary.opacity(0.025))
                                     .cornerRadius(6)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(Color.primary.opacity(isSelected ? 0.14 : 0.05), lineWidth: 0.5)
+                                    )
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -819,7 +866,7 @@ struct AgentSquadBuilderSheet: View {
                                 Text("Preset Name")
                                     .font(.system(size: 10, weight: .semibold))
                                     .foregroundColor(.secondary)
-                                TextField("Squad Name", text: $draftPreset.name)
+                                TextField("Team Name", text: $draftPreset.name)
                                     .textFieldStyle(.roundedBorder)
                                     .font(.system(size: 11.5))
                             }
@@ -833,38 +880,39 @@ struct AgentSquadBuilderSheet: View {
                             }
                         }
                         
-                        // CEO Configuration Box
+                        // Lead Orchestrator Configuration Box
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Image(systemName: "crown.fill")
-                                    .foregroundColor(.orange)
-                                Text("👔 CEO Executive Orchestrator (คนวางแผน สั่งงาน และตรวจรับงาน)")
-                                    .font(.system(size: 11.5, weight: .bold))
+                                Image(systemName: "cpu")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                Text("Lead Orchestrator (Task Decomposition & Verification)")
+                                    .font(.system(size: 11, weight: .semibold))
                                 Spacer()
                                 Text(draftPreset.ceoEndpoint.badgeLabel)
-                                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                                    .foregroundColor(.orange)
+                                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(Color.orange.opacity(0.12))
+                                    .background(Color.primary.opacity(0.06))
                                     .cornerRadius(4)
                             }
                             
                             endpointEditorRow(endpoint: $draftPreset.ceoEndpoint)
                         }
                         .padding(10)
-                        .background(Color.orange.opacity(0.05))
+                        .background(Color.primary.opacity(0.03))
                         .cornerRadius(8)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.orange.opacity(0.25), lineWidth: 0.8)
+                                .stroke(Color.primary.opacity(0.09), lineWidth: 0.8)
                         )
                         
-                        // Subordinate Specialists Section
+                        // Specialist Subagents Section
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Text("🛠️ SUBORDINATE SPECIALISTS (ทีมลูกน้องเฉพาะทาง)")
-                                    .font(.system(size: 10.5, weight: .bold))
+                                Text("SPECIALIST SUBAGENTS")
+                                    .font(.system(size: 10, weight: .semibold))
                                     .foregroundColor(.secondary)
                                 Spacer()
                                 Menu {
@@ -882,11 +930,11 @@ struct AgentSquadBuilderSheet: View {
                                     }
                                 } label: {
                                     HStack(spacing: 3) {
-                                        Image(systemName: "plus.circle.fill")
+                                        Image(systemName: "plus")
                                         Text("Add Specialist")
                                     }
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundColor(.accentColor)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.primary)
                                 }
                                 .menuStyle(.borderlessButton)
                                 .fixedSize()
@@ -906,17 +954,17 @@ struct AgentSquadBuilderSheet: View {
                                         Spacer()
                                         Text(member.endpoint.badgeLabel)
                                             .font(.system(size: 9, design: .monospaced))
-                                            .foregroundColor(.accentColor)
+                                            .foregroundColor(.secondary)
                                             .padding(.horizontal, 5)
                                             .padding(.vertical, 1.5)
-                                            .background(Color.accentColor.opacity(0.1))
+                                            .background(Color.primary.opacity(0.05))
                                             .cornerRadius(4)
                                         Button {
                                             draftPreset.subordinates.removeAll { $0.id == member.id }
                                         } label: {
                                             Image(systemName: "trash")
                                                 .font(.system(size: 9.5))
-                                                .foregroundColor(.red.opacity(0.75))
+                                                .foregroundColor(.secondary)
                                         }
                                         .buttonStyle(.plain)
                                     }

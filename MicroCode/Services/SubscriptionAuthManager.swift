@@ -38,6 +38,7 @@ public struct SubscriptionModelInfo: Identifiable, Hashable, Codable {
 
 public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codable {
     case aipass = "aipass"
+    case tokenme = "tokenme"
     case chatgpt = "chatgpt"
     case claude = "claude"
     case gemini = "gemini"
@@ -64,6 +65,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var displayName: String {
         switch self {
         case .aipass: return "TH-AI Passport (de.aipass.net)"
+        case .tokenme: return "TokenMe (9ARM — tokenme.limited)"
         case .chatgpt: return "ChatGPT Plus / Team / Pro"
         case .claude: return "Claude Pro / Team"
         case .gemini: return "Gemini Advanced (Google One)"
@@ -90,6 +92,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var providerIcon: String {
         switch self {
         case .aipass: return "aipass"
+        case .tokenme: return "tokenme"
         case .chatgpt: return "openai"
         case .claude: return "anthropic"
         case .gemini: return "gemini"
@@ -127,6 +130,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         switch self {
         case .aipass:
             return "gemini-3.5-flash-lite"
+        case .tokenme:
+            return "deepseek-ai/deepseek-v4-flash-0731"
         case .chatgpt:
             return "gpt-6-luna"
         case .claude:
@@ -173,6 +178,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var shortLabel: String {
         switch self {
         case .aipass: return "TH-AI Pass"
+        case .tokenme: return "TokenMe"
         case .chatgpt: return "ChatGPT Plus"
         case .claude: return "Claude Pro"
         case .gemini: return "Gemini Adv"
@@ -201,6 +207,19 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
 
     public static func setLiveModels(for provider: SubscriptionProviderType, models: [SubscriptionModelInfo]) {
         liveModelInfos[provider] = models
+        DispatchQueue.main.async {
+            SubscriptionAuthManager.shared.objectWillChange.send()
+        }
+    }
+
+    public var isAPIKeyBackedPortal: Bool {
+        switch self {
+        case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
+             .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
+            return true
+        case .aipass, .chatgpt, .claude, .gemini, .deepseek, .copilot, .glm:
+            return false
+        }
     }
 
     public static func registerCustomSubscriptionModel(provider: SubscriptionProviderType, modelId: String) {
@@ -233,6 +252,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var aiProviderID: String {
         switch self {
         case .aipass: return "aipass"
+        case .tokenme: return "tokenme"
         case .chatgpt: return "openai"
         case .claude: return "anthropic"
         case .gemini: return "gemini"
@@ -353,12 +373,13 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             ]
         case .chatgpt:
             return [
-                SubscriptionModelInfo(modelID: "gpt-6.1-sol", name: "GPT 6.1 Sol", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Plus / Pro flagship reasoning model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-6-luna", name: "GPT 6 Luna (Codex Flagship)", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Plus / Pro Codex high-speed flagship model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-terra", name: "GPT 5.6 Terra (Codex Architecture)", provider: .chatgpt, badge: "AGENT", description: "ChatGPT Plus / Pro Codex 5.6 Terra coding & reasoning model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-luna", name: "GPT 5.6 Luna (Codex Fast)", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus / Pro GPT-5.6 Luna low-latency model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-6.1-sol", name: "GPT 6.1 Sol", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Pro flagship reasoning model (auto-routes to Luna on Codex OAuth)", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-6-sol", name: "GPT 6 Sol", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Plus / Pro coding & architecture model", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-6-luna", name: "GPT 6 Luna", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus / Pro Codex high-speed model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT 6 Astra", provider: .chatgpt, badge: "REASONING", description: "ChatGPT Plus / Pro deep reasoning model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-5.6-sol", name: "GPT 5.6 Sol", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Plus / Pro GPT-5.6 Sol model", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-5.6-luna", name: "GPT 5.6 Luna", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus / Pro GPT-5.6 Luna model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-5.5", name: "GPT 5.5", provider: .chatgpt, badge: "CHAT", description: "ChatGPT Plus GPT-5.5 model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-5.4", name: "GPT 5.4", provider: .chatgpt, badge: "CHAT", description: "ChatGPT Plus general model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-5.4-mini", name: "GPT 5.4 Mini", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus fast lightweight model", aiProviderID: "openai"),
@@ -419,17 +440,15 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             ]
         case .copilot:
             return [
-                SubscriptionModelInfo(modelID: "auto", name: "Copilot Auto", provider: .copilot, badge: "AUTO", description: "GitHub Copilot dynamic model routing", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-sonnet-5-5", name: "Claude Sonnet 5.5 (Copilot)", provider: .copilot, badge: "AGENT", description: "Anthropic Claude Sonnet 5.5 via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-opus-5-5", name: "Claude Opus 5.5 (Copilot)", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude Opus 5.5 via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-sonnet-4.5", name: "Claude Sonnet 4.5 (Copilot)", provider: .copilot, badge: "AGENT", description: "Anthropic Claude Sonnet via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-6.1-sol", name: "GPT 6.1 Sol (Copilot)", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI GPT 6.1 Sol via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5.4", name: "GPT-5.4 (Copilot)", provider: .copilot, badge: "CHAT", description: "OpenAI GPT-5.4 via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5", name: "GPT-5 (Copilot)", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI GPT-5 via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "auto", name: "Copilot Auto (GPT-4.1)", provider: .copilot, badge: "AUTO", description: "GitHub Copilot fast coding router", aiProviderID: "copilot"),
                 SubscriptionModelInfo(modelID: "gpt-4.1", name: "GPT-4.1 (Copilot)", provider: .copilot, badge: "CODE", description: "OpenAI GPT-4.1 via GitHub Copilot", aiProviderID: "copilot"),
                 SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Copilot)", provider: .copilot, badge: "FAST", description: "OpenAI GPT-4o via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Copilot)", provider: .copilot, badge: "PRO", description: "Google Gemini 2.5 Pro via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o3-mini", name: "OpenAI o3-mini (Copilot)", provider: .copilot, badge: "REASONING", description: "OpenAI o3-mini via GitHub Copilot", aiProviderID: "copilot")
+                SubscriptionModelInfo(modelID: "gpt-4o-mini", name: "GPT-4o Mini (Copilot)", provider: .copilot, badge: "FAST", description: "OpenAI GPT-4o Mini via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-5.5", name: "Claude Sonnet 5.5 (Copilot Pro+)", provider: .copilot, badge: "AGENT", description: "Anthropic Claude Sonnet 5.5 via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-opus-5.5", name: "Claude Opus 5.5 (Copilot Pro+)", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude Opus 5.5 via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-fable-5.1", name: "Claude Fable 5.1 (Copilot Pro+)", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude Fable 5.1 via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-haiku-4.5", name: "Claude Haiku 4.5 (Copilot)", provider: .copilot, badge: "FAST", description: "Anthropic Claude Haiku 4.5 via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gemini-4-argon", name: "Gemini 4 Argon (Copilot Pro+)", provider: .copilot, badge: "PRO", description: "Google Gemini 4 Argon via GitHub Copilot", aiProviderID: "copilot")
             ]
         case .glm:
             return [
@@ -482,11 +501,15 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
                 SubscriptionModelInfo(modelID: "perch-1-fast", name: "Perch 1 Fast (Low-Latency)", provider: .perch, badge: "FAST", description: "Perch AI ultra-low-latency streaming assistant", aiProviderID: "perch"),
                 SubscriptionModelInfo(modelID: "perch-reasoning-r1", name: "Perch Reasoning R1", provider: .perch, badge: "REASONING", description: "Perch AI deep chain-of-thought reasoning model", aiProviderID: "perch")
             ]
+        case .tokenme:
+            return [
+                SubscriptionModelInfo(modelID: "deepseek-ai/deepseek-v4-flash-0731", name: "DeepSeek V4 Flash 0731 (TokenMe • 1M)", provider: .tokenme, badge: "FAST", description: "TokenMe (9ARM) Thai GPU inference — DeepSeek V4 Flash 0731 (1M context, zero prompt retention)", aiProviderID: "tokenme"),
+                SubscriptionModelInfo(modelID: "unsloth/qwen3.8-27b-nvfp4", name: "Qwen 3.8 27B NVFP4 (TokenMe • Vision)", provider: .tokenme, badge: "NVFP4", description: "TokenMe (9ARM) Blackwell NVFP4 Qwen 3.8 27B coding, reasoning & vision (256K context)", aiProviderID: "tokenme"),
+                SubscriptionModelInfo(modelID: "google/gemma-4-31b-it", name: "Gemma 4 31B IT (TokenMe • Vision)", provider: .tokenme, badge: "VISION", description: "TokenMe (9ARM) Google Gemma 4 31B Instruct multimodal model (256K context)", aiProviderID: "tokenme")
+            ]
         case .typhoon:
             return [
-                SubscriptionModelInfo(modelID: "typhoon-v2.5-30b-a3b-instruct", name: "Typhoon v2.5 30B A3B Instruct", provider: .typhoon, badge: "THAI", description: "SCB 10X Typhoon v2.5 30B sovereign Thai LLM", aiProviderID: "typhoon"),
-                SubscriptionModelInfo(modelID: "typhoon-v2.1-12b-instruct", name: "Typhoon v2.1 12B Instruct", provider: .typhoon, badge: "THAI", description: "SCB 10X Typhoon v2.1 12B Instruct", aiProviderID: "typhoon"),
-                SubscriptionModelInfo(modelID: "typhoon-v2-r1-70b-preview", name: "Typhoon v2 R1 70B Reasoning", provider: .typhoon, badge: "REASONING", description: "SCB 10X Typhoon R1 70B Thai reasoning model", aiProviderID: "typhoon")
+                SubscriptionModelInfo(modelID: "typhoon-v2.5-30b-a3b-instruct", name: "Typhoon v2.5 30B A3B Instruct", provider: .typhoon, badge: "THAI", description: "SCB 10X Typhoon v2.5 30B sovereign Thai LLM", aiProviderID: "typhoon")
             ]
         case .qwen:
             return [
@@ -553,7 +576,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .kimi: return URL(string: "https://platform.moonshot.ai/console/api-keys")!
         case .perplexity: return URL(string: "https://www.perplexity.ai/settings/api")!
         case .perch: return URL(string: "https://perchcode.dev")!
-        case .typhoon: return URL(string: "https://opentyphoon.ai/app/api-key")!
+        case .tokenme: return URL(string: "https://www.tokenme.limited/login")!
+        case .typhoon: return URL(string: "https://playground.opentyphoon.ai/settings/api-key")!
         case .qwen: return URL(string: "https://bailian.console.aliyun.com/?apiKey=1")!
         case .grok: return URL(string: "https://console.x.ai")!
         case .cerebras: return URL(string: "https://cloud.cerebras.ai")!
@@ -579,6 +603,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .kimi: return "How to connect Moonshot Kimi Web / Console"
         case .perplexity: return "How to connect Perplexity Pro / Sonar"
         case .perch: return "How to connect Perch AI (Web / CLI / API)"
+        case .tokenme: return "How to connect TokenMe (9ARM — tokenme.limited)"
         case .typhoon: return "How to connect SCB 10X Typhoon Playground"
         case .qwen: return "How to connect Alibaba Qwen / DashScope"
         case .grok: return "How to connect xAI SuperGrok Console"
@@ -664,10 +689,15 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
                 "1. Click '1-Click Sign In' to open perchcode.dev or your Perch AI console.",
                 "2. Copy your Perch AI token (`perch-...` or `sk-...`) and paste it below."
             ]
+        case .tokenme:
+            return [
+                "1. Click '1-Click Sign In' to open tokenme.limited Console → API keys.",
+                "2. Copy your TOKENME_API_KEY — MicroCode auto-captures it on Copy, or paste it below (also supports TOKENME_API_KEY env var)."
+            ]
         case .typhoon:
             return [
-                "1. Click '1-Click Sign In' to open opentyphoon.ai/app/api-key.",
-                "2. Sign in and copy your SCB 10X Typhoon token into the field below."
+                "1. Click '1-Click Sign In' to open playground.opentyphoon.ai/settings/api-key.",
+                "2. Sign in and create or copy your SCB 10X Typhoon `sk-...` key — MicroCode auto-captures it on Copy, or paste it below."
             ]
         case .qwen:
             return [
@@ -735,8 +765,10 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             return "https://www.perplexity.ai/settings/api (pplx-...)"
         case .perch:
             return "https://perchcode.dev (perch-...)"
+        case .tokenme:
+            return "https://www.tokenme.limited/login (Console → API keys → Copy TOKENME_API_KEY)"
         case .typhoon:
-            return "https://opentyphoon.ai/app/api-key"
+            return "https://playground.opentyphoon.ai/settings/api-key (sk-...)"
         case .qwen:
             return "https://bailian.console.aliyun.com/?apiKey=1"
         case .grok:
@@ -782,8 +814,10 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             return "Uses Perplexity Pro ($5/mo included Sonar credits) for real-time web-grounded reasoning."
         case .perch:
             return "Uses Perch AI Pro / Agent Hub account for agentic coding, repository analysis, and OpenAI-compatible inference."
+        case .tokenme:
+            return "Uses TokenMe (9ARM / Siam AI Cloud) API Subscription (api.tokenme.limited/api/v1) — zero prompt retention, DeepSeek V4 Flash 0731 & Qwen 3.8 27B NVFP4 + live model sync."
         case .typhoon:
-            return "Uses SCB 10X OpenTyphoon Playground account for Thai sovereign LLMs (Typhoon v2.5 & R1)."
+            return "Uses SCB 10X OpenTyphoon Playground account for Thai sovereign LLM (Typhoon v2.5 30B A3B Instruct)."
         case .qwen:
             return "Uses Alibaba Cloud Qwen / DashScope account (Qwen3-Coder-Plus, Qwen3-235B, QwQ-Plus)."
         case .grok:
@@ -925,6 +959,10 @@ public class SubscriptionAuthManager: ObservableObject {
             
             // Put live fetched models from AIModelCatalog FIRST so the newest models are always at the top
             for m in catalogProv.models {
+                let lowerId = m.id.lowercased()
+                if AIModelCatalog.legacyStaleModelIDs.contains(lowerId) || lowerId.contains("ocr") || lowerId.contains("asr") {
+                    continue
+                }
                 guard seenIds.insert(m.id).inserted else { continue }
                 subModels.append(SubscriptionModelInfo(
                     modelID: m.id,
@@ -1010,9 +1048,44 @@ public class SubscriptionAuthManager: ObservableObject {
         return false
     }
 
+    public static func normalizeBearerOrCurlToken(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        if s.contains("curl ") || s.lowercased().contains("authorization:") {
+            let pat = #"(?i)authorization:\s*bearer\s+([^\s'"]+)"#
+            if let regex = try? NSRegularExpression(pattern: pat),
+               let match = regex.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+               match.numberOfRanges > 1,
+               let r = Range(match.range(at: 1), in: s) {
+                let extracted = String(s[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !extracted.hasPrefix("$") {
+                    return extracted
+                }
+            }
+        }
+        if s.lowercased().hasPrefix("bearer ") {
+            s = String(s.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if (s.hasPrefix("\"") && s.hasSuffix("\"")) || (s.hasPrefix("'") && s.hasSuffix("'")) {
+            s = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return s.hasPrefix("$") ? "" : s
+    }
+
     public func saveAccount(provider: SubscriptionProviderType, emailOrUser: String, sessionToken: String, source: String = "Manual") {
         let rawTrimmed = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedToken = provider == .aipass ? Self.normalizeAiPassToken(rawTrimmed) : rawTrimmed
+        let apiKeyProviders: Set<SubscriptionProviderType> = [
+            .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
+            .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia
+        ]
+        let trimmedToken: String
+        if provider == .aipass {
+            trimmedToken = Self.normalizeAiPassToken(rawTrimmed)
+        } else if apiKeyProviders.contains(provider) {
+            trimmedToken = Self.normalizeBearerOrCurlToken(rawTrimmed)
+        } else {
+            trimmedToken = rawTrimmed
+        }
         guard !Self.isCorruptedToken(trimmedToken) else { return }
         
         // Also mirror direct API keys to BYOK storage so both modes stay in sync
@@ -1026,7 +1099,7 @@ public class SubscriptionAuthManager: ObservableObject {
             UserDefaults.standard.set(trimmedToken, forKey: "deepseek_api_key")
         } else if provider == .aipass {
             UserDefaults.standard.set(trimmedToken, forKey: "aipass_api_key")
-        } else if [.openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .typhoon, .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia].contains(provider) {
+        } else if apiKeyProviders.contains(provider) {
             UserDefaults.standard.set(trimmedToken, forKey: "\(provider.aiProviderID)_api_key")
         }
         
@@ -1049,9 +1122,51 @@ public class SubscriptionAuthManager: ObservableObject {
             Task {
                 await self.verifyAndFetchAiPassProfileAndModels(cookieHeader: trimmedToken)
             }
+        } else if provider == .tokenme {
+            Task {
+                await self.verifyAndFetchTokenMeProfileAndModels(apiKey: trimmedToken)
+            }
         } else if provider != .copilot {
             Task { @MainActor in
                 await self.fetchLiveModels(for: provider)
+            }
+        }
+    }
+
+    /// Verifies TokenMe API Subscription key (`tm_...`) against `GET https://api.tokenme.limited/api/v1/models`
+    /// and syncs all active chat/responses models immediately.
+    public func verifyAndFetchTokenMeProfileAndModels(apiKey: String) async {
+        let cleanKey = Self.normalizeBearerOrCurlToken(apiKey)
+        guard !cleanKey.isEmpty else { return }
+        let base = (UserDefaults.standard.string(forKey: "tokenme_base_url") ?? "https://api.tokenme.limited/api/v1")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: "\(base)/models") else { return }
+
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("MicroCode/2.0", forHTTPHeaderField: "User-Agent")
+
+        if let (_, resp) = try? await URLSession.shared.data(for: req),
+           let http = resp as? HTTPURLResponse {
+            if http.statusCode == 200 {
+                await AIModelCatalog.shared.fetchLiveModelsForProvider("tokenme")
+                await MainActor.run {
+                    self.syncLiveModelsFromCatalog(for: .tokenme)
+                    let count = SubscriptionProviderType.tokenme.modelInfos.count
+                    if var acc = self.accounts[.tokenme] {
+                        acc.emailOrUser = "TokenMe Subscription (Verified • \(count) models)"
+                        acc.isValid = true
+                        acc.lastVerified = Date()
+                        self.accounts[.tokenme] = acc
+                        self.persistAccounts()
+                    }
+                    self.lastDetectionMessage = "TokenMe (9ARM) verified — \(count) live chat models ready."
+                }
+            } else if http.statusCode == 401 || http.statusCode == 403 {
+                await MainActor.run {
+                    self.lastDetectionMessage = "TokenMe rejected this API key (HTTP \(http.statusCode)). Create a fresh tm_... key at tokenme.limited → API keys."
+                }
             }
         }
     }
@@ -1368,6 +1483,7 @@ public class SubscriptionAuthManager: ObservableObject {
             (.kimi, ["MOONSHOT_API_KEY", "KIMI_API_KEY"], "Moonshot Kimi Web"),
             (.perplexity, ["PERPLEXITY_API_KEY", "PPLX_API_KEY"], "Perplexity Pro"),
             (.perch, ["PERCH_API_KEY", "PERCHAI_API_KEY"], "Perch AI Pro"),
+            (.tokenme, ["TOKENME_API_KEY", "TOKEN_ME_API_KEY"], "TokenMe (9ARM)"),
             (.typhoon, ["TYPHOON_API_KEY", "OPENTYPHOON_API_KEY"], "SCB 10X Typhoon"),
             (.qwen, ["DASHSCOPE_API_KEY", "QWEN_API_KEY"], "Alibaba Qwen"),
             (.grok, ["XAI_API_KEY", "GROK_API_KEY"], "xAI SuperGrok"),
@@ -1629,9 +1745,9 @@ public class SubscriptionAuthManager: ObservableObject {
     }
     
     private func loadSavedAccounts() {
+        var validAccounts: [SubscriptionProviderType: SubscriptionAccount] = [:]
         if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
            let decoded = try? JSONDecoder().decode([SubscriptionProviderType: SubscriptionAccount].self, from: data) {
-            var validAccounts: [SubscriptionProviderType: SubscriptionAccount] = [:]
             for (prov, acc) in decoded {
                 var loadedToken = acc.sessionToken
                 if let keychainToken = loadTokenFromKeychain(provider: prov.rawValue) {
@@ -1648,6 +1764,8 @@ public class SubscriptionAuthManager: ObservableObject {
                     UserDefaults.standard.set(tok, forKey: "anthropic_api_key")
                 } else if tok.hasPrefix("AIzaSy") {
                     UserDefaults.standard.set(tok, forKey: "gemini_api_key")
+                } else if [.openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon, .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia, .deepseek, .glm].contains(prov) {
+                    UserDefaults.standard.set(tok, forKey: "\(prov.aiProviderID)_api_key")
                 }
                 if acc.isValid && !tok.isEmpty {
                     var updatedAcc = acc
@@ -1655,6 +1773,56 @@ public class SubscriptionAuthManager: ObservableObject {
                     validAccounts[prov] = updatedAcc
                 }
             }
+        }
+
+        // Synchronously hydrate API-key-backed subscription providers from existing BYOK UserDefaults or Env
+        // so BYOK and Web Subscription modes are immediately consistent at launch with zero network latency.
+        let instantSyncProviders: [(SubscriptionProviderType, [String], String)] = [
+            (.tokenme, ["TOKENME_API_KEY", "TOKEN_ME_API_KEY"], "TokenMe (9ARM)"),
+            (.typhoon, ["TYPHOON_API_KEY", "OPENTYPHOON_API_KEY"], "SCB 10X Typhoon"),
+            (.deepseek, ["DEEPSEEK_API_KEY"], "DeepSeek API"),
+            (.glm, ["GLM_API_KEY", "ZHIPU_API_KEY"], "Z.AI GLM Coding Plan"),
+            (.openrouter, ["OPENROUTER_API_KEY"], "OpenRouter Web"),
+            (.groq, ["GROQ_API_KEY"], "GroqCloud Developer"),
+            (.mistral, ["MISTRAL_API_KEY", "CODESTRAL_API_KEY"], "Mistral Pro"),
+            (.kimi, ["MOONSHOT_API_KEY", "KIMI_API_KEY"], "Moonshot Kimi Web"),
+            (.perplexity, ["PERPLEXITY_API_KEY", "PPLX_API_KEY"], "Perplexity Pro"),
+            (.perch, ["PERCH_API_KEY", "PERCHAI_API_KEY"], "Perch AI Pro"),
+            (.qwen, ["DASHSCOPE_API_KEY", "QWEN_API_KEY"], "Alibaba Qwen"),
+            (.grok, ["XAI_API_KEY", "GROK_API_KEY"], "xAI SuperGrok"),
+            (.cerebras, ["CEREBRAS_API_KEY"], "Cerebras Cloud Free"),
+            (.together, ["TOGETHER_API_KEY"], "Together AI Cloud"),
+            (.fireworks, ["FIREWORKS_API_KEY"], "Fireworks AI"),
+            (.minimax, ["MINIMAX_API_KEY"], "MiniMax Coding Plan"),
+            (.nvidia, ["NVIDIA_API_KEY", "NGC_API_KEY"], "NVIDIA NIM Developer")
+        ]
+        var hydratedAny = false
+        for (subProv, envVars, label) in instantSyncProviders where validAccounts[subProv] == nil {
+            var candidate = UserDefaults.standard.string(forKey: "\(subProv.aiProviderID)_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if candidate.isEmpty {
+                for env in envVars {
+                    if let val = ProcessInfo.processInfo.environment[env]?.trimmingCharacters(in: .whitespacesAndNewlines), !val.isEmpty {
+                        candidate = val
+                        break
+                    }
+                }
+            }
+            if !candidate.isEmpty && !Self.isCorruptedToken(candidate) {
+                if saveTokenToKeychain(provider: subProv.rawValue, token: candidate) {
+                    validAccounts[subProv] = SubscriptionAccount(
+                        provider: subProv,
+                        emailOrUser: label,
+                        sessionToken: candidate,
+                        isValid: true,
+                        source: "Direct / Env",
+                        lastVerified: Date()
+                    )
+                    hydratedAny = true
+                }
+            }
+        }
+
+        if !validAccounts.isEmpty || hydratedAny {
             self.accounts = validAccounts
             persistAccounts()
         }

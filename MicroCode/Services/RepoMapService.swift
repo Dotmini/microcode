@@ -81,96 +81,153 @@ struct RepoMap: Codable {
 final class RepoMapService: @unchecked Sendable {
     static let shared = RepoMapService()
     
+    private struct CachedFileRecord {
+        let mtime: TimeInterval
+        let sizeBytes: UInt64
+        let entry: RepoFileEntry
+    }
+
     private let cacheLock = NSLock()
-    private var cachedMap: RepoMap?
-    private var cachedWorkspace: String?
-    private var cacheTimestamp: Date?
+    private var workspaceCaches: [String: (map: RepoMap, timestamp: Date)] = [:]
+    private var fileEntryCache: [String: CachedFileRecord] = [:]
+    private let maxCachedWorkspaces = 4
     private let cacheTTL: TimeInterval = 120  // 2 minutes
     
     // Directories to always skip
-    private let skipDirs: Set<String> = [
-        ".git", ".build", ".swiftpm", "node_modules", "target", "build",
+    let skipDirs: Set<String> = [
+        ".git", ".build", ".swiftpm", ".codetuner-build", "node_modules", "target", "build",
         "dist", "Dist", ".build_dist", "Pods", "DerivedData", "__pycache__",
-        ".cache", ".next", ".nuxt", "vendor", "venv", ".venv", "env",
+        ".cache", ".next", ".nuxt", "vendor", "Vendor", "venv", ".venv", "env",
         ".tox", ".mypy_cache", ".pytest_cache", "coverage", ".nyc_output",
         "out", "bin", "obj", ".gradle", ".idea", ".vscode", ".cursor"
     ]
     
     // File extensions we care about for symbol extraction
-    private let indexableExtensions: Set<String> = [
+    let indexableExtensions: Set<String> = [
         "swift", "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt",
         "kts", "rb", "php", "cs", "c", "cc", "cpp", "h", "hpp", "m", "mm",
         "scala", "r", "jl", "lua", "dart", "ex", "exs", "erl", "hs",
-        "ml", "mli", "vue", "svelte"
+        "ml", "mli", "vue", "svelte", "ar"
     ]
     
     // Max limits
-    private let maxFiles = 500
-    private let maxSymbolsPerFile = 100
-    private let maxFileSizeBytes: UInt64 = 512 * 1024  // 512KB
+    private let maxFiles = 2500
+    private let maxSymbolsPerFile = 200
+    private let maxFileSizeBytes: UInt64 = 768 * 1024  // 768KB
     
-    /// Generate or return cached repo map
-    func getRepoMap(workspace: String, forceRefresh: Bool = false) async -> RepoMap {
+    private func readCachedWorkspaceMap(_ canonicalWs: String, forceRefresh: Bool) -> RepoMap? {
         cacheLock.lock()
+        defer { cacheLock.unlock() }
         if !forceRefresh,
-           let cached = cachedMap,
-           cachedWorkspace == workspace,
-           let ts = cacheTimestamp,
-           Date().timeIntervalSince(ts) < cacheTTL {
-            cacheLock.unlock()
+           let cached = workspaceCaches[canonicalWs],
+           Date().timeIntervalSince(cached.timestamp) < cacheTTL {
+            return cached.map
+        }
+        return nil
+    }
+
+    private func writeCachedWorkspaceMap(_ canonicalWs: String, map: RepoMap) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if workspaceCaches.count >= maxCachedWorkspaces, workspaceCaches[canonicalWs] == nil {
+            if let oldestKey = workspaceCaches.min(by: { $0.value.timestamp < $1.value.timestamp })?.key {
+                workspaceCaches.removeValue(forKey: oldestKey)
+            }
+        }
+        workspaceCaches[canonicalWs] = (map: map, timestamp: Date())
+    }
+
+    /// Generate or return cached repo map (multi-workspace safe + incremental mtime file cache)
+    func getRepoMap(workspace: String, forceRefresh: Bool = false) async -> RepoMap {
+        let canonicalWs = URL(fileURLWithPath: workspace).standardizedFileURL.path
+        if let cached = readCachedWorkspaceMap(canonicalWs, forceRefresh: forceRefresh) {
             return cached
         }
-        cacheLock.unlock()
         
-        let map = await buildRepoMap(workspace: workspace)
-        cacheLock.lock()
-        cachedMap = map
-        cachedWorkspace = workspace
-        cacheTimestamp = Date()
-        cacheLock.unlock()
+        let map = await buildRepoMap(workspace: canonicalWs)
+        writeCachedWorkspaceMap(canonicalWs, map: map)
         return map
     }
     
-    /// Clear cache (e.g., when files change)
-    func invalidateCache() {
+    /// Clear cache (all workspaces or a specific workspace)
+    func invalidateCache(workspace: String? = nil) {
         cacheLock.lock()
-        cachedMap = nil
-        cacheTimestamp = nil
+        if let ws = workspace, !ws.isEmpty {
+            let canonicalWs = URL(fileURLWithPath: ws).standardizedFileURL.path
+            workspaceCaches.removeValue(forKey: canonicalWs)
+        } else {
+            workspaceCaches.removeAll()
+        }
+        cacheLock.unlock()
+    }
+
+    /// Incrementally invalidate a single modified file so subsequent searches re-parse only that file
+    func invalidateFile(_ fullPath: String) {
+        let canonicalFile = URL(fileURLWithPath: fullPath).standardizedFileURL.path
+        cacheLock.lock()
+        fileEntryCache.removeValue(forKey: canonicalFile)
+        for wsKey in Array(workspaceCaches.keys) where canonicalFile.hasPrefix(wsKey + "/") {
+            workspaceCaches.removeValue(forKey: wsKey)
+        }
         cacheLock.unlock()
     }
     
-    // MARK: - Build Repo Map (Parallelized across Apple Silicon CPU Cores)
+    // MARK: - Build Repo Map (Parallelized across Apple Silicon CPU Cores + Incremental mtime Cache)
     
     private func buildRepoMap(workspace: String) async -> RepoMap {
         await PerformanceManager.shared.runOnECore { [self] in
             let rootURL = URL(fileURLWithPath: workspace)
             let files = Array(self.collectFiles(root: rootURL, current: rootURL, depth: 0, maxDepth: 8).prefix(self.maxFiles))
             
-            // Extract symbols across all CPU cores simultaneously via `DispatchQueue.concurrentPerform`
-            let maybeEntries: [RepoFileEntry?] = PerformanceManager.parallelMap(files, minItemsPerCore: 4) { fileURL in
-                let relativePath = fileURL.path.replacingOccurrences(of: workspace + "/", with: "")
-                let ext = fileURL.pathExtension
+            self.cacheLock.lock()
+            let snapshotCache = self.fileEntryCache
+            self.cacheLock.unlock()
+            
+            // Extract symbols across all CPU cores simultaneously, reusing unchanged files via (mtime, size)
+            let maybeResults: [(String, CachedFileRecord)?] = PerformanceManager.parallelMap(files, minItemsPerCore: 4) { fileURL in
+                let fullPath = fileURL.standardizedFileURL.path
+                let prefix = workspace.hasSuffix("/") ? workspace : workspace + "/"
+                let relativePath = fullPath.hasPrefix(prefix) ? String(fullPath.dropFirst(prefix.count)) : fileURL.lastPathComponent
+                let ext = fileURL.pathExtension.lowercased()
                 
-                guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: fullPath),
                       let size = attrs[.size] as? UInt64 else { return nil }
+                let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                
+                if let hit = snapshotCache[fullPath],
+                   hit.sizeBytes == size,
+                   abs(hit.mtime - mtime) < 0.001 {
+                    return (fullPath, hit)
+                }
                 
                 var symbols: [RepoSymbol] = []
                 if self.indexableExtensions.contains(ext), size <= self.maxFileSizeBytes {
-                    if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                    if let content = try? String(contentsOfFile: fullPath, encoding: .utf8) {
                         symbols = self.extractSymbols(content: content, ext: ext, relativePath: relativePath)
                     }
                 }
                 
-                return RepoFileEntry(
+                let entry = RepoFileEntry(
                     relativePath: relativePath,
                     extension_: ext,
                     sizeBytes: size,
                     symbolCount: symbols.count,
                     symbols: symbols
                 )
+                return (fullPath, CachedFileRecord(mtime: mtime, sizeBytes: size, entry: entry))
             }
             
-            var fileEntries = maybeEntries.compactMap { $0 }
+            let validRecords = maybeResults.compactMap { $0 }
+            self.cacheLock.lock()
+            if self.fileEntryCache.count > 6000 {
+                self.fileEntryCache.removeAll(keepingCapacity: true)
+            }
+            for (path, rec) in validRecords {
+                self.fileEntryCache[path] = rec
+            }
+            self.cacheLock.unlock()
+            
+            var fileEntries = validRecords.map { $0.1.entry }
             let totalSymbols = fileEntries.reduce(0) { $0 + $1.symbolCount }
             
             // Sort: source files with symbols first, then by path
@@ -551,13 +608,15 @@ struct RepoMapTool: AgentTool {
         Much more efficient than reading files one by one.
         """
     let parameters = [
-        ToolParameter(name: "directory", type: "string", description: "Workspace root directory to map", required: true),
+        ToolParameter(name: "directory", type: "string", description: "Workspace root directory to map (optional, defaults to active workspace)", required: false),
         ToolParameter(name: "max_tokens", type: "integer", description: "Max token budget for output (default: 8000)", required: false),
         ToolParameter(name: "filter", type: "string", description: "Optional file extension filter (e.g. 'swift' or 'rs,py')", required: false)
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        guard let directory = params["directory"] as? String else {
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
+        let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
+        guard let directory = directoryOpt, !directory.isEmpty else {
             throw ToolBoxError.invalidParams("directory is required")
         }
         

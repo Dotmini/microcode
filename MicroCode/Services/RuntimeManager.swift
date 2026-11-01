@@ -721,9 +721,10 @@ class RuntimeManager: ObservableObject {
         // Check local .runtime_cache first for instant offline install if available
         var usedLocalCache = false
         if let cacheName = downloadInfo.localCacheName {
+            let homeURL = fm.homeDirectoryForCurrentUser
             let candidateCaches = [
-                URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(".runtime_cache/\(cacheName)"),
-                URL(fileURLWithPath: "/Users/dotmini/Documents/SX/codetunner-native/.runtime_cache/\(cacheName)")
+                homeURL.appendingPathComponent(".microcode/runtime_cache/\(cacheName)"),
+                URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(".runtime_cache/\(cacheName)")
             ]
             if let existingCache = candidateCaches.first(where: { fm.fileExists(atPath: $0.path) }) {
                 try? fm.copyItem(at: existingCache, to: downloadPath)

@@ -263,18 +263,13 @@ public final class SubAgentHarness: ObservableObject {
         // Active token and budget enforcement
 
         let toolbox = AgentToolBox.shared
-        let executionWorkspace = workspacePath ?? toolbox.workspaceRoot
-        // AgentToolBox is shared by the primary agent and all subagents. Never
-        // repoint it from a background task: concurrent agents would otherwise
-        // read and write each other's workspaces.
-        if let ws = workspacePath, !ws.isEmpty, toolbox.workspaceRoot != ws {
-            updateSubagentState(instanceId: instanceId, state: .errored, detail: "Workspace changed before subagent started")
-            runningTasks.removeValue(forKey: instanceId)
-            return
-        }
+        let executionWorkspace = workspacePath ?? toolbox.effectiveWorkspaceRoot
+        // PNS Motor Fiber Isolation: Instead of rejecting concurrent subagents running on isolated
+        // git worktrees or multi-window workspaces when `toolbox.workspaceRoot != ws`, every tool call
+        // executes inside `@TaskLocal AgentExecutionContext.$workspaceRoot.withValue(executionWorkspace)`.
         
         // Ensure MCP server tools are booted and available for the subagent
-        await MCPClient.shared.ensureConnected(workspacePath: workspacePath)
+        await MCPClient.shared.ensureConnected(workspacePath: executionWorkspace)
         
         let jitSkillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet(
             forPrompt: taskPrompt,
@@ -307,8 +302,8 @@ public final class SubAgentHarness: ObservableObject {
         - Execute the required actions to complete the objective and verify your changes before finishing.
         """
         
-        let universalMetaTools: Set<String> = ["skill_engine", "mcp_orchestrator", "swarm_orchestrator", "send_message", "get_diagnostics", "git_status"]
-        let toolSchemas = toolbox.toolSchemas().filter { dict in
+        let universalMetaTools: Set<String> = ["skill_engine", "mcp_orchestrator", "swarm_orchestrator", "pns_nervous_system", "send_message", "get_diagnostics", "git_status"]
+        let baseToolSchemas = toolbox.toolSchemas().filter { dict in
             let name = dict["name"] as? String ?? ""
             if universalMetaTools.contains(name) { return true }
             // All MicroCode SubAgents have access to MCP tools in addition to role-specific tools
@@ -316,6 +311,17 @@ public final class SubAgentHarness: ObservableObject {
             if definition.allowedTools.contains("*") { return true }
             return definition.allowedTools.contains(name)
         }
+        // PNS Ganglion Nerve-Tract Pruning: Mount only Top-K external MCP tools matching this SubAgent's Nerve Tract
+        let toolSchemas = PNSGanglionRouter.shared.filterMCPToolsForSubAgent(
+            archetype: definition.name,
+            taskPrompt: taskPrompt,
+            workspacePath: executionWorkspace,
+            allSchemas: baseToolSchemas,
+            maxMCPTools: 10,
+            synapseLookup: { category, tract, nodeId, proj in
+                PNSOrchestrator.shared.lookupSynapse(taskCategory: category, tract: tract, targetNodeId: nodeId, projectPath: proj)
+            }
+        )
         
         var history: [[(String, Any)]] = [
             [("_role", "user"), ("text", taskPrompt)]
@@ -469,9 +475,6 @@ public final class SubAgentHarness: ObservableObject {
                         guard permittedTools.contains(toolName) || universalMetaTools.contains(toolName) else {
                             throw ToolBoxError.executionFailed("Tool '\(toolName)' is not authorized for this subagent")
                         }
-                        guard toolbox.workspaceRoot == executionWorkspace else {
-                            throw ToolBoxError.executionFailed("Subagent workspace is no longer active")
-                        }
                         try verifyFileOwnershipLock(
                             instanceId: instanceId,
                             role: definition.role,
@@ -484,7 +487,9 @@ public final class SubAgentHarness: ObservableObject {
                             return
                         }
                         toolAttempts += 1
-                        let rawOutput = try await toolbox.execute(toolName, params: toolCall.arguments)
+                        let rawOutput = try await AgentExecutionContext.$workspaceRoot.withValue(executionWorkspace) {
+                            try await toolbox.execute(toolName, params: toolCall.arguments)
+                        }
                         let toolOutput = TokenOptimizer.shared.compressToolOutput(rawOutput, toolName: toolName, budget: 12_000)
                         let logEntry = "✓ \(toolName): \(toolOutput.prefix(80))"
                         if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
@@ -683,7 +688,7 @@ public final class SubAgentHarness: ObservableObject {
     public func sendMessage(
         recipientId: String,
         message: String,
-        senderRole: String = "👔 CEO",
+        senderRole: String = "Lead",
         senderBadge: String = "Orchestrator"
     ) -> Bool {
         // Match either by exact SubAgent instance ID, prefix, typeName, or role
@@ -817,6 +822,9 @@ public final class SubAgentHarness: ObservableObject {
             if globalKeyMode == "subscription" && subActiveProvider == "aipass" {
                 return "aipass"
             }
+            if globalKeyMode == "subscription" && subActiveProvider == "tokenme" {
+                return "tokenme"
+            }
             return UserDefaults.standard.string(forKey: "aiProvider") ?? "gemini"
         }()
         let globalModel = UserDefaults.standard.string(forKey: "aiModel") ?? StreamableAIProvider.gemini.defaultModel
@@ -899,6 +907,8 @@ public final class SubAgentHarness: ObservableObject {
             return SubscriptionAuthManager.shared.isConnected(.copilot)
         case .aipass:
             return SubscriptionAuthManager.shared.isConnected(.aipass)
+        case .tokenme:
+            return SubscriptionAuthManager.shared.isConnected(.tokenme)
         default:
             return false
         }
@@ -916,6 +926,8 @@ public final class SubAgentHarness: ObservableObject {
             return SubscriptionAuthManager.shared.token(for: .copilot) ?? ""
         case .aipass:
             return SubscriptionAuthManager.shared.token(for: .aipass) ?? UserDefaults.standard.string(forKey: "aipass_api_key") ?? ""
+        case .tokenme:
+            return SubscriptionAuthManager.shared.token(for: .tokenme) ?? UserDefaults.standard.string(forKey: "tokenme_api_key") ?? ""
         default:
             return ""
         }
@@ -1134,13 +1146,13 @@ public final class SubAgentHarness: ObservableObject {
         
         clearDialogueAndContracts()
         recordDialogue(
-            senderRole: "👔 CEO (\(preset.name))",
+            senderRole: "Lead (\(preset.name))",
             senderBadge: ceoRoute.badgeLabel,
-            recipientRole: "All Squad (\(enabledSubordinates.count) Specialists)",
+            recipientRole: "Team (\(enabledSubordinates.count) Specialists)",
             kind: .briefing,
-            content: "Analyzing objective and creating File-Scoped Task Contracts for: \(objective.prefix(140))"
+            content: "Analyzing objective and creating file-scoped task contracts for: \(objective.prefix(140))"
         )
-        onProgress?("👔 **CEO [\(ceoRoute.badgeLabel)]** กำลังวิเคราะห์โจทย์และแบ่งงานให้ลูกน้อง \(enabledSubordinates.count) ตำแหน่ง...")
+        onProgress?("**Lead [\(ceoRoute.badgeLabel)]** — Analyzing objective and decomposing tasks across \(enabledSubordinates.count) specialists...")
         
         // Step 1: Ask the CEO model to decompose the objective into contracts for the available subordinates
         let rosterDescription = enabledSubordinates.map { member -> String in
@@ -1189,11 +1201,11 @@ public final class SubAgentHarness: ObservableObject {
             let parsed = parseCEOPlanJSON(from: planResult.text, availableMembers: enabledSubordinates, fallbackObjective: objective)
             ceoBriefingNote = parsed.briefing
             for fact in parsed.facts {
-                postFact(key: fact.key, value: fact.value, authorRole: "👔 CEO")
+                postFact(key: fact.key, value: fact.value, authorRole: "Lead")
             }
             plannedContracts = parsed.contracts
         } catch {
-            log("[CEO] Plan generation fallback triggered: \(error.localizedDescription)")
+            log("[Lead] Plan generation fallback triggered: \(error.localizedDescription)")
             plannedContracts = buildFallbackContracts(for: objective, members: enabledSubordinates)
         }
         
@@ -1203,9 +1215,9 @@ public final class SubAgentHarness: ObservableObject {
         activeContracts = plannedContracts
         
         recordDialogue(
-            senderRole: "👔 CEO",
+            senderRole: "Lead",
             senderBadge: ceoRoute.badgeLabel,
-            recipientRole: "Swarm Blackboard",
+            recipientRole: "Shared Context",
             kind: .briefing,
             content: ceoBriefingNote
         )
@@ -1216,7 +1228,7 @@ public final class SubAgentHarness: ObservableObject {
             let subEndpoint = memberSpec?.endpoint ?? resolveRoleEndpoint(forTypeName: contract.typeName)
             let subRoute = resolveExecutionRoute(for: subEndpoint)
             recordDialogue(
-                senderRole: "👔 CEO",
+                senderRole: "Lead",
                 senderBadge: ceoRoute.badgeLabel,
                 recipientRole: "\(contract.role) [\(subRoute.badgeLabel)]",
                 kind: .delegation,
@@ -1225,7 +1237,7 @@ public final class SubAgentHarness: ObservableObject {
             )
         }
         
-        onProgress?("🚀 **CEO** สั่งงานลูกน้อง \(plannedContracts.count) คนเรียบร้อย กำลังรันงานพร้อมล็อกขอบเขตไฟล์...")
+        onProgress?("**Lead** — Dispatched \(plannedContracts.count) specialists with file-scoped ownership...")
         
         var contractResults: [String: (instance: SubAgentInstance, verified: Bool, report: String)] = [:]
         
@@ -1275,7 +1287,7 @@ public final class SubAgentHarness: ObservableObject {
                     recordDialogue(
                         senderRole: inst.role,
                         senderBadge: inst.endpointBadge ?? inst.typeName,
-                        recipientRole: "👔 CEO",
+                        recipientRole: "Lead",
                         kind: .verificationPassed,
                         content: String(report.prefix(240)),
                         ownedFiles: inst.ownedPaths
@@ -1284,9 +1296,9 @@ public final class SubAgentHarness: ObservableObject {
             }
         }
         
-        // Step 3: Deterministic Verification Gate & CEO Inspection / Revision Loop
+        // Step 3: Deterministic Verification Gate & Inspection / Revision Loop
         let gitStatusOutput = (try? await AgentToolBox.shared.execute("git_status", params: [:])) ?? ""
-        onProgress?("🔍 **CEO [\(ceoRoute.badgeLabel)]** กำลังตรวจรับงานและตรวจสอบความถูกต้องของลูกน้องแต่ละคน...")
+        onProgress?("**Lead [\(ceoRoute.badgeLabel)]** — Verifying specialist deliverables and workspace changes...")
         
         for cIdx in activeContracts.indices {
             let contract = activeContracts[cIdx]
@@ -1303,9 +1315,9 @@ public final class SubAgentHarness: ObservableObject {
                 let subEndpoint = memberSpec?.endpoint ?? resolveRoleEndpoint(forTypeName: contract.typeName)
                 let subRoute = resolveExecutionRoute(for: subEndpoint)
                 
-                let revisionDirective = "งานรอบแรกยังไม่สมบูรณ์ (\(currentRes.instance.stateDetail ?? "Incomplete output")). กรุณาตรวจสอบไฟล์ในขอบเขต \(contract.ownedPaths.joined(separator: ", ")) แก้ไขให้เสร็จสมบูรณ์ และยืนยันผลด้วย Tool จริงเดี๋ยวนี้"
+                let revisionDirective = "Initial pass incomplete (\(currentRes.instance.stateDetail ?? "Incomplete output")). Inspect scoped paths \(contract.ownedPaths.joined(separator: ", ")), complete the required changes, and verify via tools."
                 recordDialogue(
-                    senderRole: "👔 CEO",
+                    senderRole: "Lead",
                     senderBadge: ceoRoute.badgeLabel,
                     recipientRole: "\(contract.role) [\(subRoute.badgeLabel)]",
                     kind: .revisionRequested,
@@ -1337,21 +1349,21 @@ public final class SubAgentHarness: ObservableObject {
             activeContracts[cIdx].status = .approved
             if let finalRes = contractResults[contract.id] {
                 recordDialogue(
-                    senderRole: "👔 CEO",
+                    senderRole: "Lead",
                     senderBadge: ceoRoute.badgeLabel,
                     recipientRole: finalRes.instance.role,
                     kind: .approved,
-                    content: "✅ ตรวจรับงานผ่านเกณฑ์ (\(finalRes.verified ? "Verified Workspace Mutation" : "Verified Report"))"
+                    content: "Verified (\(finalRes.verified ? "Workspace mutation confirmed" : "Report verified"))"
                 )
             }
         }
         
-        // Step 4: CEO Final Executive Synthesis
+        // Step 4: Final Synthesis
         let subordinateSummaries = activeContracts.compactMap { contract -> String? in
             guard let res = contractResults[contract.id] else { return nil }
             let badge = res.instance.endpointBadge ?? contract.typeName
             return """
-            ### 👤 \(contract.role) (`\(badge)`) — \(contract.status.rawValue)
+            ### \(contract.role) (`\(badge)`) — \(contract.status.displayLabel)
             - **Scope**: \(contract.ownedPaths.isEmpty ? "Workspace" : contract.ownedPaths.joined(separator: ", "))
             - **Report**:
             \(res.report)
@@ -1395,8 +1407,8 @@ public final class SubAgentHarness: ObservableObject {
         }
         
         return """
-        👔 **Executive Squad Delivery — \(preset.name)**
-        > **CEO**: `\(ceoRoute.badgeLabel)` • **Specialists**: \(plannedContracts.count) active • **Verification Gate**: Passed ✅
+        **Agent Team Summary — \(preset.name)**
+        > **Lead**: `\(ceoRoute.badgeLabel)` · **Specialists**: \(plannedContracts.count) · **Verification**: Passed
         
         \(ceoFinalSynthesis)
         """

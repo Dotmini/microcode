@@ -75,10 +75,37 @@ struct AgentExecutionEvidence {
                 "ปรับปรุง", "ปรับ", "พัฒนา", "ทำระบบ", "ทำหน้า", "ทำเว็บ", "แปลง"].contains(where: value.contains)
     }
 
+    static func isInternalAgentArtifactPath(_ rawPath: String) -> Bool {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let normalized = trimmed.replacingOccurrences(of: "\\", with: "/")
+        let lower = normalized.lowercased()
+        if lower.contains("/.microcode/") || lower.hasPrefix(".microcode/") || lower.hasPrefix("./.microcode/") {
+            return true
+        }
+        let fileName = (lower as NSString).lastPathComponent
+        if fileName == "task.md" || fileName == "agent.md" {
+            // Managed workspace scratchpads (whether referenced relatively or inside state storage)
+            // are agent bookkeeping artifacts, not buildable project source mutations.
+            return true
+        }
+        return false
+    }
+
     static func mutates(name: String, arguments: [String: Any]) -> Bool {
         let base = normalize(name)
         if base == "shell" { return shellMutates(arguments["command"] as? String ?? "") }
-        return ["file_write", "replace_in_file", "multi_replace_in_file", "patch_file", "apply_patch", "rename_file", "create_directory", "delete_file",
+        if ["file_write", "replace_in_file", "multi_replace_in_file", "patch_file", "apply_patch"].contains(base) {
+            let targetPath = (arguments["path"] as? String)
+                ?? (arguments["file_path"] as? String)
+                ?? (arguments["TargetFile"] as? String)
+                ?? (arguments["AbsolutePath"] as? String)
+            if let targetPath, isInternalAgentArtifactPath(targetPath) {
+                return false
+            }
+            return true
+        }
+        return ["rename_file", "create_directory", "delete_file",
                 "cell_create", "cell_update", "cell_delete"].contains(base)
     }
 

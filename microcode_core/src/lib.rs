@@ -132,11 +132,33 @@ impl MicroCore {
         // Initialize file editor
         let file_editor = FileEditor::new(workspace.clone());
         
-        // Determine vector DB path
+        // Determine vector DB path under ~/.microcode/workspaces/<name>-<hash>/vectors (never inside source repo)
         let vector_db_path = config.vector_db_path.clone()
             .unwrap_or_else(|| {
-                workspace.join(".microcode").join("vectors")
-                    .to_string_lossy().to_string()
+                let canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.clone());
+                let canonical_str = canonical.to_string_lossy();
+                let mut hash: u64 = 14695981039346656037;
+                for b in canonical_str.as_bytes() {
+                    hash ^= *b as u64;
+                    hash = hash.wrapping_mul(1099511628211);
+                }
+                let raw_name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("workspace");
+                let safe_name: String = raw_name
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+                    .take(40)
+                    .collect();
+                let slug = format!("{}-{:012x}", if safe_name.is_empty() { "workspace" } else { &safe_name }, hash >> 16);
+                let home_base = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir);
+                home_base
+                    .join(".microcode")
+                    .join("workspaces")
+                    .join(slug)
+                    .join("vectors")
+                    .to_string_lossy()
+                    .to_string()
             });
         
         // Initialize RAG engine

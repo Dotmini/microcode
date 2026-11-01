@@ -100,6 +100,263 @@ enum CollaborationMessage: Codable {
     }
 }
 
+// MARK: - Conflict-Free 3-Way Line Merger (Diff3 / LCS Anchor Hunks)
+
+enum CollaborativeThreeWayMerger {
+    struct EditHunk: Equatable {
+        let baseStart: Int // inclusive index in baseLines
+        let baseEnd: Int   // exclusive index in baseLines
+        let replacement: [String]
+
+        var isPureInsertion: Bool { baseStart == baseEnd }
+    }
+
+    struct MergeResult: Equatable {
+        let merged: String
+        let didAutoMerge: Bool
+    }
+
+    /// Performs a deterministic, syntax-safe 3-way merge of `current` (Host) and `incoming` (Peer)
+    /// relative to `base` (`baseRevision` snapshot). Preserves all non-overlapping concurrent edits,
+    /// deduplicates identical edits, preserves dual pure insertions, and resolves overlapping line
+    /// edits in favor of `incoming` without injecting broken `<<<<<<<` markers into live source code.
+    static func merge(base: String, current: String, incoming: String) -> MergeResult {
+        if incoming == current {
+            return MergeResult(merged: current, didAutoMerge: false)
+        }
+        if base == current {
+            return MergeResult(merged: incoming, didAutoMerge: false)
+        }
+        if base == incoming {
+            return MergeResult(merged: current, didAutoMerge: true)
+        }
+
+        let baseLines = base.components(separatedBy: "\n")
+        let currentLines = current.components(separatedBy: "\n")
+        let incomingLines = incoming.components(separatedBy: "\n")
+
+        // Guard against pathological Myers O(N*D) diff cost on very large generated files
+        if baseLines.count + currentLines.count + incomingLines.count > 12_000 {
+            return MergeResult(merged: incoming, didAutoMerge: false)
+        }
+
+        let hunksA = computeHunks(base: baseLines, target: currentLines)
+        let hunksB = computeHunks(base: baseLines, target: incomingLines)
+
+        var output: [String] = []
+        output.reserveCapacity(max(currentLines.count, incomingLines.count))
+
+        var cursor = 0
+        var i = 0
+        var j = 0
+
+        while i < hunksA.count || j < hunksB.count {
+            if i < hunksA.count && j < hunksB.count {
+                let a = hunksA[i]
+                let b = hunksB[j]
+
+                if comesStrictlyBefore(a, b) {
+                    if cursor < a.baseStart {
+                        output.append(contentsOf: baseLines[cursor..<a.baseStart])
+                    }
+                    output.append(contentsOf: a.replacement)
+                    cursor = a.baseEnd
+                    i += 1
+                } else if comesStrictlyBefore(b, a) {
+                    if cursor < b.baseStart {
+                        output.append(contentsOf: baseLines[cursor..<b.baseStart])
+                    }
+                    output.append(contentsOf: b.replacement)
+                    cursor = b.baseEnd
+                    j += 1
+                } else if a.isPureInsertion && b.isPureInsertion && a.baseStart == b.baseStart {
+                    if cursor < a.baseStart {
+                        output.append(contentsOf: baseLines[cursor..<a.baseStart])
+                    }
+                    if a.replacement == b.replacement {
+                        output.append(contentsOf: a.replacement)
+                    } else {
+                        output.append(contentsOf: a.replacement)
+                        output.append(contentsOf: b.replacement)
+                    }
+                    cursor = a.baseEnd
+                    i += 1
+                    j += 1
+                } else {
+                    // Transitive overlapping hunk cluster [spanStart, spanEnd)
+                    let spanStart = min(a.baseStart, b.baseStart)
+                    var spanEnd = max(a.baseEnd, b.baseEnd)
+                    var endI = i + 1
+                    var endJ = j + 1
+
+                    var expanded = true
+                    while expanded {
+                        expanded = false
+                        while endI < hunksA.count && hunksA[endI].baseStart < spanEnd {
+                            spanEnd = max(spanEnd, hunksA[endI].baseEnd)
+                            endI += 1
+                            expanded = true
+                        }
+                        while endJ < hunksB.count && hunksB[endJ].baseStart < spanEnd {
+                            spanEnd = max(spanEnd, hunksB[endJ].baseEnd)
+                            endJ += 1
+                            expanded = true
+                        }
+                    }
+
+                    if cursor < spanStart {
+                        output.append(contentsOf: baseLines[cursor..<spanStart])
+                    }
+
+                    let sliceB = renderSpan(
+                        baseLines: baseLines,
+                        spanStart: spanStart,
+                        spanEnd: spanEnd,
+                        hunks: Array(hunksB[j..<endJ])
+                    )
+                    output.append(contentsOf: sliceB)
+                    cursor = spanEnd
+                    i = endI
+                    j = endJ
+                }
+            } else if i < hunksA.count {
+                let a = hunksA[i]
+                if cursor < a.baseStart {
+                    output.append(contentsOf: baseLines[cursor..<a.baseStart])
+                }
+                output.append(contentsOf: a.replacement)
+                cursor = a.baseEnd
+                i += 1
+            } else if j < hunksB.count {
+                let b = hunksB[j]
+                if cursor < b.baseStart {
+                    output.append(contentsOf: baseLines[cursor..<b.baseStart])
+                }
+                output.append(contentsOf: b.replacement)
+                cursor = b.baseEnd
+                j += 1
+            }
+        }
+
+        if cursor < baseLines.count {
+            output.append(contentsOf: baseLines[cursor..<baseLines.count])
+        }
+
+        let mergedText = output.joined(separator: "\n")
+        return MergeResult(merged: mergedText, didAutoMerge: mergedText != incoming)
+    }
+
+    private static func comesStrictlyBefore(_ first: EditHunk, _ second: EditHunk) -> Bool {
+        if first.baseEnd < second.baseStart {
+            return true
+        }
+        if first.baseEnd == second.baseStart {
+            // Disjoint unless both are pure insertions at the exact same offset
+            return !(first.isPureInsertion && second.isPureInsertion)
+        }
+        return false
+    }
+
+    private static func renderSpan(
+        baseLines: [String],
+        spanStart: Int,
+        spanEnd: Int,
+        hunks: [EditHunk]
+    ) -> [String] {
+        var result: [String] = []
+        var pos = spanStart
+        for h in hunks {
+            if pos < h.baseStart {
+                result.append(contentsOf: baseLines[pos..<h.baseStart])
+            }
+            result.append(contentsOf: h.replacement)
+            pos = h.baseEnd
+        }
+        if pos < spanEnd {
+            result.append(contentsOf: baseLines[pos..<spanEnd])
+        }
+        return result
+    }
+
+    private static func computeHunks(base: [String], target: [String]) -> [EditHunk] {
+        let diff = target.difference(from: base)
+        var removedBase = Set<Int>()
+        removedBase.reserveCapacity(diff.removals.count)
+        for change in diff.removals {
+            if case let .remove(offset, _, _) = change {
+                removedBase.insert(offset)
+            }
+        }
+
+        var insertedTarget = Set<Int>()
+        insertedTarget.reserveCapacity(diff.insertions.count)
+        for change in diff.insertions {
+            if case let .insert(offset, _, _) = change {
+                insertedTarget.insert(offset)
+            }
+        }
+
+        var keptBase: [Int] = []
+        keptBase.reserveCapacity(max(0, base.count - removedBase.count))
+        for idx in 0..<base.count where !removedBase.contains(idx) {
+            keptBase.append(idx)
+        }
+
+        var keptTarget: [Int] = []
+        keptTarget.reserveCapacity(max(0, target.count - insertedTarget.count))
+        for idx in 0..<target.count where !insertedTarget.contains(idx) {
+            keptTarget.append(idx)
+        }
+
+        var hunks: [EditHunk] = []
+        var prevB = -1
+        var prevT = -1
+        let anchorCount = min(keptBase.count, keptTarget.count)
+
+        func appendHunk(bStart: Int, bEnd: Int, tStart: Int, tEnd: Int) {
+            let bLen = bEnd - bStart
+            let tLen = tEnd - tStart
+            if bLen > 1 && bLen == tLen {
+                for offset in 0..<bLen {
+                    hunks.append(EditHunk(
+                        baseStart: bStart + offset,
+                        baseEnd: bStart + offset + 1,
+                        replacement: [target[tStart + offset]]
+                    ))
+                }
+            } else {
+                hunks.append(EditHunk(
+                    baseStart: bStart,
+                    baseEnd: bEnd,
+                    replacement: Array(target[tStart..<tEnd])
+                ))
+            }
+        }
+
+        if anchorCount > 0 {
+            for k in 0..<anchorCount {
+                let currB = keptBase[k]
+                let currT = keptTarget[k]
+                let bStart = prevB + 1
+                let tStart = prevT + 1
+                if bStart < currB || tStart < currT {
+                    appendHunk(bStart: bStart, bEnd: currB, tStart: tStart, tEnd: currT)
+                }
+                prevB = currB
+                prevT = currT
+            }
+        }
+
+        let finalBStart = prevB + 1
+        let finalTStart = prevT + 1
+        if finalBStart < base.count || finalTStart < target.count {
+            appendHunk(bStart: finalBStart, bEnd: base.count, tStart: finalTStart, tEnd: target.count)
+        }
+
+        return hunks
+    }
+}
+
 // MARK: - Collaboration Service
 
 @MainActor
@@ -219,6 +476,8 @@ final class CollaborationService: ObservableObject {
     private var tunnelOutputPipe: Pipe?
     private var isApplyingRemoteEdit: Bool = false
     private var lastSyncedLocalFileHashes: [String: Int] = [:]
+    private var fileRevisionSnapshots: [String: [Int: String]] = [:] // relativePath -> (revision -> content snapshot, bounded to 32)
+    private var peerBaseRevisions: [String: Int] = [:]               // relativePath -> last confirmed host revision on peer
     
     private static let formalPalette = [
         "#64748B", // Muted Slate
@@ -573,6 +832,9 @@ final class CollaborationService: ObservableObject {
         followingUserId = nil
         crdtEngine.stopSession()
         crdtDocuments.removeAll()
+        fileRevisionSnapshots.removeAll()
+        peerBaseRevisions.removeAll()
+        lastSyncedLocalFileHashes.removeAll()
         currentSession = nil
         participants = []
         sharedFiles = []
@@ -760,16 +1022,30 @@ final class CollaborationService: ObservableObject {
             sendHTTPResponse(connection: connection, status: "200 OK", contentType: "application/json; charset=utf-8", body: data)
             
         case ("POST", "/api/collab/edit"):
+            var responseObj: [String: Any] = ["ok": true]
             if let body = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
                let relPath = body["path"] as? String,
                let newContent = body["content"] as? String {
                 let uid = (body["userId"] as? String) ?? "peer"
                 let name = (body["displayName"] as? String) ?? "Collaborator"
                 let color = (body["color"] as? String) ?? "#3B82F6"
-                applyIncomingFileContent(relativePath: relPath, content: newContent, authorId: uid, authorName: name, authorColor: color)
+                let baseRevision = body["baseRevision"] as? Int
+                let outcome = applyIncomingFileContent(
+                    relativePath: relPath,
+                    content: newContent,
+                    baseRevision: baseRevision,
+                    authorId: uid,
+                    authorName: name,
+                    authorColor: color
+                )
+                responseObj["revision"] = outcome.revision
+                responseObj["merged"] = outcome.didAutoMerge
+                if outcome.didAutoMerge {
+                    responseObj["content"] = outcome.content
+                }
             }
-            let data = (try? JSONSerialization.data(withJSONObject: ["ok": true])) ?? Data()
-            sendHTTPResponse(connection: connection, status: "200 OK", contentType: "application/json", body: data)
+            let data = (try? JSONSerialization.data(withJSONObject: responseObj)) ?? Data()
+            sendHTTPResponse(connection: connection, status: "200 OK", contentType: "application/json; charset=utf-8", body: data)
             
         case ("POST", "/api/collab/chat"):
             if let body = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
@@ -939,7 +1215,15 @@ final class CollaborationService: ObservableObject {
             for edit in edits {
                 if let path = edit["path"] as? String,
                    let content = edit["content"] as? String {
-                    applyIncomingFileContent(relativePath: path, content: content, authorId: uid, authorName: name, authorColor: color)
+                    let baseRev = edit["baseRevision"] as? Int
+                    _ = applyIncomingFileContent(
+                        relativePath: path,
+                        content: content,
+                        baseRevision: baseRev,
+                        authorId: uid,
+                        authorName: name,
+                        authorColor: color
+                    )
                 }
             }
         }
@@ -993,10 +1277,16 @@ final class CollaborationService: ObservableObject {
             ]
         }
         
-        // Include open/recently edited file contents for instant sync
+        // Include open/recently edited file contents & their authoritative revisions for conflict-free sync
         var openBuffers: [String: String] = [:]
+        var openBufferRevisions: [String: Int] = [:]
         for (relPath, content) in fileContents.prefix(20) {
             openBuffers[relPath] = content
+            let rev = fileRevisions[relPath] ?? 1
+            openBufferRevisions[relPath] = rev
+            if fileRevisionSnapshots[relPath]?[rev] == nil {
+                recordRevisionSnapshot(relativePath: relPath, revision: rev, content: content)
+            }
         }
         
         let chatArr: [[String: Any]] = chatMessages.suffix(50).map { m in
@@ -1040,6 +1330,7 @@ final class CollaborationService: ObservableObject {
             "participants": participantsArr,
             "sharedFiles": filesArr,
             "openBuffers": openBuffers,
+            "fileRevisions": openBufferRevisions,
             "chatMessages": chatArr,
             "activityLog": activityArr,
             "teamTasksJSON": tasksJSONString
@@ -1111,11 +1402,35 @@ final class CollaborationService: ObservableObject {
             }
         }
         
+        let incomingRevisions = (json["fileRevisions"] as? [String: Int]) ?? [:]
         if let buffers = json["openBuffers"] as? [String: String] {
-            for (relPath, content) in buffers {
-                if fileContents[relPath] != content {
-                    fileContents[relPath] = content
-                    syncBufferToOpenEditorTabIfNeeded(relativePath: relPath, content: content)
+            for (relPath, remoteContent) in buffers {
+                let remoteRev = incomingRevisions[relPath] ?? fileRevisions[relPath] ?? 1
+                let knownBaseRev = peerBaseRevisions[relPath] ?? 0
+                if knownBaseRev > 0 && remoteRev <= knownBaseRev {
+                    // Host revision has not advanced past peer's acknowledged base; preserve in-flight peer edits
+                    continue
+                }
+                let resolvedContent: String
+                if let localContent = fileContents[relPath],
+                   localContent != remoteContent,
+                   knownBaseRev > 0,
+                   let baseSnapshot = fileRevisionSnapshots[relPath]?[knownBaseRev],
+                   localContent != baseSnapshot {
+                    resolvedContent = CollaborativeThreeWayMerger.merge(
+                        base: baseSnapshot,
+                        current: remoteContent,
+                        incoming: localContent
+                    ).merged
+                } else {
+                    resolvedContent = remoteContent
+                }
+                recordRevisionSnapshot(relativePath: relPath, revision: remoteRev, content: remoteContent)
+                peerBaseRevisions[relPath] = remoteRev
+                fileRevisions[relPath] = remoteRev
+                if fileContents[relPath] != resolvedContent {
+                    fileContents[relPath] = resolvedContent
+                    syncBufferToOpenEditorTabIfNeeded(relativePath: relPath, content: resolvedContent)
                 }
             }
         }
@@ -1165,6 +1480,9 @@ final class CollaborationService: ObservableObject {
     // MARK: - Workspace File Indexing & Live Buffer Sync
     
     func indexLocalWorkspaceFiles() {
+        if let session = currentSession, !session.isHostingLocally {
+            return
+        }
         guard let state = AppState.shared else { return }
         let wsRoot = state.workspaceFolder?.standardizedFileURL.path ?? ""
         var discovered: [SharedWorkspaceFile] = []
@@ -1175,8 +1493,20 @@ final class CollaborationService: ObservableObject {
             let rel = normalizeRelativePath(openFile.path)
             guard !rel.isEmpty, !seen.contains(rel) else { continue }
             seen.insert(rel)
+            let previousContent = fileContents[rel]
             fileContents[rel] = openFile.content
-            if fileRevisions[rel] == nil { fileRevisions[rel] = 1 }
+            if let existingRev = fileRevisions[rel] {
+                if let prev = previousContent, prev != openFile.content {
+                    let nextRev = existingRev + 1
+                    fileRevisions[rel] = nextRev
+                    recordRevisionSnapshot(relativePath: rel, revision: nextRev, content: openFile.content)
+                } else if fileRevisionSnapshots[rel]?[existingRev] == nil {
+                    recordRevisionSnapshot(relativePath: rel, revision: existingRev, content: openFile.content)
+                }
+            } else {
+                fileRevisions[rel] = 1
+                recordRevisionSnapshot(relativePath: rel, revision: 1, content: openFile.content)
+            }
             let lock = activeFileLocks[rel]
             discovered.append(SharedWorkspaceFile(
                 relativePath: rel,
@@ -1235,19 +1565,42 @@ final class CollaborationService: ObservableObject {
         return (rawPath as NSString).lastPathComponent
     }
     
+    private func recordRevisionSnapshot(relativePath: String, revision: Int, content: String) {
+        var revMap = fileRevisionSnapshots[relativePath] ?? [:]
+        revMap[revision] = content
+        if revMap.count > 32 {
+            let sortedKeys = revMap.keys.sorted()
+            for oldKey in sortedKeys.prefix(revMap.count - 32) {
+                revMap.removeValue(forKey: oldKey)
+            }
+        }
+        fileRevisionSnapshots[relativePath] = revMap
+    }
+
     private func resolveFileContent(relativePath: String) -> String {
         if let cached = fileContents[relativePath] {
+            let rev = fileRevisions[relativePath] ?? 1
+            fileRevisions[relativePath] = rev
+            if fileRevisionSnapshots[relativePath]?[rev] == nil {
+                recordRevisionSnapshot(relativePath: relativePath, revision: rev, content: cached)
+            }
             return cached
         }
         if let state = AppState.shared {
             if let openMatch = state.openFiles.first(where: { normalizeRelativePath($0.path) == relativePath || $0.name == relativePath }) {
                 fileContents[relativePath] = openMatch.content
+                let rev = fileRevisions[relativePath] ?? 1
+                fileRevisions[relativePath] = rev
+                recordRevisionSnapshot(relativePath: relativePath, revision: rev, content: openMatch.content)
                 return openMatch.content
             }
             if let wsRoot = state.workspaceFolder?.path {
                 let fullURL = URL(fileURLWithPath: wsRoot).appendingPathComponent(relativePath)
                 if let str = try? String(contentsOf: fullURL, encoding: .utf8) {
                     fileContents[relativePath] = str
+                    let rev = fileRevisions[relativePath] ?? 1
+                    fileRevisions[relativePath] = rev
+                    recordRevisionSnapshot(relativePath: relativePath, revision: rev, content: str)
                     return str
                 }
             }
@@ -1255,29 +1608,67 @@ final class CollaborationService: ObservableObject {
         return ""
     }
     
-    private func applyIncomingFileContent(relativePath: String, content: String, authorId: String, authorName: String, authorColor: String) {
+    @discardableResult
+    private func applyIncomingFileContent(
+        relativePath: String,
+        content: String,
+        baseRevision: Int? = nil,
+        authorId: String,
+        authorName: String,
+        authorColor: String
+    ) -> (content: String, revision: Int, didAutoMerge: Bool) {
         let rel = normalizeRelativePath(relativePath)
-        guard !rel.isEmpty else { return }
-        guard fileContents[rel] != content else { return }
-        
-        // Update CRDT document
-        let doc = crdtEngine.createDocument(content: content, filePath: rel, id: rel)
+        guard !rel.isEmpty else {
+            return (content: content, revision: 1, didAutoMerge: false)
+        }
+
+        let currentContent = resolveFileContent(relativePath: rel)
+        let currentRev = fileRevisions[rel] ?? 1
+        if currentContent == content {
+            return (content: currentContent, revision: currentRev, didAutoMerge: false)
+        }
+
+        var mergedContent = content
+        var didAutoMerge = false
+
+        if let baseRev = baseRevision,
+           baseRev < currentRev,
+           let baseSnapshot = fileRevisionSnapshots[rel]?[baseRev] {
+            let mergeOutcome = CollaborativeThreeWayMerger.merge(
+                base: baseSnapshot,
+                current: currentContent,
+                incoming: content
+            )
+            mergedContent = mergeOutcome.merged
+            didAutoMerge = mergeOutcome.didAutoMerge
+        }
+
+        guard mergedContent != currentContent else {
+            return (content: currentContent, revision: currentRev, didAutoMerge: didAutoMerge)
+        }
+
+        // Update CRDT document & revision history
+        let doc = crdtEngine.createDocument(content: mergedContent, filePath: rel, id: rel)
         crdtDocuments[rel] = doc
-        fileContents[rel] = content
-        fileRevisions[rel] = (fileRevisions[rel] ?? 1) + 1
+        fileContents[rel] = mergedContent
+        let nextRev = currentRev + 1
+        fileRevisions[rel] = nextRev
+        recordRevisionSnapshot(relativePath: rel, revision: nextRev, content: mergedContent)
         
-        syncBufferToOpenEditorTabIfNeeded(relativePath: rel, content: content)
+        syncBufferToOpenEditorTabIfNeeded(relativePath: rel, content: mergedContent)
         
         // Also write to disk on Host if inside workspace
         if currentSession?.isHostingLocally == true,
            let wsRoot = AppState.shared?.workspaceFolder?.path {
             let fullURL = URL(fileURLWithPath: wsRoot).appendingPathComponent(rel)
             if FileManager.default.fileExists(atPath: fullURL.path) {
-                try? content.write(to: fullURL, atomically: true, encoding: .utf8)
+                try? mergedContent.write(to: fullURL, atomically: true, encoding: .utf8)
             }
         }
         
-        recordActivity(actorName: authorName, actorColor: authorColor, action: "edited", target: (rel as NSString).lastPathComponent)
+        let actionLabel = didAutoMerge ? "merged edit" : "edited"
+        recordActivity(actorName: authorName, actorColor: authorColor, action: actionLabel, target: (rel as NSString).lastPathComponent)
+        return (content: mergedContent, revision: nextRev, didAutoMerge: didAutoMerge)
     }
     
     private func syncBufferToOpenEditorTabIfNeeded(relativePath: String, content: String) {
@@ -1320,6 +1711,10 @@ final class CollaborationService: ObservableObject {
                let remoteContent = json["content"] as? String {
                 content = remoteContent
                 fileContents[rel] = remoteContent
+                let rev = (json["revision"] as? Int) ?? 1
+                fileRevisions[rel] = rev
+                peerBaseRevisions[rel] = rev
+                recordRevisionSnapshot(relativePath: rel, revision: rev, content: remoteContent)
             }
         }
         
@@ -1377,25 +1772,54 @@ final class CollaborationService: ObservableObject {
         guard lastSyncedLocalFileHashes[rel] != hash else { return }
         lastSyncedLocalFileHashes[rel] = hash
         
+        if currentSession?.isHostingLocally == true {
+            if let prev = fileContents[rel], fileRevisionSnapshots[rel] == nil {
+                let initialRev = fileRevisions[rel] ?? 1
+                fileRevisions[rel] = initialRev
+                recordRevisionSnapshot(relativePath: rel, revision: initialRev, content: prev)
+            }
+            let nextRev = (fileRevisions[rel] ?? 1) + 1
+            fileContents[rel] = content
+            fileRevisions[rel] = nextRev
+            recordRevisionSnapshot(relativePath: rel, revision: nextRev, content: content)
+            return
+        }
+
+        let baseRev = peerBaseRevisions[rel] ?? fileRevisions[rel] ?? 1
         fileContents[rel] = content
-        fileRevisions[rel] = (fileRevisions[rel] ?? 1) + 1
         
         if currentSession?.isHostingLocally == false,
            let endpoint = currentSession?.remoteEndpoint,
            let url = URL(string: "\(endpoint)/api/collab/edit") {
-            Task {
+            Task { @MainActor in
                 var req = URLRequest(url: url)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 let body: [String: Any] = [
                     "path": rel,
                     "content": content,
+                    "baseRevision": baseRev,
                     "userId": localUserId,
                     "displayName": localDisplayName,
                     "color": localColor
                 ]
                 req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-                _ = try? await URLSession.shared.data(for: req)
+                if let (respData, _) = try? await URLSession.shared.data(for: req),
+                   let respJSON = try? JSONSerialization.jsonObject(with: respData) as? [String: Any] {
+                    if let newRev = respJSON["revision"] as? Int {
+                        let authoritativeContent = (respJSON["content"] as? String) ?? content
+                        self.recordRevisionSnapshot(relativePath: rel, revision: newRev, content: authoritativeContent)
+                        self.peerBaseRevisions[rel] = newRev
+                        self.fileRevisions[rel] = newRev
+                    }
+                    if let didMerge = respJSON["merged"] as? Bool,
+                       didMerge,
+                       let mergedContent = respJSON["content"] as? String,
+                       self.fileContents[rel] == content {
+                        self.fileContents[rel] = mergedContent
+                        self.syncBufferToOpenEditorTabIfNeeded(relativePath: rel, content: mergedContent)
+                    }
+                }
             }
         }
     }
@@ -1994,6 +2418,26 @@ final class CollaborationService: ObservableObject {
             document.getElementById("nameInput").value = displayName;
             let activeFile = "";
             let isTyping = false;
+            const fileRevisions = {};
+
+            function applyRemoteText(area, nextValue) {
+              if (area.value === nextValue) return;
+              const oldVal = area.value;
+              const selStart = area.selectionStart || 0;
+              const selEnd = area.selectionEnd || 0;
+              const scrollTop = area.scrollTop;
+              let prefixLen = 0;
+              const maxPrefix = Math.min(oldVal.length, nextValue.length, selStart);
+              while (prefixLen < maxPrefix && oldVal.charCodeAt(prefixLen) === nextValue.charCodeAt(prefixLen)) {
+                prefixLen++;
+              }
+              const delta = nextValue.length - oldVal.length;
+              const newStart = selStart <= prefixLen ? selStart : Math.max(prefixLen, Math.min(nextValue.length, selStart + delta));
+              const newEnd = selEnd <= prefixLen ? selEnd : Math.max(newStart, Math.min(nextValue.length, selEnd + delta));
+              area.value = nextValue;
+              area.setSelectionRange(newStart, newEnd);
+              area.scrollTop = scrollTop;
+            }
 
             function saveName() {
               displayName = document.getElementById("nameInput").value.trim() || displayName;
@@ -2015,18 +2459,29 @@ final class CollaborationService: ObservableObject {
               document.getElementById("activeFileName").textContent = path;
               const res = await fetch("/api/collab/file?path=" + encodeURIComponent(path));
               const d = await res.json();
+              fileRevisions[path] = d.revision || 1;
               document.getElementById("codeArea").value = d.content || "";
               syncState();
             }
 
             async function pushEdit() {
               if (!activeFile) return;
-              const content = document.getElementById("codeArea").value;
-              await fetch("/api/collab/edit", {
+              const targetFile = activeFile;
+              const area = document.getElementById("codeArea");
+              const content = area.value;
+              const baseRevision = fileRevisions[targetFile] || 1;
+              const res = await fetch("/api/collab/edit", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ path: activeFile, content, userId, displayName })
+                body: JSON.stringify({ path: targetFile, content, baseRevision, userId, displayName })
               });
+              try {
+                const resp = await res.json();
+                if (resp.revision) fileRevisions[targetFile] = resp.revision;
+                if (resp.merged && resp.content != null && activeFile === targetFile && !isTyping) {
+                  applyRemoteText(area, resp.content);
+                }
+              } catch (e) {}
             }
 
             document.getElementById("codeArea").addEventListener("input", () => {
@@ -2095,8 +2550,13 @@ final class CollaborationService: ObservableObject {
                 ).join("");
 
                 if (activeFile && !isTyping && s.openBuffers && s.openBuffers[activeFile] != null) {
-                  const area = document.getElementById("codeArea");
-                  if (area.value !== s.openBuffers[activeFile]) area.value = s.openBuffers[activeFile];
+                  const remoteRev = (s.fileRevisions && s.fileRevisions[activeFile]) || 1;
+                  const localRev = fileRevisions[activeFile] || 0;
+                  if (remoteRev >= localRev) {
+                    const area = document.getElementById("codeArea");
+                    applyRemoteText(area, s.openBuffers[activeFile]);
+                    fileRevisions[activeFile] = remoteRev;
+                  }
                 }
 
                 const tasks = JSON.parse(s.teamTasksJSON || "[]");

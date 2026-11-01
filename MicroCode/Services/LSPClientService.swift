@@ -122,6 +122,11 @@ struct DidChangeTextDocumentParams: Codable {
     let contentChanges: [TextDocumentContentChangeEvent]
 }
 
+struct DidSaveTextDocumentParams: Codable {
+    let textDocument: TextDocumentIdentifier
+    let text: String?
+}
+
 struct TextDocumentContentChangeEvent: Codable {
     let text: String
 }
@@ -964,9 +969,9 @@ class LSPClientService: ObservableObject {
             if method == "textDocument/publishDiagnostics" {
                 if let notification = try? decoder.decode(JSONRPCNotification<PublishDiagnosticsParams>.self, from: data),
                    let params = notification.params {
-                    // Propagate to LSPManager -> UI
+                    // Propagate to LSPManager -> UI & event-driven diagnostic waiters
                     Task { @MainActor in
-                        LSPManager.shared.fileDiagnostics[params.uri] = params.diagnostics
+                        LSPManager.shared.receivePublishedDiagnostics(uri: params.uri, diagnostics: params.diagnostics)
                     }
                 }
             }
@@ -1131,6 +1136,15 @@ class LSPClientService: ObservableObject {
             contentChanges: [TextDocumentContentChangeEvent(text: text)]
         )
         try await sendNotification(method: "textDocument/didChange", params: params)
+    }
+
+    /// Notify server that a document was saved on disk (triggers full compiler/typecheck diagnostics)
+    func didSave(uri: String, text: String? = nil) async throws {
+        let params = DidSaveTextDocumentParams(
+            textDocument: TextDocumentIdentifier(uri: uri),
+            text: text
+        )
+        try await sendNotification(method: "textDocument/didSave", params: params)
     }
     
     /// Request completions at a position (single RPC call, supports both CompletionList and [CompletionItem])

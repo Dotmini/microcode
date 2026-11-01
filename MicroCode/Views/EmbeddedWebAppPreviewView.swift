@@ -11,6 +11,13 @@ import WebKit
 
 // MARK: - Device Frame Specification
 
+struct ScreenCornerRadii: Equatable {
+    let topLeft: CGFloat
+    let topRight: CGFloat
+    let bottomRight: CGFloat
+    let bottomLeft: CGFloat
+}
+
 struct DeviceFrameSpec {
     let name: String
     let frameSize: CGSize       // Outer bezel size
@@ -18,9 +25,67 @@ struct DeviceFrameSpec {
     let screenOffset: CGPoint   // Top-left origin of inner screen relative to top-left of outer frame
     let cornerRadius: CGFloat   // Inner screen corner radius
     let isMacBook: Bool         // If true, use top rounded corners & bottom flat
+    var cornerRadii: ScreenCornerRadii? = nil
 }
 
 // MARK: - Screen Shape Definitions (macOS 13+ compatible)
+
+struct UnevenScreenShape: Shape {
+    let radii: ScreenCornerRadii
+
+    func path(in rect: CGRect) -> Path {
+        let maxR = min(rect.width, rect.height) * 0.5
+        let tl = min(max(0, radii.topLeft), maxR)
+        let tr = min(max(0, radii.topRight), maxR)
+        let br = min(max(0, radii.bottomRight), maxR)
+        let bl = min(max(0, radii.bottomLeft), maxR)
+
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + tl, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - tr, y: rect.minY))
+        if tr > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.maxX - tr, y: rect.minY + tr),
+                radius: tr,
+                startAngle: .degrees(-90),
+                endAngle: .degrees(0),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - br))
+        if br > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.maxX - br, y: rect.maxY - br),
+                radius: br,
+                startAngle: .degrees(0),
+                endAngle: .degrees(90),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.minX + bl, y: rect.maxY))
+        if bl > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.minX + bl, y: rect.maxY - bl),
+                radius: bl,
+                startAngle: .degrees(90),
+                endAngle: .degrees(180),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + tl))
+        if tl > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.minX + tl, y: rect.minY + tl),
+                radius: tl,
+                startAngle: .degrees(180),
+                endAngle: .degrees(270),
+                clockwise: false
+            )
+        }
+        path.closeSubpath()
+        return path
+    }
+}
 
 struct MacBookScreenShape: Shape {
     var topRadius: CGFloat = 10
@@ -55,10 +120,13 @@ struct MacBookScreenShape: Shape {
 struct ScreenClipShape: Shape {
     let cornerRadius: CGFloat
     let isMacBook: Bool
+    var cornerRadii: ScreenCornerRadii? = nil
     
     func path(in rect: CGRect) -> Path {
         if isMacBook {
             return MacBookScreenShape(topRadius: cornerRadius).path(in: rect)
+        } else if let cornerRadii {
+            return UnevenScreenShape(radii: cornerRadii).path(in: rect)
         } else {
             return RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).path(in: rect)
         }
@@ -70,15 +138,27 @@ struct ScreenClipShape: Shape {
 enum WebAppViewport: String, CaseIterable, Identifiable {
     case responsive = "Responsive"
     case iphone = "iPhone"
+    case iphoneDuoOuter = "iPhone Duo (Outer)"
+    case iphoneDuoInner = "iPhone Duo (Inner)"
     case tablet = "iPad"
     case macbook = "MacBook"
     
     var id: String { rawValue }
+
+    var isIPhoneDuo: Bool {
+        self == .iphoneDuoOuter || self == .iphoneDuoInner
+    }
+
+    var providesOrientationSpecificBezel: Bool {
+        isIPhoneDuo
+    }
     
     var icon: String {
         switch self {
         case .responsive: return "arrow.left.and.right"
         case .iphone: return "iphone"
+        case .iphoneDuoOuter: return "iphone"
+        case .iphoneDuoInner: return "book.pages"
         case .tablet: return "ipad"
         case .macbook: return "laptopcomputer"
         }
@@ -88,6 +168,8 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
         switch self {
         case .responsive: return nil
         case .iphone: return 447.0
+        case .iphoneDuoOuter: return 466.0
+        case .iphoneDuoInner: return 951.0
         case .tablet: return 646.0
         case .macbook: return 802.0
         }
@@ -97,6 +179,8 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
         switch self {
         case .responsive: return nil
         case .iphone: return 972.0
+        case .iphoneDuoOuter: return 678.0
+        case .iphoneDuoInner: return 669.0
         case .tablet: return 938.0
         case .macbook: return 503.0
         }
@@ -106,6 +190,8 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
         switch self {
         case .responsive: return "Fluid Responsive • Drag handles to resize freely"
         case .iphone: return "iPhone 16 Pro • Official Apple Bezel Frame"
+        case .iphoneDuoOuter: return "iPhone Duo (จอนอก · Cover 466×678 pt @3x) • Apple Book-Fold Frame"
+        case .iphoneDuoInner: return "iPhone Duo (จอใน · Unfolded 951×669 pt @3x) • Apple Foldable Frame"
         case .tablet: return "iPad Pro • Official Apple Bezel Frame"
         case .macbook: return "MacBook Pro • Official Apple Bezel Frame"
         }
@@ -133,6 +219,50 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
                 screenSize: CGSize(width: 447.0, height: 972.0),
                 screenOffset: CGPoint(x: 22.0, y: 26.0),
                 cornerRadius: 46.0,
+                isMacBook: false
+            )
+
+        case .iphoneDuoOuter:
+            if isLandscape {
+                return DeviceFrameSpec(
+                    name: "iPhone Duo — จอนอก (Landscape)",
+                    frameSize: CGSize(width: 706.0, height: 514.0),
+                    screenSize: CGSize(width: 678.0, height: 466.0),
+                    screenOffset: CGPoint(x: 14.0, y: 26.0),
+                    cornerRadius: 19.7,
+                    isMacBook: false,
+                    cornerRadii: ScreenCornerRadii(topLeft: 2.7, topRight: 2.7, bottomRight: 19.7, bottomLeft: 19.7)
+                )
+            }
+            return DeviceFrameSpec(
+                name: "iPhone Duo — จอนอก (Outer Cover)",
+                frameSize: CGSize(width: 514.0, height: 706.0),
+                screenSize: CGSize(width: 466.0, height: 678.0),
+                screenOffset: CGPoint(x: 26.0, y: 14.0),
+                cornerRadius: 19.7,
+                isMacBook: false,
+                cornerRadii: ScreenCornerRadii(topLeft: 2.7, topRight: 19.7, bottomRight: 19.7, bottomLeft: 2.7)
+            )
+
+        case .iphoneDuoInner:
+            // Default unfolded book-open posture is 951×669 pt (nativeOrientation: 270°);
+            // toggling orientation rotates the unfolded display 90° to 669×951 pt portrait.
+            if isLandscape {
+                return DeviceFrameSpec(
+                    name: "iPhone Duo — จอใน (Portrait 669×951)",
+                    frameSize: CGSize(width: 703.0, height: 985.0),
+                    screenSize: CGSize(width: 669.0, height: 951.0),
+                    screenOffset: CGPoint(x: 17.0, y: 17.0),
+                    cornerRadius: 18.33,
+                    isMacBook: false
+                )
+            }
+            return DeviceFrameSpec(
+                name: "iPhone Duo — จอใน (Unfolded 951×669)",
+                frameSize: CGSize(width: 985.0, height: 703.0),
+                screenSize: CGSize(width: 951.0, height: 669.0),
+                screenOffset: CGPoint(x: 17.0, y: 17.0),
+                cornerRadius: 18.33,
                 isMacBook: false
             )
             
@@ -172,6 +302,10 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
         switch self {
         case .iphone:
             return DeviceFrameAssets.loadIPhoneProBezel()
+        case .iphoneDuoOuter:
+            return DeviceFrameAssets.loadIPhoneDuoOuterBezel(isLandscape: isLandscape)
+        case .iphoneDuoInner:
+            return DeviceFrameAssets.loadIPhoneDuoInnerBezel(isRotatedPortrait: isLandscape)
         case .tablet:
             return DeviceFrameAssets.loadIPadProBezel()
         case .macbook:
@@ -250,6 +384,9 @@ struct EmbeddedWebAppPreviewView: View {
                 }
             }
             .onAppear {
+                if runtime.targetViewport.lowercased() != "responsive" {
+                    handleTargetViewportChange(runtime.targetViewport)
+                }
                 detectLocalWorkspaceIndex()
                 resolveInitialURL()
                 browserAutomation.scanActivePorts()
@@ -311,6 +448,11 @@ struct EmbeddedWebAppPreviewView: View {
         if key.contains("responsive") || key.contains("fluid") {
             selectedViewport = .responsive
             customWidth = nil
+        } else if key.contains("duo") || key.contains("fold") || key.contains("จอนอก") || key.contains("จอใน") {
+            let wantsInner = key.contains("inner") || key.contains("unfold") || key.contains("จอใน") || key.contains("main")
+            selectedViewport = wantsInner ? .iphoneDuoInner : .iphoneDuoOuter
+            isLandscape = false
+            showDeviceBezel = true
         } else if key.contains("macbook") || key.contains("desktop") || key.contains("pc") || key.contains("laptop") {
             selectedViewport = .macbook
             showDeviceBezel = true
@@ -388,6 +530,9 @@ struct EmbeddedWebAppPreviewView: View {
                         ForEach(WebAppViewport.allCases) { vp in
                             Button {
                                 withAnimation(.easeInOut(duration: 0.16)) {
+                                    if vp.isIPhoneDuo && selectedViewport != vp {
+                                        isLandscape = false
+                                    }
                                     selectedViewport = vp
                                     if vp != .responsive {
                                         showDeviceBezel = true
@@ -425,8 +570,23 @@ struct EmbeddedWebAppPreviewView: View {
                                 showDeviceBezel.toggle()
                             }
                         }
+                        if selectedViewport.isIPhoneDuo {
+                            Button(selectedViewport == .iphoneDuoOuter ? "Unfold to Inner Screen (จอใน · 951×669)" : "Fold to Outer Screen (จอนอก · 466×678)") {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                    isLandscape = false
+                                    selectedViewport = (selectedViewport == .iphoneDuoOuter) ? .iphoneDuoInner : .iphoneDuoOuter
+                                    showDeviceBezel = true
+                                }
+                            }
+                        }
                         if selectedViewport != .macbook {
-                            Button(isLandscape ? "Switch to Portrait" : "Switch to Landscape") {
+                            let rotateLabel: String = {
+                                if selectedViewport == .iphoneDuoInner {
+                                    return isLandscape ? "Rotate to Unfolded Landscape (951×669)" : "Rotate to Unfolded Portrait (669×951)"
+                                }
+                                return isLandscape ? "Switch to Portrait" : "Switch to Landscape"
+                            }()
+                            Button(rotateLabel) {
                                 withAnimation(.easeInOut(duration: 0.2)) {
                                     isLandscape.toggle()
                                 }
@@ -463,6 +623,63 @@ struct EmbeddedWebAppPreviewView: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("Viewport Preset, Breakpoints & Device Frame")
+
+                // 2b. Quick Fold / Unfold Switcher for iPhone Duo (จอนอก ↔ จอใน)
+                if selectedViewport.isIPhoneDuo {
+                    HStack(spacing: 2) {
+                        Button {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                if selectedViewport != .iphoneDuoOuter {
+                                    isLandscape = false
+                                    selectedViewport = .iphoneDuoOuter
+                                    showDeviceBezel = true
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "iphone")
+                                    .font(.system(size: 8.5, weight: .semibold))
+                                Text("จอนอก")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            }
+                            .padding(.horizontal, 6)
+                            .frame(height: 18)
+                            .background(selectedViewport == .iphoneDuoOuter ? Color.accentColor : Color.clear)
+                            .foregroundColor(selectedViewport == .iphoneDuoOuter ? .white : .secondary)
+                            .cornerRadius(3.5)
+                        }
+                        .buttonStyle(.plain)
+                        .help("iPhone Duo — จอนอก (Outer Cover Display · 466×678 pt)")
+
+                        Button {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                if selectedViewport != .iphoneDuoInner {
+                                    isLandscape = false
+                                    selectedViewport = .iphoneDuoInner
+                                    showDeviceBezel = true
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "book.pages")
+                                    .font(.system(size: 8.5, weight: .semibold))
+                                Text("จอใน")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            }
+                            .padding(.horizontal, 6)
+                            .frame(height: 18)
+                            .background(selectedViewport == .iphoneDuoInner ? Color.accentColor : Color.clear)
+                            .foregroundColor(selectedViewport == .iphoneDuoInner ? .white : .secondary)
+                            .cornerRadius(3.5)
+                        }
+                        .buttonStyle(.plain)
+                        .help("iPhone Duo — จอใน (Unfolded Inner Main Display · 951×669 pt)")
+                    }
+                    .padding(2)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(5)
+                    .fixedSize()
+                }
 
                 // 3. URL Input Bar
                 HStack(spacing: 4) {
@@ -911,7 +1128,7 @@ struct EmbeddedWebAppPreviewView: View {
                             // 1. Screen backdrop
                             Color.white
                                 .frame(width: spec.screenSize.width, height: spec.screenSize.height)
-                                .clipShape(ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook))
+                                .clipShape(ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook, cornerRadii: spec.cornerRadii))
                                 .position(
                                     x: spec.screenOffset.x + spec.screenSize.width / 2,
                                     y: spec.screenOffset.y + spec.screenSize.height / 2
@@ -920,7 +1137,7 @@ struct EmbeddedWebAppPreviewView: View {
                             // 2. Interactive WebBrowserView or Universal Native GUI Surface
                             previewSurfaceContent(width: spec.screenSize.width, height: spec.screenSize.height)
                             .frame(width: spec.screenSize.width, height: spec.screenSize.height)
-                            .clipShape(ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook))
+                            .clipShape(ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook, cornerRadii: spec.cornerRadii))
                             .position(
                                 x: spec.screenOffset.x + spec.screenSize.width / 2,
                                 y: spec.screenOffset.y + spec.screenSize.height / 2
@@ -928,7 +1145,7 @@ struct EmbeddedWebAppPreviewView: View {
                             
                             // 3. Authentic Hardware Bezel Overlay
                             if let bezel = selectedViewport.bezelImage(isLandscape: isLandscape) {
-                                if isLandscape && selectedViewport != .macbook {
+                                if isLandscape && selectedViewport != .macbook && !selectedViewport.providesOrientationSpecificBezel {
                                     Image(nsImage: bezel)
                                         .resizable()
                                         .interpolation(.high)
@@ -954,7 +1171,7 @@ struct EmbeddedWebAppPreviewView: View {
                                         .allowsHitTesting(false)
                                 }
                             } else {
-                                ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook)
+                                ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook, cornerRadii: spec.cornerRadii)
                                     .stroke(Color.primary.opacity(0.2), lineWidth: 4)
                                     .frame(width: spec.screenSize.width, height: spec.screenSize.height)
                                     .position(

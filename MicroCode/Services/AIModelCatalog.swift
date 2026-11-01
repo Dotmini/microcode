@@ -63,8 +63,8 @@ final class AIModelCatalog: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var source = "Built-in catalog"
 
-    private let cacheKey = "microcode.aiModelCatalog.v17"
-    private let refreshDateKey = "microcode.aiModelCatalogRefreshDate.v17"
+    private let cacheKey = "microcode.aiModelCatalog.v18"
+    private let refreshDateKey = "microcode.aiModelCatalogRefreshDate.v18"
     private let refreshInterval: TimeInterval = 15 * 60 // 15-minute live model refresh TTL
 
     private init() {
@@ -94,14 +94,18 @@ final class AIModelCatalog: ObservableObject {
         return providers.lazy.flatMap(\.models).first { $0.id == id }
     }
 
-    private static let legacyStaleModelIDs: Set<String> = [
+    public static let legacyStaleModelIDs: Set<String> = [
         "gemini-2.0-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
         "claude-3-5-sonnet",
         "claude-3-7-sonnet",
         "claude-3-5-sonnet-20241022",
-        "claude-3-7-sonnet-20250219"
+        "claude-3-7-sonnet-20250219",
+        "typhoon-v2.1-12b-instruct",
+        "typhoon-v2-70b-instruct",
+        "typhoon-v2-r1-70b-preview",
+        "typhoon-v2-8b-instruct"
     ]
 
     private static let acpProviderIDs: Set<String> = [
@@ -136,8 +140,8 @@ final class AIModelCatalog: ObservableObject {
         }
         
         let lower = trimmed.lowercased()
-        // Only resolve bare provider name aliases ("gemini", "openai", "anthropic", "deepseek", "glm", "aipass")
-        if lower == "gemini" || lower == "openai" || lower == "anthropic" || lower == "deepseek" || lower == "glm" || lower == "aipass" {
+        // Only resolve bare provider name aliases ("gemini", "openai", "anthropic", "deepseek", "glm", "aipass", "tokenme", "typhoon")
+        if lower == "gemini" || lower == "openai" || lower == "anthropic" || lower == "deepseek" || lower == "glm" || lower == "aipass" || lower == "tokenme" || lower == "typhoon" {
             let candidateModels = self.provider(effectiveProvider)?.models ?? self.provider(lower)?.models ?? []
             if let firstLive = candidateModels.first?.id {
                 return (effectiveProvider, firstLive)
@@ -158,7 +162,7 @@ final class AIModelCatalog: ObservableObject {
         // and NEVER let "omni" (Dotmini Cloud) hijack the provider!
         let knownDirectProviders: Set<String> = [
             "gemini", "openai", "anthropic", "deepseek", "glm", "copilot", "aipass",
-            "9router", "openrouter", "groq", "mistral", "kimi", "perplexity", "perch", "typhoon",
+            "9router", "openrouter", "groq", "mistral", "kimi", "perplexity", "perch", "tokenme", "typhoon",
             "cerebras", "together", "fireworks", "minimax", "nvidia",
             "qwen", "grok", "local"
         ]
@@ -453,6 +457,37 @@ final class AIModelCatalog: ObservableObject {
         if let pk = KeychainManager.ProviderKey(rawValue: "\(provider.uppercased())_API_KEY"),
            let val = KeychainManager.shared.read(for: pk), !val.isEmpty {
             return val
+        }
+        let envCandidates: [String] = {
+            switch provider.lowercased() {
+            case "typhoon": return ["TYPHOON_API_KEY", "OPENTYPHOON_API_KEY"]
+            case "gemini": return ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+            case "anthropic": return ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
+            case "kimi": return ["KIMI_API_KEY", "MOONSHOT_API_KEY"]
+            case "perplexity": return ["PERPLEXITY_API_KEY", "PPLX_API_KEY"]
+            case "perch": return ["PERCH_API_KEY", "PERCHAI_API_KEY"]
+            case "tokenme": return ["TOKENME_API_KEY", "TOKEN_ME_API_KEY"]
+            case "qwen": return ["QWEN_API_KEY", "DASHSCOPE_API_KEY"]
+            case "grok": return ["GROK_API_KEY", "XAI_API_KEY"]
+            case "glm": return ["GLM_API_KEY", "ZHIPU_API_KEY"]
+            case "nvidia": return ["NVIDIA_API_KEY", "NGC_API_KEY"]
+            default: return ["\(provider.uppercased())_API_KEY"]
+            }
+        }()
+        for envName in envCandidates {
+            if let envVal = ProcessInfo.processInfo.environment[envName]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !envVal.isEmpty {
+                return envVal
+            }
+        }
+        // Fallback to sealed Web Subscription token for API-key-backed providers (e.g. Typhoon, OpenRouter, Groq)
+        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sub_\(provider)"),
+           let unsealed = KeychainManager.unsealSecret(sealed)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !unsealed.isEmpty,
+           !SubscriptionAuthManager.isCorruptedToken(unsealed),
+           !unsealed.hasPrefix("codeassist_oauth:"),
+           !unsealed.hasPrefix("cli-oauth:") {
+            return unsealed
         }
         return ""
     }
@@ -1124,16 +1159,18 @@ final class AIModelCatalog: ObservableObject {
         }
     }
 
-    /// Fetches live models for 9Router, OpenRouter, Mistral, Kimi, Typhoon, Cerebras, Together, Fireworks, MiniMax, and NVIDIA NIM.
+    /// Fetches live models for 9Router, OpenRouter, Mistral, Kimi, TokenMe, Typhoon, Cerebras, Together, Fireworks, MiniMax, and NVIDIA NIM.
     private func fetchLiveAdditionalProviderModels() async {
         let nineRouterBase = UserDefaults.standard.string(forKey: "9router_base_url") ?? "http://127.0.0.1:20128/v1"
         let perchBase = UserDefaults.standard.string(forKey: "perch_base_url") ?? "https://api.perchai.app/v1"
+        let tokenmeBase = UserDefaults.standard.string(forKey: "tokenme_base_url") ?? "https://api.tokenme.limited/api/v1"
         let targets: [(id: String, endpoint: String)] = [
             ("9router", "\(nineRouterBase)/models"),
             ("openrouter", "https://openrouter.ai/api/v1/models"),
             ("mistral", "https://api.mistral.ai/v1/models"),
             ("kimi", "https://api.moonshot.ai/v1/models"),
             ("perch", "\(perchBase)/models"),
+            ("tokenme", "\(tokenmeBase)/models"),
             ("typhoon", "https://api.opentyphoon.ai/v1/models"),
             ("cerebras", "https://api.cerebras.ai/v1/models"),
             ("together", "https://api.together.xyz/v1/models"),
@@ -1151,7 +1188,7 @@ final class AIModelCatalog: ObservableObject {
 
     private func fetchLiveOpenAICompatibleModels(providerId: String, endpoint: String) async {
         let key = resolveKey(providerId)
-        let allowNoKey = (providerId == "9router")
+        let allowNoKey = (providerId == "9router" || providerId == "typhoon")
         guard (!key.isEmpty || allowNoKey), let url = URL(string: endpoint) else { return }
         var req = URLRequest(url: url, timeoutInterval: providerId == "9router" ? 3.5 : 10)
         if !key.isEmpty {
@@ -1165,22 +1202,45 @@ final class AIModelCatalog: ObservableObject {
 
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]]) else { return }
+              let rawJSON = try? JSONSerialization.jsonObject(with: data) else { return }
+
+        let list: [[String: Any]]
+        if let topArray = rawJSON as? [[String: Any]] {
+            list = topArray
+        } else if let json = rawJSON as? [String: Any],
+                  let nested = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]]) {
+            list = nested
+        } else {
+            return
+        }
 
         guard let idx = providers.firstIndex(where: { $0.id == providerId }) else { return }
-        var merged = providers[idx].models
-        var seen = Set(merged.map(\.id))
+        var liveModels: [AIModelDefinition] = []
+        var seen = Set<String>()
 
-        for item in list.prefix(60) {
-            guard let mid = item["id"] as? String, seen.insert(mid).inserted else { continue }
+        for item in list.prefix(80) {
+            guard let mid = item["id"] as? String, !mid.isEmpty else { continue }
             let lower = mid.lowercased()
-            if lower.contains("embed") || lower.contains("whisper") || lower.contains("tts") || lower.contains("moderation") || lower.contains("rerank") {
+            if Self.legacyStaleModelIDs.contains(lower) || !Self.isChatModel(mid) {
                 continue
             }
-            let displayName = (item["name"] as? String) ?? Self.formatModelName(mid)
+            if lower.contains("embed") || lower.contains("whisper") || lower.contains("tts") || lower.contains("moderation") || lower.contains("rerank") || lower.contains("ocr") || lower.contains("asr") {
+                continue
+            }
+            guard seen.insert(mid).inserted else { continue }
+            let rawName = (item["name"] as? String) ?? (item["display_name"] as? String)
+            let displayName: String
+            if let rawName, !rawName.isEmpty, rawName.lowercased() != lower {
+                displayName = rawName
+            } else {
+                displayName = Self.formatModelName(mid)
+            }
             let badge: String
-            if lower.contains("code") || lower.contains("devstral") {
+            if providerId == "typhoon" {
+                badge = "THAI"
+            } else if providerId == "tokenme" && lower.contains("nvfp4") {
+                badge = "NVFP4"
+            } else if lower.contains("code") || lower.contains("devstral") {
                 badge = "CODE"
             } else if lower.contains("reason") || lower.contains("r1") || lower.contains("thinking") {
                 badge = "REASONING"
@@ -1189,11 +1249,18 @@ final class AIModelCatalog: ObservableObject {
             } else {
                 badge = providerId.uppercased()
             }
-            merged.append(AIModelDefinition(id: mid, name: displayName, provider: providerId, badge: badge))
+            liveModels.append(AIModelDefinition(id: mid, name: displayName, provider: providerId, badge: badge))
         }
 
-        if !merged.isEmpty {
-            providers[idx].models = merged
+        // Append non-stale curated fallback models after live-discovered models
+        for existing in providers[idx].models where !Self.legacyStaleModelIDs.contains(existing.id.lowercased()) {
+            if seen.insert(existing.id).inserted {
+                liveModels.append(existing)
+            }
+        }
+
+        if !liveModels.isEmpty {
+            providers[idx].models = liveModels
         }
     }
 
@@ -1217,6 +1284,9 @@ final class AIModelCatalog: ObservableObject {
         case "perch":
             let base = UserDefaults.standard.string(forKey: "perch_base_url") ?? "https://api.perchai.app/v1"
             await fetchLiveOpenAICompatibleModels(providerId: "perch", endpoint: "\(base)/models")
+        case "tokenme":
+            let base = UserDefaults.standard.string(forKey: "tokenme_base_url") ?? "https://api.tokenme.limited/api/v1"
+            await fetchLiveOpenAICompatibleModels(providerId: "tokenme", endpoint: "\(base)/models")
         case "typhoon": await fetchLiveOpenAICompatibleModels(providerId: "typhoon", endpoint: "https://api.opentyphoon.ai/v1/models")
         case "cerebras": await fetchLiveOpenAICompatibleModels(providerId: "cerebras", endpoint: "https://api.cerebras.ai/v1/models")
         case "together": await fetchLiveOpenAICompatibleModels(providerId: "together", endpoint: "https://api.together.xyz/v1/models")
@@ -1306,6 +1376,12 @@ final class AIModelCatalog: ObservableObject {
 
     private static func decodeRemoteModels(_ data: Data) throws -> [RemoteModelItem] {
         let object = try JSONSerialization.jsonObject(with: data)
+        if let rows = object as? [[String: Any]] {
+            return rows.compactMap { dict in
+                guard let id = dict["id"] as? String else { return nil }
+                return RemoteModelItem(id: id, ownedBy: dict["owned_by"] as? String)
+            }
+        }
         if let dictionary = object as? [String: Any], let rows = dictionary["data"] as? [[String: Any]] {
             return rows.compactMap { dict in
                 guard let id = dict["id"] as? String else { return nil }
@@ -1389,6 +1465,7 @@ final class AIModelCatalog: ObservableObject {
         case "kimi", "moonshot": return "Moonshot Kimi"
         case "perplexity": return "Perplexity Sonar"
         case "perch": return "Perch AI"
+        case "tokenme", "token_me": return "TokenMe (9ARM)"
         case "typhoon": return "SCB 10X Typhoon"
         case "cerebras": return "Cerebras"
         case "together": return "Together AI"
@@ -1469,7 +1546,7 @@ final class AIModelCatalog: ObservableObject {
             case "r1": formattedParts.append("R1")
             case "r2": formattedParts.append("R2")
             case "r3": formattedParts.append("R3")
-            case "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9":
+            case "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "nvfp4", "fp8", "fp4", "bf16":
                 formattedParts.append(lower.uppercased())
             default:
                 if lower.hasSuffix("b"), let _ = Double(lower.dropLast()) {
@@ -1499,6 +1576,7 @@ final class AIModelCatalog: ObservableObject {
             if owner.contains("moonshot") || owner.contains("kimi") { return "kimi" }
             if owner.contains("perplexity") { return "perplexity" }
             if owner.contains("perch") { return "perch" }
+            if owner.contains("tokenme") || owner.contains("9arm") || owner.contains("siam") { return "tokenme" }
             if owner.contains("typhoon") || owner.contains("scb") { return "typhoon" }
             if owner.contains("cerebras") { return "cerebras" }
             if owner.contains("together") { return "together" }
@@ -1511,6 +1589,7 @@ final class AIModelCatalog: ObservableObject {
         }
         let value = model.lowercased()
         if value.hasPrefix("accounts/fireworks/") { return "fireworks" }
+        if value.hasPrefix("unsloth/") || value == "deepseek-ai/deepseek-v4-flash-0731" || value.contains("nvfp4") { return "tokenme" }
         if value.hasPrefix("nvidia/") || value.contains("nemotron") { return "nvidia" }
         if value.contains("codestral") || value.contains("devstral") || value.contains("mistral") || value.contains("pixtral") { return "mistral" }
         if value.contains("moonshot") || value.hasPrefix("kimi-") { return "kimi" }
@@ -1530,15 +1609,22 @@ final class AIModelCatalog: ObservableObject {
     }
 
     private static func isChatModel(_ id: String) -> Bool {
-        let excluded = ["embedding", "moderation", "tts", "whisper", "audio", "transcribe", "dall-e"]
+        let excluded = ["embedding", "moderation", "tts", "whisper", "audio", "transcribe", "dall-e", "ocr", "asr"]
         let lower = id.lowercased()
         return !excluded.contains { lower.contains($0) }
     }
 
     private func loadCachedCatalog() {
         if let data = UserDefaults.standard.data(forKey: cacheKey),
-           let cached = try? JSONDecoder().decode([AIProviderDefinition].self, from: data),
+           var cached = try? JSONDecoder().decode([AIProviderDefinition].self, from: data),
            !cached.isEmpty {
+            // Merge any newly added built-in providers (e.g. tokenme) into existing persistent cache
+            for (fallbackIdx, fallbackProv) in Self.fallbackProviders.enumerated() {
+                if !cached.contains(where: { $0.id == fallbackProv.id }) {
+                    let insertIdx = min(fallbackIdx, cached.count)
+                    cached.insert(fallbackProv, at: insertIdx)
+                }
+            }
             providers = cached
             lastUpdated = UserDefaults.standard.object(forKey: refreshDateKey) as? Date
             source = "Persistent Cache (\(cached.flatMap(\.models).count) models)"
@@ -1679,6 +1765,11 @@ final class AIModelCatalog: ObservableObject {
             AIModelDefinition(id: "lyria-3-clip-preview", name: "Lyria 3 Clip — 30s Music Gen (AiPASS)", provider: "aipass", badge: "MUSIC"),
             AIModelDefinition(id: "lyria-3-pro-preview", name: "Lyria 3 Pro — Full Song + Vocals (AiPASS)", provider: "aipass", badge: "MUSIC")
         ]),
+        AIProviderDefinition(id: "tokenme", name: "TokenMe (9ARM)", icon: "tokenme", endpoint: "api.tokenme.limited/api/v1", models: [
+            AIModelDefinition(id: "deepseek-ai/deepseek-v4-flash-0731", name: "DeepSeek V4 Flash 0731", provider: "tokenme", badge: "FAST"),
+            AIModelDefinition(id: "unsloth/qwen3.8-27b-nvfp4", name: "Qwen 3.8 27B NVFP4", provider: "tokenme", badge: "NVFP4"),
+            AIModelDefinition(id: "google/gemma-4-31b-it", name: "Gemma 4 31B IT (Vision)", provider: "tokenme", badge: "VISION")
+        ]),
         AIProviderDefinition(id: "9router", name: "9Router Smart Gateway", icon: "9router", endpoint: "localhost:20128/v1", models: [
             AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (9Router Tier 1)", provider: "9router", badge: "3-TIER AUTO"),
             AIModelDefinition(id: "claude-opus-4-6", name: "Claude Opus 4.6 (9Router Tier 1)", provider: "9router", badge: "FLAGSHIP"),
@@ -1742,10 +1833,7 @@ final class AIModelCatalog: ObservableObject {
             AIModelDefinition(id: "perch-reasoning-r1", name: "Perch Reasoning R1", provider: "perch", badge: "REASONING")
         ]),
         AIProviderDefinition(id: "typhoon", name: "SCB 10X Typhoon", icon: "hurricane", endpoint: "api.opentyphoon.ai/v1", models: [
-            AIModelDefinition(id: "typhoon-v2.1-12b-instruct", name: "Typhoon v2.1 12B Instruct", provider: "typhoon", badge: "THAI"),
-            AIModelDefinition(id: "typhoon-v2-70b-instruct", name: "Typhoon v2 70B Instruct", provider: "typhoon", badge: "FLAGSHIP"),
-            AIModelDefinition(id: "typhoon-v2-r1-70b-preview", name: "Typhoon v2 R1 70B Reasoning", provider: "typhoon", badge: "REASONING"),
-            AIModelDefinition(id: "typhoon-v2-8b-instruct", name: "Typhoon v2 8B Instruct", provider: "typhoon", badge: "FAST")
+            AIModelDefinition(id: "typhoon-v2.5-30b-a3b-instruct", name: "Typhoon v2.5 30B A3B Instruct", provider: "typhoon", badge: "THAI")
         ]),
         AIProviderDefinition(id: "cerebras", name: "Cerebras Inference", icon: "memorychip.fill", endpoint: "api.cerebras.ai/v1", models: [
             AIModelDefinition(id: "llama-3.3-70b", name: "Llama 3.3 70B (Wafer-Scale 2000+ tok/s)", provider: "cerebras", badge: "WAFER FAST"),

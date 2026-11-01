@@ -128,6 +128,10 @@ final class PhoneCompanionService: ObservableObject {
     private var lastGeneratedQRURL: String = ""
     private var cachedStateFingerprint: String = ""
     private var cachedStateData: Data = Data("{}".utf8)
+    private var sseConnections: [UUID: NWConnection] = [:]
+    private var sseBroadcastTimer: Timer?
+    private var lastBroadcastFingerprint: String = ""
+    private var sseTickCounter: Int = 0
     private var workspaceLanguageCache: [String: (primary: String, label: String, langs: [String])] = [:]
     private lazy var cachedMacName: String = {
         let raw = ProcessInfo.processInfo.hostName
@@ -141,7 +145,7 @@ final class PhoneCompanionService: ObservableObject {
     )
     
     private init() {
-        self.isEnabled = false
+        self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.phoneCompanion.enabled") as? Bool) ?? true
         if let savedMode = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.mode"),
            let mode = PhoneConnectionMode(rawValue: savedMode) {
             self.connectionMode = mode
@@ -418,6 +422,12 @@ final class PhoneCompanionService: ObservableObject {
         listener = nil
         secondaryListener?.cancel()
         secondaryListener = nil
+        sseBroadcastTimer?.invalidate()
+        sseBroadcastTimer = nil
+        for (_, conn) in sseConnections {
+            conn.cancel()
+        }
+        sseConnections.removeAll()
         isServerRunning = false
     }
     
@@ -588,14 +598,16 @@ final class PhoneCompanionService: ObservableObject {
                     let bodyData = buffer.subdata(in: bodyStartIndex..<min(buffer.count, bodyStartIndex + expectedContentLength))
                     let remoteIP = Self.extractRemoteIP(from: connection)
                     Task { @MainActor in
-                        let responseData = await self.processHTTPRequest(
+                        if let responseData = await self.processHTTPRequest(
                             headerString: headerString,
                             bodyData: bodyData,
-                            remoteIP: remoteIP
-                        )
-                        connection.send(content: responseData, completion: .contentProcessed { _ in
-                            connection.cancel()
-                        })
+                            remoteIP: remoteIP,
+                            connection: connection
+                        ) {
+                            connection.send(content: responseData, completion: .contentProcessed { _ in
+                                connection.cancel()
+                            })
+                        }
                     }
                     return
                 }
@@ -622,7 +634,12 @@ final class PhoneCompanionService: ObservableObject {
     
     // MARK: - HTTP Router (@MainActor)
     
-    private func processHTTPRequest(headerString: String, bodyData: Data, remoteIP: String) async -> Data {
+    private func processHTTPRequest(
+        headerString: String,
+        bodyData: Data,
+        remoteIP: String,
+        connection: NWConnection? = nil
+    ) async -> Data? {
         let lines = headerString.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else {
             return makeHTTPResponse(status: "400 Bad Request", contentType: "text/plain", body: Data("Bad Request".utf8))
@@ -701,6 +718,14 @@ final class PhoneCompanionService: ObservableObject {
             let statePayload = buildCompanionStateJSON()
             return makeHTTPResponse(status: "200 OK", contentType: "application/json; charset=utf-8", body: statePayload)
             
+        case ("GET", "/api/stream"):
+            if let conn = connection {
+                registerSSEConnection(conn)
+                return nil
+            }
+            let statePayload = buildCompanionStateJSON()
+            return makeHTTPResponse(status: "200 OK", contentType: "application/json; charset=utf-8", body: statePayload)
+            
         case ("GET", "/api/models"):
             let models = buildAvailableModelsPayload()
             return makeJSONResponse(["ok": true, "models": models])
@@ -723,6 +748,7 @@ final class PhoneCompanionService: ObservableObject {
                !prompt.isEmpty {
                 let enqueueOnly = (json["enqueue"] as? Bool) ?? false
                 dispatchRemotePrompt(prompt, enqueueOnly: enqueueOnly)
+                broadcastSSEStateNow()
                 return makeJSONResponse(["ok": true])
             }
             return makeJSONResponse(["ok": false, "error": "Empty prompt"], status: "400 Bad Request")
@@ -733,6 +759,7 @@ final class PhoneCompanionService: ObservableObject {
                let provider = json["provider"] as? String,
                let modelId = json["modelId"] as? String {
                 selectRemoteModel(mode: mode, provider: provider, modelId: modelId)
+                broadcastSSEStateNow()
                 return makeJSONResponse(["ok": true])
             }
             return makeJSONResponse(["ok": false, "error": "Invalid model payload"], status: "400 Bad Request")
@@ -740,22 +767,27 @@ final class PhoneCompanionService: ObservableObject {
         case ("POST", "/api/stop"):
             AgentService.shared.stopGeneration()
             ACPHostService.shared.stopActiveAgent()
+            broadcastSSEStateNow()
             return makeJSONResponse(["ok": true])
             
         case ("POST", "/api/plan/approve"):
             ImplementationPlanManager.shared.approve()
+            broadcastSSEStateNow()
             return makeJSONResponse(["ok": true])
             
         case ("POST", "/api/plan/reject"):
             ImplementationPlanManager.shared.reject()
+            broadcastSSEStateNow()
             return makeJSONResponse(["ok": true])
             
         case ("POST", "/api/tool/approve"):
             ToolApprovalManager.shared.approve()
+            broadcastSSEStateNow()
             return makeJSONResponse(["ok": true])
             
         case ("POST", "/api/tool/reject"):
             ToolApprovalManager.shared.reject()
+            broadcastSSEStateNow()
             return makeJSONResponse(["ok": true])
             
         case ("POST", "/api/workspace/switch"):
@@ -763,6 +795,7 @@ final class PhoneCompanionService: ObservableObject {
                 let targetPath = (json["path"] as? String) ?? ""
                 let sessionId = json["sessionId"] as? String
                 switchRemoteWorkspace(path: targetPath, sessionId: sessionId)
+                broadcastSSEStateNow()
                 return makeJSONResponse(["ok": true])
             }
             return makeJSONResponse(["ok": false, "error": "Invalid workspace payload"], status: "400 Bad Request")
@@ -771,6 +804,7 @@ final class PhoneCompanionService: ObservableObject {
             if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
                let sessionId = json["sessionId"] as? String {
                 switchRemoteSession(sessionId: sessionId)
+                broadcastSSEStateNow()
                 return makeJSONResponse(["ok": true])
             }
             return makeJSONResponse(["ok": false], status: "400 Bad Request")
@@ -778,6 +812,7 @@ final class PhoneCompanionService: ObservableObject {
         case ("POST", "/api/session/new"):
             let requestedPath = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any])?["projectPath"] as? String
             createRemoteSession(projectPath: requestedPath)
+            broadcastSSEStateNow()
             return makeJSONResponse(["ok": true])
             
         default:
@@ -785,6 +820,101 @@ final class PhoneCompanionService: ObservableObject {
         }
     }
     
+    // MARK: - Real-Time Server-Sent Events (SSE) Streaming Engine
+    
+    private func registerSSEConnection(_ connection: NWConnection) {
+        let connId = UUID()
+        sseConnections[connId] = connection
+        
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                Task { @MainActor [weak self] in
+                    self?.sseConnections.removeValue(forKey: connId)
+                }
+            default:
+                break
+            }
+        }
+        
+        let initialPayload = buildCompanionStateJSON()
+        lastBroadcastFingerprint = cachedStateFingerprint
+        let initialJSON = String(data: initialPayload, encoding: .utf8) ?? "{}"
+        let sseHeaderAndFirstFrame = [
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/event-stream; charset=utf-8",
+            "Cache-Control: no-cache, no-transform",
+            "Connection: keep-alive",
+            "X-Accel-Buffering: no",
+            "Access-Control-Allow-Origin: *",
+            "",
+            "data: \(initialJSON)\n\n"
+        ].joined(separator: "\r\n")
+        
+        connection.send(content: Data(sseHeaderAndFirstFrame.utf8), completion: .contentProcessed { [weak self] error in
+            if error != nil {
+                Task { @MainActor [weak self] in
+                    self?.sseConnections.removeValue(forKey: connId)
+                    connection.cancel()
+                }
+            }
+        })
+        
+        ensureSSEBroadcastTimerRunning()
+    }
+    
+    private func ensureSSEBroadcastTimerRunning() {
+        guard sseBroadcastTimer == nil else { return }
+        sseBroadcastTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tickSSEBroadcast()
+            }
+        }
+    }
+    
+    private func broadcastSSEStateNow() {
+        guard !sseConnections.isEmpty else { return }
+        tickSSEBroadcast(force: true)
+    }
+    
+    private func tickSSEBroadcast(force: Bool = false) {
+        guard !sseConnections.isEmpty else {
+            sseBroadcastTimer?.invalidate()
+            sseBroadcastTimer = nil
+            return
+        }
+        sseTickCounter &+= 1
+        let payload = buildCompanionStateJSON()
+        if force || cachedStateFingerprint != lastBroadcastFingerprint {
+            lastBroadcastFingerprint = cachedStateFingerprint
+            let jsonString = String(data: payload, encoding: .utf8) ?? "{}"
+            let frameData = Data("data: \(jsonString)\n\n".utf8)
+            for (id, conn) in sseConnections {
+                conn.send(content: frameData, completion: .contentProcessed { [weak self] error in
+                    if error != nil {
+                        Task { @MainActor [weak self] in
+                            self?.sseConnections.removeValue(forKey: id)
+                            conn.cancel()
+                        }
+                    }
+                })
+            }
+        } else if sseTickCounter % 100 == 0 {
+            // Send lightweight SSE heartbeat comment every ~12s to keep proxies/Safari alive
+            let pingData = Data(": keepalive\n\n".utf8)
+            for (id, conn) in sseConnections {
+                conn.send(content: pingData, completion: .contentProcessed { [weak self] error in
+                    if error != nil {
+                        Task { @MainActor [weak self] in
+                            self?.sseConnections.removeValue(forKey: id)
+                            conn.cancel()
+                        }
+                    }
+                })
+            }
+        }
+    }
+
     private func recordConnectedDevice(headers: [String: String], remoteIP: String) {
         let ua = headers["user-agent"] ?? ""
         let forwardedFor = headers["cf-connecting-ip"] ?? headers["x-forwarded-for"]
@@ -854,30 +984,30 @@ final class PhoneCompanionService: ObservableObject {
     private func switchRemoteWorkspace(path: String, sessionId: String? = nil) {
         let agent = AgentService.shared
         let state = appState ?? AppState.shared
-        let cleanPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canonicalTarget = AgentService.canonicalWorkspacePath(path)
         
         if let sid = sessionId, !sid.isEmpty, agent.chatSessions.contains(where: { $0.id == sid }) {
             agent.switchChat(to: sid)
-        } else if !cleanPath.isEmpty && cleanPath != "__general__" {
-            let canonicalTarget = URL(fileURLWithPath: cleanPath).standardizedFileURL.path
-            if let existingChat = agent.chatSessions.first(where: {
-                guard let p = $0.projectPath, !p.isEmpty else { return false }
-                return URL(fileURLWithPath: p).standardizedFileURL.path == canonicalTarget
-            }) {
+        } else if let target = canonicalTarget {
+            let matchingChats = agent.chats(for: target)
+            if let existingChat = matchingChats.first {
                 agent.switchChat(to: existingChat.id)
             } else {
-                _ = agent.createNewChat(projectPath: canonicalTarget)
+                _ = agent.createNewChat(projectPath: target)
             }
-            agent.setWorkspace(canonicalTarget)
+            agent.setWorkspace(target)
         } else {
-            if let generalChat = agent.chatSessions.first(where: { ($0.projectPath ?? "").isEmpty }) {
+            let unassignedChats = agent.chats(for: nil)
+            if let generalChat = unassignedChats.first {
                 agent.switchChat(to: generalChat.id)
+            } else {
+                _ = agent.createNewChat(projectPath: nil)
             }
         }
         
-        if !cleanPath.isEmpty && cleanPath != "__general__" {
-            let folderURL = URL(fileURLWithPath: cleanPath)
-            if state?.workspaceFolder?.standardizedFileURL.path != folderURL.standardizedFileURL.path {
+        if let target = canonicalTarget {
+            let folderURL = URL(fileURLWithPath: target)
+            if AgentService.canonicalWorkspacePath(state?.workspaceFolder?.path) != target {
                 Task { @MainActor in
                     await state?.openWorkspace(url: folderURL)
                 }
@@ -891,9 +1021,10 @@ final class PhoneCompanionService: ObservableObject {
         let state = appState ?? AppState.shared
         agent.switchChat(to: sessionId)
         if let chat = agent.chatSessions.first(where: { $0.id == sessionId }),
-           let chatPath = chat.projectPath, !chatPath.isEmpty {
-            let folderURL = URL(fileURLWithPath: chatPath)
-            if state?.workspaceFolder?.standardizedFileURL.path != folderURL.standardizedFileURL.path {
+           let canonicalPath = AgentService.canonicalWorkspacePath(chat.projectPath) {
+            agent.setWorkspace(canonicalPath)
+            let folderURL = URL(fileURLWithPath: canonicalPath)
+            if AgentService.canonicalWorkspacePath(state?.workspaceFolder?.path) != canonicalPath {
                 Task { @MainActor in
                     await state?.openWorkspace(url: folderURL)
                 }
@@ -906,16 +1037,16 @@ final class PhoneCompanionService: ObservableObject {
         let agent = AgentService.shared
         let state = appState ?? AppState.shared
         let resolvedPath: String? = {
-            if let p = projectPath?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty, p != "__general__" {
-                return URL(fileURLWithPath: p).standardizedFileURL.path
+            if let explicit = AgentService.canonicalWorkspacePath(projectPath) {
+                return explicit
             }
-            return agent.currentWorkspace ?? state?.workspaceFolder?.path
+            return AgentService.canonicalWorkspacePath(agent.currentWorkspace ?? state?.workspaceFolder?.path)
         }()
         _ = agent.createNewChat(projectPath: resolvedPath)
         if let path = resolvedPath, !path.isEmpty {
             agent.setWorkspace(path)
             let folderURL = URL(fileURLWithPath: path)
-            if state?.workspaceFolder?.standardizedFileURL.path != folderURL.standardizedFileURL.path {
+            if AgentService.canonicalWorkspacePath(state?.workspaceFolder?.path) != path {
                 Task { @MainActor in
                     await state?.openWorkspace(url: folderURL)
                 }
@@ -1418,18 +1549,17 @@ final class PhoneCompanionService: ObservableObject {
     
     private func buildWorkspacesPayload(currentWorkspacePath: String) -> [[String: Any]] {
         let agent = AgentService.shared
-        let canonicalCurrent = currentWorkspacePath.isEmpty
-            ? ""
-            : URL(fileURLWithPath: currentWorkspacePath).standardizedFileURL.path
+        let canonicalCurrent = AgentService.canonicalWorkspacePath(currentWorkspacePath) ?? ""
         
         var result: [[String: Any]] = []
         var seenPaths: Set<String> = []
         
-        // 1. All IDE projectGroups in exact IDE order
+        // 1. All IDE projectGroups in exact IDE order (each Workspace contains its own Chats)
         for group in agent.projectGroups {
-            let rawPath = group.projectPath ?? ""
-            let canonicalPath = rawPath.isEmpty ? "__general__" : URL(fileURLWithPath: rawPath).standardizedFileURL.path
-            seenPaths.insert(canonicalPath)
+            let canonicalPath = AgentService.canonicalWorkspacePath(group.projectPath) ?? "__general__"
+            let groupKey = canonicalPath == "__general__" ? "general:\(group.projectName)" : canonicalPath
+            guard !seenPaths.contains(groupKey) else { continue }
+            seenPaths.insert(groupKey)
             
             let isGroupActive: Bool = {
                 if canonicalPath != "__general__" && !canonicalCurrent.isEmpty {
@@ -1447,34 +1577,26 @@ final class PhoneCompanionService: ObservableObject {
                 ]
             }
             
-            let langInfo = detectWorkspaceLanguageInfo(path: canonicalPath)
             result.append([
                 "id": group.id,
                 "name": group.projectName,
                 "path": canonicalPath,
                 "active": isGroupActive,
-                "lang": langInfo.primary,
-                "langLabel": langInfo.label,
-                "langs": langInfo.langs,
                 "chatCount": group.chats.count,
                 "chats": chatsPayload
             ])
         }
         
-        // 2. Also include any recent workspaces from AppState.getRecentWorkspaces() not yet in projectGroups
+        // 2. Also include recent workspaces not yet in projectGroups so user can start a new chat in them
         for url in AppState.getRecentWorkspaces() {
-            let canonicalPath = url.standardizedFileURL.path
-            guard !canonicalPath.isEmpty, !seenPaths.contains(canonicalPath) else { continue }
+            guard let canonicalPath = AgentService.canonicalWorkspacePath(url.path),
+                  !seenPaths.contains(canonicalPath) else { continue }
             seenPaths.insert(canonicalPath)
-            let langInfo = detectWorkspaceLanguageInfo(path: canonicalPath)
             result.append([
                 "id": canonicalPath,
                 "name": url.lastPathComponent,
                 "path": canonicalPath,
                 "active": canonicalPath == canonicalCurrent,
-                "lang": langInfo.primary,
-                "langLabel": langInfo.label,
-                "langs": langInfo.langs,
                 "chatCount": 0,
                 "chats": []
             ])
@@ -1491,11 +1613,11 @@ final class PhoneCompanionService: ObservableObject {
         let currentWsPath: String = {
             if let activeId = agent.activeChatId,
                let activeChat = agent.chatSessions.first(where: { $0.id == activeId }),
-               let chatPath = activeChat.projectPath, !chatPath.isEmpty {
-                return URL(fileURLWithPath: chatPath).standardizedFileURL.path
+               let canonical = AgentService.canonicalWorkspacePath(activeChat.projectPath) {
+                return canonical
             }
-            if let ws = agent.currentWorkspace ?? appState?.workspaceFolder?.path, !ws.isEmpty {
-                return URL(fileURLWithPath: ws).standardizedFileURL.path
+            if let ws = AgentService.canonicalWorkspacePath(agent.currentWorkspace ?? appState?.workspaceFolder?.path) {
+                return ws
             }
             return ""
         }()
@@ -1534,7 +1656,7 @@ final class PhoneCompanionService: ObservableObject {
             if !currentWsPath.isEmpty {
                 return URL(fileURLWithPath: currentWsPath).lastPathComponent
             }
-            return "Workspace"
+            return "General"
         }()
         
         let activeSessionName: String = {
@@ -1560,18 +1682,10 @@ final class PhoneCompanionService: ObservableObject {
         
         let workspacesList = buildWorkspacesPayload(currentWorkspacePath: currentWsPath)
         
-        let scopedChats: [ChatSession] = {
-            if !currentWsPath.isEmpty {
-                let matching = agent.chatSessions.filter {
-                    guard let p = $0.projectPath, !p.isEmpty else { return false }
-                    return URL(fileURLWithPath: p).standardizedFileURL.path == currentWsPath
-                }
-                if !matching.isEmpty { return matching }
-            }
-            return agent.chatSessions
-        }()
+        // Strictly scope chats to the active workspace — never mix chats from different workspaces
+        let scopedChats: [ChatSession] = agent.chats(for: currentWsPath.isEmpty ? nil : currentWsPath)
         
-        let sessionsList = scopedChats.prefix(35).map { s -> [String: Any] in
+        let sessionsList = scopedChats.prefix(40).map { s -> [String: Any] in
             [
                 "id": s.id,
                 "name": s.name,
@@ -2169,21 +2283,23 @@ final class PhoneCompanionService: ObservableObject {
                 <span class="conn-indicator" id="connDot"></span>
                 <span>MicroCode AI</span>
               </div>
-              <div class="ide-breadcrumb" onclick="openWorkspaceModal()" title="Switch Workspace">
-                <span>/</span>
-                <span class="ws-lang-stack" id="wsHeaderLangIcons"></span>
-                <span id="wsBreadcrumb">Workspace</span>
+              <div class="ide-breadcrumb" onclick="openWorkspaceModal()" title="Switch Workspace or Chat">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>
+                <span id="wsBreadcrumb">Workspace / Chat</span>
                 <span style="font-size:10px;color:var(--muted)">▾</span>
               </div>
               <a class="tb-btn" id="previewBtn" href="#" target="_blank" style="display:none">Preview</a>
             </div>
             <div class="ide-subbar">
               <div class="ws-select-wrap">
-                <span class="ws-lang-stack" id="subbarWsIcon"></span>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>
                 <select class="ws-select" id="workspaceSelect" onchange="switchWorkspace(this.value)" title="Workspace"></select>
               </div>
-              <select class="session-select" id="sessionSelect" onchange="switchSession(this.value)" title="Conversation"></select>
-              <button class="tb-btn" onclick="newSession()">+ New</button>
+              <div class="ws-select-wrap" style="flex:1 1 54%;border-color:var(--border)">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M2.5 3h11A1.5 1.5 0 0 1 15 4.5v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5V12A1.5 1.5 0 0 1 1 10.5v-6A1.5 1.5 0 0 1 2.5 3Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+                <select class="ws-select" id="sessionSelect" onchange="switchSession(this.value)" title="Chat in Workspace" style="font-weight:500"></select>
+              </div>
+              <button class="tb-btn" onclick="newSession()">+ Chat</button>
             </div>
           </header>
 
@@ -2225,14 +2341,14 @@ final class PhoneCompanionService: ObservableObject {
             </div>
           </div>
 
-          <!-- Projects & Workspaces Sheet (100% Matching Mac IDE Sidebar) -->
+          <!-- Workspaces & Chats Sheet (100% Matching Mac IDE Projects & Conversations) -->
           <div class="modal-backdrop" id="workspaceModal" onclick="if(event.target===this)closeWorkspaceModal()">
             <div class="modal-sheet">
               <div class="modal-header">
-                <span style="font-family:var(--mono);font-size:11px;letter-spacing:0.04em;color:var(--secondary)">PROJECTS &amp; WORKSPACES</span>
+                <span style="font-family:var(--mono);font-size:11px;letter-spacing:0.04em;color:var(--secondary)">WORKSPACES &amp; CHATS</span>
                 <button class="tb-btn" onclick="closeWorkspaceModal()">Close</button>
               </div>
-              <input class="modal-search" id="workspaceSearch" type="text" placeholder="Filter workspaces or conversations…" oninput="renderWorkspaceList()">
+              <input class="modal-search" id="workspaceSearch" type="text" placeholder="Search workspaces or chat conversations…" oninput="renderWorkspaceList()">
               <div class="modal-list" id="workspaceList"></div>
             </div>
           </div>
@@ -2704,21 +2820,62 @@ final class PhoneCompanionService: ObservableObject {
           }
 
           let pollTimer = null;
+          let sseConnected = false;
+          let evtSource = null;
+
           function schedulePoll(delayMs) {
             if (pollTimer) clearTimeout(pollTimer);
             pollTimer = setTimeout(pollLoop, delayMs);
           }
 
+          function connectSSEStream() {
+            if (typeof EventSource === "undefined") return;
+            try {
+              if (evtSource) { try { evtSource.close(); } catch (_) {} }
+              evtSource = new EventSource("/api/stream?token=" + encodeURIComponent(TOKEN));
+              evtSource.onopen = () => {
+                sseConnected = true;
+                document.getElementById("connDot").style.background = "#22c55e";
+              };
+              evtSource.onmessage = (ev) => {
+                if (!ev || !ev.data) return;
+                try {
+                  const s = JSON.parse(ev.data);
+                  sseConnected = true;
+                  applyStatePayload(s);
+                } catch (_) {}
+              };
+              evtSource.onerror = () => {
+                sseConnected = false;
+                try { evtSource.close(); } catch (_) {}
+                evtSource = null;
+                setTimeout(connectSSEStream, 2500);
+              };
+            } catch (_) {
+              sseConnected = false;
+            }
+          }
+
           async function pollLoop() {
-            if (!document.hidden) {
+            if (!document.hidden && !sseConnected) {
               await pollState();
             }
-            schedulePoll(isAgentLoading ? 380 : 1500);
+            schedulePoll(sseConnected ? 5000 : (isAgentLoading ? 380 : 1500));
           }
 
           async function pollState() {
             try {
               const s = await api("/api/state");
+              applyStatePayload(s);
+            } catch (e) {
+              if (!sseConnected) {
+                document.getElementById("connDot").style.background = "#ef4444";
+              }
+            }
+          }
+
+          function applyStatePayload(s) {
+            try {
               document.getElementById("connDot").style.background = "#22c55e";
               document.getElementById("wsBreadcrumb").textContent = (s.workspace || "Workspace") + " / " + (s.sessionTitle || "Chat");
               document.getElementById("modelPillText").textContent = s.modelLabel || "Select Model";
@@ -2726,20 +2883,6 @@ final class PhoneCompanionService: ObservableObject {
               if (provIconEl && s.providerId && provIconEl.dataset.prov !== s.providerId) {
                 provIconEl.dataset.prov = s.providerId;
                 provIconEl.src = "/api/icon/provider?id=" + encodeURIComponent(s.providerId) + "&token=" + encodeURIComponent(TOKEN);
-              }
-
-              // Active Workspace Language Icon(s) in Header & Subbar
-              const wsLangs = (s.workspaceLangs && s.workspaceLangs.length) ? s.workspaceLangs : [s.workspaceLang || "code"];
-              const headerIconsHTML = wsLangs.slice(0, 2).map(l => renderLangIcon("", l, 13)).join("");
-              const headerIconsEl = document.getElementById("wsHeaderLangIcons");
-              if (headerIconsEl && headerIconsEl.dataset.key !== wsLangs.join(",")) {
-                headerIconsEl.dataset.key = wsLangs.join(",");
-                headerIconsEl.innerHTML = headerIconsHTML;
-              }
-              const subbarIconEl = document.getElementById("subbarWsIcon");
-              if (subbarIconEl && subbarIconEl.dataset.key !== wsLangs[0]) {
-                subbarIconEl.dataset.key = wsLangs[0];
-                subbarIconEl.innerHTML = renderLangIcon("", wsLangs[0], 14);
               }
 
               const prevBtn = document.getElementById("previewBtn");
@@ -2750,30 +2893,35 @@ final class PhoneCompanionService: ObservableObject {
                 prevBtn.style.display = "none";
               }
 
-              // Workspaces list (ordered 100% like Mac IDE)
+              // Workspaces list (ordered 100% like Mac IDE Projects -> Chats)
               availableWorkspaces = s.workspaces || [];
               const wsSel = document.getElementById("workspaceSelect");
-              const wsKey = JSON.stringify(availableWorkspaces.map(w => ({ p: w.path, n: w.name, a: w.active, c: w.chatCount, l: w.langLabel })));
+              const wsKey = JSON.stringify(availableWorkspaces.map(w => ({ p: w.path, n: w.name, a: w.active, c: w.chatCount })));
               if (wsSel.dataset.key !== wsKey) {
                 wsSel.dataset.key = wsKey;
                 wsSel.innerHTML = availableWorkspaces.map(w => {
-                  const countText = w.chatCount > 0 ? ` (${w.chatCount})` : "";
-                  const langSuffix = w.langLabel && w.langLabel !== "Workspace" && w.langLabel !== "General" ? ` · ${w.langLabel}` : "";
-                  return `<option value="${esc(w.path)}" ${w.active ? "selected" : ""}>${esc(w.name)}${langSuffix}${countText}</option>`;
+                  const n = w.chatCount || 0;
+                  const countText = n > 0 ? ` (${n} chat${n === 1 ? "" : "s"})` : "";
+                  return `<option value="${esc(w.path)}" ${w.active ? "selected" : ""}>${esc(w.name)}${countText}</option>`;
                 }).join("");
               }
               if (document.getElementById("workspaceModal").style.display === "flex") {
                 renderWorkspaceList();
               }
 
-              // Sessions dropdown for active workspace
+              // Chats dropdown strictly for the active workspace
               const sel = document.getElementById("sessionSelect");
               const sessKey = JSON.stringify(s.sessions || []);
               if (sel.dataset.key !== sessKey) {
                 sel.dataset.key = sessKey;
-                sel.innerHTML = (s.sessions || []).map(item =>
-                  `<option value="${esc(item.id)}" ${item.active ? "selected" : ""}>${esc(item.name)}</option>`
-                ).join("");
+                const sessions = s.sessions || [];
+                if (sessions.length === 0) {
+                  sel.innerHTML = `<option value="">New Chat</option>`;
+                } else {
+                  sel.innerHTML = sessions.map(item =>
+                    `<option value="${esc(item.id)}" ${item.active ? "selected" : ""}>${esc(item.name)}</option>`
+                  ).join("");
+                }
               }
 
               // Live Task Activity Bar & Composer State
@@ -2906,43 +3054,47 @@ final class PhoneCompanionService: ObservableObject {
           function renderWorkspaceList() {
             const q = (document.getElementById("workspaceSearch").value || "").toLowerCase().trim();
             const listEl = document.getElementById("workspaceList");
+            const folderSVG = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>`;
+            const chatSVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M2.5 3h11A1.5 1.5 0 0 1 15 4.5v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5V12A1.5 1.5 0 0 1 1 10.5v-6A1.5 1.5 0 0 1 2.5 3Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
             let html = "";
             for (let i = 0; i < availableWorkspaces.length; i++) {
               const w = availableWorkspaces[i];
               const chats = w.chats || [];
-              const matchWs = !q || (w.name || "").toLowerCase().includes(q) || (w.path || "").toLowerCase().includes(q) || (w.langLabel || "").toLowerCase().includes(q);
+              const matchWs = !q || (w.name || "").toLowerCase().includes(q) || (w.path || "").toLowerCase().includes(q);
               const matchingChats = matchWs ? chats : chats.filter(c => (c.name || "").toLowerCase().includes(q));
               if (!matchWs && matchingChats.length === 0) continue;
 
-              const wLangs = (w.langs && w.langs.length) ? w.langs : [w.lang || "code"];
-              const langIconsHTML = `<span class="ws-lang-stack">` + wLangs.slice(0, 2).map(l => renderLangIcon("", l, 15)).join("") + `</span>`;
-              const langTag = (w.langLabel && w.langLabel !== "Workspace") ? `<span class="ws-lang-tag">${esc(w.langLabel)}</span>` : "";
               const activeBadge = w.active ? `<span class="model-badge" style="color:var(--green)">Active</span>` : "";
-              const countBadge = `<span class="ws-group-count">${w.chatCount || 0}</span>`;
-              const chatsRows = matchingChats.map(c => {
-                const check = c.active ? "✓ " : "";
-                return `<div class="ws-chat-row ${c.active ? 'active' : ''}" data-widx="${i}" data-cid="${esc(c.id)}" onclick="selectWorkspaceChat(this)">
-                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${check}${esc(c.name)}</span>
-                </div>`;
-              }).join("");
+              const chatCountNum = w.chatCount || chats.length || 0;
+              const countBadge = `<span class="ws-group-count">${chatCountNum} chat${chatCountNum === 1 ? "" : "s"}</span>`;
+              const chatsRows = matchingChats.length > 0
+                ? matchingChats.map(c => {
+                    const check = c.active ? `<span style="color:var(--green);font-weight:700;flex-shrink:0">✓</span>` : "";
+                    return `<div class="ws-chat-row ${c.active ? 'active' : ''}" data-widx="${i}" data-cid="${esc(c.id)}" onclick="selectWorkspaceChat(this)">
+                      <span style="display:inline-flex;align-items:center;gap:7px;min-width:0;overflow:hidden">${chatSVG}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</span></span>
+                      ${check}
+                    </div>`;
+                  }).join("")
+                : `<div class="ws-chat-row" data-widx="${i}" onclick="createChatInWorkspace(this)" style="color:var(--muted);font-style:italic">
+                    <span style="display:inline-flex;align-items:center;gap:7px">${chatSVG}<span>+ Start new chat in ${esc(w.name)}</span></span>
+                  </div>`;
 
               html += `<div class="ws-group-card ${w.active ? 'active' : ''}">
                 <div class="ws-group-header" data-widx="${i}" onclick="selectWorkspaceGroup(this)">
                   <div class="ws-group-left">
-                    ${langIconsHTML}
+                    ${folderSVG}
                     <span class="ws-group-name">${esc(w.name)}</span>
-                    ${langTag}
                     ${activeBadge}
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
                     ${countBadge}
-                    <button class="tb-btn" style="padding:2px 7px;font-size:11px" data-widx="${i}" onclick="event.stopPropagation();createChatInWorkspace(this)">+ New</button>
+                    <button class="tb-btn" style="padding:2px 7px;font-size:11px" data-widx="${i}" onclick="event.stopPropagation();createChatInWorkspace(this)">+ Chat</button>
                   </div>
                 </div>
-                ${chatsRows ? `<div class="ws-chat-list">${chatsRows}</div>` : ""}
+                <div class="ws-chat-list">${chatsRows}</div>
               </div>`;
             }
-            listEl.innerHTML = html || `<div style="padding:14px;color:var(--secondary);font-size:12px">No matching workspaces</div>`;
+            listEl.innerHTML = html || `<div style="padding:14px;color:var(--secondary);font-size:12px">No matching workspaces or chats</div>`;
           }
 
           function selectWorkspaceGroup(el) {
@@ -3052,9 +3204,13 @@ final class PhoneCompanionService: ObservableObject {
           });
 
           document.addEventListener("visibilitychange", () => {
-            if (!document.hidden) pollLoop();
+            if (!document.hidden) {
+              if (!sseConnected) connectSSEStream();
+              pollState();
+            }
           });
 
+          connectSSEStream();
           pollLoop();
         </script>
         </body>

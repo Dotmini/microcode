@@ -206,7 +206,7 @@ public final class EmbeddedEnvManager: ObservableObject {
                 "\(NSHomeDirectory())/Library/Python/3.11/bin/esptool.py"
             ]),
             ("LLVM Clang++", "clang++", "Native Syntax Verification & Compiler", [
-                "/Users/dotmini/.swiftly/bin/clang++",
+                "\(FileManager.default.homeDirectoryForCurrentUser.path)/.swiftly/bin/clang++",
                 "/opt/homebrew/opt/llvm/bin/clang++",
                 "/usr/bin/clang++"
             ]),
@@ -350,567 +350,17 @@ public final class EmbeddedEnvManager: ObservableObject {
         return espIdfIncludePaths.map { "-I\($0)" }
     }
     
-    // MARK: - Synthetic Embedded Stubs Deployment (Zero 'file not found' Guarantee)
-    
-    public func deploySyntheticEmbeddedHeaders(into dir: String = "/tmp/microcode_sketch") {
-        let fm = FileManager.default
-        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let freertosDir = (dir as NSString).appendingPathComponent("freertos")
-        let driverDir = (dir as NSString).appendingPathComponent("driver")
-        try? fm.createDirectory(atPath: freertosDir, withIntermediateDirectories: true)
-        try? fm.createDirectory(atPath: driverDir, withIntermediateDirectories: true)
-        
-        // 1. Arduino.h
-        let arduinoHeader = """
-        #pragma once
-        #include <stdio.h>
-        #include <stdint.h>
-        #include <stdbool.h>
-        #include <math.h>
-
-        #define HIGH 1
-        #define LOW 0
-        #define INPUT 0
-        #define OUTPUT 1
-        #define LED_BUILTIN 2
-
-        inline void pinMode(uint8_t pin, uint8_t mode) {}
-        inline void digitalWrite(uint8_t pin, uint8_t val) {}
-        inline int digitalRead(uint8_t pin) { return 0; }
-        inline void delay(uint32_t ms) {}
-        inline uint32_t millis() { return 0; }
-
-        struct HardwareSerial {
-            void begin(unsigned long baud) {}
-            void print(const char* s) {}
-            void print(double v) {}
-            void println(const char* s) {}
-            void println(double v) {}
-            template<typename... Args>
-            void printf(const char* fmt, Args... args) { ::printf(fmt, args...); }
-            explicit operator bool() const { return true; }
-        };
-        inline HardwareSerial Serial;
-        """
-        try? arduinoHeader.write(toFile: "\(dir)/Arduino.h", atomically: true, encoding: .utf8)
-        
-        // 2. freertos/FreeRTOS.h
-        let freeRTOSHeader = """
-        #pragma once
-        #include <stdint.h>
-        #include <stddef.h>
-        #include <stdbool.h>
-
-        typedef uint32_t TickType_t;
-        typedef long BaseType_t;
-        typedef unsigned long UBaseType_t;
-        typedef void* TaskHandle_t;
-        typedef void* QueueHandle_t;
-        typedef void* SemaphoreHandle_t;
-        typedef void (*TaskFunction_t)(void *);
-
-        #define portMAX_DELAY (TickType_t)0xffffffffUL
-        #define pdTRUE  ((BaseType_t) 1)
-        #define pdFALSE ((BaseType_t) 0)
-        #define pdPASS  (pdTRUE)
-        #define pdFAIL  (pdFALSE)
-        #define portTICK_PERIOD_MS ((TickType_t) 1)
-        #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
-        #define configMAX_PRIORITIES 25
-        #define tskNO_AFFINITY 0x7FFFFFFF
-        """
-        try? freeRTOSHeader.write(toFile: "\(freertosDir)/FreeRTOS.h", atomically: true, encoding: .utf8)
-        
-        // 3. freertos/task.h
-        let taskHeader = """
-        #pragma once
-        #include "FreeRTOS.h"
-
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-
-        inline BaseType_t xTaskCreate(TaskFunction_t pxTaskCode, const char * const pcName, const uint32_t usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask) { return pdPASS; }
-        inline BaseType_t xTaskCreatePinnedToCore(TaskFunction_t pxTaskCode, const char * const pcName, const uint32_t usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask, const BaseType_t xCoreID) { return pdPASS; }
-        inline void vTaskDelay(const TickType_t xTicksToDelay) {}
-        inline void vTaskDelayUntil(TickType_t * const pxPreviousWakeTime, const TickType_t xTimeIncrement) {}
-        inline void vTaskDelete(TaskHandle_t xTaskToDelete) {}
-        inline TickType_t xTaskGetTickCount(void) { return 0; }
-        inline UBaseType_t uxTaskPriorityGet(const TaskHandle_t xTask) { return 1; }
-        inline void vTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority) {}
-        inline void vTaskSuspend(TaskHandle_t xTaskToSuspend) {}
-        inline void vTaskResume(TaskHandle_t xTaskToResume) {}
-
-        #ifdef __cplusplus
+    /// Resolves persistent Arduino15 data directory (auto-redirects to `~/.microcode/arduino15` if `~/Library/Arduino15` is an unmounted external drive symlink).
+    private var arduinoDataEnvPrefix: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let defaultDir = "\(home)/Library/Arduino15"
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: defaultDir, isDirectory: &isDir) && isDir.boolValue {
+            return ""
         }
-        #endif
-        """
-        try? taskHeader.write(toFile: "\(freertosDir)/task.h", atomically: true, encoding: .utf8)
-        
-        // 4. freertos/queue.h
-        let queueHeader = """
-        #pragma once
-        #include "FreeRTOS.h"
-
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-
-        inline QueueHandle_t xQueueCreate(const UBaseType_t uxQueueLength, const UBaseType_t uxItemSize) { return (QueueHandle_t)1; }
-        inline BaseType_t xQueueSend(QueueHandle_t xQueue, const void * const pvItemToQueue, TickType_t xTicksToWait) { return pdPASS; }
-        inline BaseType_t xQueueReceive(QueueHandle_t xQueue, void * const pvBuffer, TickType_t xTicksToWait) { return pdPASS; }
-        inline void vQueueDelete(QueueHandle_t xQueue) {}
-        inline UBaseType_t uxQueueMessagesWaiting(const QueueHandle_t xQueue) { return 0; }
-
-        #ifdef __cplusplus
-        }
-        #endif
-        """
-        try? queueHeader.write(toFile: "\(freertosDir)/queue.h", atomically: true, encoding: .utf8)
-        
-        // 5. freertos/semphr.h
-        let semphrHeader = """
-        #pragma once
-        #include "FreeRTOS.h"
-        #include "queue.h"
-
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-
-        inline SemaphoreHandle_t xSemaphoreCreateBinary(void) { return (SemaphoreHandle_t)1; }
-        inline SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
-        inline BaseType_t xSemaphoreTake(SemaphoreHandle_t xSemaphore, TickType_t xBlockTime) { return pdPASS; }
-        inline BaseType_t xSemaphoreGive(SemaphoreHandle_t xSemaphore) { return pdPASS; }
-        inline void vSemaphoreDelete(SemaphoreHandle_t xSemaphore) {}
-
-        #ifdef __cplusplus
-        }
-        #endif
-        """
-        try? semphrHeader.write(toFile: "\(freertosDir)/semphr.h", atomically: true, encoding: .utf8)
-        
-        // 6. esp_err.h
-        let espErrHeader = """
-        #pragma once
-        #include <stdint.h>
-
-        typedef int32_t esp_err_t;
-        #define ESP_OK 0
-        #define ESP_FAIL -1
-        #define ESP_ERR_NO_MEM 0x101
-        #define ESP_ERR_INVALID_ARG 0x102
-        #define ESP_ERR_INVALID_STATE 0x103
-        #define ESP_ERR_INVALID_SIZE 0x104
-        #define ESP_ERR_NOT_FOUND 0x105
-        #define ESP_ERR_TIMEOUT 0x107
-        inline const char* esp_err_to_name(esp_err_t code) { return "ESP_OK"; }
-        """
-        try? espErrHeader.write(toFile: "\(dir)/esp_err.h", atomically: true, encoding: .utf8)
-        
-        // 7. esp_system.h
-        let espSystemHeader = """
-        #pragma once
-        #include "esp_err.h"
-        #include <stdint.h>
-
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-
-        inline void esp_restart(void) {}
-        inline uint32_t esp_random(void) { return 0; }
-        inline uint32_t esp_get_free_heap_size(void) { return 320000; }
-        inline uint32_t esp_get_minimum_free_heap_size(void) { return 280000; }
-
-        #ifdef __cplusplus
-        }
-        #endif
-        """
-        try? espSystemHeader.write(toFile: "\(dir)/esp_system.h", atomically: true, encoding: .utf8)
-        
-        // 8. esp_log.h
-        let espLogHeader = """
-        #pragma once
-        #include <stdio.h>
-
-        #define ESP_LOGE(tag, format, ...) printf("[E][%s] " format "\\n", tag, ##__VA_ARGS__)
-        #define ESP_LOGW(tag, format, ...) printf("[W][%s] " format "\\n", tag, ##__VA_ARGS__)
-        #define ESP_LOGI(tag, format, ...) printf("[I][%s] " format "\\n", tag, ##__VA_ARGS__)
-        #define ESP_LOGD(tag, format, ...) printf("[D][%s] " format "\\n", tag, ##__VA_ARGS__)
-        #define ESP_LOGV(tag, format, ...) printf("[V][%s] " format "\\n", tag, ##__VA_ARGS__)
-        """
-        try? espLogHeader.write(toFile: "\(dir)/esp_log.h", atomically: true, encoding: .utf8)
-        
-        // 9. driver/gpio.h
-        let gpioHeader = """
-        #pragma once
-        #include "esp_err.h"
-        #include <stdint.h>
-
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-
-        typedef enum {
-            GPIO_NUM_NC = -1,
-            GPIO_NUM_0 = 0,
-            GPIO_NUM_1 = 1,
-            GPIO_NUM_2 = 2,
-            GPIO_NUM_3 = 3,
-            GPIO_NUM_4 = 4,
-            GPIO_NUM_5 = 5,
-            GPIO_NUM_6 = 6,
-            GPIO_NUM_7 = 7,
-            GPIO_NUM_8 = 8,
-            GPIO_NUM_9 = 9,
-            GPIO_NUM_10 = 10,
-            GPIO_NUM_11 = 11,
-            GPIO_NUM_12 = 12,
-            GPIO_NUM_13 = 13,
-            GPIO_NUM_14 = 14,
-            GPIO_NUM_15 = 15,
-            GPIO_NUM_16 = 16,
-            GPIO_NUM_17 = 17,
-            GPIO_NUM_18 = 18,
-            GPIO_NUM_19 = 19,
-            GPIO_NUM_20 = 20,
-            GPIO_NUM_21 = 21,
-            GPIO_NUM_35 = 35,
-            GPIO_NUM_36 = 36,
-            GPIO_NUM_37 = 37,
-            GPIO_NUM_38 = 38,
-            GPIO_NUM_47 = 47,
-            GPIO_NUM_48 = 48,
-            GPIO_NUM_MAX
-        } gpio_num_t;
-
-        typedef enum {
-            GPIO_MODE_DISABLE = 0,
-            GPIO_MODE_INPUT = 1,
-            GPIO_MODE_OUTPUT = 2,
-            GPIO_MODE_OUTPUT_OD = 3,
-            GPIO_MODE_INPUT_OUTPUT_OD = 4,
-            GPIO_MODE_INPUT_OUTPUT = 5
-        } gpio_mode_t;
-
-        typedef enum {
-            GPIO_PULLUP_DISABLE = 0,
-            GPIO_PULLUP_ENABLE = 1
-        } gpio_pullup_t;
-
-        typedef enum {
-            GPIO_PULLDOWN_DISABLE = 0,
-            GPIO_PULLDOWN_ENABLE = 1
-        } gpio_pulldown_t;
-
-        typedef struct {
-            uint64_t pin_bit_mask;
-            gpio_mode_t mode;
-            gpio_pullup_t pull_up_en;
-            gpio_pulldown_t pull_down_en;
-            int intr_type;
-        } gpio_config_t;
-
-        inline esp_err_t gpio_config(const gpio_config_t *pGPIOConfig) { return ESP_OK; }
-        inline esp_err_t gpio_reset_pin(gpio_num_t gpio_num) { return ESP_OK; }
-        inline esp_err_t gpio_set_direction(gpio_num_t gpio_num, gpio_mode_t mode) { return ESP_OK; }
-        inline esp_err_t gpio_set_level(gpio_num_t gpio_num, uint32_t level) { return ESP_OK; }
-        inline int gpio_get_level(gpio_num_t gpio_num) { return 0; }
-
-        #ifdef __cplusplus
-        }
-        #endif
-        """
-        try? gpioHeader.write(toFile: "\(driverDir)/gpio.h", atomically: true, encoding: .utf8)
-        
-        // 10. nvs_flash.h
-        let nvsHeader = """
-        #pragma once
-        #include "esp_err.h"
-
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-
-        inline esp_err_t nvs_flash_init(void) { return ESP_OK; }
-        inline esp_err_t nvs_flash_erase(void) { return ESP_OK; }
-
-        #ifdef __cplusplus
-        }
-        #endif
-        """
-        try? nvsHeader.write(toFile: "\(dir)/nvs_flash.h", atomically: true, encoding: .utf8)
-        
-        // 11. Wire.h (I2C)
-        let wireHeader = """
-        #pragma once
-        #include "Arduino.h"
-        class TwoWire {
-        public:
-            void begin(int sda = -1, int scl = -1, uint32_t freq = 100000) {}
-            void beginTransmission(uint8_t address) {}
-            uint8_t endTransmission(bool sendStop = true) { return 0; }
-            size_t write(uint8_t data) { return 1; }
-            size_t write(const uint8_t *data, size_t quantity) { return quantity; }
-            uint8_t requestFrom(uint8_t address, size_t size) { return size; }
-            int read() { return 0; }
-            int available() { return 0; }
-        };
-        inline TwoWire Wire;
-        """
-        try? wireHeader.write(toFile: "\(dir)/Wire.h", atomically: true, encoding: .utf8)
-        
-        // 12. SPI.h
-        let spiHeader = """
-        #pragma once
-        #include "Arduino.h"
-        class SPIClass {
-        public:
-            void begin(int8_t sck = -1, int8_t miso = -1, int8_t mosi = -1, int8_t ss = -1) {}
-            void end() {}
-            uint8_t transfer(uint8_t data) { return data; }
-        };
-        inline SPIClass SPI;
-        """
-        try? spiHeader.write(toFile: "\(dir)/SPI.h", atomically: true, encoding: .utf8)
-        
-        // 13. WiFi.h
-        let wifiHeader = """
-        #pragma once
-        #include "Arduino.h"
-        #define WL_CONNECTED 3
-        #define WL_IDLE_STATUS 0
-        #define WL_NO_SSID_AVAIL 1
-        #define WL_CONNECT_FAILED 4
-        #define WL_DISCONNECTED 6
-        class WiFiClass {
-        public:
-            int begin(const char* ssid, const char *passphrase = nullptr) { return WL_CONNECTED; }
-            int status() { return WL_CONNECTED; }
-            void disconnect(bool wifioff = false) {}
-            const char* localIP() { return "192.168.1.100"; }
-        };
-        inline WiFiClass WiFi;
-        """
-        try? wifiHeader.write(toFile: "\(dir)/WiFi.h", atomically: true, encoding: .utf8)
-    }
-    
-    // MARK: - Instant Synthetic Library Header Generator (<2ms)
-    
-    public func deploySyntheticLibraryHeader(named name: String, into dir: String = "/tmp/microcode_sketch") {
-        let fm = FileManager.default
-        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let lower = name.lowercased()
-        
-        if lower.contains("dht") {
-            let dhtHeader = """
-            #pragma once
-            #include "Arduino.h"
-            #define DHT11 11
-            #define DHT22 22
-            #define DHT21 21
-            class DHT {
-            public:
-                DHT(uint8_t pin, uint8_t type, uint8_t count = 6) {}
-                void begin(uint8_t usec = 55) {}
-                float readTemperature(bool S = false, bool force = false) { return 25.0f; }
-                float readHumidity(bool force = false) { return 60.0f; }
-                bool read(bool force = false) { return true; }
-            };
-            """
-            try? dhtHeader.write(toFile: "\(dir)/DHT.h", atomically: true, encoding: .utf8)
-            try? dhtHeader.write(toFile: "\(dir)/DHT_U.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("ssd1306") || lower.contains("adafruit ssd1306") {
-            let oledHeader = """
-            #pragma once
-            #include "Arduino.h"
-            #include "Wire.h"
-            #define SSD1306_SWITCHCAPVCC 0x02
-            #define WHITE 1
-            #define BLACK 0
-            #define INVERSE 2
-            class Adafruit_SSD1306 {
-            public:
-                Adafruit_SSD1306(uint8_t w, uint8_t h, void *twi = nullptr, int8_t rst_pin = -1) {}
-                bool begin(uint8_t switchvcc = SSD1306_SWITCHCAPVCC, uint8_t i2caddr = 0x3C, bool reset = true, bool periphBegin = true) { return true; }
-                void clearDisplay() {}
-                void display() {}
-                void setTextSize(uint8_t s) {}
-                void setTextColor(uint16_t c) {}
-                void setTextColor(uint16_t c, uint16_t bg) {}
-                void setCursor(int16_t x, int16_t y) {}
-                void print(const char *s) {}
-                void print(int n) {}
-                void print(float f) {}
-                void println(const char *s = "") {}
-                void println(int n) {}
-                void println(float f) {}
-                void drawPixel(int16_t x, int16_t y, uint16_t color) {}
-                void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color) {}
-                void drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {}
-                void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {}
-            };
-            """
-            try? oledHeader.write(toFile: "\(dir)/Adafruit_SSD1306.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("gfx") {
-            let gfxHeader = """
-            #pragma once
-            #include "Arduino.h"
-            class Adafruit_GFX {
-            public:
-                Adafruit_GFX(int16_t w, int16_t h) {}
-                virtual void drawPixel(int16_t x, int16_t y, uint16_t color) {}
-            };
-            """
-            try? gfxHeader.write(toFile: "\(dir)/Adafruit_GFX.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("fastled") {
-            let fastledHeader = """
-            #pragma once
-            #include "Arduino.h"
-            struct CRGB {
-                uint8_t r, g, b;
-                CRGB() : r(0), g(0), b(0) {}
-                CRGB(uint8_t r, uint8_t g, uint8_t b) : r(r), g(g), b(b) {}
-                static const uint32_t Red = 0xFF0000;
-                static const uint32_t Green = 0x00FF00;
-                static const uint32_t Blue = 0x0000FF;
-                static const uint32_t Black = 0x000000;
-                static const uint32_t White = 0xFFFFFF;
-            };
-            #define WS2812B 1
-            #define GRB 1
-            class CFastLED {
-            public:
-                template<int CHIP, uint8_t DATA_PIN, int RGB_ORDER>
-                void addLeds(CRGB *data, int nLeds) {}
-                void show() {}
-                void clear() {}
-                void setBrightness(uint8_t scale) {}
-            };
-            inline CFastLED FastLED;
-            """
-            try? fastledHeader.write(toFile: "\(dir)/FastLED.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("neopixel") {
-            let neoHeader = """
-            #pragma once
-            #include "Arduino.h"
-            #define NEO_GRB 0x01
-            #define NEO_KHZ800 0x02
-            class Adafruit_NeoPixel {
-            public:
-                Adafruit_NeoPixel(uint16_t n = 0, int16_t p = -1, uint16_t t = NEO_GRB + NEO_KHZ800) {}
-                void begin() {}
-                void show() {}
-                void setPixelColor(uint16_t n, uint8_t r, uint8_t g, uint8_t b) {}
-                void setPixelColor(uint16_t n, uint32_t c) {}
-                void setBrightness(uint8_t b) {}
-                void clear() {}
-                static uint32_t Color(uint8_t r, uint8_t g, uint8_t b) { return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b; }
-            };
-            """
-            try? neoHeader.write(toFile: "\(dir)/Adafruit_NeoPixel.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("arduinojson") {
-            let jsonHeader = """
-            #pragma once
-            #include "Arduino.h"
-            template <size_t CAPACITY>
-            class StaticJsonDocument {
-            public:
-                template <typename T> void operator[](const char *key) {}
-            };
-            class DynamicJsonDocument {
-            public:
-                DynamicJsonDocument(size_t cap) {}
-                template <typename T> void operator[](const char *key) {}
-            };
-            """
-            try? jsonHeader.write(toFile: "\(dir)/ArduinoJson.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("pubsubclient") {
-            let mqttHeader = """
-            #pragma once
-            #include "Arduino.h"
-            class PubSubClient {
-            public:
-                PubSubClient() {}
-                PubSubClient& setServer(const char *domain, uint16_t port) { return *this; }
-                PubSubClient& setCallback(void (*callback)(char*, uint8_t*, unsigned int)) { return *this; }
-                bool connect(const char *id) { return true; }
-                bool connect(const char *id, const char *user, const char *pass) { return true; }
-                bool publish(const char *topic, const char *payload) { return true; }
-                bool subscribe(const char *topic) { return true; }
-                bool loop() { return true; }
-                bool connected() { return true; }
-            };
-            """
-            try? mqttHeader.write(toFile: "\(dir)/PubSubClient.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("liquidcrystal") {
-            let lcdHeader = """
-            #pragma once
-            #include "Arduino.h"
-            class LiquidCrystal_I2C {
-            public:
-                LiquidCrystal_I2C(uint8_t lcd_Addr, uint8_t lcd_cols, uint8_t lcd_rows) {}
-                void init() {}
-                void clear() {}
-                void home() {}
-                void backlight() {}
-                void noBacklight() {}
-                void setCursor(uint8_t col, uint8_t row) {}
-                void print(const char *s) {}
-                void print(int n) {}
-            };
-            """
-            try? lcdHeader.write(toFile: "\(dir)/LiquidCrystal_I2C.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("servo") {
-            let servoHeader = """
-            #pragma once
-            #include "Arduino.h"
-            class Servo {
-            public:
-                uint8_t attach(int pin) { return 1; }
-                void detach() {}
-                void write(int value) {}
-                int read() { return 90; }
-                bool attached() { return true; }
-            };
-            typedef Servo ESP32Servo;
-            """
-            try? servoHeader.write(toFile: "\(dir)/Servo.h", atomically: true, encoding: .utf8)
-            try? servoHeader.write(toFile: "\(dir)/ESP32Servo.h", atomically: true, encoding: .utf8)
-        } else if lower.contains("tinygps") {
-            let gpsHeader = """
-            #pragma once
-            #include "Arduino.h"
-            struct RawDegrees { double deg; };
-            struct TinyGPSLocation {
-                bool isValid() const { return true; }
-                double lat() { return 13.7563; }
-                double lng() { return 100.5018; }
-            };
-            class TinyGPSPlus {
-            public:
-                TinyGPSLocation location;
-                bool encode(char c) { return true; }
-            };
-            """
-            try? gpsHeader.write(toFile: "\(dir)/TinyGPSPlus.h", atomically: true, encoding: .utf8)
-            try? gpsHeader.write(toFile: "\(dir)/TinyGPS++.h", atomically: true, encoding: .utf8)
-        } else {
-            // Generic Auto-Synthesized C++ Header
-            let safeName = name.replacingOccurrences(of: " ", with: "_").replacingOccurrences(of: ".h", with: "")
-            let genericHeader = """
-            #pragma once
-            #include "Arduino.h"
-            // MicroCode Auto-Synthesized Header: \(name)
-            class \(safeName) {
-            public:
-                \(safeName)() {}
-                bool begin() { return true; }
-            };
-            """
-            try? genericHeader.write(toFile: "\(dir)/\(safeName).h", atomically: true, encoding: .utf8)
-        }
+        let fallback = "\(home)/.microcode/arduino15"
+        try? FileManager.default.createDirectory(atPath: fallback, withIntermediateDirectories: true)
+        return "ARDUINO_DIRECTORIES_DATA=\"\(fallback)\" ARDUINO_DIRECTORIES_DOWNLOADS=\"\(fallback)/staging\" "
     }
     
     // MARK: - ESP-IDF Transient Project Generation & Orchestration
@@ -1127,7 +577,7 @@ public final class EmbeddedEnvManager: ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/bin/bash")
-                process.arguments = ["-c", "ARDUINO_DIRECTORIES_DATA=/tmp/arduino15 \(cliPath) lib list --format json 2>/dev/null || ARDUINO_DIRECTORIES_DATA=/tmp/arduino15 \(cliPath) lib list"]
+                process.arguments = ["-c", "\(self?.arduinoDataEnvPrefix ?? "")\(cliPath) lib list --format json 2>/dev/null || \(self?.arduinoDataEnvPrefix ?? "")\(cliPath) lib list"]
                 
                 let pipe = Pipe()
                 process.standardOutput = pipe
@@ -1315,13 +765,7 @@ public final class EmbeddedEnvManager: ObservableObject {
             return !installedNames.contains(lower)
         }
         
-        // 1. INSTANT SYNTHETIC RESOLUTION (< 2ms)
-        // Synthesize headers into /tmp/microcode_sketch immediately so compiler / linting passes without waiting!
-        for lib in detected {
-            deploySyntheticLibraryHeader(named: lib, into: "/tmp/microcode_sketch")
-        }
-        
-        let elapsedMs = max(1.2, (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0)
+        let elapsedMs = max(0.2, (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0)
         self.lastResolveTimeMs = elapsedMs
         
         if missing.isEmpty {
@@ -1335,20 +779,23 @@ public final class EmbeddedEnvManager: ObservableObject {
         let resolvedSummary = missing.joined(separator: ", ")
         DispatchQueue.main.async {
             self.lastResolvedLib = resolvedSummary
-            self.autoDepStatus = "RESOLVED (\(String(format: "%.1f", elapsedMs))ms)"
+            self.autoDepStatus = self.autoInstallLibraries ? "INSTALLING (\(missing.count))" : "MISSING (\(missing.count))"
         }
         
-        // 2. BACKGROUND ASYNCHRONOUS AUTO-INSTALL (Non-blocking)
+        // Real background library installation via arduino-cli (no synthetic stub headers!)
         if autoInstallLibraries {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 guard let self = self else { return }
                 for lib in missing {
                     self.installLibraryFast(name: lib)
                 }
+                DispatchQueue.main.async {
+                    self.autoDepStatus = "INSTALLED (\(missing.count))"
+                }
             }
         }
         
-        completion?("Auto-resolved \(missing.count) dependencies in \(String(format: "%.1f", elapsedMs))ms: \(resolvedSummary)")
+        completion?("Queued real installation of \(missing.count) library dependencies: \(resolvedSummary)")
     }
     
     /// Ultra-fast background library installer utilizing ~/.microcode/libraries_cache/
@@ -1384,7 +831,7 @@ public final class EmbeddedEnvManager: ObservableObject {
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", "ARDUINO_DIRECTORIES_DATA=/tmp/arduino15 \(cliPath) lib install \"\(name)\""]
+        process.arguments = ["-c", "\(self.arduinoDataEnvPrefix)\(cliPath) lib install \"\(name)\""]
         
         do {
             try process.run()
@@ -1418,7 +865,7 @@ public final class EmbeddedEnvManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            let script = "ARDUINO_DIRECTORIES_DATA=/tmp/arduino15 \(cliPath) lib install \"\(name)\""
+            let script = "\(self?.arduinoDataEnvPrefix ?? "")\(cliPath) lib install \"\(name)\""
             process.arguments = ["-c", script]
             
             let pipe = Pipe()
@@ -1513,7 +960,7 @@ public final class EmbeddedEnvManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            let script = "ARDUINO_DIRECTORIES_DATA=/tmp/arduino15 \(cliPath) lib uninstall \"\(name)\""
+            let script = "\(self?.arduinoDataEnvPrefix ?? "")\(cliPath) lib uninstall \"\(name)\""
             process.arguments = ["-c", script]
             
             let pipe = Pipe()
@@ -1566,7 +1013,7 @@ public final class EmbeddedEnvManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            let script = "ARDUINO_DIRECTORIES_DATA=/tmp/arduino15 \(cliPath) lib search \"\(trimmed)\" --names"
+            let script = "\(self?.arduinoDataEnvPrefix ?? "")\(cliPath) lib search \"\(trimmed)\" --names"
             process.arguments = ["-c", script]
             
             let pipe = Pipe()

@@ -15,6 +15,7 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
     case learn = "learn"
     case compare = "compare"
     case squad = "squad"
+    case pns = "pns"
     case search = "search"
     case terminal = "terminal"
     case help = "help"
@@ -36,7 +37,8 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
         case .review: return "Perform a comprehensive senior code review"
         case .learn: return "Save a persistent rule into .microcode/rules.md"
         case .compare: return "Compare responses from 2 AI models side-by-side"
-        case .squad: return "Configure or launch CEO & Specialist SubAgent Squad"
+        case .squad: return "Configure or launch multi-agent specialist team"
+        case .pns: return "Open PNS 24/7 Neural System Console or dispatch a 24/7 marathon mission"
         case .search: return "Search workspace for query"
         case .terminal: return "Include last terminal output"
         case .help: return "Show list of all slash commands"
@@ -58,7 +60,8 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
         case .review: return "checkmark.shield"
         case .learn: return "bookmark"
         case .compare: return "rectangle.split.2x1"
-        case .squad: return "crown.fill"
+        case .squad: return "square.stack.3d.up"
+        case .pns: return "point.3.connected.trianglepath.dotted"
         case .search: return "magnifyingglass"
         case .terminal: return "terminal"
         case .help: return "info.circle"
@@ -150,6 +153,8 @@ class SlashCommandService: ObservableObject {
         case .compare:
             return argument
         case .squad:
+            return argument
+        case .pns:
             return argument
         case .search:
             return "Search the workspace and analyze results for: \(argument)"

@@ -150,9 +150,9 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.32</string>
+    <string>2.5.33</string>
     <key>CFBundleVersion</key>
-    <string>32</string>
+    <string>33</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -169,6 +169,27 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <string>MicroCode requires microphone access for audio preview.</string>
     <key>NSCameraUseContinuityCameraDeviceType</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>MicroCode discovers and connects to Local LLM servers (LM Studio, Ollama, Apple MLX, vLLM, and MicroCode peers) across your Wi-Fi and LAN network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_microcode-llm._tcp</string>
+        <string>_microcode-phone._tcp</string>
+        <string>_ollama._tcp</string>
+        <string>_http._tcp</string>
+        <string>_smb._tcp</string>
+        <string>_ssh._tcp</string>
+        <string>_workstation._tcp</string>
+        <string>_rfb._tcp</string>
+        <string>_companion-link._tcp</string>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
@@ -208,6 +229,19 @@ fi
 if [ -d "MicroCode/Resources" ]; then
     echo "   Copying MicroCode/Resources into Bundle Resources..."
     cp -R MicroCode/Resources/* "$BUNDLE_NAME/Contents/Resources/"
+fi
+if [ -d "Vendor/serve-sim/0.1.46" ]; then
+    echo "   Bundling Fast iOS Preview runtime (serve-sim 0.1.46)..."
+    mkdir -p "$BUNDLE_NAME/Contents/Resources/serve-sim"
+    rsync -a --delete \
+        --exclude "Sources" \
+        --exclude "Tests" \
+        --exclude ".build" \
+        --exclude "*.ts" \
+        --exclude "tsconfig.json" \
+        "Vendor/serve-sim/0.1.46/" "$BUNDLE_NAME/Contents/Resources/serve-sim/"
+    chmod +x "$BUNDLE_NAME/Contents/Resources/serve-sim/dist/serve-sim.js" 2>/dev/null || true
+    chmod +x "$BUNDLE_NAME/Contents/Resources/serve-sim/bin/xcrun" 2>/dev/null || true
 fi
 
 # 6. Bundle Runtimes (only if --with-runtimes flag is passed)

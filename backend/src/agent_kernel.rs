@@ -365,8 +365,12 @@ impl AgentKernel {
             .as_ref()
             .map(|name| tool_fingerprint(name, &request.arguments));
         let is_start_event = matches!(kind.as_str(), "tool_start" | "model_start");
-        let progress =
-            request.made_progress || inferred_progress(&kind, request.success, &request.output);
+        let is_duplicate_fingerprint = fingerprint
+            .as_ref()
+            .map(|fp| run.recent_fingerprints.contains(fp))
+            .unwrap_or(false);
+        let progress = !is_duplicate_fingerprint
+            && (request.made_progress || inferred_progress(&kind, request.success, &request.output));
 
         if progress {
             run.no_progress_streak = 0;
@@ -683,18 +687,10 @@ fn evaluate(run: &mut AgentRun, request: &ObserveRequest) -> KernelDirective {
     if request.kind == "model_no_tool" && run.no_progress_streak >= 3 {
         run.replans_without_progress = run.replans_without_progress.saturating_add(1);
         if run.replans_without_progress >= MAX_REPLANS_WITHOUT_PROGRESS {
-            run.replans_without_progress = 0;
-            run.retry_attempt = run.retry_attempt.saturating_add(1);
-            run.state = RunState::WaitingRetry;
-            let delay = retry_delay(run.retry_attempt);
-            return KernelDirective {
-                action: "retry".into(),
-                reason: "The model did not issue an executable action; retrying from the durable checkpoint with a fresh strategy".into(),
-                state: run.state.clone(),
-                retry_after_ms: Some(delay),
-                ready_nodes: ready_node_ids(&run.plan),
-                suggested_prompt: Some("Resume from the durable plan. Inspect the latest real tool evidence, choose a different executable action, and do not return a progress-only answer.".into()),
-            };
+            let reason = "Agent stalled: model repeatedly emitted no executable tool action without making progress";
+            run.state = RunState::Blocked;
+            run.terminal_reason = Some(reason.into());
+            return directive_for(run, "stalled", reason);
         }
         run.state = RunState::Replanning;
         return KernelDirective {
@@ -741,20 +737,18 @@ fn evaluate(run: &mut AgentRun, request: &ObserveRequest) -> KernelDirective {
         || repeated_tail(&run.recent_fingerprints) >= REPEAT_REPLAN_THRESHOLD
     {
         run.replans_without_progress = run.replans_without_progress.saturating_add(1);
-        run.recent_fingerprints.clear();
+        let mut unique_seen = VecDeque::new();
+        for fp in run.recent_fingerprints.drain(..) {
+            if !unique_seen.contains(&fp) {
+                unique_seen.push_back(fp);
+            }
+        }
+        run.recent_fingerprints = unique_seen;
         if run.replans_without_progress >= MAX_REPLANS_WITHOUT_PROGRESS {
-            run.replans_without_progress = 0;
-            run.retry_attempt = run.retry_attempt.saturating_add(1);
-            run.state = RunState::WaitingRetry;
-            let delay = retry_delay(run.retry_attempt);
-            return KernelDirective {
-                action: "retry".into(),
-                reason: "Repeated action cycle detected; waiting before resuming from the durable checkpoint".into(),
-                state: run.state.clone(),
-                retry_after_ms: Some(delay),
-                ready_nodes: ready_node_ids(&run.plan),
-                suggested_prompt: Some("Do not repeat an earlier command. Re-read its observed result, select a different diagnostic or repair action, then verify it.".into()),
-            };
+            let reason = "Agent stalled: repeated action cycle continued across multiple replans with zero forward progress";
+            run.state = RunState::Blocked;
+            run.terminal_reason = Some(reason.into());
+            return directive_for(run, "stalled", reason);
         }
         run.state = RunState::Replanning;
         let reason = "Repeated action cycle detected; completed actions must not be repeated";
@@ -810,18 +804,16 @@ fn evaluate(run: &mut AgentRun, request: &ObserveRequest) -> KernelDirective {
     if request.success == Some(false) && run.error_streak >= 2 {
         run.replans_without_progress = run.replans_without_progress.saturating_add(1);
         if run.replans_without_progress >= MAX_REPLANS_WITHOUT_PROGRESS {
-            run.replans_without_progress = 0;
-            run.retry_attempt = run.retry_attempt.saturating_add(1);
-            run.state = RunState::WaitingRetry;
-            let delay = retry_delay(run.retry_attempt);
-            return KernelDirective {
-                action: "retry".into(),
-                reason: "The operation failed repeatedly; retaining evidence and retrying with a new strategy".into(),
-                state: run.state.clone(),
-                retry_after_ms: Some(delay),
-                ready_nodes: ready_node_ids(&run.plan),
-                suggested_prompt: Some("Use the latest failing output as the source of truth. Diagnose the first actionable error, apply one scoped repair, then execute verification.".into()),
+            let reason = match run.last_error.as_deref() {
+                Some(err) if !err.is_empty() => format!(
+                    "Agent stalled after repeated unrecovered errors: {}",
+                    compact(err)
+                ),
+                _ => "Agent stalled after repeated unrecovered tool failures without progress".into(),
             };
+            run.state = RunState::Blocked;
+            run.terminal_reason = Some(reason.clone());
+            return directive_for(run, "stalled", &reason);
         }
         run.state = RunState::Replanning;
         return KernelDirective {
@@ -1569,5 +1561,25 @@ mod tests {
             .directive
             .ready_nodes
             .contains(&"build".to_string()));
+    }
+
+    #[tokio::test]
+    async fn halts_with_stalled_after_exhausting_replans_without_progress() {
+        let kernel = test_kernel("stalled-breaker");
+        run(&kernel, "stalled-run").await;
+        let args = serde_json::json!({"path": "same_file.rs"});
+        let mut final_action = String::new();
+        for _ in 0..(MAX_REPLANS_WITHOUT_PROGRESS as usize * REPEAT_REPLAN_THRESHOLD) {
+            let response = kernel
+                .observe("stalled-run", tool("read", args.clone(), true, false))
+                .await
+                .unwrap();
+            final_action = response.directive.action;
+            if final_action == "stalled" {
+                assert_eq!(response.run.state, RunState::Blocked);
+                break;
+            }
+        }
+        assert_eq!(final_action, "stalled");
     }
 }

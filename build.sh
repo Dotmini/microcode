@@ -434,9 +434,9 @@ elif [ -f "Package.swift" ]; then
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.32</string>
+    <string>2.5.33</string>
     <key>CFBundleVersion</key>
-    <string>32</string>
+    <string>33</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -445,6 +445,27 @@ elif [ -f "Package.swift" ]; then
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
     <string>MicroCode captures only the Apple Device Hub window you select to display an interactive iOS Simulator beside your chat.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>MicroCode discovers and connects to Local LLM servers (LM Studio, Ollama, Apple MLX, vLLM, and MicroCode peers) across your Wi-Fi and LAN network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_microcode-llm._tcp</string>
+        <string>_microcode-phone._tcp</string>
+        <string>_ollama._tcp</string>
+        <string>_http._tcp</string>
+        <string>_smb._tcp</string>
+        <string>_ssh._tcp</string>
+        <string>_workstation._tcp</string>
+        <string>_rfb._tcp</string>
+        <string>_companion-link._tcp</string>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

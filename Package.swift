@@ -168,12 +168,14 @@ let package = Package(
                 "Views/EmbeddedStudioView.swift",
                 "Views/EmbeddedProjectWizard.swift",
                 "Services/EmbeddedEnvManager.swift",
+                "Services/EmbeddedHardwareServices.swift",
                 "Views/EmbeddedEnvSheet.swift",
                 "Views/EmbeddedAIAgentPanel.swift",
                 "Views/CollaborationView.swift",
                 "Models/SASProcedures.swift",
                 "Views/Tasks/GitHistoryView.swift", // New Phase 10
                 "Views/Notebook/SASProcedureView.swift", // New Phase 12
+                "Views/Notebook/CellAIAgentEngine.swift", // Unified Cell Mode AI Picker & Agent Loop
                 "Views/Notebook/NotebookAIPanel.swift", // Cell Mode AI Agent
                 "Views/Notebook/GoogleColabSheetView.swift", // Google Colab Management Sheet
                 "Models/DesignModels.swift", // Design Engine
@@ -237,6 +239,7 @@ let package = Package(
                 "Services/KeychainManager.swift",      // Keychain CRUD + Rust FFI Bridge
                 "Services/MCPServer.swift",            // MCP Protocol Server
                 "Services/LocalLLMService.swift",     // Local LLM Detection (LM Studio, Ollama)
+                "Services/LocalLLMGatewayService.swift", // Worldwide & LAN QR Gateway for Local LLM
                 "Services/AIAutocompleteService.swift", // Ghost Text AI Engine
                 
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper
@@ -372,6 +375,25 @@ let package = Package(
                 "Services/TelemetryIngestionService.swift",
                 // Phase 4: Datasheet-to-Code
                 "Services/HardwareRAGService.swift",
+                // Multi-Workspace Isolation & Hybrid BM25 + Symbol Graph Search
+                "Services/AgentCore/AgentExecutionContext.swift",
+                "Services/AgentCore/CodebaseSearchTool.swift",
+                // Modularized Workspace Views (split from ContentView monolith)
+                "Views/Workspace/WorkspaceXcodeNavigatorAndInspector.swift",
+                "Views/Workspace/WorkspaceEditorAndDebugViews.swift",
+                "Views/Workspace/WorkspaceWelcomeAndSheets.swift",
+                "Views/Workspace/WorkspaceSettingsAndWindowModifiers.swift",
+                // Modularized AI Agent Views (split from AIAgentView monolith)
+                "Views/AI/AIAgentChatStageAndCells.swift",
+                "Views/AI/AIAgentMessageRowsAndDiffCards.swift",
+                "Views/AI/AIAgentMarkdownAndCodeViews.swift",
+                "Views/AI/AIAgentTimelineAndMenus.swift",
+                // PNS — Pseudo Neural System (24/7 Biomimetic Nerve-Tract Orchestrator & Out-of-Process Daemon)
+                "Services/PNS/PNSModels.swift",
+                "Services/PNS/PNSGanglionRouter.swift",
+                "Services/PNS/PNSMotorWorktreePlexus.swift",
+                "Services/PNS/PNSOrchestrator.swift",
+                "Views/AI/PNSNeuralDashboardView.swift",
             ],
             resources: [
                 .process("Resources")

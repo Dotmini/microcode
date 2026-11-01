@@ -73,6 +73,8 @@ struct MicCell: Codable {
     var isCollapsed: Bool
     var procedureMetadata: [String: String]? // Stored as JSON strings to bypass AnyCodable complexity
     var generatedCode: String
+    var aiSelection: CellAISelection?
+    var agentExecutionMode: Bool?
     
     // Convert from UI Model
     init(from model: NotebookCellModel) {
@@ -85,6 +87,8 @@ struct MicCell: Codable {
         self.colorTheme = model.colorTheme.rawValue
         self.isCollapsed = model.isCollapsed
         self.generatedCode = model.generatedCode
+        self.aiSelection = model.aiSelection
+        self.agentExecutionMode = model.agentExecutionMode
         
         if !model.procedureMetadata.isEmpty {
             var stringMap: [String: String] = [:]
@@ -111,6 +115,12 @@ struct MicCell: Codable {
         model.colorTheme = CellColorTheme(rawValue: self.colorTheme) ?? .none
         model.isCollapsed = self.isCollapsed
         model.generatedCode = self.generatedCode
+        if let sel = self.aiSelection {
+            model.aiSelection = sel
+        }
+        if let agentMode = self.agentExecutionMode {
+            model.agentExecutionMode = agentMode
+        }
         
         if let metadata = self.procedureMetadata {
             for (key, str) in metadata {

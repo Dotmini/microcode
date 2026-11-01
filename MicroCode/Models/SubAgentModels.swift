@@ -27,11 +27,11 @@ public enum SubAgentLifecycleState: String, Codable, CaseIterable {
     public var statusColor: Color {
         switch self {
         case .idle: return .secondary
-        case .running: return .green
-        case .waitingForInput, .waitingForMessage: return .orange
-        case .completed: return .blue
-        case .errored: return .red
-        case .killed: return .gray
+        case .running: return .primary
+        case .waitingForInput, .waitingForMessage: return .secondary
+        case .completed: return .secondary
+        case .errored: return .red.opacity(0.85)
+        case .killed: return .secondary.opacity(0.6)
         }
     }
     
@@ -235,9 +235,9 @@ public struct AgentSquadPreset: Identifiable, Codable, Hashable, Equatable {
         [
             AgentSquadPreset(
                 id: "squad_titan_claude_gemini_deepseek",
-                name: "Claude CEO + Gemini + DeepSeek",
-                subtitle: "Claude (CEO) สั่งงาน • Gemini (Frontend/UI) • DeepSeek (Backend/Core) • Claude (QA)",
-                icon: "crown.fill",
+                name: "Claude + Gemini + DeepSeek",
+                subtitle: "Claude (Lead) • Gemini (Frontend/UI) • DeepSeek (Backend/Core) • Claude (QA)",
+                icon: "square.stack.3d.up",
                 isBuiltIn: true,
                 ceoEndpoint: AgentModelEndpoint(authSource: .auto, provider: "anthropic", model: "claude-sonnet-4-6"),
                 subordinates: [
@@ -273,9 +273,9 @@ public struct AgentSquadPreset: Identifiable, Codable, Hashable, Equatable {
             ),
             AgentSquadPreset(
                 id: "squad_openai_deepseek",
-                name: "ChatGPT CEO + DeepSeek + Gemini",
-                subtitle: "ChatGPT/Codex (CEO) วางแผนตรวจงาน • DeepSeek (Backend) • Gemini (Frontend)",
-                icon: "sparkles.rectangle.stack.fill",
+                name: "ChatGPT + DeepSeek + Gemini",
+                subtitle: "ChatGPT/Codex (Lead) • DeepSeek (Backend) • Gemini (Frontend)",
+                icon: "square.3.layers.3d",
                 isBuiltIn: true,
                 ceoEndpoint: AgentModelEndpoint(authSource: .auto, provider: "openai", model: "gpt-4.1"),
                 subordinates: [
@@ -354,6 +354,17 @@ public struct SubAgentTaskContract: Identifiable, Codable, Equatable {
         case revisionNeeded = "Revision Ordered"
         case approved = "CEO Approved"
         case failed = "Failed"
+
+        public var displayLabel: String {
+            switch self {
+            case .pending: return "Pending"
+            case .inProgress: return "In Progress"
+            case .underReview: return "Reviewing"
+            case .revisionNeeded: return "Revision"
+            case .approved: return "Approved"
+            case .failed: return "Failed"
+            }
+        }
     }
     
     public var id: String
@@ -400,6 +411,17 @@ public struct InterAgentMessage: Identifiable, Codable, Equatable {
         case verificationPassed = "Verified"
         case revisionRequested = "CEO Revision Order"
         case approved = "CEO Approved"
+
+        public var displayLabel: String {
+            switch self {
+            case .briefing: return "Briefing"
+            case .delegation: return "Assigned"
+            case .peerSync: return "Sync"
+            case .verificationPassed: return "Verified"
+            case .revisionRequested: return "Revision"
+            case .approved: return "Approved"
+            }
+        }
     }
     
     public let id: String

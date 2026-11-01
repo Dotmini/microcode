@@ -19,6 +19,7 @@ struct InteractiveCodePreviewView: View {
     
     @State private var codeContent: String = ""
     @State private var highlightedLines: [AttributedString] = []
+    @State private var maxLineCharCount: Int = 0
     @State private var isLoading: Bool = true
     @State private var errorMessage: String? = nil
     @State private var isCopied: Bool = false
@@ -56,8 +57,8 @@ struct InteractiveCodePreviewView: View {
         }
     }
     
-    private var detectedLanguage: String {
-        switch fileExtension {
+    private static func detectLanguage(for fileURL: URL) -> String {
+        switch fileURL.pathExtension.lowercased() {
         case "swift": return "swift"
         case "rs": return "rust"
         case "py", "pyi": return "python"
@@ -74,10 +75,10 @@ struct InteractiveCodePreviewView: View {
         case "go": return "go"
         case "dart": return "dart"
         case "json", "jsonc", "jsonl": return "json"
-        case "html", "htm": return "html"
+        case "html", "htm", "razor", "cshtml": return "html"
         case "css", "scss", "sass", "less": return "css"
         case "yaml", "yml": return "yaml"
-        case "xml", "plist", "svg": return "xml"
+        case "xml", "plist", "svg", "axaml", "xaml", "csproj", "fsproj", "vbproj", "props", "targets", "resx", "config": return "xml"
         case "sh", "bash", "zsh", "fish": return "bash"
         case "sql", "prisma": return "sql"
         case "toml": return "toml"
@@ -85,9 +86,25 @@ struct InteractiveCodePreviewView: View {
         case "rb": return "ruby"
         case "php": return "php"
         case "cs": return "csharp"
+        case "fs": return "fsharp"
         case "ar": return "ardium"
         default: return "text"
         }
+    }
+
+    private var detectedLanguage: String {
+        Self.detectLanguage(for: url)
+    }
+
+    /// Only highlight a range when it points to a specific sub-section of the file,
+    /// avoiding painting 100% of every line blue when `#L1-N` covers the entire file.
+    private var effectiveHighlightRange: ClosedRange<Int>? {
+        guard let range = activeHighlightRange else { return nil }
+        let total = highlightedLines.count
+        if total > 0 && range.lowerBound <= 1 && range.upperBound >= total {
+            return nil
+        }
+        return range
     }
 
     /// Breadcrumb segments relative to workspace root (matching AGY breadcrumb bar)
@@ -111,6 +128,8 @@ struct InteractiveCodePreviewView: View {
     }
     
     var body: some View {
+        let theme = appState.appTheme
+        let editorCanvas = theme.isGlass ? Color.clear : Color(nsColor: theme.editorBackground)
         VStack(spacing: 0) {
             // AGY-Style Breadcrumb & Action Bar
             headerBar
@@ -141,11 +160,12 @@ struct InteractiveCodePreviewView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if showGitDiff, let diff = gitDiffContent {
-                // Inline Git Diff View
+                // Inline Git Diff View (header bar above already provides Close button)
                 InteractiveDiffPreviewView(
                     title: url.lastPathComponent,
                     oldContent: diff.old,
-                    newContent: diff.new
+                    newContent: diff.new,
+                    showsCloseButton: false
                 )
             } else if showLiveRender && supportsLiveRender {
                 // Playground-Style Live Render View (SwiftUI / HTML / SVG / Markdown)
@@ -155,21 +175,27 @@ struct InteractiveCodePreviewView: View {
                 codeViewer
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(editorCanvas)
         .onAppear {
             activeHighlightRange = highlightRange
-            loadFileContent()
-            checkGitDiff()
+            loadFileContent(for: url)
+            checkGitDiff(for: url)
         }
-        .onChange(of: url) { _ in
+        .onChange(of: url) { newURL in
             activeHighlightRange = highlightRange
+            showGitDiff = false
+            gitDiffContent = nil
+            hasGitDiff = false
             liveSwiftUIDylibPath = nil
             swiftUICompileError = nil
-            loadFileContent()
-            checkGitDiff()
+            loadFileContent(for: newURL)
+            checkGitDiff(for: newURL)
         }
         .onChange(of: highlightRange) { newRange in
             activeHighlightRange = newRange
+        }
+        .onChange(of: appState.appTheme) { newTheme in
+            rehighlightCurrentCode(theme: newTheme)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
             guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
@@ -214,7 +240,8 @@ struct InteractiveCodePreviewView: View {
     // MARK: - AGY-Style Breadcrumb Header Bar
     
     private var headerBar: some View {
-        HStack(spacing: 6) {
+        let headerBg = appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground)
+        return HStack(spacing: 6) {
             // Breadcrumb path + file icon & name
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 5) {
@@ -236,7 +263,7 @@ struct InteractiveCodePreviewView: View {
                             .lineLimit(1)
                     }
 
-                    if let range = activeHighlightRange {
+                    if let range = effectiveHighlightRange {
                         Button {
                             withAnimation(.easeInOut(duration: 0.15)) {
                                 activeHighlightRange = nil
@@ -348,75 +375,105 @@ struct InteractiveCodePreviewView: View {
             }
             .buttonStyle(.plain)
             .help("Open in full Code Editor")
+
+            Divider()
+                .frame(height: 14)
+                .padding(.horizontal, 1)
+
+            PreviewCloseTabButton()
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.55))
+        .background(headerBg)
     }
     
-    // MARK: - Syntax-Highlighted Code Viewer
+    // MARK: - Syntax-Highlighted Code Viewer (Theme-Matched & Full-Width Rows)
     
     private var codeViewer: some View {
+        let theme = appState.appTheme
         let totalLines = max(1, highlightedLines.count)
         let gutterWidth: CGFloat = totalLines > 9999 ? 48 : (totalLines > 999 ? 40 : (totalLines > 99 ? 32 : 26))
+        let gutterTotalWidth: CGFloat = showLineNumbers ? (gutterWidth + 18.5) : 0
+        let contentNaturalWidth: CGFloat = gutterTotalWidth + CGFloat(maxLineCharCount) * 7.35 + 40
+        let highlightBg = Color(nsColor: theme.selectionColor).opacity(theme.isDark ? 0.52 : 0.42)
+        let lineNumBaseColor = Color(nsColor: theme.commentColor).opacity(0.78)
+        let rangeToHighlight = effectiveHighlightRange
         
-        return ScrollViewReader { scrollProxy in
-            ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(0..<highlightedLines.count, id: \.self) { index in
-                        let lineNumber = index + 1
-                        let isHighlighted = activeHighlightRange?.contains(lineNumber) ?? false
-                        
-                        HStack(alignment: .firstTextBaseline, spacing: 0) {
-                            if showLineNumbers {
-                                Rectangle()
-                                    .fill(isHighlighted ? Color.accentColor : Color.clear)
-                                    .frame(width: 2.5, height: 19)
+        return GeometryReader { geo in
+            let minRowWidth = max(geo.size.width, contentNaturalWidth)
+            ScrollViewReader { scrollProxy in
+                ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(0..<highlightedLines.count, id: \.self) { index in
+                            let lineNumber = index + 1
+                            let isHighlighted = rangeToHighlight?.contains(lineNumber) ?? false
+                            
+                            HStack(alignment: .center, spacing: 0) {
+                                if showLineNumbers {
+                                    Rectangle()
+                                        .fill(isHighlighted ? Color.accentColor : Color.clear)
+                                        .frame(width: 2.5, height: 20)
+                                    
+                                    Text("\(lineNumber)")
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundColor(isHighlighted ? .accentColor : lineNumBaseColor)
+                                        .frame(width: gutterWidth, alignment: .trailing)
+                                        .padding(.trailing, 10)
+                                        .padding(.leading, 6)
+                                }
                                 
-                                Text("\(lineNumber)")
-                                    .font(.system(size: 11.5, design: .monospaced))
-                                    .foregroundColor(isHighlighted ? .accentColor : .secondary.opacity(0.45))
-                                    .frame(width: gutterWidth, alignment: .trailing)
-                                    .padding(.trailing, 10)
-                                    .padding(.leading, 4)
+                                Text(highlightedLines[index])
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.leading, 6)
+                                    .padding(.trailing, 24)
+                                
+                                Spacer(minLength: 0)
                             }
-                            
-                            Text(highlightedLines[index])
-                                .font(.system(size: 12, design: .monospaced))
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .padding(.leading, 6)
-                                .padding(.trailing, 24)
-                            
-                            Spacer(minLength: 0)
+                            .frame(minWidth: minRowWidth, minHeight: 20, maxHeight: 20, alignment: .leading)
+                            .background(isHighlighted ? highlightBg : Color.clear)
+                            .id(lineNumber)
                         }
-                        .frame(height: 19, alignment: .leading)
-                        .background(isHighlighted ? Color.accentColor.opacity(0.11) : Color.clear)
-                        .id(lineNumber)
                     }
+                    .frame(minWidth: minRowWidth, alignment: .leading)
+                    .padding(.vertical, 8)
+                    .textSelection(.enabled)
                 }
-                .padding(.vertical, 8)
-                .textSelection(.enabled)
-            }
-            .onAppear {
-                scrollToHighlightedLine(using: scrollProxy)
-            }
-            .onChange(of: activeHighlightRange) { _ in
-                scrollToHighlightedLine(using: scrollProxy)
-            }
-            .onChange(of: highlightedLines.count) { _ in
-                scrollToHighlightedLine(using: scrollProxy)
+                .onAppear {
+                    scrollToHighlightedLine(using: scrollProxy, range: activeHighlightRange, totalLineCount: highlightedLines.count)
+                }
+                .onChange(of: activeHighlightRange) { newRange in
+                    scrollToHighlightedLine(using: scrollProxy, range: newRange, totalLineCount: highlightedLines.count)
+                }
+                .onChange(of: highlightedLines.count) { newCount in
+                    scrollToHighlightedLine(using: scrollProxy, range: activeHighlightRange, totalLineCount: newCount)
+                }
             }
         }
     }
 
-    private func scrollToHighlightedLine(using proxy: ScrollViewProxy) {
-        guard let targetLine = activeHighlightRange?.lowerBound,
-              targetLine > 0,
-              targetLine <= highlightedLines.count else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                proxy.scrollTo(max(1, targetLine - 3), anchor: .top)
+    private func scrollToHighlightedLine(
+        using proxy: ScrollViewProxy,
+        range: ClosedRange<Int>?,
+        totalLineCount: Int
+    ) {
+        guard totalLineCount > 0 else { return }
+        // Suppress full-file range (1...totalLineCount) and always anchor to .topLeading
+        // so horizontal scroll stays pinned at x = 0 (never centered by UnitPoint.top).
+        if let r = range,
+           !(r.lowerBound <= 1 && r.upperBound >= totalLineCount),
+           r.lowerBound > 0,
+           r.lowerBound <= totalLineCount {
+            let targetRow = max(1, r.lowerBound - 3)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    proxy.scrollTo(targetRow, anchor: .topLeading)
+                }
+            }
+        } else {
+            DispatchQueue.main.async {
+                proxy.scrollTo(1, anchor: .topLeading)
             }
         }
     }
@@ -526,13 +583,72 @@ struct InteractiveCodePreviewView: View {
         }
     }
 
+    private struct ThemeSyntaxPalette {
+        let baseColor: Color
+        let keywordColor: Color
+        let typeColor: Color
+        let functionColor: Color
+        let stringColor: Color
+        let commentColor: Color
+        let numberColor: Color
+
+        init(theme: AppTheme) {
+            self.baseColor = Color(nsColor: theme.editorText)
+            self.keywordColor = Color(nsColor: theme.keywordColor)
+            self.typeColor = Color(nsColor: theme.typeColor)
+            self.functionColor = Color(nsColor: theme.functionColor)
+            self.stringColor = Color(nsColor: theme.stringColor)
+            self.commentColor = Color(nsColor: theme.commentColor)
+            self.numberColor = Color(nsColor: theme.numberColor)
+        }
+    }
+
+    private static func normalizeDisplayLines(_ rawText: String) -> (lines: [String], maxChars: Int) {
+        let normalized = rawText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var rawLines = normalized.components(separatedBy: "\n")
+        // Drop single trailing empty line produced by standard POSIX trailing newline so line count matches editors
+        if rawLines.count > 1 && rawLines.last == "" {
+            rawLines.removeLast()
+        }
+        var maxChars = 0
+        var expanded: [String] = []
+        expanded.reserveCapacity(rawLines.count)
+        for line in rawLines {
+            let tabExpanded = line.contains("\t") ? line.replacingOccurrences(of: "\t", with: "    ") : line
+            if tabExpanded.count > maxChars {
+                maxChars = min(tabExpanded.count, 400)
+            }
+            expanded.append(tabExpanded)
+        }
+        return (expanded, maxChars)
+    }
+
+    private func rehighlightCurrentCode(theme: AppTheme) {
+        let currentCode = codeContent
+        guard !currentCode.isEmpty else { return }
+        let lang = detectedLanguage
+        let palette = ThemeSyntaxPalette(theme: theme)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let prepared = Self.normalizeDisplayLines(currentCode)
+            let styled = Self.highlightLines(prepared.lines, language: lang, palette: palette)
+            DispatchQueue.main.async {
+                self.maxLineCharCount = prepared.maxChars
+                self.highlightedLines = styled
+            }
+        }
+    }
+
     private func applyLiveBufferContent(_ newContent: String) {
         let lang = detectedLanguage
+        let palette = ThemeSyntaxPalette(theme: appState.appTheme)
         self.codeContent = newContent
         DispatchQueue.global(qos: .userInteractive).async {
-            let rawLines = newContent.components(separatedBy: "\n")
-            let styled = Self.highlightLines(rawLines, language: lang)
+            let prepared = Self.normalizeDisplayLines(newContent)
+            let styled = Self.highlightLines(prepared.lines, language: lang, palette: palette)
             DispatchQueue.main.async {
+                self.maxLineCharCount = prepared.maxChars
                 self.highlightedLines = styled
             }
         }
@@ -567,15 +683,16 @@ struct InteractiveCodePreviewView: View {
         }
     }
 
-    // MARK: - Helpers & Fast Syntax Highlighter
+    // MARK: - Helpers & Theme-Synchronized Fast Syntax Highlighter
     
-    private func loadFileContent(silent: Bool = false) {
+    private func loadFileContent(for overrideURL: URL? = nil, silent: Bool = false) {
         if !silent {
             isLoading = true
         }
         errorMessage = nil
-        let targetURL = url
-        let lang = detectedLanguage
+        let targetURL = overrideURL ?? url
+        let lang = Self.detectLanguage(for: targetURL)
+        let palette = ThemeSyntaxPalette(theme: appState.appTheme)
         
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -601,11 +718,12 @@ struct InteractiveCodePreviewView: View {
                     string = "⚠️ [LARGE FILE WARNING: File size is \(formatted). Previewing the first 1 MB in read-only mode.]\n\n" + string
                 }
                 
-                let rawLines = string.components(separatedBy: "\n")
-                let styled = Self.highlightLines(rawLines, language: lang)
+                let prepared = Self.normalizeDisplayLines(string)
+                let styled = Self.highlightLines(prepared.lines, language: lang, palette: palette)
                 
                 DispatchQueue.main.async {
                     self.codeContent = string
+                    self.maxLineCharCount = prepared.maxChars
                     self.highlightedLines = styled
                     self.isLoading = false
                 }
@@ -619,28 +737,30 @@ struct InteractiveCodePreviewView: View {
     }
 
     private static let keywordsSet: Set<String> = [
-        "import", "from", "export", "default", "package", "module", "use", "mod", "crate",
-        "struct", "class", "enum", "protocol", "interface", "trait", "impl", "type", "typealias", "extension",
+        "import", "from", "export", "default", "package", "module", "use", "mod", "crate", "namespace", "using",
+        "struct", "class", "enum", "protocol", "interface", "trait", "impl", "type", "typealias", "extension", "record",
         "func", "fn", "def", "function", "sub", "proc", "init", "deinit", "subscript",
-        "let", "var", "const", "mut", "static", "final", "lazy", "weak", "unowned",
-        "public", "private", "internal", "fileprivate", "open", "protected", "pub",
-        "if", "else", "elif", "guard", "switch", "case", "match", "for", "in", "while", "repeat", "loop", "do",
+        "let", "var", "const", "mut", "static", "final", "lazy", "weak", "unowned", "readonly", "sealed", "partial",
+        "public", "private", "internal", "fileprivate", "open", "protected", "pub", "override", "virtual", "abstract",
+        "if", "else", "elif", "guard", "switch", "case", "match", "for", "foreach", "in", "while", "repeat", "loop", "do",
         "return", "yield", "break", "continue", "fallthrough", "defer",
-        "try", "catch", "throw", "throws", "rethrows", "async", "await", "actor", "nonisolated", "some", "any",
-        "where", "as", "is", "in", "inout", "Self", "self", "super", "true", "false", "nil", "null", "None", "True", "False",
-        "and", "or", "not", "with", "lambda", "pass", "del", "global", "nonlocal", " script", "style", "template"
+        "try", "catch", "finally", "throw", "throws", "rethrows", "async", "await", "actor", "nonisolated", "some", "any",
+        "where", "as", "is", "inout", "out", "ref", "Self", "self", "this", "base", "super", "new",
+        "true", "false", "nil", "null", "None", "True", "False", "undefined",
+        "bool", "int", "string", "double", "float", "decimal", "void", "object", "byte", "char", "long", "short",
+        "get", "set", "value", "nameof", "typeof", "sizeof",
+        "and", "or", "not", "with", "lambda", "pass", "del", "global", "nonlocal", "script", "style", "template"
     ]
 
-    private static func highlightLines(_ lines: [String], language: String) -> [AttributedString] {
-        let keywordColor = Color(red: 0.72, green: 0.20, blue: 0.66)     // Xcode/AGY Magenta-Purple
-        let typeColor = Color(red: 0.16, green: 0.52, blue: 0.68)        // Teal-Blue for Types & Attributes
-        let stringColor = Color(red: 0.78, green: 0.22, blue: 0.18)      // Warm Red-Orange for Strings
-        let commentColor = Color.secondary.opacity(0.68)                 // Muted Gray-Green for Comments
-        let numberColor = Color(red: 0.15, green: 0.44, blue: 0.82)      // Royal Blue for Numbers
-        let baseColor = Color.primary.opacity(0.90)
+    private static let markupLanguages: Set<String> = [
+        "xml", "html", "svelte", "vue", "astro", "javascript", "typescript", "markdown"
+    ]
 
+    private static func highlightLines(_ lines: [String], language: String, palette: ThemeSyntaxPalette) -> [AttributedString] {
         var result: [AttributedString] = []
         result.reserveCapacity(lines.count)
+        let isMarkup = markupLanguages.contains(language)
+        let isPureXMLOrHTML = (language == "xml" || language == "html")
 
         let highlightCap = 3000 // Highlight up to 3000 lines for instant zero-lag rendering
         for (idx, line) in lines.enumerated() {
@@ -650,38 +770,37 @@ struct InteractiveCodePreviewView: View {
             }
             if idx >= highlightCap {
                 var plain = AttributedString(line)
-                plain.foregroundColor = baseColor
+                plain.foregroundColor = palette.baseColor
                 result.append(plain)
                 continue
             }
 
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("//") || (trimmed.hasPrefix("#") && !trimmed.hasPrefix("#include") && !trimmed.hasPrefix("#import") && !trimmed.hasPrefix("#if") && !trimmed.hasPrefix("#endif") && !trimmed.hasPrefix("#pragma")) || trimmed.hasPrefix("<!--") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*") {
+            if trimmed.hasPrefix("<!--") ||
+               (!isPureXMLOrHTML && (trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*") ||
+                (trimmed.hasPrefix("#") && !trimmed.hasPrefix("#include") && !trimmed.hasPrefix("#import") && !trimmed.hasPrefix("#if") && !trimmed.hasPrefix("#endif") && !trimmed.hasPrefix("#pragma") && !trimmed.hasPrefix("#region") && !trimmed.hasPrefix("#endregion")))) {
                 var commentAttr = AttributedString(line)
-                commentAttr.foregroundColor = commentColor
+                commentAttr.foregroundColor = palette.commentColor
                 result.append(commentAttr)
                 continue
             }
 
-            // Check if there is a trailing `//` comment outside quotes
+            // Check if there is a trailing `//` comment outside quotes (for non-XML languages)
             var codePart = line
             var trailingComment: String? = nil
-            if let commentRange = findTrailingLineComment(in: line) {
+            if !isPureXMLOrHTML, let commentRange = findTrailingLineComment(in: line) {
                 codePart = String(line[..<commentRange.lowerBound])
                 trailingComment = String(line[commentRange.lowerBound...])
             }
 
             var lineAttr = highlightCodeSegment(
                 codePart,
-                baseColor: baseColor,
-                keywordColor: keywordColor,
-                typeColor: typeColor,
-                stringColor: stringColor,
-                numberColor: numberColor
+                isMarkup: isMarkup,
+                palette: palette
             )
             if let comment = trailingComment {
                 var cAttr = AttributedString(comment)
-                cAttr.foregroundColor = commentColor
+                cAttr.foregroundColor = palette.commentColor
                 lineAttr.append(cAttr)
             }
             result.append(lineAttr)
@@ -715,13 +834,14 @@ struct InteractiveCodePreviewView: View {
         return nil
     }
 
+    private static func isXMLNameChar(_ c: Character) -> Bool {
+        c.isLetter || c.isNumber || c == "-" || c == "_" || c == ":" || c == "."
+    }
+
     private static func highlightCodeSegment(
         _ text: String,
-        baseColor: Color,
-        keywordColor: Color,
-        typeColor: Color,
-        stringColor: Color,
-        numberColor: Color
+        isMarkup: Bool,
+        palette: ThemeSyntaxPalette
     ) -> AttributedString {
         var output = AttributedString()
         var i = text.startIndex
@@ -729,8 +849,108 @@ struct InteractiveCodePreviewView: View {
         while i < text.endIndex {
             let ch = text[i]
 
-            // 1. String literal ("..." or '...')
-            if ch == "\"" || ch == "'" {
+            // 0. XML / HTML / XAML / .csproj / JSX Tag (`<Tag attr="val">`, `</Tag>`, `<?xml ...?>`)
+            if isMarkup && ch == "<" {
+                let next1 = text.index(after: i)
+                if next1 < text.endIndex {
+                    let c1 = text[next1]
+                    var bracketEnd = next1
+                    var isClosingTag = false
+                    if c1 == "/" || c1 == "?" || c1 == "!" {
+                        isClosingTag = (c1 == "/")
+                        bracketEnd = text.index(after: next1)
+                    }
+                    if bracketEnd < text.endIndex && (text[bracketEnd].isLetter || text[bracketEnd] == "_") {
+                        // Append `<`, `</`, or `<?`
+                        var openBracket = AttributedString(String(text[i..<bracketEnd]))
+                        openBracket.foregroundColor = palette.commentColor
+                        output.append(openBracket)
+
+                        // Tag name
+                        var tagEnd = bracketEnd
+                        while tagEnd < text.endIndex && isXMLNameChar(text[tagEnd]) {
+                            tagEnd = text.index(after: tagEnd)
+                        }
+                        var tagSeg = AttributedString(String(text[bracketEnd..<tagEnd]))
+                        tagSeg.foregroundColor = palette.keywordColor
+                        output.append(tagSeg)
+                        i = tagEnd
+
+                        // Parse attributes until closing `>`, `/>`, or `?>`
+                        while i < text.endIndex {
+                            let tc = text[i]
+                            if tc == ">" {
+                                let afterClose = text.index(after: i)
+                                var closeSeg = AttributedString(">")
+                                closeSeg.foregroundColor = palette.commentColor
+                                output.append(closeSeg)
+                                i = afterClose
+                                break
+                            }
+                            if (tc == "/" || tc == "?") {
+                                let n = text.index(after: i)
+                                if n < text.endIndex && text[n] == ">" {
+                                    let afterClose = text.index(after: n)
+                                    var closeSeg = AttributedString(String(text[i..<afterClose]))
+                                    closeSeg.foregroundColor = palette.commentColor
+                                    output.append(closeSeg)
+                                    i = afterClose
+                                    break
+                                }
+                            }
+                            if tc == "\"" || tc == "'" {
+                                let quote = tc
+                                var qEnd = text.index(after: i)
+                                var escaped = false
+                                while qEnd < text.endIndex {
+                                    let qc = text[qEnd]
+                                    if escaped {
+                                        escaped = false
+                                    } else if qc == "\\" {
+                                        escaped = true
+                                    } else if qc == quote {
+                                        qEnd = text.index(after: qEnd)
+                                        break
+                                    }
+                                    qEnd = text.index(after: qEnd)
+                                }
+                                var strSeg = AttributedString(String(text[i..<qEnd]))
+                                strSeg.foregroundColor = palette.stringColor
+                                output.append(strSeg)
+                                i = qEnd
+                                continue
+                            }
+                            if !isClosingTag && (tc.isLetter || tc == "_") {
+                                var attrEnd = text.index(after: i)
+                                while attrEnd < text.endIndex && isXMLNameChar(text[attrEnd]) {
+                                    attrEnd = text.index(after: attrEnd)
+                                }
+                                var attrSeg = AttributedString(String(text[i..<attrEnd]))
+                                attrSeg.foregroundColor = palette.typeColor
+                                output.append(attrSeg)
+                                i = attrEnd
+                                continue
+                            }
+                            if tc == "=" {
+                                var eqSeg = AttributedString("=")
+                                eqSeg.foregroundColor = palette.commentColor
+                                output.append(eqSeg)
+                                i = text.index(after: i)
+                                continue
+                            }
+                            let nextChar = text.index(after: i)
+                            var wsSeg = AttributedString(String(text[i..<nextChar]))
+                            wsSeg.foregroundColor = palette.baseColor
+                            output.append(wsSeg)
+                            i = nextChar
+                        }
+                        continue
+                    }
+                }
+            }
+
+            // 1. String literal ("...", '...', or `...`)
+            if ch == "\"" || ch == "'" || ch == "`" {
                 let quote = ch
                 var end = text.index(after: i)
                 var escaped = false
@@ -747,7 +967,7 @@ struct InteractiveCodePreviewView: View {
                     end = text.index(after: end)
                 }
                 var seg = AttributedString(String(text[i..<end]))
-                seg.foregroundColor = stringColor
+                seg.foregroundColor = palette.stringColor
                 output.append(seg)
                 i = end
                 continue
@@ -761,14 +981,14 @@ struct InteractiveCodePreviewView: View {
                 }
                 if end > text.index(after: i) {
                     var seg = AttributedString(String(text[i..<end]))
-                    seg.foregroundColor = keywordColor
+                    seg.foregroundColor = palette.keywordColor
                     output.append(seg)
                     i = end
                     continue
                 }
             }
 
-            // 3. Identifier / Keyword / Type
+            // 3. Identifier / Keyword / Type / Function
             if ch.isLetter || ch == "_" {
                 var end = text.index(after: i)
                 while end < text.endIndex && (text[end].isLetter || text[end].isNumber || text[end] == "_") {
@@ -777,11 +997,13 @@ struct InteractiveCodePreviewView: View {
                 let word = String(text[i..<end])
                 var seg = AttributedString(word)
                 if keywordsSet.contains(word) {
-                    seg.foregroundColor = keywordColor
+                    seg.foregroundColor = palette.keywordColor
                 } else if let first = word.first, first.isUppercase {
-                    seg.foregroundColor = typeColor
+                    seg.foregroundColor = palette.typeColor
+                } else if end < text.endIndex && text[end] == "(" {
+                    seg.foregroundColor = palette.functionColor
                 } else {
-                    seg.foregroundColor = baseColor
+                    seg.foregroundColor = palette.baseColor
                 }
                 output.append(seg)
                 i = end
@@ -795,7 +1017,7 @@ struct InteractiveCodePreviewView: View {
                     end = text.index(after: end)
                 }
                 var seg = AttributedString(String(text[i..<end]))
-                seg.foregroundColor = numberColor
+                seg.foregroundColor = palette.numberColor
                 output.append(seg)
                 i = end
                 continue
@@ -805,13 +1027,13 @@ struct InteractiveCodePreviewView: View {
             var end = text.index(after: i)
             while end < text.endIndex {
                 let c = text[end]
-                if c == "\"" || c == "'" || c == "@" || c.isLetter || c == "_" || c.isNumber {
+                if c == "\"" || c == "'" || c == "`" || c == "@" || (isMarkup && c == "<") || c.isLetter || c == "_" || c.isNumber {
                     break
                 }
                 end = text.index(after: end)
             }
             var seg = AttributedString(String(text[i..<end]))
-            seg.foregroundColor = baseColor
+            seg.foregroundColor = palette.baseColor
             output.append(seg)
             i = end
         }
@@ -819,20 +1041,45 @@ struct InteractiveCodePreviewView: View {
         return output
     }
     
-    private func checkGitDiff() {
-        guard let workspace = appState.workspaceFolder else { return }
-        let relPath = url.path.replacingOccurrences(of: workspace.path + "/", with: "")
+    private static func findGitRoot(startingAt fileURL: URL) -> URL? {
+        var current = fileURL.hasDirectoryPath ? fileURL : fileURL.deletingLastPathComponent()
+        while current.path != "/" && current.path.count > 1 {
+            if FileManager.default.fileExists(atPath: current.appendingPathComponent(".git").path) {
+                return current
+            }
+            current = current.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    private func checkGitDiff(for overrideURL: URL? = nil) {
+        let targetURL = (overrideURL ?? url).standardizedFileURL
+        let fallbackWS = appState.workspaceFolder
+            ?? AgentService.shared.currentWorkspace.map { URL(fileURLWithPath: $0) }
+        guard let gitRoot = Self.findGitRoot(startingAt: targetURL) ?? fallbackWS else { return }
+        let rootPrefix = gitRoot.standardizedFileURL.path.hasSuffix("/")
+            ? gitRoot.standardizedFileURL.path
+            : gitRoot.standardizedFileURL.path + "/"
+        guard targetURL.path.hasPrefix(rootPrefix) else { return }
+        let relPath = String(targetURL.path.dropFirst(rootPrefix.count))
         
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
             let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             process.arguments = ["status", "--porcelain", "--", relPath]
-            process.currentDirectoryURL = workspace
+            process.currentDirectoryURL = gitRoot
             process.standardOutput = pipe
             process.standardError = Pipe()
             try? process.run()
             process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                DispatchQueue.main.async {
+                    self.hasGitDiff = false
+                    self.gitDiffContent = nil
+                }
+                return
+            }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let status = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             
@@ -841,15 +1088,15 @@ struct InteractiveCodePreviewView: View {
                 let showPipe = Pipe()
                 showProcess.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                 showProcess.arguments = ["show", "HEAD:\(relPath)"]
-                showProcess.currentDirectoryURL = workspace
+                showProcess.currentDirectoryURL = gitRoot
                 showProcess.standardOutput = showPipe
                 showProcess.standardError = Pipe()
                 try? showProcess.run()
                 showProcess.waitUntilExit()
                 let oldData = showPipe.fileHandleForReading.readDataToEndOfFile()
-                let oldText = String(data: oldData, encoding: .utf8) ?? ""
+                let oldText = (showProcess.terminationStatus == 0) ? (String(data: oldData, encoding: .utf8) ?? "") : ""
                 
-                let attr = try? FileManager.default.attributesOfItem(atPath: self.url.path)
+                let attr = try? FileManager.default.attributesOfItem(atPath: targetURL.path)
                 let fileSize = (attr?[.size] as? NSNumber)?.int64Value ?? 0
                 if fileSize > 10 * 1024 * 1024 {
                     DispatchQueue.main.async {
@@ -859,7 +1106,7 @@ struct InteractiveCodePreviewView: View {
                     return
                 }
                 
-                let currentText = (try? String(contentsOf: self.url, encoding: .utf8)) ?? ""
+                let currentText = (try? String(contentsOf: targetURL, encoding: .utf8)) ?? ""
                 
                 DispatchQueue.main.async {
                     self.hasGitDiff = true
@@ -875,22 +1122,56 @@ struct InteractiveCodePreviewView: View {
     }
 }
 
-// MARK: - Interactive Diff Preview View
+// MARK: - Shared Header Close Tab Button [✕]
+
+struct PreviewCloseTabButton: View {
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                PreviewDockService.shared.closeActiveTabOrHideDock()
+            }
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(isHovered ? .white : .secondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isHovered ? Color.red.opacity(0.85) : Color.primary.opacity(0.06))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .help("Close Preview Tab")
+    }
+}
+
+// MARK: - Interactive Diff Preview View (Theme-Synchronized & Edge-to-Edge Rows)
 
 struct InteractiveDiffPreviewView: View {
     let title: String
     let oldContent: String
     let newContent: String
-    
+    var showsCloseButton: Bool = true
+
+    @EnvironmentObject var appState: AppState
     @State private var isCopied: Bool = false
-    @State private var cardWidth: CGFloat = 0
     
-    private var diffLines: [UnifiedDiffLine] {
-        DiffCacheManager.getOrComputeDiff(
+    private var diffEntry: CachedDiffEntry {
+        DiffCacheManager.getOrComputeDiffEntry(
             id: "preview-diff:\(title)",
             old: oldContent,
             new: newContent
         )
+    }
+
+    private var diffLines: [UnifiedDiffLine] {
+        diffEntry.lines
     }
     
     private var additionsCount: Int {
@@ -902,13 +1183,20 @@ struct InteractiveDiffPreviewView: View {
     }
     
     var body: some View {
+        let theme = appState.appTheme
+        let headerBg = theme.isGlass ? Color.clear : Color(nsColor: theme.panelBackground)
+        let editorCanvas = theme.isGlass ? Color.clear : Color(nsColor: theme.editorBackground)
+        let baseTextColor = Color(nsColor: theme.editorText)
+        let lineNumColor = Color(nsColor: theme.commentColor).opacity(0.75)
+
         VStack(spacing: 0) {
             // Diff Stats Header
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
                     ProgrammingLanguageIconView(fileName: title, size: 14)
                     Text("Diff: \(title)")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(.primary)
                         .lineLimit(1)
                 }
                 
@@ -916,21 +1204,21 @@ struct InteractiveDiffPreviewView: View {
                 HStack(spacing: 4) {
                     if additionsCount > 0 {
                         Text("+\(additionsCount)")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.green.opacity(0.15))
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.green.opacity(0.16))
                             .foregroundColor(.green)
-                            .cornerRadius(3)
+                            .cornerRadius(3.5)
                     }
                     if deletionsCount > 0 {
                         Text("-\(deletionsCount)")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.red.opacity(0.15))
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.red.opacity(0.16))
                             .foregroundColor(.red)
-                            .cornerRadius(3)
+                            .cornerRadius(3.5)
                     }
                 }
                 
@@ -938,7 +1226,9 @@ struct InteractiveDiffPreviewView: View {
                 
                 // Copy Diff Button
                 Button {
-                    let fullDiff = diffLines.map { "\($0.prefix)\($0.text)" }.joined(separator: "\n")
+                    let fullDiff = diffLines.map { line in
+                        line.type == .hunkHeader ? line.text : "\(line.prefix)\(line.text)"
+                    }.joined(separator: "\n")
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(fullDiff, forType: .string)
                     isCopied = true
@@ -948,92 +1238,139 @@ struct InteractiveDiffPreviewView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 9))
+                            .font(.system(size: 9.5))
                         Text(isCopied ? "Copied" : "Copy Diff")
-                            .font(.system(size: 10))
+                            .font(.system(size: 10, weight: .medium))
                     }
                     .foregroundColor(isCopied ? .green : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
                 .help("Copy full unified diff to clipboard")
+
+                if showsCloseButton {
+                    Divider()
+                        .frame(height: 14)
+                        .padding(.horizontal, 1)
+
+                    PreviewCloseTabButton()
+                }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+            .padding(.vertical, 6)
+            .background(headerBg)
             
             Divider()
             
-            let maxTextWidth = diffLines.reduce(CGFloat(0)) { currentMax, line in
-                let textWidth = (line.text as NSString).size(
-                    withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)]
-                ).width
-                return max(currentMax, textWidth)
-            }
-            let gutterWidth: CGFloat = 95.5
-            let minContentWidth = gutterWidth + maxTextWidth + 32
-            let effectiveWidth = max(cardWidth, minContentWidth)
-            
-            // Diff Content Lines
-            ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(diffLines) { (diffLine: UnifiedDiffLine) in
-                        HStack(spacing: 0) {
-                            // Status accent strip (2.5pt)
-                            Rectangle()
-                                .fill(diffLine.accentColor)
-                                .frame(width: 2.5)
-                            
-                            // Old line number gutter
-                            Text(diffLine.oldNum)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary.opacity(0.4))
-                                .frame(width: 32, alignment: .trailing)
-                                .padding(.trailing, 4)
-                            
-                            // New line number gutter
-                            Text(diffLine.newNum)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary.opacity(0.4))
-                                .frame(width: 32, alignment: .trailing)
-                                .padding(.trailing, 6)
-                            
-                            // Gutter divider line
-                            Rectangle()
-                                .fill(Color.primary.opacity(0.08))
-                                .frame(width: 1)
-                            
-                            // Prefix (+/-)
-                            Text(diffLine.prefix)
-                                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .foregroundColor(diffLine.prefixColor)
-                                .frame(width: 18, alignment: .center)
-                            
-                            // Code text
-                            Text(diffLine.text)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(diffLine.textColor)
-                                .lineLimit(1)
-                            
-                            Spacer(minLength: 0)
-                        }
-                        .frame(height: 18)
-                        .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
-                        .background(diffLine.bgColor)
-                    }
-                }
-                .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
-                .padding(.vertical, 2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.85))
-        }
-        .background(
+            // Diff Content Lines (Edge-to-Edge Full Width)
             GeometryReader { geo in
-                Color.clear
-                    .onAppear { cardWidth = geo.size.width }
-                    .onChange(of: geo.size.width) { newW in cardWidth = newW }
+                let minRowWidth = max(geo.size.width, diffEntry.minContentWidth)
+                ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(diffLines) { (diffLine: UnifiedDiffLine) in
+                            if diffLine.type == .hunkHeader {
+                                HStack(spacing: 0) {
+                                    Rectangle()
+                                        .fill(Color.cyan.opacity(0.85))
+                                        .frame(width: 2.5, height: 22)
+
+                                    Text("⋯")
+                                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.cyan.opacity(0.8))
+                                        .frame(width: 74, alignment: .center)
+
+                                    Rectangle()
+                                        .fill(Color.primary.opacity(0.08))
+                                        .frame(width: 1, height: 22)
+
+                                    Text(diffLine.text)
+                                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.cyan.opacity(0.9))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                        .padding(.leading, 10)
+                                        .padding(.trailing, 20)
+
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(minWidth: minRowWidth, minHeight: 22, maxHeight: 22, alignment: .leading)
+                                .background(Color.cyan.opacity(theme.isDark ? 0.09 : 0.07))
+                            } else {
+                                let rowTextColor: Color = {
+                                    switch diffLine.type {
+                                    case .addition: return baseTextColor
+                                    case .deletion: return baseTextColor.opacity(0.78)
+                                    case .context: return baseTextColor.opacity(0.88)
+                                    case .hunkHeader: return .cyan
+                                    }
+                                }()
+                                let rowBg: Color = {
+                                    switch diffLine.type {
+                                    case .addition: return Color.green.opacity(theme.isDark ? 0.15 : 0.12)
+                                    case .deletion: return Color.red.opacity(theme.isDark ? 0.14 : 0.10)
+                                    case .context: return Color.clear
+                                    case .hunkHeader: return Color.cyan.opacity(0.08)
+                                    }
+                                }()
+
+                                HStack(spacing: 0) {
+                                    // Status accent strip (2.5pt)
+                                    Rectangle()
+                                        .fill(diffLine.accentColor)
+                                        .frame(width: 2.5, height: 19)
+                                    
+                                    // Old line number gutter
+                                    Text(diffLine.oldNum)
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundColor(lineNumColor)
+                                        .frame(width: 34, alignment: .trailing)
+                                        .padding(.trailing, 4)
+                                    
+                                    // New line number gutter
+                                    Text(diffLine.newNum)
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundColor(lineNumColor)
+                                        .frame(width: 34, alignment: .trailing)
+                                        .padding(.trailing, 6)
+                                    
+                                    // Gutter divider line
+                                    Rectangle()
+                                        .fill(Color.primary.opacity(0.08))
+                                        .frame(width: 1, height: 19)
+                                    
+                                    // Prefix (+/-)
+                                    Text(diffLine.prefix)
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                        .foregroundColor(diffLine.prefixColor)
+                                        .frame(width: 18, alignment: .center)
+                                    
+                                    // Code text (tab-expanded for crisp alignment)
+                                    Text(diffLine.displayText)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundColor(rowTextColor)
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                        .padding(.trailing, 24)
+                                    
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(minWidth: minRowWidth, minHeight: 19, maxHeight: 19, alignment: .leading)
+                                .background(rowBg)
+                            }
+                        }
+                    }
+                    .frame(minWidth: minRowWidth, alignment: .leading)
+                    .padding(.vertical, 4)
+                    .textSelection(.enabled)
+                }
             }
-        )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(editorCanvas)
+        }
+        .background(editorCanvas)
     }
 }
 
@@ -1041,20 +1378,31 @@ struct InteractiveDiffPreviewView: View {
 
 struct InteractiveDiffFilePreviewView: View {
     let url: URL
+    var showsCloseButton: Bool = true
     
+    @EnvironmentObject var appState: AppState
     @State private var rawDiff: String = ""
+    @State private var displayLines: [String] = []
+    @State private var maxLineChars: Int = 0
     @State private var isLoading: Bool = true
     @State private var isCopied: Bool = false
     
     var body: some View {
+        let theme = appState.appTheme
+        let headerBg = theme.isGlass ? Color.clear : Color(nsColor: theme.panelBackground)
+        let editorCanvas = theme.isGlass ? Color.clear : Color(nsColor: theme.editorBackground)
+        let baseTextColor = Color(nsColor: theme.editorText)
+        let lineNumColor = Color(nsColor: theme.commentColor).opacity(0.75)
+
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.left.and.right.square")
-                    .font(.system(size: 10))
+                    .font(.system(size: 10.5))
                     .foregroundColor(.cyan)
                 
                 Text(url.lastPathComponent)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(.primary)
                 
                 Text("PATCH")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -1073,15 +1421,25 @@ struct InteractiveDiffFilePreviewView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isCopied = false }
                 } label: {
                     Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundColor(isCopied ? .green : .secondary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Copy patch content")
+
+                if showsCloseButton {
+                    Divider()
+                        .frame(height: 14)
+                        .padding(.horizontal, 1)
+
+                    PreviewCloseTabButton()
+                }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+            .padding(.vertical, 6)
+            .background(headerBg)
             
             Divider()
             
@@ -1089,53 +1447,94 @@ struct InteractiveDiffFilePreviewView: View {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView([.horizontal, .vertical]) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        let lines = rawDiff.components(separatedBy: "\n")
-                        ForEach(0..<lines.count, id: \.self) { idx in
-                            let line = lines[idx]
-                            let isAdd = line.hasPrefix("+") && !line.hasPrefix("+++")
-                            let isDel = line.hasPrefix("-") && !line.hasPrefix("---")
-                            let isHunk = line.hasPrefix("@@")
-                            
-                            HStack(spacing: 0) {
-                                Rectangle()
-                                    .fill(isAdd ? Color.green : (isDel ? Color.red : (isHunk ? Color.cyan : Color.clear)))
-                                    .frame(width: 2.5)
+                GeometryReader { geo in
+                    let minRowWidth = max(geo.size.width, CGFloat(maxLineChars) * 7.2 + 72)
+                    ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(0..<displayLines.count, id: \.self) { idx in
+                                let line = displayLines[idx]
+                                let isAdd = line.hasPrefix("+") && !line.hasPrefix("+++")
+                                let isDel = line.hasPrefix("-") && !line.hasPrefix("---")
+                                let isHunk = line.hasPrefix("@@")
+                                let isHeaderMeta = line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("diff --git") || line.hasPrefix("index ")
                                 
-                                Text("\(idx + 1)")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary.opacity(0.4))
-                                    .frame(width: 32, alignment: .trailing)
-                                    .padding(.trailing, 6)
-                                
-                                Rectangle()
-                                    .fill(Color.primary.opacity(0.08))
-                                    .frame(width: 1)
-                                
-                                Text(line.isEmpty ? " " : line)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(isAdd ? .green : (isDel ? .red : (isHunk ? .cyan : .primary.opacity(0.85))))
-                                    .padding(.leading, 6)
-                                
-                                Spacer(minLength: 16)
+                                HStack(spacing: 0) {
+                                    Rectangle()
+                                        .fill(isAdd ? Color.green : (isDel ? Color.red : (isHunk ? Color.cyan : Color.clear)))
+                                        .frame(width: 2.5, height: 19)
+                                    
+                                    Text("\(idx + 1)")
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundColor(lineNumColor)
+                                        .frame(width: 36, alignment: .trailing)
+                                        .padding(.trailing, 6)
+                                    
+                                    Rectangle()
+                                        .fill(Color.primary.opacity(0.08))
+                                        .frame(width: 1, height: 19)
+                                    
+                                    Text(line.isEmpty ? " " : line)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundColor(
+                                            isAdd ? baseTextColor :
+                                            (isDel ? baseTextColor.opacity(0.78) :
+                                            (isHunk ? .cyan :
+                                            (isHeaderMeta ? .secondary : baseTextColor.opacity(0.88))))
+                                        )
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                        .padding(.leading, 8)
+                                        .padding(.trailing, 24)
+                                    
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(minWidth: minRowWidth, minHeight: 19, maxHeight: 19, alignment: .leading)
+                                .background(
+                                    isAdd ? Color.green.opacity(theme.isDark ? 0.15 : 0.12) :
+                                    (isDel ? Color.red.opacity(theme.isDark ? 0.14 : 0.10) :
+                                    (isHunk ? Color.cyan.opacity(theme.isDark ? 0.09 : 0.07) : Color.clear))
+                                )
                             }
-                            .frame(height: 18)
-                            .background(isAdd ? Color.green.opacity(0.1) : (isDel ? Color.red.opacity(0.08) : (isHunk ? Color.cyan.opacity(0.06) : Color.clear)))
                         }
+                        .frame(minWidth: minRowWidth, alignment: .leading)
+                        .padding(.vertical, 4)
+                        .textSelection(.enabled)
                     }
-                    .padding(.vertical, 4)
                 }
-                .background(Color(nsColor: .textBackgroundColor).opacity(0.85))
+                .background(editorCanvas)
             }
         }
+        .background(editorCanvas)
         .onAppear {
-            DispatchQueue.global(qos: .userInitiated).async {
-                let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-                DispatchQueue.main.async {
-                    self.rawDiff = content
-                    self.isLoading = false
-                }
+            loadDiffFile(from: url)
+        }
+        .onChange(of: url) { newURL in
+            loadDiffFile(from: newURL)
+        }
+    }
+
+    private func loadDiffFile(from targetURL: URL) {
+        isLoading = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let content = (try? String(contentsOf: targetURL, encoding: .utf8)) ?? ""
+            let normalized = content
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            var lines = normalized.components(separatedBy: "\n")
+            if lines.count > 1 && lines.last == "" {
+                lines.removeLast()
+            }
+            var maxChars = 0
+            let expanded = lines.map { line -> String in
+                let s = line.contains("\t") ? line.replacingOccurrences(of: "\t", with: "    ") : line
+                if s.count > maxChars { maxChars = min(s.count, 400) }
+                return s
+            }
+            DispatchQueue.main.async {
+                self.rawDiff = content
+                self.displayLines = expanded
+                self.maxLineChars = maxChars
+                self.isLoading = false
             }
         }
     }

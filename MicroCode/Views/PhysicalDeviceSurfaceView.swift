@@ -408,13 +408,15 @@ final class AppleDeviceFrameManager {
             cache[name] = img
             return img
         }
-        // 2. Direct paths in app bundle and project resources
+        // 2. Direct paths in app bundle and user/system Applications
+        let homeURL = FileManager.default.homeDirectoryForCurrentUser
         let candidatePaths = [
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png"),
             Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/\(name).png"),
-            URL(fileURLWithPath: "MicroCode/Resources/\(name).png"),
-            URL(fileURLWithPath: "/Users/dotmini/Documents/SX/codetunner-native/MicroCode/Resources/\(name).png"),
-            URL(fileURLWithPath: "/Users/dotmini/Documents/SX/codetunner-native/MicroCode.app/Contents/Resources/\(name).png")
-        ]
+            URL(fileURLWithPath: "/Applications/MicroCode.app/Contents/Resources/\(name).png"),
+            homeURL.appendingPathComponent("Applications/MicroCode.app/Contents/Resources/\(name).png"),
+            URL(fileURLWithPath: "MicroCode/Resources/\(name).png")
+        ].compactMap { $0 }
         for path in candidatePaths {
             if FileManager.default.fileExists(atPath: path.path),
                let img = NSImage(contentsOf: path) {

@@ -1,4 +1,4 @@
-// /Users/dotmini/Documents/SX/codetunner-native/MicroCode/Views/AI/ACPPermissionView.swift
+// ACPPermissionView.swift
 import SwiftUI
 
 struct ACPPermissionView: View {

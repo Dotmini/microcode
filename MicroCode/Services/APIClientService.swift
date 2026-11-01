@@ -182,8 +182,10 @@ class APIClientService: ObservableObject {
     @Published var routeScanMessage: String? = nil
     
     private var storageDir: String {
-        let workspace = AgentToolBox.shared.workspaceRoot ?? NSHomeDirectory()
-        return (workspace as NSString).appendingPathComponent(".microcode/api-client")
+        return WorkspaceStoragePaths.managedStateFile(
+            named: "api-client",
+            workspacePath: AgentToolBox.shared.workspaceRoot
+        ).path
     }
     
     private init() {

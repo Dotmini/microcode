@@ -123,6 +123,18 @@ enum ACPAgentType: String, Codable, CaseIterable, Identifiable {
         case .custom: return "#8E8E93"
         }
     }
+    
+    /// Only Claude Code (`claude --effort`) accepts `--effort <level>` without model-slug tier conflicts.
+    /// Antigravity (`agy`) encodes reasoning effort directly in tiered model slugs (`-low`, `-medium`, `-high`)
+    /// and exits with code 1 when `--effort` conflicts or is unsupported by the chosen model.
+    var supportsEffortFlag: Bool {
+        switch self {
+        case .claudeCode:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 // MARK: - Connection State
@@ -288,6 +300,30 @@ struct ACPAgentConfig: Codable, Identifiable, Hashable {
             autoDetected: true,
             lastConnected: nil
         )
+    }
+    
+    /// Safely strips `--effort <value>` and `--effort=<value>` tokens from an argument array by index.
+    static func stripEffortArguments(_ args: [String]) -> [String] {
+        var cleaned: [String] = []
+        var i = 0
+        while i < args.count {
+            let token = args[i]
+            if token == "--effort" {
+                if i + 1 < args.count && !args[i + 1].hasPrefix("-") {
+                    i += 2
+                } else {
+                    i += 1
+                }
+                continue
+            }
+            if token.hasPrefix("--effort=") {
+                i += 1
+                continue
+            }
+            cleaned.append(token)
+            i += 1
+        }
+        return cleaned
     }
 }
 
@@ -588,7 +624,9 @@ struct ClaudeCodeStreamParser {
     
     /// Parses all events contained in a single Claude Code stream-json line
     /// (e.g. an assistant message containing both text and tool_use blocks).
-    static func parseAll(_ json: [String: Any]) -> [ACPStreamEvent] {
+    /// When `includeAssistantTextAndThinking` is false (because `--include-partial-messages` already
+    /// streamed `text_delta` / `thinking_delta` via `stream_event`), `assistant` frames only emit `tool_use`.
+    static func parseAll(_ json: [String: Any], includeAssistantTextAndThinking: Bool = true) -> [ACPStreamEvent] {
         let type = json["type"] as? String ?? ""
         
         switch type {
@@ -597,7 +635,7 @@ struct ClaudeCodeStreamParser {
             return []
             
         case "assistant":
-            return parseAssistantMessages(json)
+            return parseAssistantMessages(json, includeTextAndThinking: includeAssistantTextAndThinking)
             
         case "user":
             // Tool results from Claude's own tool execution (supports both top-level and nested message.content)
@@ -682,7 +720,7 @@ struct ClaudeCodeStreamParser {
         }
     }
     
-    private static func parseAssistantMessages(_ json: [String: Any]) -> [ACPStreamEvent] {
+    private static func parseAssistantMessages(_ json: [String: Any], includeTextAndThinking: Bool = true) -> [ACPStreamEvent] {
         let content: [[String: Any]]? = {
             if let c = json["content"] as? [[String: Any]] { return c }
             if let msg = json["message"] as? [String: Any], let c = msg["content"] as? [[String: Any]] { return c }
@@ -696,10 +734,12 @@ struct ClaudeCodeStreamParser {
             
             switch blockType {
             case "text":
+                guard includeTextAndThinking else { continue }
                 let text = block["text"] as? String ?? ""
                 if !text.isEmpty { events.append(.text(text)) }
                 
             case "thinking":
+                guard includeTextAndThinking else { continue }
                 let thinking = block["thinking"] as? String ?? ""
                 if !thinking.isEmpty { events.append(.thinking(thinking)) }
                 
@@ -764,9 +804,12 @@ struct AGYStreamParser {
         switch eventName {
         case "init":
             let initData = json["init"] as? [String: Any] ?? [:]
-            let sessionId = json["conversation_id"] as? String ?? UUID().uuidString
-            let model = json["model"] as? String ?? "gemini-2.0-flash"
-            return .sessionInit(ACPSessionInit(sessionId: sessionId, model: model, tools: [], capabilities: []))
+            let sessionId = (json["conversation_id"] as? String)
+                ?? (initData["conversation_id"] as? String)
+                ?? UUID().uuidString
+            let model = (initData["model"] as? String) ?? (json["model"] as? String)
+            let tools = (initData["tools"] as? [String]) ?? (json["tools"] as? [String]) ?? []
+            return .sessionInit(ACPSessionInit(sessionId: sessionId, model: model, tools: tools, capabilities: []))
             
         case "step_update":
             let step = json["step_update"] as? [String: Any] ?? [:]
@@ -871,6 +914,9 @@ struct AGYStreamParser {
             
         default:
             if let text = json["text"] as? String, !text.isEmpty {
+                if (json["_raw"] as? Bool) == true && text.trimmingCharacters(in: .whitespaces).hasPrefix("[agy]") {
+                    return .systemInfo(ACPSystemInfo(message: text, subtype: "agy_log"))
+                }
                 return .text(text)
             }
             return nil
@@ -929,6 +975,26 @@ struct CodexStreamParser {
 }
 
 struct CodexProcessArguments {
+    static func sanitizeModel(_ rawModel: String?) -> String? {
+        guard let trimmed = rawModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        let lower = trimmed.lowercased()
+        let incompatiblePrefixes = [
+            "claude", "gemini", "gemma", "deepseek", "qwen", "glm", "llama", "mistral", "omni"
+        ]
+        if lower.contains("/")
+            || lower.contains("argon")
+            || lower == "sonnet"
+            || lower == "opus"
+            || lower == "haiku"
+            || incompatiblePrefixes.contains(where: { lower.hasPrefix($0) }) {
+            return nil
+        }
+        return trimmed
+    }
+
     static func build(task: String, model: String?, sessionID: String?,
                       permissionMode: ACPPermissionMode, extra: [String]) -> [String] {
         var args = ["exec"]
@@ -940,7 +1006,7 @@ struct CodexProcessArguments {
         } else if sessionID == nil {
             args += ["--sandbox", "workspace-write"]
         }
-        if let model, !model.isEmpty { args += ["--model", model] }
+        if let validModel = sanitizeModel(model) { args += ["--model", validModel] }
         args += extra
         if let sessionID { args.append(sessionID) }
         args.append(task)
@@ -1012,6 +1078,115 @@ struct OpenCodeStreamParser {
             if let text = part["text"] as? String ?? json["text"] as? String, !text.isEmpty {
                 return .text(text)
             }
+            return nil
+        }
+    }
+}
+
+// MARK: - Google Gemini CLI Stream Event Parser
+
+/// Parses `@google/gemini-cli` (`gemini -p ... --output-format stream-json`) NDJSON events
+struct GeminiCLIStreamParser {
+    static func parse(_ json: [String: Any]) -> ACPStreamEvent? {
+        // Plain-text fallback lines emitted by ACPNDJSONParser carry `_raw == true`
+        if (json["_raw"] as? Bool) == true, let rawText = json["text"] as? String {
+            return rawText.isEmpty ? nil : .text(rawText)
+        }
+        
+        let type = json["type"] as? String ?? ""
+        switch type {
+        case "init":
+            let sid = json["session_id"] as? String ?? UUID().uuidString
+            let model = json["model"] as? String
+            return .sessionInit(ACPSessionInit(
+                sessionId: sid,
+                model: model,
+                tools: [],
+                capabilities: ["gemini-cli"]
+            ))
+            
+        case "message":
+            // `@google/gemini-cli` emits `{"type":"message","role":"user","content":...}` for the input prompt;
+            // ignore `role == "user"` so the prompt is never echoed into the assistant stream.
+            let role = (json["role"] as? String ?? "assistant").lowercased()
+            if role == "user" {
+                return nil
+            }
+            if let thought = json["thought"] as? String ?? json["thinking"] as? String, !thought.isEmpty {
+                return .thinking(thought)
+            }
+            if let content = json["content"] as? String, !content.isEmpty {
+                return .text(content)
+            }
+            if let text = json["text"] as? String, !text.isEmpty {
+                return .text(text)
+            }
+            return nil
+            
+        case "thought", "thinking":
+            let thought = json["content"] as? String
+                ?? json["thought"] as? String
+                ?? json["thinking"] as? String
+                ?? json["text"] as? String
+                ?? ""
+            return thought.isEmpty ? nil : .thinking(thought)
+            
+        case "tool_use", "tool_call":
+            let toolId = json["tool_id"] as? String ?? json["id"] as? String ?? UUID().uuidString
+            let toolName = json["tool_name"] as? String ?? json["name"] as? String ?? "tool"
+            let params = json["parameters"] as? [String: Any]
+                ?? json["input"] as? [String: Any]
+                ?? json["args"] as? [String: Any]
+                ?? [:]
+            return .toolCall(ACPToolCall(id: toolId, name: toolName, input: params))
+            
+        case "tool_result":
+            let toolId = json["tool_id"] as? String ?? json["tool_call_id"] as? String ?? json["id"] as? String ?? ""
+            let status = (json["status"] as? String ?? "").lowercased()
+            let errObj = json["error"] as? [String: Any]
+            let errMsg = errObj?["message"] as? String ?? (json["error"] as? String)
+            let isError = (status == "error" || status == "failed" || errMsg != nil || (json["is_error"] as? Bool == true))
+            let output = (json["output"] as? String)
+                ?? (json["content"] as? String)
+                ?? errMsg
+                ?? (status.isEmpty ? "Completed" : status)
+            return .toolResult(ACPToolResult(
+                toolCallId: toolId,
+                content: output,
+                isError: isError,
+                toolName: json["tool_name"] as? String
+            ))
+            
+        case "error":
+            let severity = (json["severity"] as? String ?? "error").lowercased()
+            let msg: String
+            if let errDict = json["error"] as? [String: Any], let m = errDict["message"] as? String {
+                msg = m
+            } else {
+                msg = json["message"] as? String ?? (json["error"] as? String) ?? "Gemini CLI error"
+            }
+            if severity == "warning" {
+                return .systemInfo(ACPSystemInfo(message: msg, subtype: "warning"))
+            }
+            return .error(msg)
+            
+        case "result":
+            let sid = json["session_id"] as? String ?? "completed"
+            let response = json["response"] as? String ?? (json["result"] as? String) ?? ""
+            let stats = json["stats"] as? [String: Any]
+            let totalTokens = stats?["total_tokens"] as? Int
+            if let errDict = json["error"] as? [String: Any], let errMsg = errDict["message"] as? String, !errMsg.isEmpty {
+                return .error(errMsg)
+            }
+            return .complete(ACPTaskResult(
+                sessionId: sid,
+                result: response,
+                totalCostUSD: nil,
+                tokensUsed: totalTokens,
+                model: json["model"] as? String
+            ))
+            
+        default:
             return nil
         }
     }

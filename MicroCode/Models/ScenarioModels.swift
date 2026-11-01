@@ -357,8 +357,10 @@ class ScenarioManager: ObservableObject {
     @Published var scheduleIntervalSeconds: Int = 300
     
     private var scenarioDir: String {
-        let workspace = AgentToolBox.shared.workspaceRoot ?? NSHomeDirectory()
-        return (workspace as NSString).appendingPathComponent(".microcode/scenarios")
+        return WorkspaceStoragePaths.managedStateFile(
+            named: "scenarios",
+            workspacePath: AgentToolBox.shared.workspaceRoot
+        ).path
     }
     
     private init() {

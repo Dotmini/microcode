@@ -175,6 +175,8 @@ private final class NativeSimulatorIOSurfaceCapture: @unchecked Sendable {
     private var callbackIDs: [ObjectIdentifier: UUID] = [:]
     private var lastSeeds: [ObjectIdentifier: UInt32] = [:]
     private var lastFrameTime = Date()
+    private var activeDeviceUDID: String?
+    private var integratedScreenSizes: [CGSize] = []
     private var expectedScreenSize: CGSize?
     private var framePollTimer: DispatchSourceTimer?
 
@@ -223,7 +225,9 @@ private final class NativeSimulatorIOSurfaceCapture: @unchecked Sendable {
         guard state.caseInsensitiveCompare("booted") == .orderedSame else {
             throw NativeSimulatorError.unavailable("The selected simulator has not finished booting (state: \(state)).")
         }
-        expectedScreenSize = nativeScreenSize(for: device)
+        activeDeviceUDID = deviceUDID
+        integratedScreenSizes = integratedDisplaySizes(for: device)
+        expectedScreenSize = resolvedExpectedScreenSize(for: device, udid: deviceUDID)
         guard let io = device.perform(NSSelectorFromString("io"))?.takeUnretainedValue() as? NSObject else {
             throw NativeSimulatorError.unavailable("Simulator framebuffer IO is unavailable in this Xcode runtime.")
         }
@@ -319,6 +323,13 @@ private final class NativeSimulatorIOSurfaceCapture: @unchecked Sendable {
     }
 
     private func preferredDescriptor() -> NSObject? {
+        if integratedScreenSizes.count >= 2, let udid = activeDeviceUDID {
+            let modePath = IPhoneDuoDisplayMode.modeFilePath(for: udid)
+            let raw = (try? String(contentsOfFile: modePath, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            expectedScreenSize = (raw == "inner") ? integratedScreenSizes[1] : integratedScreenSizes[0]
+        }
         let candidates: [(NSObject, CGSize)] = descriptors.compactMap { descriptor in
             guard let value = descriptor.perform(NSSelectorFromString("framebufferSurface"))?.takeUnretainedValue() else { return nil }
             let surface = unsafeBitCast(value, to: IOSurface.self)
@@ -330,7 +341,38 @@ private final class NativeSimulatorIOSurfaceCapture: @unchecked Sendable {
            let exact = candidates.first(where: { $0.1 == expectedScreenSize || $0.1 == CGSize(width: expectedScreenSize.height, height: expectedScreenSize.width) }) {
             return exact.0
         }
-        return candidates.max { ($0.1.width * $0.1.height) < ($1.1.width * $1.1.height) }?.0
+        let nonPresentation = candidates.filter { max($0.1.width, $0.1.height) < 5120 }
+        let pool = nonPresentation.isEmpty ? candidates : nonPresentation
+        return pool.max { ($0.1.width * $0.1.height) < ($1.1.width * $1.1.height) }?.0
+    }
+
+    private func integratedDisplaySizes(for device: NSObject) -> [CGSize] {
+        let deviceTypeSelector = NSSelectorFromString("deviceType")
+        guard let type = device.perform(deviceTypeSelector)?.takeUnretainedValue() as? NSObject,
+              let bundlePath = type.value(forKey: "bundlePath") as? String else { return [] }
+        let capPath = (bundlePath as NSString).appendingPathComponent("Contents/Resources/capabilities.plist")
+        guard let root = NSDictionary(contentsOfFile: capPath) as? [String: Any],
+              let caps = root["capabilities"] as? [String: Any],
+              let displays = caps["displays"] as? [[String: Any]] else { return [] }
+        return displays.compactMap { display in
+            let kind = (display["displayType"] as? String ?? "integrated").lowercased()
+            if kind == "scene" { return nil }
+            guard let w = display["width"] as? Int,
+                  let h = display["height"] as? Int,
+                  w > 0, h > 0, max(w, h) < 5120 else { return nil }
+            return CGSize(width: w, height: h)
+        }
+    }
+
+    private func resolvedExpectedScreenSize(for device: NSObject, udid: String) -> CGSize? {
+        if integratedScreenSizes.count >= 2 {
+            let modePath = IPhoneDuoDisplayMode.modeFilePath(for: udid)
+            let raw = (try? String(contentsOfFile: modePath, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return (raw == "inner") ? integratedScreenSizes[1] : integratedScreenSizes[0]
+        }
+        return integratedScreenSizes.first ?? nativeScreenSize(for: device)
     }
 
     private func nativeScreenSize(for device: NSObject) -> CGSize? {
@@ -374,6 +416,8 @@ private final class NativeSimulatorIOSurfaceCapture: @unchecked Sendable {
         callbackIDs.removeAll()
         lastSeeds.removeAll()
         descriptors.removeAll()
+        activeDeviceUDID = nil
+        integratedScreenSizes.removeAll()
         expectedScreenSize = nil
         if !preserveOutput { onFrame = nil }
     }
@@ -400,6 +444,7 @@ private enum NativeSimulatorPrivateFrameworks {
         let candidates = [
             "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator",
             "\(developer)/Library/PrivateFrameworks/CoreSimulator.framework/CoreSimulator",
+            "/Applications/Simulator.app/Contents/Frameworks/SimulatorKit.framework/SimulatorKit",
             "\(developer)/../SharedFrameworks/SimulatorKit.framework/SimulatorKit",
             "\(developer)/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"
         ]

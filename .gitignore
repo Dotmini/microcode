@@ -30,6 +30,7 @@ DerivedData/
 .build
 .build/
 .build_dist/
+.codetuner-build/
 __pycache__/
 *.pyc
 .swiftpm/

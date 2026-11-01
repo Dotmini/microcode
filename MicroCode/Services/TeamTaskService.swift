@@ -270,9 +270,7 @@ final class TeamTaskService: ObservableObject {
     }
 
     private func documentURL(for workspace: String) -> URL {
-        URL(fileURLWithPath: workspace)
-            .appendingPathComponent(".microcode", isDirectory: true)
-            .appendingPathComponent("team-tasks.json")
+        WorkspaceStoragePaths.readableWorkspaceOrStateFile(named: "team-tasks.json", workspacePath: workspace)
     }
 
     private func persist(broadcastToCollab: Bool = true) {

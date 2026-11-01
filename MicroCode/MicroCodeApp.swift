@@ -13,15 +13,42 @@ import AppKit
 import UserNotifications
 
 @main
+enum MicroCodeEntryPoint {
+    static func main() {
+        let args = CommandLine.arguments
+        if args.contains("--pns-daemon") {
+            PNSDaemonRunner.runHeadlessDaemon(arguments: args)
+        }
+        MicroCodeApp.main()
+    }
+}
+
 struct MicroCodeApp: App {
     // Core delegates
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     // Core state - Initialized lazily where possible inside AppState
     @StateObject private var appState = AppState()
-    
-    // Services (non-observed reference so memory telemetry never invalidates the root WindowGroup)
-    private let performanceManager = PerformanceManager.shared
+
+    static func parseCLILaunchURLs() -> [URL] {
+        let args = Array(CommandLine.arguments.dropFirst())
+        guard !args.contains("--acp-server") && !args.contains("--pns-daemon") else { return [] }
+        var launchURLs: [URL] = []
+        var skipNext = false
+        for arg in args {
+            if skipNext { skipNext = false; continue }
+            if arg == "-NSDocumentRevisionsDebugMode" || arg == "-ApplePersistenceIgnoreState" {
+                skipNext = true
+                continue
+            }
+            guard !arg.hasPrefix("-") else { continue }
+            let expanded = (arg as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expanded) {
+                launchURLs.append(URL(fileURLWithPath: expanded))
+            }
+        }
+        return launchURLs
+    }
 
     init() {
         // Install crash/error capture as early as possible so Swift traps,
@@ -64,27 +91,15 @@ struct MicroCodeApp: App {
                         await performBackgroundStartup()
                     }
                     
-                    // Handle any files/folders passed via CLI or open -a MicroCode after initial window commit
-                    DispatchQueue.main.async {
-                        for url in appDelegate.consumePendingOpenURLs() {
-                            handleIncomingDeepLink(url)
-                        }
-                        let args = Array(CommandLine.arguments.dropFirst())
-                        if !args.contains("--acp-server") {
-                            var skipNext = false
-                            for arg in args {
-                                if skipNext { skipNext = false; continue }
-                                if arg == "-NSDocumentRevisionsDebugMode" || arg == "-ApplePersistenceIgnoreState" {
-                                    skipNext = true
-                                    continue
-                                }
-                                guard !arg.hasPrefix("-") else { continue }
-                                let expanded = (arg as NSString).expandingTildeInPath
-                                if FileManager.default.fileExists(atPath: expanded) {
-                                    openLocalFileOrFolder(URL(fileURLWithPath: expanded))
-                                    break
-                                }
-                            }
+                    // Handle any files/folders passed via CLI or open -a MicroCode
+                    for url in appDelegate.consumePendingOpenURLs() {
+                        handleIncomingDeepLink(url)
+                    }
+                    if !appState.hasBootstrappedCLITargets {
+                        let launchURLs = Self.parseCLILaunchURLs()
+                        if !launchURLs.isEmpty {
+                            appState.hasBootstrappedCLITargets = true
+                            openLocalLaunchTargets(launchURLs)
                         }
                     }
                 }
@@ -118,22 +133,35 @@ struct MicroCodeApp: App {
 
     }
 
+    private static var configuredWindowNumbers = Set<Int>()
+
     private func setupWindow() {
-        if let window = NSApplication.shared.windows.first {
+        let isTransparent = appState.appTheme.isGlass
+        let targetAppearance = NSAppearance(named: appState.appTheme.colorScheme == .light ? .aqua : .darkAqua)
+        let candidateWindows = NSApplication.shared.windows.filter { win in
+            !(win is NSPanel) && win.className != "NSStatusBarWindow"
+        }
+        for window in candidateWindows {
+            let isFirstConfiguration = Self.configuredWindowNumbers.insert(window.windowNumber).inserted
             window.toolbar = nil
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
-            window.styleMask.insert(.fullSizeContentView)
-            window.isMovableByWindowBackground = true
-            window.appearance = NSAppearance(named: .darkAqua)
-            
+            window.styleMask.insert([.resizable, .fullSizeContentView])
+            window.minSize = NSSize(width: 720, height: 480)
+            // Keep false so splitters, canvases, and drag gestures resize panels instead of dragging the window
+            window.isMovableByWindowBackground = false
+            window.appearance = targetAppearance
+
             // Dynamic transparency based on theme
-            let isTransparent = appState.appTheme.isGlass
             window.backgroundColor = isTransparent ? .clear : appState.appTheme.workspaceBackground
             window.isOpaque = !isTransparent
             window.hasShadow = true
-            window.center()
-            window.makeKeyAndOrderFront(nil)
+            if isFirstConfiguration {
+                if Self.configuredWindowNumbers.count == 1 {
+                    window.center()
+                }
+                window.makeKeyAndOrderFront(nil)
+            }
         }
     }
     
@@ -182,7 +210,7 @@ struct MicroCodeApp: App {
         ReportLogManager.shared.log("App Started & Omni AI Local Bridge Initialized on Port 18888", type: .info)
         
         // Log startup performance
-        await performanceManager.runOnECore {
+        await PerformanceManager.shared.runOnECore {
             print("🚀 App Startup: Background services and Omni AI Bridge warmed up")
         }
     }
@@ -225,6 +253,25 @@ struct MicroCodeApp: App {
                 Task { @MainActor in
                     await GoogleColabService.shared.connectToColab(endpoint: endpoint, token: token)
                     AppState.shared?.currentComputeTarget = .googleColab
+                }
+            }
+            return
+        }
+
+        // Worldwide & LAN QR Local LLM Pairing Deep Link (e.g. microcode://llm-connect?endpoint=https://...&token=sk-mc-...&name=MacStudio)
+        if (url.scheme?.lowercased() == "microcode" || url.scheme?.lowercased() == "codetuner"),
+           ["llm-connect", "llm_connect", "local-llm", "localllm"].contains(url.host?.lowercased() ?? "") {
+            Task { @MainActor in
+                let ok = await LocalLLMService.shared.connectOrPairEndpoint(url.absoluteString)
+                if ok {
+                    let chosenModel = LocalLLMService.shared.activeModel
+                    appState.aiProvider = "local"
+                    appState.aiModel = chosenModel
+                    let defaults = UserDefaults.standard
+                    defaults.set("local", forKey: "aiKeyMode")
+                    defaults.set("local", forKey: "aiProvider")
+                    defaults.set(chosenModel, forKey: "aiModel")
+                    ReportLogManager.shared.log("Paired remote Local LLM via QR deep link (\(LocalLLMService.shared.activeEndpoint))", type: .info)
                 }
             }
             return
@@ -298,23 +345,11 @@ struct MicroCodeApp: App {
     }
 
     private func openLocalFileOrFolder(_ url: URL) {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
-        if isDir.boolValue {
-            Task { @MainActor in
-                await appState.openWorkspace(url: url)
-                AgentService.shared.setWorkspace(url.path)
-            }
-        } else {
-            let parentDir = url.deletingLastPathComponent()
-            Task { @MainActor in
-                if appState.workspaceFolder == nil {
-                    await appState.openWorkspace(url: parentDir)
-                    AgentService.shared.setWorkspace(parentDir.path)
-                }
-                await appState.loadFile(url: url)
-            }
-        }
+        openLocalLaunchTargets([url])
+    }
+
+    private func openLocalLaunchTargets(_ urls: [URL]) {
+        appState.openLaunchTargetsParallel(urls)
     }
 }
 
@@ -413,6 +448,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if mainWorkspaceWindow == nil {
             mainWorkspaceWindow = window
         }
+        window.styleMask.insert(.resizable)
+        window.minSize = NSSize(width: 720, height: 480)
+        window.isMovableByWindowBackground = false
         if window.delegate !== self {
             window.delegate = self
         }
@@ -455,6 +493,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ReportLogManager.shared.log("App Terminating", type: .info)
         AgentService.shared.saveChats()
         AgentService.shared.saveArx()
+        DevServerRegistry.shared.terminateAll()
         DeviceRuntimeService.shared.shutdownAllRuntimes()
         // Stop backend server
         BackendService.shared.stopBackend()

@@ -494,7 +494,7 @@ struct MicroCodeLicenseSettingsView: View {
                         ForEach(telemetry.cloudUsersHistory) { user in
                             VStack(alignment: .leading, spacing: 5) {
                                 HStack {
-                                    Image(systemName: user.role == "admin" ? "crown.fill" : "person.crop.circle.fill")
+                                    Image(systemName: user.role == "admin" ? "person.badge.key.fill" : "person.crop.circle.fill")
                                         .foregroundStyle(user.role == "admin" ? .orange : .accentColor)
                                     Text(user.fullName)
                                         .font(.system(size: 12, weight: .semibold))

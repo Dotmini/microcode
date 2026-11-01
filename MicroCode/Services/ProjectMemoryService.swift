@@ -30,15 +30,24 @@ class ProjectMemoryService: ObservableObject {
     
     @discardableResult
     func appendLearnedRule(_ rule: String, workspace: String? = nil) -> String {
-        let targetWorkspace = workspace ?? currentWorkspace ?? UserDefaults.standard.string(forKey: "MicroCode.WorkspacePath") ?? FileManager.default.currentDirectoryPath
-        guard !targetWorkspace.isEmpty else { return "" }
-        self.currentWorkspace = targetWorkspace
-        let microcodeDir = URL(fileURLWithPath: targetWorkspace).appendingPathComponent(".microcode")
-        try? FileManager.default.createDirectory(at: microcodeDir, withIntermediateDirectories: true)
-        let rulesURL = microcodeDir.appendingPathComponent("rules.md")
+        let targetWorkspace = workspace ?? currentWorkspace ?? UserDefaults.standard.string(forKey: "MicroCode.WorkspacePath") ?? ""
+        self.currentWorkspace = targetWorkspace.isEmpty ? nil : targetWorkspace
+        let fm = FileManager.default
+        let rulesURL: URL
+        if !targetWorkspace.isEmpty {
+            let repoRulesURL = URL(fileURLWithPath: targetWorkspace).appendingPathComponent(".microcode/rules.md")
+            if fm.fileExists(atPath: repoRulesURL.path) {
+                rulesURL = repoRulesURL
+            } else {
+                rulesURL = WorkspaceStoragePaths.managedStateFile(named: "rules.md", workspacePath: targetWorkspace)
+            }
+        } else {
+            rulesURL = WorkspaceStoragePaths.managedStateFile(named: "rules.md", workspacePath: nil)
+        }
+        try? fm.createDirectory(at: rulesURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let cleanRule = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanRule.isEmpty else { return rulesURL.path }
-        let existing = (try? String(contentsOf: rulesURL, encoding: .utf8)) ?? "# Project Rules (.microcode/rules.md)\n\n"
+        let existing = (try? String(contentsOf: rulesURL, encoding: .utf8)) ?? "# Project Rules\n\n"
         let updated = existing.hasSuffix("\n") ? "\(existing)- \(cleanRule)\n" : "\(existing)\n- \(cleanRule)\n"
         try? updated.write(to: rulesURL, atomically: true, encoding: .utf8)
         readMemoryFile()
@@ -60,6 +69,17 @@ class ProjectMemoryService: ObservableObject {
                     let capped = String(trimmed.prefix(8000))
                     combinedSections.append("### \(fileName)\n\(capped)")
                 }
+            }
+        }
+
+        // Also load isolated ~/.microcode/workspaces/<id>/rules.md so /learn rules work without polluting Git repos
+        let isolatedRulesURL = WorkspaceStoragePaths.managedStateFile(named: "rules.md", workspacePath: workspace)
+        if fm.fileExists(atPath: isolatedRulesURL.path),
+           let content = try? String(contentsOf: isolatedRulesURL, encoding: .utf8) {
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let capped = String(trimmed.prefix(8000))
+                combinedSections.append("### ~/.microcode/workspaces/rules.md\n\(capped)")
             }
         }
         

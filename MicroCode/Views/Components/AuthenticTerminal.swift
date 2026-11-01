@@ -515,6 +515,8 @@ struct PersistentTerminalSessionHostView: NSViewRepresentable {
         if tv.superview !== nsView {
             attachTerminal(into: nsView)
         }
+        // Keep the inset gutter the same colour as the terminal grid.
+        nsView.layer?.backgroundColor = (isTransparent ? NSColor.clear : backgroundColor).cgColor
         tv.nativeBackgroundColor = isTransparent ? .clear : backgroundColor
         tv.nativeForegroundColor = textColor
         let desiredFont = NSFont(name: fontName, size: fontSize)
@@ -529,13 +531,21 @@ struct PersistentTerminalSessionHostView: NSViewRepresentable {
         tv.removeFromSuperview()
         tv.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(tv)
+        // Inset the grid so the first/last rows are never flush against the pane
+        // edge. Without a bottom inset the active prompt row sits directly on the
+        // window's rounded bottom edge and reads as "cut off / hidden". SwiftTerm
+        // derives rows/cols from its own frame, so the PTY size stays correct.
         NSLayoutConstraint.activate([
-            tv.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            tv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            tv.topAnchor.constraint(equalTo: container.topAnchor),
-            tv.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            tv.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.horizontalInset),
+            tv.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.horizontalInset),
+            tv.topAnchor.constraint(equalTo: container.topAnchor, constant: Self.topInset),
+            tv.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -Self.bottomInset)
         ])
     }
+
+    private static let horizontalInset: CGFloat = 8
+    private static let topInset: CGFloat = 4
+    private static let bottomInset: CGFloat = 10
 }
 
 // MARK: - Backward-Compatible AuthenticTerminal Wrapper

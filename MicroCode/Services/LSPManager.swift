@@ -45,6 +45,9 @@ class LSPManager: ObservableObject {
     /// Latest in-memory content per URI for fast local symbol extraction
     private var documentContents: [String: String] = [:]
     
+    /// Event-driven waiters for fresh `textDocument/publishDiagnostics` after file edits/saves
+    private var diagnosticsWaiters: [String: [UUID: CheckedContinuation<[LSPDiagnostic]?, Never>]] = [:]
+    
     /// Startup timestamp used to stagger external LSP binary spawning after cold start
     private let launchTimestamp = Date()
     
@@ -184,6 +187,90 @@ class LSPManager: ObservableObject {
             try await client.didChange(uri: uri, version: version, text: content)
         } catch {
             print("❌ [LSPManager] didChange failed: \(error)")
+        }
+    }
+
+    /// Receive `textDocument/publishDiagnostics` from an active language server and wake any pending post-edit waiters
+    func receivePublishedDiagnostics(uri: String, diagnostics: [LSPDiagnostic]) {
+        let canonicalURI = URL(string: uri)?.standardizedFileURL.absoluteString ?? uri
+        fileDiagnostics[canonicalURI] = diagnostics
+        if canonicalURI != uri {
+            fileDiagnostics[uri] = diagnostics
+        }
+        if let waiters = diagnosticsWaiters.removeValue(forKey: canonicalURI) {
+            for (_, continuation) in waiters {
+                continuation.resume(returning: diagnostics)
+            }
+        }
+    }
+
+    /// Push the latest on-disk buffer (`didOpen`/`didChange` + `didSave`) to the Language Server
+    /// and await fresh post-edit `publishDiagnostics` within a bounded window (`timeoutMs`).
+    /// Never returns stale pre-edit diagnostics when the document hash changed.
+    func syncAndAwaitFreshDiagnostics(
+        fileURL: URL,
+        content: String,
+        timeoutMs: UInt64 = 220,
+        startServerIfNeeded: Bool = false
+    ) async -> [LSPDiagnostic]? {
+        let canonicalURL = fileURL.standardizedFileURL
+        let canonicalURI = canonicalURL.absoluteString
+        let ext = canonicalURL.pathExtension.lowercased()
+        guard !ext.isEmpty, let serverType = LanguageServer.serverFor(language: ext) else {
+            return nil
+        }
+
+        let isServerActive = (activeClients[serverType]?.isRunning == true)
+        if !isServerActive && !startServerIfNeeded {
+            // Warm up language server in background without blocking the current tool turn
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                _ = try? await self.clientFor(language: ext, fileURI: canonicalURI)
+                await self.documentOpened(uri: canonicalURI, language: ext, content: content)
+                if let client = self.activeClients[serverType], client.isRunning {
+                    try? await client.didSave(uri: canonicalURI, text: content)
+                }
+            }
+            return nil
+        }
+
+        let contentHash = content.hashValue
+        let didContentChange = (documentContentHashes[canonicalURI] != contentHash) || !openedDocumentURIs.contains(canonicalURI)
+        if didContentChange {
+            // Invalidate stale pre-edit diagnostics so AI never sees errors from code it already fixed
+            fileDiagnostics.removeValue(forKey: canonicalURI)
+        } else if let existing = fileDiagnostics[canonicalURI] {
+            return existing
+        }
+
+        guard let client = try? await clientFor(language: ext, fileURI: canonicalURI), client.isRunning else {
+            return nil
+        }
+
+        let waiterId = UUID()
+        let timeoutNs = timeoutMs * 1_000_000
+
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[LSPDiagnostic]?, Never>) in
+            var map = self.diagnosticsWaiters[canonicalURI] ?? [:]
+            map[waiterId] = continuation
+            self.diagnosticsWaiters[canonicalURI] = map
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.documentChanged(uri: canonicalURI, language: ext, content: content)
+                try? await client.didSave(uri: canonicalURI, text: content)
+            }
+
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: timeoutNs)
+                guard let self else { return }
+                if let pending = self.diagnosticsWaiters[canonicalURI]?.removeValue(forKey: waiterId) {
+                    if self.diagnosticsWaiters[canonicalURI]?.isEmpty == true {
+                        self.diagnosticsWaiters.removeValue(forKey: canonicalURI)
+                    }
+                    pending.resume(returning: nil)
+                }
+            }
         }
     }
     

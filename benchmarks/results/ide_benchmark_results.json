@@ -1,32 +1,34 @@
 {
-  "benchmark_suite": "MicroCode Controlled-Variable Production IDE Benchmark v1.0",
-  "controlled_variables": {
-    "hardware": {
-      "cpu_brand": "Apple M2",
-      "cpu_cores_total": 8,
-      "cpu_performance_cores": 4,
-      "cpu_efficiency_cores": 4,
-      "memory_gb": 16,
-      "memory_bytes": 17179869184,
-      "macos_version": "27.0",
-      "macos_build": "26A5388g",
-      "architecture": "arm64",
-      "window_server_poll_hz": 500,
-      "trials_per_ide": 5,
-      "timestamp_utc": "2026-10-26T08:58:24.693256+00:00"
-    },
-    "workspace_fixture": {
-      "workspace_path": "/tmp/microcode_controlled_bench_workspace",
-      "primary_file": "/tmp/microcode_controlled_bench_workspace/src/core/BenchmarkCoreEngine.swift",
-      "large_stress_file": "/tmp/microcode_controlled_bench_workspace/data/LargeDatasetMatrix.json",
-      "source_files_count": 500,
-      "source_lines_count": 49350,
-      "primary_file_lines": 4996,
-      "large_stress_file_lines": 100000,
-      "total_bytes": 12282780,
-      "sha256_manifest": "c5504e49e51fe7af09eac5398dd6573488bb7dc7c1db2d485c0428af1d946f2f"
-    },
-    "isolation_protocol": "Clean process termination before each run; 1 warmup + 5 measured trials per IDE; 500 Hz CoreGraphics WindowServer detection; full process-tree RSS summation."
+  "benchmark_suite_version": "2.0.0-gb-equal",
+  "hardware_environment": {
+    "cpu_brand": "Apple M2",
+    "cpu_cores_total": 8,
+    "cpu_performance_cores": 4,
+    "cpu_efficiency_cores": 4,
+    "memory_gb": 16,
+    "memory_bytes": 17179869184,
+    "macos_version": "27.0",
+    "macos_build": "26A5388g",
+    "architecture": "arm64",
+    "window_server_poll_hz": 500,
+    "trials_per_ide": 5,
+    "steady_state_wait_sec": 5.5,
+    "timestamp_utc": "2026-10-26T11:46:38.568539+00:00"
+  },
+  "controlled_workspace": {
+    "workspace_path": "/tmp/microcode_gb_bench_workspace",
+    "primary_file": "/tmp/microcode_gb_bench_workspace/src/core/BenchmarkCoreEngine.swift",
+    "large_stress_file": "/tmp/microcode_gb_bench_workspace/data/LargeDatasetMatrix.json",
+    "source_files_count": 3001,
+    "total_files_count": 3064,
+    "source_lines_count": 455596,
+    "primary_file_lines": 9997,
+    "large_stress_file_lines": 500000,
+    "total_bytes": 1235981129,
+    "physical_disk_mb": 1197.0,
+    "physical_disk_gb": 1.17,
+    "git_initialized": true,
+    "sha256_manifest": "8c7b3a154d07a9dcc995183aa27b80b3ddc2691cb9b6c8fe9049954b159c1acf"
   },
   "ide_results": [
     {
@@ -40,34 +42,70 @@
       "trials_count": 5,
       "cold_start_ms": {
         "trials": [
-          493.0,
-          576.1,
-          505.5,
-          458.7,
-          476.7
+          814.7,
+          732.4,
+          785.3,
+          769.9,
+          767.5
         ],
-        "median": 493.0,
-        "mean": 502.0,
-        "min": 458.7,
-        "max": 576.1,
-        "stdev": 45.0
+        "median": 769.9,
+        "mean": 774.0,
+        "min": 732.4,
+        "max": 814.7,
+        "stdev": 29.89
+      },
+      "workspace_ready_ms": {
+        "trials": [
+          1035.7,
+          957.2,
+          998.0,
+          974.1,
+          1012.2
+        ],
+        "median": 998.0,
+        "mean": 995.4,
+        "min": 957.2,
+        "max": 1035.7,
+        "stdev": 30.93
+      },
+      "memory_rss_t15_mb": {
+        "trials": [
+          156.3,
+          154.0,
+          155.7,
+          158.1,
+          156.0
+        ],
+        "median": 156.0,
+        "mean": 156.0
       },
       "memory_rss_mb": {
         "trials": [
-          195.7,
-          178.4,
-          173.5,
           194.8,
-          195.1
+          195.6,
+          201.9,
+          164.1,
+          160.1
         ],
         "median": 194.8,
-        "mean": 187.5,
-        "min": 173.5,
-        "max": 195.7,
-        "stdev": 10.69
+        "mean": 183.3,
+        "min": 160.1,
+        "max": 201.9,
+        "stdev": 19.6
       },
-      "process_count_median": 1,
-      "thread_count_median": 20
+      "core_ide_rss_t55_mb": {
+        "trials": [
+          194.8,
+          195.6,
+          201.9,
+          164.1,
+          160.1
+        ],
+        "median": 194.8,
+        "mean": 183.3
+      },
+      "process_count_median": 2,
+      "thread_count_median": 14
     },
     {
       "id": "zed",
@@ -80,34 +118,70 @@
       "trials_count": 5,
       "cold_start_ms": {
         "trials": [
-          771.7,
-          798.4,
-          824.2,
-          841.8,
-          695.1
+          674.3,
+          592.5,
+          732.1,
+          609.5,
+          662.8
         ],
-        "median": 798.4,
-        "mean": 786.2,
-        "min": 695.1,
-        "max": 841.8,
-        "stdev": 57.43
+        "median": 662.8,
+        "mean": 654.2,
+        "min": 592.5,
+        "max": 732.1,
+        "stdev": 55.57
+      },
+      "workspace_ready_ms": {
+        "trials": [
+          674.3,
+          592.5,
+          732.1,
+          609.5,
+          662.9
+        ],
+        "median": 662.9,
+        "mean": 654.3,
+        "min": 592.5,
+        "max": 732.1,
+        "stdev": 55.57
+      },
+      "memory_rss_t15_mb": {
+        "trials": [
+          229.7,
+          228.0,
+          230.5,
+          229.1,
+          229.2
+        ],
+        "median": 229.2,
+        "mean": 229.3
       },
       "memory_rss_mb": {
         "trials": [
-          219.6,
-          219.2,
-          217.1,
-          227.6,
-          218.6
+          233.1,
+          231.9,
+          233.8,
+          232.6,
+          233.0
         ],
-        "median": 219.2,
-        "mean": 220.4,
-        "min": 217.1,
-        "max": 227.6,
-        "stdev": 4.12
+        "median": 233.0,
+        "mean": 232.9,
+        "min": 231.9,
+        "max": 233.8,
+        "stdev": 0.7
+      },
+      "core_ide_rss_t55_mb": {
+        "trials": [
+          233.1,
+          231.9,
+          233.8,
+          232.6,
+          233.0
+        ],
+        "median": 233.0,
+        "mean": 232.9
       },
       "process_count_median": 2,
-      "thread_count_median": 47
+      "thread_count_median": 41
     },
     {
       "id": "opencode",
@@ -120,34 +194,70 @@
       "trials_count": 5,
       "cold_start_ms": {
         "trials": [
-          562.6,
-          1053.1,
-          566.7,
-          1081.2,
-          544.9
+          1022.1,
+          953.0,
+          583.1,
+          971.6,
+          881.2
         ],
-        "median": 566.7,
-        "mean": 761.7,
-        "min": 544.9,
-        "max": 1081.2,
-        "stdev": 279.13
+        "median": 953.0,
+        "mean": 882.2,
+        "min": 583.1,
+        "max": 1022.1,
+        "stdev": 174.67
+      },
+      "workspace_ready_ms": {
+        "trials": [
+          1022.1,
+          953.0,
+          583.1,
+          971.6,
+          881.2
+        ],
+        "median": 953.0,
+        "mean": 882.2,
+        "min": 583.1,
+        "max": 1022.1,
+        "stdev": 174.67
+      },
+      "memory_rss_t15_mb": {
+        "trials": [
+          387.9,
+          418.6,
+          376.2,
+          421.9,
+          425.6
+        ],
+        "median": 418.6,
+        "mean": 406.0
       },
       "memory_rss_mb": {
         "trials": [
-          192.2,
-          214.6,
-          214.3,
-          240.7,
-          220.6
+          484.0,
+          493.3,
+          495.5,
+          493.9,
+          487.5
         ],
-        "median": 214.6,
-        "mean": 216.5,
-        "min": 192.2,
-        "max": 240.7,
-        "stdev": 17.33
+        "median": 493.3,
+        "mean": 490.8,
+        "min": 484.0,
+        "max": 495.5,
+        "stdev": 4.88
+      },
+      "core_ide_rss_t55_mb": {
+        "trials": [
+          484.0,
+          493.3,
+          495.5,
+          493.9,
+          487.5
+        ],
+        "median": 493.3,
+        "mean": 490.8
       },
       "process_count_median": 2,
-      "thread_count_median": 37
+      "thread_count_median": 47
     },
     {
       "id": "antigravity_ide",
@@ -160,89 +270,138 @@
       "trials_count": 5,
       "cold_start_ms": {
         "trials": [
-          1854.8,
-          2197.2,
-          2159.9,
-          2186.1,
-          2319.4
+          2412.8,
+          2347.7,
+          2188.7,
+          2264.1,
+          2057.0
         ],
-        "median": 2186.1,
-        "mean": 2143.5,
-        "min": 1854.8,
-        "max": 2319.4,
-        "stdev": 172.67
+        "median": 2264.1,
+        "mean": 2254.1,
+        "min": 2057.0,
+        "max": 2412.8,
+        "stdev": 138.9
+      },
+      "workspace_ready_ms": {
+        "trials": [
+          4173.8,
+          4211.5,
+          4054.7,
+          4065.5,
+          3777.6
+        ],
+        "median": 4065.5,
+        "mean": 4056.6,
+        "min": 3777.6,
+        "max": 4211.5,
+        "stdev": 170.04
+      },
+      "memory_rss_t15_mb": {
+        "trials": [
+          1719.4,
+          1750.6,
+          1921.4,
+          1774.7,
+          1781.3
+        ],
+        "median": 1774.7,
+        "mean": 1789.5
       },
       "memory_rss_mb": {
         "trials": [
-          937.6,
-          1004.4,
-          936.6,
-          1175.1,
-          941.7
+          2510.7,
+          2801.2,
+          2330.1,
+          2352.9,
+          2377.8
         ],
-        "median": 941.7,
-        "mean": 999.1,
-        "min": 936.6,
-        "max": 1175.1,
-        "stdev": 102.45
+        "median": 2377.8,
+        "mean": 2474.5,
+        "min": 2330.1,
+        "max": 2801.2,
+        "stdev": 195.6
       },
-      "process_count_median": 6,
-      "thread_count_median": 112
+      "core_ide_rss_t55_mb": {
+        "trials": [
+          2510.7,
+          2801.2,
+          2330.1,
+          2352.9,
+          2377.8
+        ],
+        "median": 2377.8,
+        "mean": 2474.5
+      },
+      "process_count_median": 18,
+      "thread_count_median": 269
     }
   ],
-  "active_electron_session_reference": {
-    "name": "Electron AI IDE (Active Multi-Window + Agent Session)",
+  "active_electron_multiwindow_reference": {
+    "name": "Electron Agent IDE (Active Multi-Window Session)",
     "bundle_size_mb": 471.3,
     "live_metrics": {
-      "process_count": 37,
-      "thread_count": 451,
-      "total_rss_kb": 3102496,
-      "total_rss_mb": 3029.8
+      "process_count": 36,
+      "thread_count": 447,
+      "total_rss_kb": 1400256,
+      "total_rss_mb": 1367.4,
+      "core_ide_rss_mb": 1367.4,
+      "external_lsp_rss_mb": 0.0
     }
   },
-  "engine_and_token_benchmarks": {
-    "workspace_50k_loc_symbol_scan_ms": {
+  "workspace_and_tokenmem_benchmarks": {
+    "workspace_gb_ripgrep_search_ms": {
       "trials": [
-        164.12,
-        53.84,
-        28.91,
-        44.48,
-        41.87
+        13.21,
+        12.53,
+        11.85,
+        11.48,
+        12.82
       ],
-      "median": 44.48,
-      "mean": 66.64
+      "median": 12.53,
+      "mean": 12.38
     },
-    "large_100k_lines_load_ms": {
+    "large_500k_lines_45mb_unbounded_load_ms": {
       "trials": [
-        24.56,
-        20.42,
-        16.88,
-        15.85,
-        17.16
+        98.7,
+        78.44,
+        80.76,
+        79.0,
+        82.4
       ],
-      "median": 17.16,
-      "mean": 18.97
+      "median": 80.76,
+      "mean": 83.86
+    },
+    "large_500k_lines_45mb_microcode_bounded_load_ms": {
+      "trials": [
+        12.9,
+        20.17,
+        16.27,
+        15.88,
+        14.7
+      ],
+      "median": 15.88,
+      "mean": 15.98
     },
     "ai_token_efficiency_15_turn_task": {
       "baseline_unoptimized_ide": {
-        "tool_schemas": 11440,
-        "file_reads_in_history": 16800,
-        "terminal_build_logs": 6400,
-        "conversation_and_diffs": 3760,
-        "total_turn15_input_tokens": 38400,
-        "cumulative_15_turns_tokens": 342600
+        "tool_schemas": 16432,
+        "file_reads_in_history": 42314,
+        "terminal_build_logs": 10908,
+        "conversation_and_diffs": 3850,
+        "total_turn15_input_tokens": 73504,
+        "cumulative_15_turns_tokens": 654185
       },
       "microcode_tokenmem_v3": {
-        "layer1_tool_scope_tokens": 1980,
-        "layer2_semantic_turn_folding": 1840,
-        "layer3_ast_skeleton_reads": 2420,
-        "layer4_rolling_key_facts": 620,
-        "layer5_delta_read_cache": 310,
+        "layer1_tool_scope_tokens": 2844,
+        "layer2_semantic_turn_folding": 1171,
+        "layer3_ast_skeleton_reads": 3755,
+        "layer4_rolling_key_facts": 580,
+        "layer5_delta_read_cache": 290,
         "layer6_prompt_cache_hit_pct": 84.0,
-        "total_turn15_input_tokens": 7170,
-        "cumulative_15_turns_tokens": 64850,
-        "token_reduction_pct": 81.3,
-        "cumulative_reduction_pct": 81.1
+        "total_turn15_input_tokens": 8640,
+        "cumulative_15_turns_tokens": 77760,
+        "token_reduction_pct": 88.2,
+        "cumulative_reduction_pct": 88.1
       }
     }
   }

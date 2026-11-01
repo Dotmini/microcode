@@ -376,7 +376,9 @@ public final class MultiPlatformRulesEngine: ObservableObject {
             // 9. Scan Universal MCP servers across MicroCode, Antigravity, Claude, Cursor, Windsurf, VS Code, and Codex
             var mcpServers: [DiscoveredMCPServer] = []
             let homeURL = self.fileManager.homeDirectoryForCurrentUser
+            let isolatedWorkspaceMCP = WorkspaceStoragePaths.managedStateFile(named: "mcp.json", workspacePath: rootURL.path)
             let mcpCandidates: [(URL, String)] = [
+                (isolatedWorkspaceMCP, "MicroCode Workspace State (~/.microcode/workspaces/.../mcp.json)"),
                 (rootURL.appendingPathComponent(".microcode/mcp.json"), "MicroCode Workspace (.microcode/mcp.json)"),
                 (rootURL.appendingPathComponent(".mcp.json"), "MCP Standard (.mcp.json)"),
                 (rootURL.appendingPathComponent(".cursor/mcp.json"), "Cursor (.cursor/mcp.json)"),

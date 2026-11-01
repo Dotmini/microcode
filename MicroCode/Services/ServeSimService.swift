@@ -17,6 +17,49 @@ enum ServeSimConnectionState: Equatable {
     case failed
 }
 
+enum IPhoneDuoDisplayMode: String, CaseIterable, Identifiable {
+    case outer = "outer"
+    case inner = "inner"
+
+    var id: String { rawValue }
+
+    var shortLabel: String {
+        switch self {
+        case .outer: return "จอนอก (Outer)"
+        case .inner: return "จอใน (Inner)"
+        }
+    }
+
+    var compactBadge: String {
+        switch self {
+        case .outer: return "จอนอก"
+        case .inner: return "จอใน"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .outer: return "iphone"
+        case .inner: return "book.pages"
+        }
+    }
+
+    var resolutionLabel: String {
+        switch self {
+        case .outer: return "466×678 pt · Cover"
+        case .inner: return "951×669 pt · Unfolded"
+        }
+    }
+
+    static func modeFilePath(for simulatorID: String) -> String {
+        "/tmp/microcode-serve-sim-display-\(simulatorID).mode"
+    }
+
+    func persist(for simulatorID: String) {
+        try? rawValue.write(toFile: Self.modeFilePath(for: simulatorID), atomically: true, encoding: .utf8)
+    }
+}
+
 @MainActor
 final class ServeSimService: ObservableObject {
     static let shared = ServeSimService()
@@ -25,6 +68,7 @@ final class ServeSimService: ObservableObject {
     @Published private(set) var statusMessage = "Fast iOS Preview is idle."
     @Published private(set) var previewURL: URL?
     @Published private(set) var connectionState: ServeSimConnectionState = .idle
+    @Published private(set) var displayMode: IPhoneDuoDisplayMode = .outer
 
     private let port = 3200
     private(set) var activeDeviceID: String?
@@ -36,20 +80,31 @@ final class ServeSimService: ObservableObject {
 
     private init() {}
 
-    func start(simulatorID: String, simulatorName: String) async {
+    func start(
+        simulatorID: String,
+        simulatorName: String,
+        displayMode: IPhoneDuoDisplayMode = .outer
+    ) async {
+        displayMode.persist(for: simulatorID)
+        let modeChanged = (self.displayMode != displayMode)
+        self.displayMode = displayMode
+
         // Preview is long-lived. Recreating the local stream for an already
         // selected simulator is both slow and makes WKWebView briefly discard
-        // the real Apple frame, so first attach to the healthy existing one.
+        // the real Apple frame, so first attach to the healthy existing one
+        // unless the foldable outer/inner display mode changed.
         if activeDeviceID == simulatorID {
-            if isActive, let url = previewURL, await isReachable(url) {
+            if !modeChanged, isActive, let url = previewURL, await isReachable(url, simulatorID: simulatorID) {
                 connectionState = .ready
                 statusMessage = "Interactive preview · 60 FPS target"
                 return
             }
-            if connectionState == .connecting { return }
-            await stopHelper(keepPresentation: true)
+            if !modeChanged, connectionState == .connecting { return }
+            await stopHelper(keepPresentation: !modeChanged)
         } else if activeDeviceID != nil {
             await stop()
+            self.displayMode = displayMode
+            displayMode.persist(for: simulatorID)
         }
 
         guard let runtime = locateRuntime() else {
@@ -79,17 +134,17 @@ final class ServeSimService: ObservableObject {
             ])
             guard generation == connectionGeneration else { return }
             let url = URL(string: "http://127.0.0.1:\(port)")!
-            guard await waitUntilReachable(url, generation: generation) else {
+            guard await waitUntilReachable(url, simulatorID: simulatorID, generation: generation) else {
                 guard generation == connectionGeneration else { return }
                 isActive = false
                 connectionState = .failed
                 statusMessage = output.isEmpty
-                    ? "Preview did not connect in 12 seconds. Check the simulator, then Retry."
+                    ? "Preview did not connect in 15 seconds. Check the simulator, then Retry."
                     : "Preview did not connect. \(output)"
                 return
             }
             guard generation == connectionGeneration else { return }
-            previewURL = sessionURL(for: url, generation: generation)
+            previewURL = sessionURL(for: url, simulatorID: simulatorID, generation: generation)
             isActive = true
             connectionState = .ready
             statusMessage = "Interactive preview · 60 FPS target"
@@ -102,12 +157,22 @@ final class ServeSimService: ObservableObject {
     }
 
     func retryLastSimulator() async {
-        guard let activeDeviceID, let activeSimulatorName else { return }
-        await start(simulatorID: activeDeviceID, simulatorName: activeSimulatorName)
+        if let activeDeviceID, let activeSimulatorName {
+            await start(simulatorID: activeDeviceID, simulatorName: activeSimulatorName, displayMode: displayMode)
+        } else {
+            await DeviceRuntimeService.shared.startEmbeddedAppleSimulator()
+        }
     }
 
-    func isShowing(simulatorID: String) -> Bool {
-        activeDeviceID == simulatorID && isActive && connectionState == .ready
+    func reportPreflightFailure(_ message: String) {
+        isActive = false
+        connectionState = .failed
+        statusMessage = message
+    }
+
+    func isShowing(simulatorID: String, displayMode: IPhoneDuoDisplayMode? = nil) -> Bool {
+        let modeMatches = displayMode == nil || self.displayMode == displayMode
+        return activeDeviceID == simulatorID && modeMatches && isActive && connectionState == .ready
     }
 
     func stop() async {
@@ -130,12 +195,17 @@ final class ServeSimService: ObservableObject {
 
     private func locateRuntime() -> URL? {
         let bundle = Bundle.main.resourceURL
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
         let candidates: [URL?] = [
             bundle?.appendingPathComponent("serve-sim/serve-sim.js"),
             bundle?.appendingPathComponent("serve-sim/dist/serve-sim.js"),
             bundle?.appendingPathComponent("serve-sim/0.1.46/dist/serve-sim.js"),
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("Vendor/serve-sim/0.1.46/dist/serve-sim.js")
+                .appendingPathComponent("Vendor/serve-sim/0.1.46/dist/serve-sim.js"),
+            sourceRoot.appendingPathComponent("Vendor/serve-sim/0.1.46/dist/serve-sim.js")
         ]
         return candidates.compactMap { $0 }.first { FileManager.default.isExecutableFile(atPath: $0.path) || FileManager.default.fileExists(atPath: $0.path) }
     }
@@ -170,27 +240,33 @@ final class ServeSimService: ObservableObject {
         }
     }
 
-    private func sessionURL(for url: URL, generation: Int) -> URL {
+    private func sessionURL(for url: URL, simulatorID: String, generation: Int) -> URL {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: "microcodeSession", value: String(generation))]
+        components?.queryItems = [
+            URLQueryItem(name: "device", value: simulatorID),
+            URLQueryItem(name: "microcodeSession", value: String(generation)),
+            URLQueryItem(name: "duoDisplay", value: displayMode.rawValue)
+        ]
         return components?.url ?? url
     }
 
-    private func isReachable(_ url: URL) async -> Bool {
+    private func isReachable(_ url: URL, simulatorID: String) async -> Bool {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.query = nil
-        guard let baseURL = components?.url else { return false }
-        var request = URLRequest(url: baseURL, timeoutInterval: 0.5)
+        components?.queryItems = [URLQueryItem(name: "device", value: simulatorID)]
+        guard let checkURL = components?.url else { return false }
+        var request = URLRequest(url: checkURL, timeoutInterval: 0.8)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        guard let (_, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse else { return false }
-        return (200..<500).contains(http.statusCode)
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 200 else { return false }
+        let html = String(decoding: data, as: UTF8.self)
+        return html.contains("\"streamUrl\"") && html.localizedCaseInsensitiveContains(simulatorID)
     }
 
-    private func waitUntilReachable(_ url: URL, generation: Int) async -> Bool {
-        for attempt in 0..<80 {
+    private func waitUntilReachable(_ url: URL, simulatorID: String, generation: Int) async -> Bool {
+        for attempt in 0..<100 {
             guard generation == connectionGeneration else { return false }
-            if await isReachable(url) { return true }
+            if await isReachable(url, simulatorID: simulatorID) { return true }
             if attempt == 20 {
                 statusMessage = "Waiting for the iOS Simulator display…"
             }
@@ -200,11 +276,24 @@ final class ServeSimService: ObservableObject {
     }
 
     private func run(_ executable: URL, _ arguments: [String]) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
+        let currentMode = self.displayMode.rawValue
+        let runtimeBinDir: String? = (commandURL ?? locateRuntime()).map { runtimeScript in
+            let parent = runtimeScript.deletingLastPathComponent()
+            let root = parent.lastPathComponent == "dist" ? parent.deletingLastPathComponent() : parent
+            return root.appendingPathComponent("bin").path
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let output = Pipe()
             process.executableURL = executable
             process.arguments = arguments
+            var env = ProcessInfo.processInfo.environment
+            env["SERVE_SIM_DISPLAY_MODE"] = currentMode
+            if let binDir = runtimeBinDir, FileManager.default.fileExists(atPath: binDir) {
+                let existingPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+                env["PATH"] = "\(binDir):\(existingPath)"
+            }
+            process.environment = env
             process.standardOutput = output
             process.standardError = output
             self.activeProcess = process

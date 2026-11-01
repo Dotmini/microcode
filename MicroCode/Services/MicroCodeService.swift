@@ -24,9 +24,13 @@ class MicroCodeService: ObservableObject {
     
     func setupCore() {
         do {
+            let isolatedVectorDir = WorkspaceStoragePaths.managedStateFile(
+                named: "vectors",
+                workspacePath: workspacePath
+            ).path
             let config = AgentConfig(
                 workspacePath: workspacePath,
-                vectorDbPath: nil, // Use default
+                vectorDbPath: isolatedVectorDir,
                 shell: "/bin/zsh"
             )
             

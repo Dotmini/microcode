@@ -122,10 +122,15 @@ struct UniversalSpreadsheetView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 18)
+
+                PreviewCloseTabButton()
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+            .background({
+                let theme = AppState.shared?.appTheme ?? .dark
+                return theme.isGlass ? Color.clear : Color(nsColor: theme.panelBackground)
+            }())
             
             Divider()
             
@@ -138,10 +143,10 @@ struct UniversalSpreadsheetView: View {
             }
         }
         .onAppear {
-            loadSpreadsheet()
+            loadSpreadsheet(from: url)
         }
-        .onChange(of: url) { _ in
-            loadSpreadsheet()
+        .onChange(of: url) { newURL in
+            loadSpreadsheet(from: newURL)
         }
     }
     
@@ -244,11 +249,12 @@ struct UniversalSpreadsheetView: View {
         }
     }
     
-    private func loadSpreadsheet() {
+    private func loadSpreadsheet(from targetURL: URL? = nil) {
+        let resolvedURL = targetURL ?? url
         isLoading = true
         errorMessage = nil
         
-        let ext = url.pathExtension.lowercased()
+        let ext = resolvedURL.pathExtension.lowercased()
         if ext == "xlsx" || ext == "xls" || ext == "numbers" {
             // For binary spreadsheets, default to QuickLook mode which renders full Excel natively
             viewMode = .quickLook
@@ -259,21 +265,21 @@ struct UniversalSpreadsheetView: View {
         // CSV / TSV text parsing
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let attr = try? FileManager.default.attributesOfItem(atPath: self.url.path)
+                let attr = try? FileManager.default.attributesOfItem(atPath: resolvedURL.path)
                 let fileSize = (attr?[.size] as? NSNumber)?.int64Value ?? 0
                 let isGiant = fileSize > 10 * 1024 * 1024 // > 10MB
                 
                 let content: String
                 if isGiant {
                     // For massive CSVs/dumps (>10MB), read first 2MB to extract headers and preview rows safely
-                    let handle = try FileHandle(forReadingFrom: self.url)
+                    let handle = try FileHandle(forReadingFrom: resolvedURL)
                     defer { try? handle.close() }
                     let data = handle.readData(ofLength: 2 * 1024 * 1024)
                     content = String(data: data, encoding: .utf8)
                         ?? String(data: data, encoding: .isoLatin1)
                         ?? ""
                 } else {
-                    content = try String(contentsOf: self.url, encoding: .utf8)
+                    content = try String(contentsOf: resolvedURL, encoding: .utf8)
                 }
                 
                 let delimiter = ext == "tsv" ? "\t" : ","

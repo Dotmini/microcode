@@ -780,6 +780,29 @@ struct PythonVersionInfo: Identifiable, Hashable {
 @MainActor
 class AppState: ObservableObject {
     static weak var shared: AppState? = nil
+    static let activeInstances = NSHashTable<AppState>.weakObjects()
+
+    static func flushAllUnsavedBuffersBeforeAgentAccess(path: String) {
+        let states = activeInstances.allObjects
+        if states.isEmpty {
+            shared?.flushUnsavedBufferBeforeAgentAccess(path: path)
+            return
+        }
+        for state in states {
+            state.flushUnsavedBufferBeforeAgentAccess(path: path)
+        }
+    }
+
+    static func reloadAllOpenBuffersFromDisk(path: String, forceOverwriteUnsaved: Bool = false) {
+        let states = activeInstances.allObjects
+        if states.isEmpty {
+            shared?.reloadFileFromDisk(path: path, forceOverwriteUnsaved: forceOverwriteUnsaved)
+            return
+        }
+        for state in states {
+            state.reloadFileFromDisk(path: path, forceOverwriteUnsaved: forceOverwriteUnsaved)
+        }
+    }
 
     // MARK: - Published Properties
 
@@ -1077,7 +1100,7 @@ class AppState: ObservableObject {
                 || LocalEcosystemDiscovery.shared.engines.contains(where: { $0.id == aiProvider && $0.isInstalled })
         }
         if keyMode == "subscription" {
-            return SubscriptionAuthManager.shared.hasAnyConnected
+            return SubscriptionAuthManager.shared.hasAnyConnected || !resolveApiKey(for: aiProvider).isEmpty
         }
         if keyMode == "local" || aiProvider == "local" {
             return LocalLLMService.shared.activeServer?.isOnline == true
@@ -1108,6 +1131,7 @@ class AppState: ObservableObject {
     private var activeFileLoadGeneration = UUID()
     private var loadingDirectoryPaths = Set<String>()
     private var loadedDirectoryPaths = Set<String>()
+    var hasBootstrappedCLITargets: Bool = false
 
     nonisolated private static let maximumDirectoryEntries = 2_000
     nonisolated private static let maximumEditableFileBytes = 2 * 1_024 * 1_024
@@ -1119,12 +1143,86 @@ class AppState: ObservableObject {
 
     init() {
         AppState.shared = self
-        // Let SwiftUI commit the first window before restoring settings and a
-        // previous workspace. This keeps cold-launch first paint responsive.
+        AppState.activeInstances.add(self)
+        let defaults = UserDefaults.standard
+        if let savedTheme = defaults.string(forKey: "appTheme").flatMap(AppTheme.init(rawValue:)),
+           savedTheme != .transparent {
+            self.appTheme = savedTheme
+        }
+
+        // Parallel Cold-Start Pipeline: resolve CLI targets (or lastWorkspacePath)
+        // before Frame 0 so SwiftUI mounts the active workspace directly without
+        // instantiating and tearing down WelcomeScreen.
+        let cliURLs = MicroCodeApp.parseCLILaunchURLs()
+        if !cliURLs.isEmpty {
+            self.hasBootstrappedCLITargets = true
+            for url in cliURLs {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+                    if isDir.boolValue && self.workspaceFolder == nil {
+                        self.workspaceFolder = url
+                    }
+                }
+            }
+            if self.workspaceFolder == nil, let firstFile = cliURLs.first {
+                self.workspaceFolder = firstFile.deletingLastPathComponent()
+            }
+            self.openLaunchTargetsParallel(cliURLs)
+        } else if let rawLastPath = defaults.string(forKey: "lastWorkspacePath"),
+                  !rawLastPath.isEmpty {
+            let lastPath = WorkspaceStoragePaths.migrateMisplacedQuickStartIfNeeded(rawLastPath)
+            if lastPath != rawLastPath {
+                defaults.set(lastPath, forKey: "lastWorkspacePath")
+            }
+            if FileManager.default.fileExists(atPath: lastPath) {
+                self.workspaceFolder = URL(fileURLWithPath: lastPath)
+            }
+        }
+
+        // Let SwiftUI commit the first window before restoring full settings and
+        // enumerating the workspace. This keeps cold-launch first paint ultra-fast.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.setupSubscriptions()
             self.loadSettings()
+        }
+    }
+
+    func openLaunchTargetsParallel(_ urls: [URL]) {
+        var directoryURLs: [URL] = []
+        var fileURLs: [URL] = []
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                directoryURLs.append(url)
+            } else {
+                fileURLs.append(url)
+            }
+        }
+        guard !directoryURLs.isEmpty || !fileURLs.isEmpty else { return }
+
+        let targetRootDir: URL? = directoryURLs.first ?? fileURLs.first?.deletingLastPathComponent()
+        if let rootDir = targetRootDir, self.workspaceFolder == nil {
+            self.workspaceFolder = rootDir
+        }
+
+        Task { @MainActor in
+            if let rootDir = targetRootDir {
+                if fileURLs.isEmpty {
+                    await self.openWorkspace(url: rootDir, autoOpenEntryFile: true)
+                } else {
+                    async let wsLoad: Void = self.openWorkspace(url: rootDir, autoOpenEntryFile: false)
+                    for fileURL in fileURLs {
+                        await self.loadFile(url: fileURL)
+                    }
+                    _ = await wsLoad
+                }
+            } else {
+                for fileURL in fileURLs {
+                    await self.loadFile(url: fileURL)
+                }
+            }
         }
     }
 
@@ -1276,11 +1374,8 @@ class AppState: ObservableObject {
             defaults.set(true, forKey: opaqueDefaultMigrationKey)
         }
         
-        // Auto-detect and migrate credentials from existing local developer setups across macOS
-        autoDetectAndMigrateCredentials(defaults: defaults)
-
-        // Load API Keys
-        let providers = ["gemini", "openai", "anthropic", "glm", "deepseek", "qwen", "grok"]
+        // Load API Keys across all supported BYOK providers (including Typhoon, OpenRouter, Groq, Mistral, Kimi, etc.)
+        let providers = Self.allDirectAPIProviders
         for provider in providers {
             if let key = defaults.string(forKey: "\(provider)_api_key"), !key.isEmpty {
                 apiKeys[provider] = key
@@ -1289,6 +1384,16 @@ class AppState: ObservableObject {
         if let legacyKey = defaults.string(forKey: "apiKey"), !legacyKey.isEmpty {
             if apiKeys["openai"] == nil || apiKeys["openai"]?.isEmpty == true {
                 apiKeys["openai"] = legacyKey
+            }
+        }
+
+        // Only scan legacy preference plists on disk if no keys exist yet
+        if apiKeys.isEmpty {
+            autoDetectAndMigrateCredentials(defaults: defaults)
+            for provider in providers {
+                if let key = defaults.string(forKey: "\(provider)_api_key"), !key.isEmpty {
+                    apiKeys[provider] = key
+                }
             }
         }
 
@@ -1358,15 +1463,23 @@ class AppState: ObservableObject {
         unsetenv("MICRORENT_TOKEN")
         unsetenv("USE_MICRORENT_PROXY")
 
-        // Load GitHub Settings (Token stored securely in Keychain, migrated from legacy UserDefaults)
+        // Load GitHub Settings (Token stored securely in Keychain, deferred to next runloop turn)
         githubOwner = defaults.string(forKey: "githubOwner") ?? ""
         githubRepo = defaults.string(forKey: "githubRepo") ?? ""
         if let legacyToken = defaults.string(forKey: "githubToken"), !legacyToken.isEmpty {
-            _ = KeychainManager.shared.saveIntegrationSecret(legacyToken, account: "GITHUB_PAT_TOKEN")
-            defaults.removeObject(forKey: "githubToken")
             githubToken = legacyToken
+            defaults.removeObject(forKey: "githubToken")
+            Task { @MainActor in
+                _ = KeychainManager.shared.saveIntegrationSecret(legacyToken, account: "GITHUB_PAT_TOKEN")
+            }
         } else {
-            githubToken = KeychainManager.shared.readIntegrationSecret(account: "GITHUB_PAT_TOKEN") ?? ""
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                let token = KeychainManager.shared.readIntegrationSecret(account: "GITHUB_PAT_TOKEN") ?? ""
+                if !token.isEmpty {
+                    self?.githubToken = token
+                }
+            }
         }
 
         // Use object check to properly default booleans
@@ -1393,16 +1506,16 @@ class AppState: ObservableObject {
             defaults.set(agentMaxIterations, forKey: "agentMaxIterations")
         }
         
-        // Restore last opened workspace folder
-        if let lastPath = defaults.string(forKey: "lastWorkspacePath"),
+        // Restore last opened workspace folder only if no CLI or deep-link workspace was already opened
+        if !self.hasBootstrappedCLITargets,
+           self.fileTree.isEmpty,
+           let lastPath = defaults.string(forKey: "lastWorkspacePath"),
            !lastPath.isEmpty,
            FileManager.default.fileExists(atPath: lastPath) {
             let url = URL(fileURLWithPath: lastPath)
-            // External workspaces can be expensive to enumerate. Restore only
-            // after the editor shell has become interactive.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                guard let self else { return }
-                Task { @MainActor in await self.openWorkspace(url: url) }
+            Task { @MainActor [weak self] in
+                guard let self, self.fileTree.isEmpty else { return }
+                await self.openWorkspace(url: url)
             }
         }
         
@@ -1441,8 +1554,15 @@ class AppState: ObservableObject {
         }
     }
 
+    private static let allDirectAPIProviders: [String] = [
+        "gemini", "openai", "anthropic", "glm", "deepseek",
+        "9router", "openrouter", "groq", "mistral", "kimi",
+        "perplexity", "perch", "tokenme", "typhoon", "cerebras", "together",
+        "fireworks", "minimax", "nvidia", "qwen", "grok", "aipass"
+    ]
+
     private func autoDetectAndMigrateCredentials(defaults: UserDefaults) {
-        let providers = ["gemini", "openai", "anthropic", "glm", "deepseek", "qwen", "grok"]
+        let providers = Self.allDirectAPIProviders
         
         // 1. Scan candidate preference suites and plists for existing developer credentials
         let candidateSuites = [
@@ -1760,9 +1880,22 @@ class AppState: ObservableObject {
             return cached
         }
 
-        var paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_workspaces") ?? []
-        if let last = UserDefaults.standard.string(forKey: "lastWorkspacePath"), !last.isEmpty, !paths.contains(last) {
-            paths.insert(last, at: 0)
+        let rawStoredPaths = UserDefaults.standard.stringArray(forKey: "microcode_recent_workspaces") ?? []
+        var paths: [String] = []
+        var didMigrateRecent = false
+        for raw in rawStoredPaths {
+            let migrated = WorkspaceStoragePaths.migrateMisplacedQuickStartIfNeeded(raw)
+            if migrated != raw { didMigrateRecent = true }
+            if !paths.contains(migrated) { paths.append(migrated) }
+        }
+        if didMigrateRecent {
+            UserDefaults.standard.set(paths, forKey: "microcode_recent_workspaces")
+        }
+        if let rawLast = UserDefaults.standard.string(forKey: "lastWorkspacePath"), !rawLast.isEmpty {
+            let last = WorkspaceStoragePaths.migrateMisplacedQuickStartIfNeeded(rawLast)
+            if !paths.contains(last) {
+                paths.insert(last, at: 0)
+            }
         }
         
         // Only merge NSDocumentController recent documents once per launch to avoid
@@ -1880,12 +2013,12 @@ class AppState: ObservableObject {
     }
     
     /// Public async method to open a workspace from path / URL
-    func openWorkspace(url: URL) async {
-        await loadFolderOptimized(url: url)
+    func openWorkspace(url: URL, autoOpenEntryFile: Bool = true) async {
+        await loadFolderOptimized(url: url, autoOpenEntryFile: autoOpenEntryFile)
     }
     
     /// Optimized folder loading with lazy background services
-    private func loadFolderOptimized(url: URL) async {
+    private func loadFolderOptimized(url: URL, autoOpenEntryFile: Bool = true) async {
         // Invalidate every in-flight folder/file result from the previous
         // workspace before publishing the new root. This prevents a slow scan
         // from an old folder replacing the new folder's UI later.
@@ -1950,7 +2083,7 @@ class AppState: ObservableObject {
         // Auto-open a primary entry file when no files are currently open so
         // switching to Code Editor mode immediately displays code rather than
         // an empty "Select a file to view" placeholder.
-        if self.openFiles.isEmpty {
+        if autoOpenEntryFile && self.openFiles.isEmpty {
             let preferredNames = [
                 "main.swift", "App.swift", "ContentView.swift", "Package.swift",
                 "main.rs", "lib.rs", "Cargo.toml",
@@ -2208,12 +2341,43 @@ class AppState: ObservableObject {
         }
     }
 
-    public func reloadFileFromDisk(path: String) {
+    /// Flushes any unsaved in-memory editor buffer for `path` to disk before an AI tool reads or modifies it,
+    /// ensuring checkpoints, diff baselines, and targeted replacements always include the user's latest keystrokes.
+    public func flushUnsavedBufferBeforeAgentAccess(path: String) {
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard let index = openFiles.firstIndex(where: { $0.path == normalizedPath }) else { return }
+        let file = openFiles[index]
+        guard file.isUnsaved, !file.isReadOnly, !file.isTruncated, !file.path.isEmpty else { return }
+        let url = URL(fileURLWithPath: normalizedPath)
+        do {
+            try file.content.write(to: url, atomically: true, encoding: .utf8)
+            openFiles[index].isUnsaved = false
+            openFiles[index].originalByteSize = file.content.utf8.count
+            if currentFileIndex == index || currentFile?.path == normalizedPath {
+                currentFile = openFiles[index]
+            }
+            ReportLogManager.shared.log("Editor Sync: Flushed unsaved buffer for \(file.name) before AI tool access", type: .info)
+        } catch {
+            ReportLogManager.shared.log("Editor Sync: Failed to flush unsaved buffer for \(file.name): \(error.localizedDescription)", type: .warning)
+        }
+    }
+
+    public func reloadFileFromDisk(path: String, forceOverwriteUnsaved: Bool = false) {
         let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
         if let index = openFiles.firstIndex(where: { $0.path == normalizedPath }) {
             let url = URL(fileURLWithPath: normalizedPath)
             let result = Self.readFileSafely(at: url)
             guard result.errorMessage == nil else { return }
+            if openFiles[index].isUnsaved && openFiles[index].content != result.content {
+                Self.saveUnsavedConflictBackup(fileName: openFiles[index].name, content: openFiles[index].content)
+                if !forceOverwriteUnsaved {
+                    ReportLogManager.shared.log(
+                        "Editor Guard: Preserved unsaved edits in \(openFiles[index].name) against external disk overwrite (backup snapshot saved)",
+                        type: .warning
+                    )
+                    return
+                }
+            }
             openFiles[index].content = result.content
             openFiles[index].isUnsaved = false
             openFiles[index].originalByteSize = result.originalByteSize
@@ -2222,6 +2386,19 @@ class AppState: ObservableObject {
                 currentFile = openFiles[index]
             }
         }
+    }
+
+    nonisolated private static func saveUnsavedConflictBackup(fileName: String, content: String) {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let backupDir = appSupport
+            .appendingPathComponent("MicroCode", isDirectory: true)
+            .appendingPathComponent("UnsavedBackups", isDirectory: true)
+        try? FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        let timestamp = Int(Date().timeIntervalSince1970 * 1000)
+        let safeName = fileName.replacingOccurrences(of: "/", with: "_")
+        let backupURL = backupDir.appendingPathComponent("\(timestamp)_\(safeName)")
+        try? content.write(to: backupURL, atomically: true, encoding: .utf8)
     }
 
     nonisolated private static func readFileSafely(at url: URL) -> SafeFileLoadResult {
@@ -3915,7 +4092,7 @@ class AppState: ObservableObject {
     
     /// Parses `git status --porcelain=v1 -b` directly in <15ms with zero HTTP server dependency.
     private func fetchLocalGitStatus() async -> GitStatus {
-        let raw = await runGit(["status", "--porcelain=v1", "-b"])
+        let raw = await runGit(["--no-optional-locks", "status", "--porcelain=v1", "-b", "-uno"])
         var branch = "main"
         var ahead = 0
         var behind = 0
@@ -4813,7 +4990,13 @@ class AppState: ObservableObject {
         if isAnyInspectorVisible {
             hidePreviewInspector()
         } else {
-            agenticContextVisible = true
+            if editorMode == .aiAgent && !PreviewDockService.shared.openTabs.isEmpty {
+                PreviewDockService.shared.isDockVisible = true
+                DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                agenticContextVisible = false
+            } else {
+                agenticContextVisible = true
+            }
             saveSettings()
         }
     }
