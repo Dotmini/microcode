@@ -289,104 +289,130 @@ struct EmbeddedAIAgentPanel: View {
 
     var body: some View {
         GeometryReader { geo in
-            let contentWidth = max(220, geo.size.width - 24)
-            VStack(spacing: 0) {
-                panelHeader
-                Rectangle().fill(dividerLineColor).frame(height: 1)
-
-                hardwareContextStrip
-                Rectangle().fill(dividerLineColor).frame(height: 1)
-
-                if let notice = viewModel.lastAppliedNotice {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(isDark ? .white : .black)
-                        Text(notice)
-                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                            .foregroundColor(isDark ? .white : .black)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
-                }
-
-                ScrollViewReader { proxy in
-                    ScrollView(.vertical, showsIndicators: true) {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            Color.clear.frame(height: 1).id("TOP_AI_ANCHOR")
-
-                            if viewModel.messages.isEmpty {
-                                emptyStateView
-                                    .frame(width: contentWidth)
-                            } else {
-                                ForEach(viewModel.messages) { msg in
-                                    EmbeddedAIMessageRow(
-                                        message: msg,
-                                        isLoading: viewModel.isLoading && viewModel.messages.last?.id == msg.id,
-                                        statusText: viewModel.currentStatus,
-                                        isDark: isDark,
-                                        availableWidth: contentWidth,
-                                        onReplaceSketch: { code in
-                                            editorSourceCode = code
-                                            envManager.analyzeIncludes(code: code)
-                                            envManager.autoResolveAndInstallDependencies(code: code)
-                                            viewModel.triggerNotice("Code applied directly to Sketch")
-                                        },
-                                        onAppendSketch: { code in
-                                            editorSourceCode += "\n\n" + code
-                                            envManager.analyzeIncludes(code: editorSourceCode)
-                                            envManager.autoResolveAndInstallDependencies(code: editorSourceCode)
-                                            viewModel.triggerNotice("Code appended to Sketch")
-                                        },
-                                        onRevert: {
-                                            if let text = viewModel.revertToMessage(id: msg.id) {
-                                                inputText = text
-                                            }
-                                        },
-                                        onEditAndResend: { newText in
-                                            _ = viewModel.revertToMessage(id: msg.id)
-                                            inputText = newText
-                                            sendMessage()
-                                        },
-                                        onDelete: {
-                                            viewModel.deleteMessage(id: msg.id)
-                                        }
-                                    )
-                                    .frame(width: contentWidth, alignment: msg.role == .user ? .trailing : .leading)
-                                    .id(msg.id)
-                                }
-                            }
-
-                            Color.clear.frame(height: 1).id("BOTTOM_AI_ANCHOR")
-                        }
-                        .padding(12)
-                        .frame(width: geo.size.width)
-                    }
-                    .onChange(of: viewModel.messages.count) { count in
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            proxy.scrollTo(count == 0 ? "TOP_AI_ANCHOR" : "BOTTOM_AI_ANCHOR", anchor: count == 0 ? .top : .bottom)
-                        }
-                    }
-                    .onChange(of: viewModel.messages.last?.content) { _ in
-                        proxy.scrollTo("BOTTOM_AI_ANCHOR", anchor: .bottom)
-                    }
-                    .onChange(of: viewModel.messages.last?.toolSteps.count) { _ in
-                        proxy.scrollTo("BOTTOM_AI_ANCHOR", anchor: .bottom)
-                    }
-                }
-
-                if !viewModel.messages.isEmpty {
-                    quickSuggestionsBar
-                    Rectangle().fill(dividerLineColor).frame(height: 1)
-                }
-
-                promptInputBar
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .background(panelBg)
-            .clipped()
+            mainPanelLayout(geoSize: geo.size)
         }
+    }
+
+    private func mainPanelLayout(geoSize: CGSize) -> some View {
+        let contentWidth = max(220, geoSize.width - 24)
+        return VStack(spacing: 0) {
+            panelHeader
+            Rectangle().fill(dividerLineColor).frame(height: 1)
+
+            hardwareContextStrip
+            Rectangle().fill(dividerLineColor).frame(height: 1)
+
+            if let notice = viewModel.lastAppliedNotice {
+                appliedNoticeBanner(notice)
+            }
+
+            messagesScrollStage(geoWidth: geoSize.width, contentWidth: contentWidth)
+
+            if !viewModel.messages.isEmpty {
+                quickSuggestionsBar
+                Rectangle().fill(dividerLineColor).frame(height: 1)
+            }
+
+            promptInputBar
+        }
+        .frame(width: geoSize.width, height: geoSize.height)
+        .background(panelBg)
+        .clipped()
+    }
+
+    private func appliedNoticeBanner(_ notice: String) -> some View {
+        let fg: Color = isDark ? .white : .black
+        let bg: Color = isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)
+        return HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(fg)
+            Text(notice)
+                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                .foregroundColor(fg)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(bg)
+    }
+
+    private func messagesScrollStage(geoWidth: CGFloat, contentWidth: CGFloat) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: true) {
+                messageListContent(contentWidth: contentWidth)
+                    .padding(12)
+                    .frame(width: geoWidth)
+            }
+            .onChange(of: viewModel.messages.count) { count in
+                let target = count == 0 ? "TOP_AI_ANCHOR" : "BOTTOM_AI_ANCHOR"
+                let anchor: UnitPoint = count == 0 ? .top : .bottom
+                withAnimation(.easeOut(duration: 0.16)) {
+                    proxy.scrollTo(target, anchor: anchor)
+                }
+            }
+            .onChange(of: viewModel.messages.last?.content) { _ in
+                proxy.scrollTo("BOTTOM_AI_ANCHOR", anchor: .bottom)
+            }
+            .onChange(of: viewModel.messages.last?.toolSteps.count) { _ in
+                proxy.scrollTo("BOTTOM_AI_ANCHOR", anchor: .bottom)
+            }
+        }
+    }
+
+    private func messageListContent(contentWidth: CGFloat) -> some View {
+        LazyVStack(alignment: .leading, spacing: 12) {
+            Color.clear.frame(height: 1).id("TOP_AI_ANCHOR")
+
+            if viewModel.messages.isEmpty {
+                emptyStateView
+                    .frame(width: contentWidth)
+            } else {
+                ForEach(viewModel.messages) { msg in
+                    messageRowView(msg, contentWidth: contentWidth)
+                }
+            }
+
+            Color.clear.frame(height: 1).id("BOTTOM_AI_ANCHOR")
+        }
+    }
+
+    private func messageRowView(_ msg: EmbeddedAIMessage, contentWidth: CGFloat) -> some View {
+        let isLastLoading = viewModel.isLoading && viewModel.messages.last?.id == msg.id
+        let rowAlignment: Alignment = msg.role == .user ? .trailing : .leading
+        return EmbeddedAIMessageRow(
+            message: msg,
+            isLoading: isLastLoading,
+            statusText: viewModel.currentStatus,
+            isDark: isDark,
+            availableWidth: contentWidth,
+            onReplaceSketch: { code in
+                editorSourceCode = code
+                envManager.analyzeIncludes(code: code)
+                envManager.autoResolveAndInstallDependencies(code: code)
+                viewModel.triggerNotice("Code applied directly to Sketch")
+            },
+            onAppendSketch: { code in
+                editorSourceCode += "\n\n" + code
+                envManager.analyzeIncludes(code: editorSourceCode)
+                envManager.autoResolveAndInstallDependencies(code: editorSourceCode)
+                viewModel.triggerNotice("Code appended to Sketch")
+            },
+            onRevert: {
+                if let text = viewModel.revertToMessage(id: msg.id) {
+                    inputText = text
+                }
+            },
+            onEditAndResend: { newText in
+                _ = viewModel.revertToMessage(id: msg.id)
+                inputText = newText
+                sendMessage()
+            },
+            onDelete: {
+                viewModel.deleteMessage(id: msg.id)
+            }
+        )
+        .frame(width: contentWidth, alignment: rowAlignment)
+        .id(msg.id)
     }
 
     // MARK: - Header
@@ -768,203 +794,261 @@ struct EmbeddedAIMessageRow: View {
 
     var body: some View {
         if message.role == .user {
-            VStack(alignment: .trailing, spacing: 4) {
-                if isEditing {
-                    VStack(alignment: .leading, spacing: 6) {
-                        TextField("แก้ไขคำสั่ง...", text: $editedText)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(isDark ? .white : .black)
-                            .padding(8)
-                            .background(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06))
-                            .cornerRadius(5)
-
-                        HStack(spacing: 6) {
-                            Spacer()
-                            Button("ยกเลิก") { isEditing = false }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundColor(.secondary)
-                            Button("ส่งใหม่") {
-                                let trimmed = editedText.trimmingCharacters(in: .whitespacesAndNewlines)
-                                guard !trimmed.isEmpty else { return }
-                                isEditing = false
-                                onEditAndResend?(trimmed)
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(isDark ? Color.white : Color.black)
-                            .foregroundColor(isDark ? .black : .white)
-                            .cornerRadius(4)
-                        }
-                    }
-                    .padding(8)
-                    .background(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
-                    .cornerRadius(6)
-                } else {
-                    Text(message.content)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(isDark ? .white : .black)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(isDark ? Color.white.opacity(0.13) : Color.black.opacity(0.07))
-                        .cornerRadius(6)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.12), lineWidth: 1))
-                        .frame(maxWidth: max(180, availableWidth * 0.88), alignment: .trailing)
-
-                    HStack(spacing: 4) {
-                        actionPill(icon: "arrow.uturn.backward", label: "ย้อนกลับ") { onRevert?() }
-                        actionPill(icon: "pencil", label: "แก้ไข") {
-                            editedText = message.content
-                            isEditing = true
-                        }
-                        actionPill(icon: isCopied ? "checkmark" : "doc.on.doc", label: isCopied ? "คัดลอกแล้ว" : "คัดลอก") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(message.content, forType: .string)
-                            isCopied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isCopied = false }
-                        }
-                        actionPill(icon: "trash", label: "ลบ", destructive: true) { onDelete?() }
-                    }
-                }
-            }
+            userMessageView
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 5) {
-                    Image(systemName: message.isAgentTurn ? "cpu.fill" : "bubble.left.fill")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(isDark ? .white : .black)
-                    Text(message.modelBadge.isEmpty ? "EMBEDDED HIL AGENT" : message.modelBadge.uppercased())
-                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+            assistantMessageView
+        }
+    }
+
+    private var userMessageView: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            if isEditing {
+                userEditingCard
+            } else {
+                userStaticCard
+            }
+        }
+    }
+
+    private var userEditingCard: some View {
+        let fg: Color = isDark ? .white : .black
+        let fieldBg: Color = isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+        let cardBg: Color = isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)
+        let sendBg: Color = isDark ? Color.white : Color.black
+        let sendFg: Color = isDark ? .black : .white
+
+        return VStack(alignment: .leading, spacing: 6) {
+            TextField("แก้ไขคำสั่ง...", text: $editedText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(fg)
+                .padding(8)
+                .background(fieldBg)
+                .cornerRadius(5)
+
+            HStack(spacing: 6) {
+                Spacer()
+                Button("ยกเลิก") { isEditing = false }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(.secondary)
+                Button("ส่งใหม่") {
+                    let trimmed = editedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    isEditing = false
+                    onEditAndResend?(trimmed)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(sendBg)
+                .foregroundColor(sendFg)
+                .cornerRadius(4)
+            }
+        }
+        .padding(8)
+        .background(cardBg)
+        .cornerRadius(6)
+    }
+
+    @ViewBuilder
+    private var userStaticCard: some View {
+        let fg: Color = isDark ? .white : .black
+        let bg: Color = isDark ? Color.white.opacity(0.13) : Color.black.opacity(0.07)
+        let border: Color = isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.12)
+
+        Text(message.content)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundColor(fg)
+            .textSelection(.enabled)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(bg)
+            .cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(border, lineWidth: 1))
+            .frame(maxWidth: max(180, availableWidth * 0.88), alignment: .trailing)
+
+        HStack(spacing: 4) {
+            actionPill(icon: "arrow.uturn.backward", label: "ย้อนกลับ") { onRevert?() }
+            actionPill(icon: "pencil", label: "แก้ไข") {
+                editedText = message.content
+                isEditing = true
+            }
+            actionPill(icon: isCopied ? "checkmark" : "doc.on.doc", label: isCopied ? "คัดลอกแล้ว" : "คัดลอก") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message.content, forType: .string)
+                isCopied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isCopied = false }
+            }
+            actionPill(icon: "trash", label: "ลบ", destructive: true) { onDelete?() }
+        }
+    }
+
+    private var assistantMessageView: some View {
+        let cardBg: Color = isDark ? Color.white.opacity(0.035) : Color.black.opacity(0.03)
+        let border: Color = isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)
+
+        return VStack(alignment: .leading, spacing: 8) {
+            assistantHeader
+
+            if !message.thought.isEmpty {
+                AntigravityThoughtBlockView(content: message.thought, durationSeconds: nil)
+            }
+
+            if !message.toolSteps.isEmpty {
+                CellAgentToolStepsTimeline(steps: message.toolSteps)
+            }
+
+            assistantContentBody
+        }
+        .padding(10)
+        .frame(maxWidth: availableWidth, alignment: .leading)
+        .background(cardBg)
+        .cornerRadius(6)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(border, lineWidth: 1))
+    }
+
+    private var assistantHeader: some View {
+        let iconFg: Color = isDark ? .white : .black
+        let hilFg: Color = isDark ? .black : .white
+        let hilBg: Color = isDark ? Color.white.opacity(0.85) : Color.black.opacity(0.85)
+        let title = message.modelBadge.isEmpty ? "EMBEDDED HIL AGENT" : message.modelBadge.uppercased()
+
+        return HStack(spacing: 5) {
+            Image(systemName: message.isAgentTurn ? "cpu.fill" : "bubble.left.fill")
+                .font(.system(size: 9.5))
+                .foregroundColor(iconFg)
+            Text(title)
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            if message.isAgentTurn {
+                Text("HIL")
+                    .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(hilFg)
+                    .padding(.horizontal, 4.5)
+                    .padding(.vertical, 1)
+                    .background(hilBg)
+                    .cornerRadius(3)
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var assistantContentBody: some View {
+        if message.content.isEmpty {
+            if isLoading {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.7)
+                    Text(statusText.isEmpty ? "Executing HIL step…" : statusText)
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
-                    if message.isAgentTurn {
-                        Text("HIL")
-                            .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                            .foregroundColor(isDark ? .black : .white)
-                            .padding(.horizontal, 4.5)
-                            .padding(.vertical, 1)
-                            .background(isDark ? Color.white.opacity(0.85) : Color.black.opacity(0.85))
-                            .cornerRadius(3)
-                    }
-                    Spacer()
                 }
-
-                if !message.thought.isEmpty {
-                    AntigravityThoughtBlockView(content: message.thought, durationSeconds: nil)
+                .padding(.vertical, 3)
+            }
+        } else {
+            let blocks = MessageContentParser.parse(message.content)
+            let bodyFg: Color = isDark ? Color(white: 0.92) : Color(white: 0.10)
+            if blocks.isEmpty {
+                Text(message.content)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(bodyFg)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(blocks) { block in
+                    assistantParsedBlockView(block)
                 }
+            }
 
-                if !message.toolSteps.isEmpty {
-                    CellAgentToolStepsTimeline(steps: message.toolSteps)
+            if isLoading && !statusText.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.68)
+                    Text(statusText)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
+            }
 
-                if message.content.isEmpty {
-                    if isLoading {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .scaleEffect(0.7)
-                            Text(statusText.isEmpty ? "Executing HIL step…" : statusText)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-                        .padding(.vertical, 3)
-                    }
-                } else {
-                    let blocks = MessageContentParser.parse(message.content)
-                    if blocks.isEmpty {
-                        Text(message.content)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(isDark ? Color(white: 0.92) : Color(white: 0.10))
-                            .textSelection(.enabled)
+            if !isLoading {
+                assistantFooterActions
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func assistantParsedBlockView(_ block: MessageBlock) -> some View {
+        switch block {
+        case .thought(let content, let duration):
+            AntigravityThoughtBlockView(content: content, durationSeconds: duration)
+        case .text(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let bodyFg: Color = isDark ? Color(white: 0.92) : Color(white: 0.10)
+                Text(trimmed)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(bodyFg)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        case .code(let lang, let code):
+            EmbeddedAICodeBlockView(
+                language: lang,
+                code: code,
+                isDark: isDark,
+                maxWidth: max(180, availableWidth - 20),
+                onReplace: { onReplaceSketch(code) },
+                onAppend: { onAppendSketch(code) }
+            )
+        case .heading(let level, let content):
+            let headingFg: Color = isDark ? .white : .black
+            let size: CGFloat = level <= 2 ? 12 : 11
+            Text(content)
+                .font(.system(size: size, weight: .bold, design: .monospaced))
+                .foregroundColor(headingFg)
+                .fixedSize(horizontal: false, vertical: true)
+        case .list(let items, _):
+            let itemFg: Color = isDark ? Color(white: 0.88) : Color(white: 0.14)
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(items, id: \.self) { item in
+                    HStack(alignment: .top, spacing: 5) {
+                        Text("•")
+                            .foregroundColor(.secondary)
+                        Text(item)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundColor(itemFg)
                             .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        ForEach(blocks) { block in
-                            switch block {
-                            case .thought(let content, let duration):
-                                AntigravityThoughtBlockView(content: content, durationSeconds: duration)
-                            case .text(let text):
-                                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                                if !trimmed.isEmpty {
-                                    Text(trimmed)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundColor(isDark ? Color(white: 0.92) : Color(white: 0.10))
-                                        .textSelection(.enabled)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            case .code(let lang, let code):
-                                EmbeddedAICodeBlockView(
-                                    language: lang,
-                                    code: code,
-                                    isDark: isDark,
-                                    maxWidth: max(180, availableWidth - 20),
-                                    onReplace: { onReplaceSketch(code) },
-                                    onAppend: { onAppendSketch(code) }
-                                )
-                            case .heading(let level, let content):
-                                Text(content)
-                                    .font(.system(size: level <= 2 ? 12 : 11, weight: .bold, design: .monospaced))
-                                    .foregroundColor(isDark ? .white : .black)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            case .list(let items, _):
-                                VStack(alignment: .leading, spacing: 3) {
-                                    ForEach(items, id: \.self) { item in
-                                        HStack(alignment: .top, spacing: 5) {
-                                            Text("•")
-                                                .foregroundColor(.secondary)
-                                            Text(item)
-                                                .font(.system(size: 10.5, design: .monospaced))
-                                                .foregroundColor(isDark ? Color(white: 0.88) : Color(white: 0.14))
-                                                .fixedSize(horizontal: false, vertical: true)
-                                        }
-                                    }
-                                }
-                            case .media(let kind, let title, let target):
-                                ChatMediaBlockView(kind: kind, title: title, target: target)
-                            default:
-                                EmptyView()
-                            }
-                        }
-                    }
-
-                    if isLoading && !statusText.isEmpty {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .scaleEffect(0.68)
-                            Text(statusText)
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-
-                    if !isLoading {
-                        HStack(spacing: 4) {
-                            actionPill(icon: isCopied ? "checkmark" : "doc.on.doc", label: isCopied ? "คัดลอกแล้ว" : "คัดลอก") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(message.content, forType: .string)
-                                isCopied = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isCopied = false }
-                            }
-                            actionPill(icon: "arrow.uturn.backward", label: "ย้อนกลับ") { onRevert?() }
-                            actionPill(icon: "trash", label: "ลบ", destructive: true) { onDelete?() }
-                            Spacer()
-                        }
-                        .padding(.top, 2)
                     }
                 }
             }
-            .padding(10)
-            .frame(maxWidth: availableWidth, alignment: .leading)
-            .background(isDark ? Color.white.opacity(0.035) : Color.black.opacity(0.03))
-            .cornerRadius(6)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08), lineWidth: 1))
+        case .media(let kind, let title, let target):
+            ChatMediaBlockView(kind: kind, title: title, target: target)
+        default:
+            EmptyView()
         }
+    }
+
+    private var assistantFooterActions: some View {
+        HStack(spacing: 4) {
+            actionPill(icon: isCopied ? "checkmark" : "doc.on.doc", label: isCopied ? "คัดลอกแล้ว" : "คัดลอก") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message.content, forType: .string)
+                isCopied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isCopied = false }
+            }
+            actionPill(icon: "arrow.uturn.backward", label: "ย้อนกลับ") { onRevert?() }
+            actionPill(icon: "trash", label: "ลบ", destructive: true) { onDelete?() }
+            Spacer()
+        }
+        .padding(.top, 2)
     }
 
     private func actionPill(icon: String, label: String, destructive: Bool = false, action: @escaping () -> Void) -> some View {

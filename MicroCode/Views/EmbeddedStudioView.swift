@@ -4197,20 +4197,30 @@ struct EmbeddedStudioView: View {
     }
     
     private func realPortRow(port: RealSerialPort, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        let iconName = port.isUSB ? "cable.connector" : "antenna.radiowaves.left.and.right"
+        let iconColor: Color = isSelected ? (isDark ? .white : .black) : (isDark ? Color(white: 0.4) : Color(white: 0.55))
+        let nameWeight: Font.Weight = isSelected ? .bold : .regular
+        let nameColor: Color = isSelected ? (isDark ? .white : .black) : (isDark ? Color(white: 0.8) : Color(white: 0.2))
+        let driverColor: Color = isDark ? Color(white: 0.45) : Color(white: 0.55)
+        let badgeBg: Color = isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)
+        let badgeFg: Color = isDark ? .white : .black
+        let rowBg: Color = isSelected ? (isDark ? Color.white.opacity(0.1) : Color.black.opacity(0.08)) : Color.clear
+        let rowStroke: Color = isSelected ? (isDark ? Color.white.opacity(0.2) : Color.black.opacity(0.15)) : Color.clear
+
+        return Button(action: action) {
             HStack(spacing: 6) {
-                Image(systemName: port.isUSB ? "cable.connector" : "antenna.radiowaves.left.and.right")
+                Image(systemName: iconName)
                     .font(.system(size: 10))
-                    .foregroundColor(isSelected ? (isDark ? .white : .black) : (isDark ? Color(white: 0.4) : Color(white: 0.55)))
+                    .foregroundColor(iconColor)
                 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(port.name)
-                        .font(.system(size: 10, weight: isSelected ? .bold : .regular, design: .monospaced))
-                        .foregroundColor(isSelected ? (isDark ? .white : .black) : (isDark ? Color(white: 0.8) : Color(white: 0.2)))
+                        .font(.system(size: 10, weight: nameWeight, design: .monospaced))
+                        .foregroundColor(nameColor)
                         .lineLimit(1)
                     Text(port.driverDescription)
                         .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
+                        .foregroundColor(driverColor)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -4220,16 +4230,16 @@ struct EmbeddedStudioView: View {
                         .font(.system(size: 7, weight: .bold, design: .monospaced))
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
-                        .background(isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
-                        .foregroundColor(isDark ? .white : .black)
+                        .background(badgeBg)
+                        .foregroundColor(badgeFg)
                         .clipShape(Capsule())
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(isSelected ? (isDark ? Color.white.opacity(0.1) : Color.black.opacity(0.08)) : Color.clear)
+            .background(rowBg)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(isSelected ? (isDark ? Color.white.opacity(0.2) : Color.black.opacity(0.15)) : Color.clear, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(rowStroke, lineWidth: 1))
         }
         .buttonStyle(.plain)
     }
@@ -4242,67 +4252,108 @@ struct EmbeddedStudioView: View {
         
         return HStack(spacing: 4) {
             if !isLeft {
-                Text("\(pin.physicalPin)")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.4))
-                    .frame(width: 14)
+                pinNumberLabel(pin.physicalPin)
             }
             
-            Button(action: action) {
-                HStack(spacing: 4) {
-                    Text(pin.name)
-                        .font(.system(size: 9, weight: (isSelected || isUsedInCode) ? .bold : .medium, design: .monospaced))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                    
-                    if hasWarning {
-                        Text("DRC!")
-                            .font(.system(size: 6.5, weight: .black, design: .monospaced))
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 1)
-                            .background(Color.white)
-                            .foregroundColor(.black)
-                            .cornerRadius(2)
-                    } else if isUsedInCode {
-                        Text("USED")
-                            .font(.system(size: 6.5, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 1)
-                            .background(Color.white.opacity(0.85))
-                            .foregroundColor(.black)
-                            .cornerRadius(2)
-                    } else {
-                        Text(pin.category)
-                            .font(.system(size: 7, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 1)
-                            .background(isSelected ? Color.white : Color.white.opacity(0.12))
-                            .foregroundColor(isSelected ? Color.black : Color.white)
-                            .cornerRadius(2)
-                    }
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .frame(width: 118, alignment: isLeft ? .trailing : .leading)
-                .contentShape(Rectangle())
-                .background(isSelected ? Color.white.opacity(0.22) : (isUsedInCode ? Color.white.opacity(0.11) : Color.white.opacity(0.04)))
-                .cornerRadius(3)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 3)
-                        .stroke(isSelected ? Color.white : (hasWarning ? Color.white.opacity(0.85) : (isUsedInCode ? Color.white.opacity(0.45) : Color.white.opacity(0.1))), lineWidth: (isSelected || hasWarning) ? 1.3 : 1)
-                )
-            }
-            .buttonStyle(.plain)
-            .simultaneousGesture(TapGesture().onEnded {
-                action()
-            })
+            pinSchematicButton(
+                pin: pin,
+                isLeft: isLeft,
+                isSelected: isSelected,
+                isUsedInCode: isUsedInCode,
+                hasWarning: hasWarning,
+                action: action
+            )
             
             if isLeft {
-                Text("\(pin.physicalPin)")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.4))
-                    .frame(width: 14)
+                pinNumberLabel(pin.physicalPin)
             }
+        }
+    }
+
+    private func pinNumberLabel(_ physicalPin: Int) -> some View {
+        Text("\(physicalPin)")
+            .font(.system(size: 8, weight: .bold, design: .monospaced))
+            .foregroundColor(Color(white: 0.4))
+            .frame(width: 14)
+    }
+
+    private func pinSchematicButton(
+        pin: PinDefinition,
+        isLeft: Bool,
+        isSelected: Bool,
+        isUsedInCode: Bool,
+        hasWarning: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        let nameWeight: Font.Weight = (isSelected || isUsedInCode) ? .bold : .medium
+        let rowAlignment: Alignment = isLeft ? .trailing : .leading
+        let bgColor: Color = {
+            if isSelected { return Color.white.opacity(0.22) }
+            if isUsedInCode { return Color.white.opacity(0.11) }
+            return Color.white.opacity(0.04)
+        }()
+        let borderColor: Color = {
+            if isSelected { return Color.white }
+            if hasWarning { return Color.white.opacity(0.85) }
+            if isUsedInCode { return Color.white.opacity(0.45) }
+            return Color.white.opacity(0.1)
+        }()
+        let borderWidth: CGFloat = (isSelected || hasWarning) ? 1.3 : 1.0
+
+        return Button(action: action) {
+            HStack(spacing: 4) {
+                Text(pin.name)
+                    .font(.system(size: 9, weight: nameWeight, design: .monospaced))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                
+                pinBadgeView(pin: pin, isSelected: isSelected, isUsedInCode: isUsedInCode, hasWarning: hasWarning)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .frame(width: 118, alignment: rowAlignment)
+            .contentShape(Rectangle())
+            .background(bgColor)
+            .cornerRadius(3)
+            .overlay(
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(borderColor, lineWidth: borderWidth)
+            )
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(TapGesture().onEnded {
+            action()
+        })
+    }
+
+    @ViewBuilder
+    private func pinBadgeView(pin: PinDefinition, isSelected: Bool, isUsedInCode: Bool, hasWarning: Bool) -> some View {
+        if hasWarning {
+            Text("DRC!")
+                .font(.system(size: 6.5, weight: .black, design: .monospaced))
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(Color.white)
+                .foregroundColor(.black)
+                .cornerRadius(2)
+        } else if isUsedInCode {
+            Text("USED")
+                .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(Color.white.opacity(0.85))
+                .foregroundColor(.black)
+                .cornerRadius(2)
+        } else {
+            let catBg: Color = isSelected ? Color.white : Color.white.opacity(0.12)
+            let catFg: Color = isSelected ? Color.black : Color.white
+            Text(pin.category)
+                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(catBg)
+                .foregroundColor(catFg)
+                .cornerRadius(2)
         }
     }
     
