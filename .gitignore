@@ -34,7 +34,7 @@ DerivedData/
 __pycache__/
 *.pyc
 .swiftpm/
-Package.resolved
+!Package.resolved
 *.xcodeproj
 Packages/
 

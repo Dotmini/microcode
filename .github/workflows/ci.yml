@@ -232,6 +232,7 @@ jobs:
             backend -> target
             microcode_core -> target
           shared-key: microcode-rust-${{ matrix.arch }}
+          cache-on-failure: "true"
 
       - name: Cache Swift PM
         uses: actions/cache@v4
