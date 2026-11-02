@@ -1874,7 +1874,20 @@ class AgentService: ObservableObject {
         let isGeminiModel = lowerModel.contains("gemini") || lowerModel.contains("gemma")
         let activeSub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
-        if keyMode == "subscription" && (activeSub == "tokenme" || resolvedProvider == "tokenme") && SubscriptionAuthManager.shared.isConnected(.tokenme) {
+        if resolvedProvider == "local" || keyMode == "local" || provider.lowercased() == "local" {
+            detectedProvider = .local
+            if let srv = await LocalLLMService.shared.ensureAnyLocalLLMServerRunning() {
+                let validModels = Set(srv.models.map(\.id))
+                if resolvedModel.isEmpty || resolvedModel == "local" || resolvedModel == "local-model" || !validModels.contains(resolvedModel) {
+                    if let firstModel = srv.models.first?.id {
+                        resolvedModel = firstModel
+                    }
+                }
+                LocalLLMService.shared.selectModelAcrossServers(modelId: resolvedModel, endpointHint: srv.endpoint)
+                AppState.shared?.aiProvider = "local"
+                AppState.shared?.aiModel = resolvedModel
+            }
+        } else if keyMode == "subscription" && (activeSub == "tokenme" || resolvedProvider == "tokenme") && SubscriptionAuthManager.shared.isConnected(.tokenme) {
             detectedProvider = .tokenme
         } else if keyMode == "subscription" && (activeSub == "aipass" || resolvedProvider == "aipass") && SubscriptionAuthManager.shared.isConnected(.aipass) {
             detectedProvider = .aipass
@@ -1982,12 +1995,19 @@ class AgentService: ObservableObject {
         
         // Build optimized system prompt
         let queryEmbedding = await memoryService.fetchEmbeddingFromBackend(content)
-        let optimizedSystemPrompt = buildSystemPrompt(
-            for: content,
-            provider: detectedProvider,
-            model: resolvedModel,
-            queryEmbedding: queryEmbedding
-        )
+        let optimizedSystemPrompt: String
+        if detectedProvider == .local {
+            optimizedSystemPrompt = "You are MicroCode AI running locally on the user's Mac (\(resolvedModel)). Answer clearly and concisely using clean Markdown and complete, runnable code blocks."
+            requiresMutation = false
+            requiresWorkspaceEvidence = false
+        } else {
+            optimizedSystemPrompt = buildSystemPrompt(
+                for: content,
+                provider: detectedProvider,
+                model: resolvedModel,
+                queryEmbedding: queryEmbedding
+            )
+        }
         
         // Build and compress prior conversation history (excluding the just-appended userMessage to avoid duplication)
         let rawHistory = buildConversationHistory(excludingMessageID: userMessage.id)
@@ -2106,7 +2126,7 @@ class AgentService: ObservableObject {
                         provider: detectedProvider,
                         model: resolvedModel,
                         apiKey: effectiveApiKey,
-                        tools: isDirectMediaModel ? nil : stickyActiveTools,
+                        tools: (isDirectMediaModel || detectedProvider == .local) ? nil : stickyActiveTools,
                         onToken: { token in
                             gate.touchActivity()
                             guard !token.isEmpty else { return }
@@ -2294,8 +2314,8 @@ class AgentService: ObservableObject {
 
 
             
-            // Direct TH-AI Passport media models (Image, Video, Music) complete in a single turn
-            if AIClient.isAiPassMediaModel(resolvedModel) {
+            // Direct TH-AI Passport media models (Image, Video, Music) or Local LLM direct answers complete in a single turn
+            if AIClient.isAiPassMediaModel(resolvedModel) || (detectedProvider == .local && receivedToolCalls.isEmpty && !streamedText.isEmpty) {
                 currentToolExecution = nil
                 break
             }

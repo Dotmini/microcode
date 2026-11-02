@@ -680,16 +680,12 @@ final class PhoneCompanionService: ObservableObject {
         }
     }
     
-    nonisolated private static let pinnedLocalhostRunHostKeys = """
+    nonisolated static let pinnedLocalhostRunHostKeys = """
     localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9
     localhost.run ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3lJnhW1oCXuAYV9IBdcJA+Vx7AHL5S/ZQvV2fhceOAPgO2kNQZla6xvUwoE4iw8lYu3zoE1KtieCU9yInWOVI6W/wFaT/ETH1tn55T2FVsK/zaxPiHZVJGLPPdEEid0vS2p1JDfc9onZ0pNSHLl1QusIOeMUyZ2bUMMLLgw46KOT9S3s/LmxgoJ3PocVUn5rVXz/Dng7Y8jYNe4IFrZOAUsi7hNBa+OYja6ceefpDvNDEJ1BdhbYfGolBdNA7f+FNl0kfaWru4Cblr843wBe2ckO/sNqgeAMXO/qH+SSgQxUXF2AgAw+TGp3yCIyYoOPvOgvcPsQziJLmDbUuQpnH
     """
 
-    private func launchSSHReverseTunnel(port: Int) {
-        tunnelState = .starting("Starting macOS Native SSH HTTPS Tunnel…")
-        
-        // SECURITY: Pin the verified Ed25519 and RSA host keys of localhost.run and enforce StrictHostKeyChecking=yes
-        // so even the very first connection rejects any MITM impostor (eliminating the TOFU window).
+    nonisolated static func ensurePinnedKnownHostsFile() -> URL {
         let supportDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/MicroCode", isDirectory: true)
         try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
@@ -697,6 +693,15 @@ final class PhoneCompanionService: ObservableObject {
         let pinnedData = Data((Self.pinnedLocalhostRunHostKeys + "\n").utf8)
         FileManager.default.createFile(atPath: knownHostsURL.path, contents: pinnedData, attributes: [.posixPermissions: 0o600])
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: knownHostsURL.path)
+        return knownHostsURL
+    }
+
+    private func launchSSHReverseTunnel(port: Int) {
+        tunnelState = .starting("Starting macOS Native SSH HTTPS Tunnel…")
+        
+        // SECURITY: Pin the verified Ed25519 and RSA host keys of localhost.run and enforce StrictHostKeyChecking=yes
+        // so even the very first connection rejects any MITM impostor (eliminating the TOFU window).
+        let knownHostsURL = Self.ensurePinnedKnownHostsFile()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -852,24 +857,33 @@ final class PhoneCompanionService: ObservableObject {
         let path = urlComponents?.path ?? "/"
         let queryItems = urlComponents?.queryItems ?? []
         
-        // Extract one-time pairing code (`?pair=`) or session token (`X-Companion-Token` header, `mc_token` cookie, or legacy `?token=`)
+        // Extract one-time pairing code (`?pair=`) or session token (`X-Companion-Token` header, `Authorization: Bearer`, `mc_token` cookie, or legacy `?token=`)
         let queryPairCode = queryItems.first(where: { $0.name == "pair" })?.value
         let queryToken = queryItems.first(where: { $0.name == "token" })?.value
         let headerToken = headers["x-companion-token"]
+        let bearerToken: String? = {
+            if let auth = headers["authorization"] {
+                if auth.lowercased().hasPrefix("bearer ") {
+                    return String(auth.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                return auth.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return headers["x-api-key"]
+        }()
         let cookieToken: String? = {
             guard let cookieHeader = headers["cookie"] else { return nil }
             for pair in cookieHeader.components(separatedBy: ";") {
                 let kv = pair.trimmingCharacters(in: .whitespaces).components(separatedBy: "=")
-                if kv.count == 2 && kv[0] == "mc_token" {
+                if kv.count == 2 && (kv[0] == "mc_token" || kv[0] == "mc_llm_token") {
                     return kv[1]
                 }
             }
             return nil
         }()
         
-        let suppliedToken = queryToken ?? headerToken ?? cookieToken ?? ""
+        let suppliedToken = queryToken ?? headerToken ?? bearerToken ?? cookieToken ?? ""
         let matchedOneTimePair = (queryPairCode != nil) && Self.constantTimeEquals(queryPairCode ?? "", oneTimePairingCode)
-        let matchedSessionToken = Self.constantTimeEquals(suppliedToken, pairingToken)
+        let matchedSessionToken = Self.constantTimeEquals(suppliedToken, pairingToken) || Self.constantTimeEquals(suppliedToken, LocalLLMGatewayService.shared.apiToken)
         let isForwardedTunnel = (headers["cf-connecting-ip"] != nil || headers["x-forwarded-for"] != nil)
         // SECURITY: only the Mac itself is trusted without the pairing token/code. Every other peer, including devices on the same
         // Wi-Fi / office LAN, must present either the one-time QR pairing code (`?pair=`) or the `mc_token` session token.
@@ -893,9 +907,21 @@ final class PhoneCompanionService: ObservableObject {
             regenerateQRCode()
         }
 
+        // OpenAI-compatible `/v1/*` Local LLM Gateway endpoints work seamlessly on both Mobile Connect and Local LLM Gateway
+        if (path.hasPrefix("/v1/") || path == "/models" || path == "/api/tags"), let conn = connection {
+            await LocalLLMGatewayService.shared.handleDirectOpenAIEndpoint(
+                method: method,
+                path: path,
+                bodyData: bodyData,
+                on: conn
+            )
+            return nil
+        }
+
         // State-changing requests must carry the token in the custom `X-Companion-Token` header. Browsers cannot attach a custom
         // header cross-site without a CORS preflight, which this server never approves, so a malicious page cannot forge them.
-        if method == "POST", !Self.constantTimeEquals(headers["x-companion-token"] ?? "", pairingToken) {
+        let postCustomToken = headers["x-companion-token"] ?? ""
+        if method == "POST", !(Self.constantTimeEquals(postCustomToken, pairingToken) || Self.constantTimeEquals(postCustomToken, LocalLLMGatewayService.shared.apiToken)) {
             return makeJSONResponse(["ok": false, "error": "Missing X-Companion-Token header"], status: "403 Forbidden")
         }
 
@@ -928,13 +954,48 @@ final class PhoneCompanionService: ObservableObject {
             return makeJSONResponse(["ok": true, "approved": true, "status": "approved", "deviceId": device.id])
         }
 
+        return await handleAuthenticatedRoute(
+            method: method,
+            path: path,
+            queryItems: queryItems,
+            headers: headers,
+            bodyData: bodyData,
+            connection: connection,
+            sessionToken: pairingToken,
+            cookieName: "mc_token",
+            localLLMGatewayInfo: nil
+        )
+    }
+
+    func handleAuthenticatedRoute(
+        method: String,
+        path: String,
+        queryItems: [URLQueryItem],
+        headers: [String: String],
+        bodyData: Data,
+        connection: NWConnection?,
+        sessionToken: String,
+        cookieName: String = "mc_token",
+        localLLMGatewayInfo: (nodeName: String, apiToken: String)? = nil
+    ) async -> Data? {
         // Route endpoints
         switch (method, path) {
         case ("GET", "/"):
-            let html = buildMobileCompanionHTML(token: pairingToken)
+            if localLLMGatewayInfo != nil {
+                if let srv = await LocalLLMService.shared.ensureAnyLocalLLMServerRunning(),
+                   let firstModel = srv.models.first?.id {
+                    let currentMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? ""
+                    let currentModel = (appState ?? AppState.shared)?.aiModel ?? ""
+                    let validModels = Set(srv.models.map(\.id))
+                    let targetModel = (currentMode == "local" && validModels.contains(currentModel)) ? currentModel : firstModel
+                    selectRemoteModel(mode: "local", provider: "local", modelId: targetModel)
+                }
+            }
+            let html = buildMobileCompanionHTML(token: sessionToken, localLLMGatewayInfo: localLLMGatewayInfo)
             // HttpOnly: the page never reads the cookie from JS. Secure whenever the request arrived over the HTTPS tunnel.
             let viaHTTPS = (headers["x-forwarded-proto"]?.lowercased() == "https")
-            let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Strict; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
+            let sameSite = (cookieName == "mc_llm_token") ? "Lax" : "Strict"
+            let extraHeaders = ["Set-Cookie": "\(cookieName)=\(sessionToken); Path=/; SameSite=\(sameSite); HttpOnly" + (viaHTTPS ? "; Secure" : "")]
             return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", extraHeaders: extraHeaders, body: Data(html.utf8))
             
         case ("GET", "/api/state"):
@@ -950,6 +1011,9 @@ final class PhoneCompanionService: ObservableObject {
             return makeHTTPResponse(status: "200 OK", contentType: "application/json; charset=utf-8", body: statePayload)
             
         case ("GET", "/api/models"):
+            if LocalLLMService.shared.detectedServers.filter({ $0.isOnline && !$0.models.isEmpty }).isEmpty {
+                _ = await LocalLLMService.shared.ensureAnyLocalLLMServerRunning()
+            }
             let models = buildAvailableModelsPayload()
             return makeJSONResponse(["ok": true, "models": models])
             
@@ -1266,7 +1330,7 @@ final class PhoneCompanionService: ObservableObject {
             UserDefaults.standard.set("local", forKey: "aiKeyMode")
             state.aiProvider = "local"
             state.aiModel = modelId
-            LocalLLMService.shared.selectedModelId = modelId
+            LocalLLMService.shared.selectModelAcrossServers(modelId: modelId)
             state.saveSettings()
         case "cloud":
             UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
@@ -1441,6 +1505,27 @@ final class PhoneCompanionService: ObservableObject {
         let activeProvId = state?.aiProvider ?? ""
         var list: [[String: Any]] = []
         
+        // 0. Local LLM Servers (shown first when Local mode is active)
+        var localItems: [[String: Any]] = []
+        for srv in LocalLLMService.shared.detectedServers where srv.isOnline {
+            let groupTitle = "Local LLM · \(srv.displayName)"
+            for m in srv.models.prefix(30) {
+                let isCurrent = ((keyMode == "local" || activeProvId == "local") && activeModelId == m.id)
+                localItems.append([
+                    "group": groupTitle,
+                    "mode": "local",
+                    "provider": "local",
+                    "modelId": m.id,
+                    "name": m.displayName,
+                    "badge": m.size ?? "Local",
+                    "active": isCurrent
+                ])
+            }
+        }
+        if keyMode == "local" || activeProvId == "local" {
+            list.append(contentsOf: localItems)
+        }
+
         // 1. Subscription Providers
         let connected = Set(SubscriptionAuthManager.shared.connectedProviders())
         let orderedSub = SubscriptionAuthManager.shared.connectedProviders() + SubscriptionProviderType.allCases.filter { !connected.contains($0) }
@@ -1478,21 +1563,9 @@ final class PhoneCompanionService: ObservableObject {
             }
         }
         
-        // 3. Local LLM Servers
-        for srv in LocalLLMService.shared.detectedServers where srv.isOnline {
-            let groupTitle = "Local LLM · \(srv.displayName)"
-            for m in srv.models.prefix(20) {
-                let isCurrent = (keyMode == "local" && activeModelId == m.id)
-                list.append([
-                    "group": groupTitle,
-                    "mode": "local",
-                    "provider": "local",
-                    "modelId": m.id,
-                    "name": m.displayName,
-                    "badge": m.size ?? "Local",
-                    "active": isCurrent
-                ])
-            }
+        // 3. Local LLM Servers (when not already placed at top)
+        if keyMode != "local" && activeProvId != "local" {
+            list.append(contentsOf: localItems)
         }
         
         // 4. Dotmini Sovereign AI
@@ -2130,7 +2203,10 @@ final class PhoneCompanionService: ObservableObject {
     
     // MARK: - Embedded Formal MicroCode IDE Mobile Web App
     
-    private func buildMobileCompanionHTML(token: String) -> String {
+    private func buildMobileCompanionHTML(token: String, localLLMGatewayInfo: (nodeName: String, apiToken: String)? = nil) -> String {
+        let brandTitle = localLLMGatewayInfo.map { "\($0.nodeName) · Local LLM" } ?? "MicroCode AI"
+        let apiKeyForDrawer = localLLMGatewayInfo?.apiToken ?? LocalLLMGatewayService.shared.apiToken
+        let nodeNameForDrawer = localLLMGatewayInfo?.nodeName ?? cachedMacName
         return #"""
         <!DOCTYPE html>
         <html lang="en">
@@ -2139,8 +2215,8 @@ final class PhoneCompanionService: ObservableObject {
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
         <meta name="apple-mobile-web-app-capable" content="yes">
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-        <meta name="apple-mobile-web-app-title" content="MicroCode AI">
-        <title>MicroCode AI</title>
+        <meta name="apple-mobile-web-app-title" content="\#(brandTitle)">
+        <title>\#(brandTitle)</title>
         <style>
           :root {
             --bg: #0d0d0f;
@@ -2636,13 +2712,14 @@ final class PhoneCompanionService: ObservableObject {
                   <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>
                 </button>
                 <span class="conn-indicator" id="connDot"></span>
-                <span>MicroCode AI</span>
+                <span>\#(brandTitle)</span>
               </div>
               <div class="ide-breadcrumb" onclick="openWorkspaceModal()" title="Switch Workspace or Chat">
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>
                 <span id="wsBreadcrumb">Workspace / Chat</span>
                 <span style="font-size:10px;color:var(--muted)">▾</span>
               </div>
+              <button class="tb-btn" onclick="openApiModal()" title="OpenAI /v1 Endpoint &amp; Remote IDE">API / IDE</button>
               <a class="tb-btn" id="previewBtn" href="#" target="_blank" style="display:none">Preview</a>
             </div>
             <div class="ide-subbar">
@@ -2734,8 +2811,43 @@ final class PhoneCompanionService: ObservableObject {
             </div>
           </div>
 
+          <!-- OpenAI /v1 API & Remote MicroCode IDE Sheet -->
+          <div class="modal-backdrop" id="apiModal" onclick="if(event.target===this)closeApiModal()">
+            <div class="modal-sheet">
+              <div class="modal-header">
+                <span>Local LLM OpenAI /v1 Gateway &amp; IDE</span>
+                <button class="tb-btn" onclick="closeApiModal()">Close</button>
+              </div>
+              <div class="modal-list" style="display:flex;flex-direction:column;gap:10px;padding-top:10px">
+                <div style="font-size:12px;color:var(--secondary)">Use your Mac's Local LLM from any OpenAI-compatible app, Python/JS SDK, or remote MicroCode IDE:</div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <code id="apiBaseUrlBox" style="flex:1;background:var(--surface);padding:7px 9px;border-radius:6px;border:1px solid var(--border);font-family:var(--mono);font-size:11px;overflow-x:auto;white-space:nowrap"></code>
+                  <button class="tb-btn" onclick="navigator.clipboard&&navigator.clipboard.writeText(document.getElementById('apiBaseUrlBox').textContent)">Copy /v1</button>
+                </div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <code id="apiKeyBox" style="flex:1;background:var(--surface);padding:7px 9px;border-radius:6px;border:1px solid var(--border);font-family:var(--mono);font-size:11px;overflow-x:auto;white-space:nowrap">\#(apiKeyForDrawer)</code>
+                  <button class="tb-btn" onclick="navigator.clipboard&&navigator.clipboard.writeText('\#(apiKeyForDrawer)')">Copy Key</button>
+                </div>
+                <button class="btn-allow" style="padding:9px 12px;margin-top:4px" onclick="connectRemoteMicroCodeIDE()">⚡ Connect Remote MicroCode IDE</button>
+              </div>
+            </div>
+          </div>
+
         <script>
           const TOKEN = "\#(token)";
+          const GATEWAY_API_KEY = "\#(apiKeyForDrawer)";
+          const GATEWAY_NODE_NAME = "\#(nodeNameForDrawer)";
+          function openApiModal() {
+            document.getElementById("apiBaseUrlBox").textContent = window.location.origin + "/v1";
+            document.getElementById("apiModal").style.display = "flex";
+          }
+          function closeApiModal() {
+            document.getElementById("apiModal").style.display = "none";
+          }
+          function connectRemoteMicroCodeIDE() {
+            const baseV1 = window.location.origin + "/v1";
+            window.location.href = "microcode://llm-connect?endpoint=" + encodeURIComponent(baseV1) + "&token=" + encodeURIComponent(GATEWAY_API_KEY) + "&name=" + encodeURIComponent(GATEWAY_NODE_NAME);
+          }
           if (window.location.search) {
             try { window.history.replaceState(null, "", window.location.pathname); } catch (_) {}
           }

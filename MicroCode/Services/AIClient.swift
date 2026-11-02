@@ -95,6 +95,15 @@ enum StreamableAIProvider: String, CaseIterable {
     }
     
     var defaultModel: String {
+        if self == .local {
+            if Thread.isMainThread {
+                let active = MainActor.assumeIsolated { LocalLLMService.shared.activeModel }
+                if !active.isEmpty && active != "local-model" {
+                    return active
+                }
+            }
+            return LocalLLMService.cachedModel
+        }
         if Thread.isMainThread {
             if let liveFirst = MainActor.assumeIsolated({ AIModelCatalog.shared.provider(self.rawValue)?.models.first?.id }),
                !liveFirst.isEmpty {
@@ -181,6 +190,21 @@ enum StreamableAIProvider: String, CaseIterable {
         return .omni
     }
 
+    static func isLocalEndpoint(_ baseURL: String) -> Bool {
+        let lowerURL = baseURL.lowercased()
+        if lowerURL.contains("127.0.0.1:20128") { return false }
+        return lowerURL.contains("127.0.0.1") ||
+            lowerURL.contains("localhost") ||
+            lowerURL.contains("0.0.0.0") ||
+            lowerURL.contains("192.168.") ||
+            lowerURL.contains("://10.") ||
+            lowerURL.contains("://172.") ||
+            lowerURL.contains(".local:") ||
+            lowerURL.contains(":11434") ||
+            lowerURL.contains(":1234") ||
+            lowerURL.contains(":8475")
+    }
+
     static func detect(from model: String, baseURL: String) -> StreamableAIProvider {
         let lowerURL = baseURL.lowercased()
         if lowerURL.contains("tokenme.limited") { return .tokenme }
@@ -193,6 +217,7 @@ enum StreamableAIProvider: String, CaseIterable {
         if lowerURL.contains("fireworks.ai") { return .fireworks }
         if lowerURL.contains("cerebras.ai") { return .cerebras }
         if lowerURL.contains("127.0.0.1:20128") { return .ninerouter }
+        if isLocalEndpoint(lowerURL) { return .local }
         return detect(from: model)
     }
 }
@@ -539,6 +564,13 @@ final class AIClient: ObservableObject {
         var trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return provider.defaultModel
+        }
+        if provider == .local || StreamableAIProvider.isLocalEndpoint(baseURL) {
+            let lowerLocal = trimmed.lowercased()
+            if lowerLocal.isEmpty || lowerLocal == "local" || lowerLocal == "local-model" {
+                return StreamableAIProvider.local.defaultModel
+            }
+            return trimmed
         }
         if !baseURL.contains("cloudcode-pa.googleapis.com") && !trimmed.lowercased().hasPrefix("mistral-") {
             for suffix in ["-high", "-medium", "-low"] {
@@ -2797,7 +2829,7 @@ final class AIClient: ObservableObject {
             messages.append(["role": "user", "content": contentArray])
         }
         
-        let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model), baseURL: baseURL)
+        let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model, baseURL: baseURL), baseURL: baseURL)
         let lowerEffective = effectiveModel.lowercased()
         let isOpenAIReasoning = lowerEffective.hasPrefix("o1") || lowerEffective.hasPrefix("o3") || lowerEffective.hasPrefix("o4")
         let isReasoningNoTemp = lowerEffective.contains("reasoner") || lowerEffective.contains("deepseek-r1") || lowerEffective.hasPrefix("qwq")
@@ -2807,9 +2839,10 @@ final class AIClient: ObservableObject {
             "stream": true
         ]
         let isTokenMe = baseURL.contains("tokenme.limited")
+        let isLocalTarget = StreamableAIProvider.isLocalEndpoint(baseURL)
         // TokenMe enforces a tiny ~512-token default cap (shared with `reasoning`) when `max_tokens` is omitted,
         // and supports up to 32,768 output tokens across all chat models. Always send an explicit budget.
-        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : maxOutputTokens(for: effectiveModel))
+        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : (isLocalTarget ? 1024 : maxOutputTokens(for: effectiveModel)))
         if isOpenAIReasoning {
             body["max_completion_tokens"] = requestedMaxTokens
         } else if isReasoningNoTemp {
@@ -2856,7 +2889,8 @@ final class AIClient: ObservableObject {
                 // Only failover to TH-AI Passport / Google CodeAssist for non-explicit third-party endpoints,
                 // or for Typhoon on quota/rate-limit/outage (402/429/503) mapped to `typhoon2.5-qwen3-30b`.
                 // Never mask 401/403/404 auth or model errors on explicit BYOK endpoints with an unrelated Gemini/DeepSeek model.
-                let isExplicitThirdPartyEndpoint = baseURL.contains("tokenme.limited") ||
+                let isExplicitThirdPartyEndpoint = StreamableAIProvider.isLocalEndpoint(baseURL) ||
+                    baseURL.contains("tokenme.limited") ||
                     baseURL.contains("opentyphoon.ai") ||
                     baseURL.contains("openrouter.ai") ||
                     baseURL.contains("groq.com") ||
@@ -3602,7 +3636,7 @@ final class AIClient: ObservableObject {
             apiMessages.append(["role": "user", "content": "Continue with the task."])
         }
         
-        let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model), baseURL: baseURL)
+        let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model, baseURL: baseURL), baseURL: baseURL)
         let isReasoning = effectiveModel.hasPrefix("o1") || effectiveModel.hasPrefix("o3") || effectiveModel.hasPrefix("o4")
         let isTokenMe = baseURL.contains("tokenme.limited")
         let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : maxOutputTokens(for: effectiveModel))

@@ -116,7 +116,7 @@ final class LocalLLMGatewayService: ObservableObject {
     }()
 
     private init() {
-        self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.localLLMGateway.enabled") as? Bool) ?? false
+        self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.localLLMGateway.enabled") as? Bool) ?? true
         if let savedMode = UserDefaults.standard.string(forKey: "microcode.localLLMGateway.mode"),
            let mode = LocalLLMShareTransportMode(rawValue: savedMode) {
             self.transportMode = mode
@@ -289,6 +289,10 @@ final class LocalLLMGatewayService: ObservableObject {
         guard !isServerRunning && listener == nil else { return }
         refreshNetworkAddresses()
         startServer(onPort: 8475)
+        Task { @MainActor [weak self] in
+            let port = Int(self?.listeningPort ?? 8475)
+            _ = await LocalLLMService.shared.ensureAnyLocalLLMServerRunning(excludedPort: port)
+        }
     }
 
     private func startServer(onPort candidatePort: UInt16, attempt: Int = 0) {
@@ -418,11 +422,12 @@ final class LocalLLMGatewayService: ObservableObject {
 
     private func launchSSHTunnel(port: Int) {
         tunnelState = .starting("Starting macOS SSH Worldwide HTTPS Tunnel…")
+        let knownHostsURL = PhoneCompanionService.ensurePinnedKnownHostsFile()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         proc.arguments = [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=\(knownHostsURL.path)",
             "-o", "ServerAliveInterval=30",
             "-o", "ExitOnForwardFailure=yes",
             "-R", "80:127.0.0.1:\(port)",
@@ -466,7 +471,30 @@ final class LocalLLMGatewayService: ObservableObject {
 
     // MARK: - HTTP & Streaming SSE Reverse Proxy
 
-    private func resolveUpstreamServer() -> DetectedLLMServer? {
+    private func allUpstreamServers() -> [DetectedLLMServer] {
+        let ownPort = Int(listeningPort)
+        let ownIPs = Set(allNetworkAddresses.map(\.ip) + ["127.0.0.1", "localhost"])
+        let candidates = LocalLLMService.shared.detectedServers.filter { srv in
+            srv.isOnline && !srv.requiresAuthToUnlock && !srv.models.isEmpty && !(ownIPs.contains(srv.host) && srv.port == ownPort)
+        }
+        return candidates.sorted { a, b in
+            let aLocal = (a.sourceKind == .thisMac)
+            let bLocal = (b.sourceKind == .thisMac)
+            if aLocal != bLocal { return aLocal && !bLocal }
+            return a.perfScore > b.perfScore
+        }
+    }
+
+    private func resolveUpstreamServer(forModel requestedModel: String? = nil) -> DetectedLLMServer? {
+        let servers = allUpstreamServers()
+        if let req = requestedModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !req.isEmpty,
+           let matched = servers.first(where: { $0.models.contains(where: { $0.id == req }) }) {
+            return matched
+        }
+        if let first = servers.first {
+            return first
+        }
         let ownPort = Int(listeningPort)
         let ownIPs = Set(allNetworkAddresses.map(\.ip) + ["127.0.0.1", "localhost"])
         if let active = LocalLLMService.shared.activeServer,
@@ -478,6 +506,14 @@ final class LocalLLMGatewayService: ObservableObject {
         return LocalLLMService.shared.detectedServers.first { srv in
             srv.isOnline && !srv.requiresAuthToUnlock && !(ownIPs.contains(srv.host) && srv.port == ownPort)
         }
+    }
+
+    private func resolveUpstreamServerAsync(forModel requestedModel: String? = nil) async -> DetectedLLMServer? {
+        if let existing = resolveUpstreamServer(forModel: requestedModel), !existing.models.isEmpty {
+            return existing
+        }
+        _ = await LocalLLMService.shared.ensureAnyLocalLLMServerRunning(excludedPort: Int(listeningPort))
+        return resolveUpstreamServer(forModel: requestedModel)
     }
 
     nonisolated private func handleIncomingConnection(_ connection: NWConnection) {
@@ -611,26 +647,43 @@ final class LocalLLMGatewayService: ObservableObject {
         let effectiveClientIP = headers["cf-connecting-ip"] ?? headers["x-forwarded-for"]?.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? remoteIP
         recordClientVisit(ip: effectiveClientIP, via: isProxiedTunnel ? "Worldwide" : "LAN")
 
-        // 1. Mobile & Web Streaming Console (`GET /`)
-        if method == "GET" && (path == "/" || path.isEmpty) {
-            let upstream = resolveUpstreamServer()
-            let html = Self.mobileWebConsoleHTML(
-                nodeName: macNodeName,
-                engineName: upstream?.displayName ?? "No Local LLM Running on Mac",
-                apiToken: apiToken
-            )
-            let setCookie = "mc_llm_token=\(apiToken); Path=/; HttpOnly; SameSite=Lax"
-            sendSimpleResponse(
-                on: connection,
-                status: "200 OK",
-                contentType: "text/html; charset=utf-8",
-                extraHeaders: ["Set-Cookie: \(setCookie)"],
-                body: Data(html.utf8)
-            )
+        // 1. Unified Mobile Connect IDE Web App & Companion API (`GET /` and `/api/*` except Ollama `/api/tags`)
+        if (method == "GET" && (path == "/" || path.isEmpty)) || (path.hasPrefix("/api/") && path != "/api/tags") {
+            if let respData = await PhoneCompanionService.shared.handleAuthenticatedRoute(
+                method: method,
+                path: path.isEmpty ? "/" : path,
+                queryItems: comps?.queryItems ?? [],
+                headers: headers,
+                bodyData: bodyData,
+                connection: connection,
+                sessionToken: apiToken,
+                cookieName: "mc_llm_token",
+                localLLMGatewayInfo: (nodeName: macNodeName, apiToken: apiToken)
+            ) {
+                connection.send(content: respData, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+            }
             return
         }
 
-        guard let upstream = resolveUpstreamServer() else {
+        guard let upstream = await resolveUpstreamServerAsync() else {
+            let err = #"{"error":{"message":"No Local LLM server (Ollama / LM Studio / MLX) is currently running on the host Mac.","type":"service_unavailable"}}"#
+            sendSimpleResponse(on: connection, status: "503 Service Unavailable", contentType: "application/json", body: Data(err.utf8))
+            return
+        }
+
+        await handleDirectOpenAIEndpoint(method: method, path: path, bodyData: bodyData, upstream: upstream, on: connection)
+    }
+
+    func handleDirectOpenAIEndpoint(
+        method: String,
+        path: String,
+        bodyData: Data,
+        upstream: DetectedLLMServer? = nil,
+        on connection: NWConnection
+    ) async {
+        guard let upstream = upstream != nil ? upstream : await resolveUpstreamServerAsync() else {
             let err = #"{"error":{"message":"No Local LLM server (Ollama / LM Studio / MLX) is currently running on the host Mac.","type":"service_unavailable"}}"#
             sendSimpleResponse(on: connection, status: "503 Service Unavailable", contentType: "application/json", body: Data(err.utf8))
             return
@@ -638,13 +691,19 @@ final class LocalLLMGatewayService: ObservableObject {
 
         // 2. OpenAI `/v1/models` & Ollama `/api/tags`
         if method == "GET" && (path == "/v1/models" || path == "/models") {
-            let modelsList: [[String: Any]] = upstream.models.map { m in
-                [
-                    "id": m.id,
-                    "object": "model",
-                    "created": 1_740_000_000,
-                    "owned_by": upstream.type.rawValue
-                ]
+            let allServers = allUpstreamServers()
+            let sourceServers = allServers.isEmpty ? [upstream] : allServers
+            var seenIds = Set<String>()
+            var modelsList: [[String: Any]] = []
+            for srv in sourceServers {
+                for m in srv.models where seenIds.insert(m.id).inserted {
+                    modelsList.append([
+                        "id": m.id,
+                        "object": "model",
+                        "created": 1_740_000_000,
+                        "owned_by": srv.type.rawValue
+                    ])
+                }
             }
             let payload: [String: Any] = ["object": "list", "data": modelsList]
             let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data(#"{"object":"list","data":[]}"#.utf8)
@@ -653,8 +712,14 @@ final class LocalLLMGatewayService: ObservableObject {
         }
 
         if method == "GET" && path == "/api/tags" {
-            let modelsList: [[String: Any]] = upstream.models.map { m in
-                ["name": m.id, "model": m.id]
+            let allServers = allUpstreamServers()
+            let sourceServers = allServers.isEmpty ? [upstream] : allServers
+            var seenIds = Set<String>()
+            var modelsList: [[String: Any]] = []
+            for srv in sourceServers {
+                for m in srv.models where seenIds.insert(m.id).inserted {
+                    modelsList.append(["name": m.id, "model": m.id])
+                }
             }
             let data = (try? JSONSerialization.data(withJSONObject: ["models": modelsList])) ?? Data(#"{"models":[]}"#.utf8)
             sendSimpleResponse(on: connection, status: "200 OK", contentType: "application/json", body: data)
@@ -664,31 +729,57 @@ final class LocalLLMGatewayService: ObservableObject {
         // 3. OpenAI `/v1/chat/completions` & `/v1/completions` (Streaming & Non-Streaming)
         if method == "POST" && (path.hasSuffix("/chat/completions") || path.hasSuffix("/completions")) {
             let suffix = path.hasSuffix("/chat/completions") ? "/chat/completions" : "/completions"
-            guard let targetURL = URL(string: "\(upstream.endpoint)\(suffix)") else {
+            var isStream = false
+            var effectiveBodyData = bodyData
+            var targetUpstream = upstream
+            if var json = (try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any] {
+                isStream = (json["stream"] as? Bool) == true
+                let reqModel = (json["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if let matchedSrv = resolveUpstreamServer(forModel: reqModel) {
+                    targetUpstream = matchedSrv
+                }
+                let validIds = Set(targetUpstream.models.map(\.id))
+                if (reqModel.isEmpty || reqModel == "local-model" || reqModel == "local" || !validIds.contains(reqModel)),
+                   let fallbackId = targetUpstream.models.first?.id {
+                    json["model"] = fallbackId
+                    if let updated = try? JSONSerialization.data(withJSONObject: json) {
+                        effectiveBodyData = updated
+                    }
+                }
+            }
+            guard let targetURL = URL(string: "\(targetUpstream.endpoint)\(suffix)") else {
                 sendSimpleResponse(on: connection, status: "502 Bad Gateway", contentType: "application/json", body: Data(#"{"error":{"message":"Invalid upstream URL"}}"#.utf8))
                 return
-            }
-
-            var isStream = false
-            if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                isStream = (json["stream"] as? Bool) == true
             }
 
             var upstreamReq = URLRequest(url: targetURL)
             upstreamReq.httpMethod = "POST"
             upstreamReq.timeoutInterval = 300
             upstreamReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            if let upKey = upstream.apiKey, !upKey.isEmpty {
+            if let upKey = targetUpstream.apiKey, !upKey.isEmpty {
                 upstreamReq.setValue("Bearer \(upKey)", forHTTPHeaderField: "Authorization")
             }
-            upstreamReq.httpBody = bodyData
+            upstreamReq.httpBody = effectiveBodyData
 
             if isStream {
                 await streamUpstreamSSE(request: upstreamReq, on: connection)
             } else {
                 do {
-                    let (respData, resp) = try await URLSession.shared.data(for: upstreamReq)
-                    let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+                    var (respData, resp) = try await URLSession.shared.data(for: upstreamReq)
+                    var code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+                    if (code == 400 || code == 422),
+                       let errText = String(data: respData, encoding: .utf8)?.lowercased(),
+                       errText.contains("tool"),
+                       var json = (try? JSONSerialization.jsonObject(with: effectiveBodyData)) as? [String: Any],
+                       json["tools"] != nil {
+                        json.removeValue(forKey: "tools")
+                        json.removeValue(forKey: "tool_choice")
+                        if let stripped = try? JSONSerialization.data(withJSONObject: json) {
+                            upstreamReq.httpBody = stripped
+                            (respData, resp) = try await URLSession.shared.data(for: upstreamReq)
+                            code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+                        }
+                    }
                     sendSimpleResponse(on: connection, status: "\(code) OK", contentType: "application/json", body: respData)
                 } catch {
                     let msg = #"{"error":{"message":"Upstream Local LLM request failed: \#(error.localizedDescription.replacingOccurrences(of: "\"", with: "'"))"}}"#
@@ -701,7 +792,7 @@ final class LocalLLMGatewayService: ObservableObject {
         sendSimpleResponse(on: connection, status: "404 Not Found", contentType: "application/json", body: Data(#"{"error":{"message":"Endpoint not found"}}"#.utf8))
     }
 
-    private func streamUpstreamSSE(request: URLRequest, on connection: NWConnection) async {
+    private func streamUpstreamSSE(request: URLRequest, on connection: NWConnection, didStripTools: Bool = false) async {
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 200
@@ -710,6 +801,24 @@ final class LocalLLMGatewayService: ObservableObject {
                 for try await b in bytes {
                     errData.append(b)
                     if errData.count > 16384 { break }
+                }
+                if !didStripTools,
+                   (statusCode == 400 || statusCode == 422),
+                   let errStr = String(data: errData, encoding: .utf8)?.lowercased(),
+                   errStr.contains("tool"),
+                   let body = request.httpBody,
+                   let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+                   json["tools"] != nil,
+                   let stripped = try? JSONSerialization.data(withJSONObject: {
+                       var copy = json
+                       copy.removeValue(forKey: "tools")
+                       copy.removeValue(forKey: "tool_choice")
+                       return copy
+                   }()) {
+                    var retryReq = request
+                    retryReq.httpBody = stripped
+                    await streamUpstreamSSE(request: retryReq, on: connection, didStripTools: true)
+                    return
                 }
                 sendSimpleResponse(on: connection, status: "\(statusCode) Error", contentType: "application/json", body: errData)
                 return
@@ -801,6 +910,9 @@ final class LocalLLMGatewayService: ObservableObject {
             }
             return auth.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        if let companionToken = headers["x-companion-token"], !companionToken.isEmpty {
+            return companionToken
+        }
         if let apiKey = headers["x-api-key"], !apiKey.isEmpty {
             return apiKey
         }
@@ -810,7 +922,7 @@ final class LocalLLMGatewayService: ObservableObject {
         if let cookie = headers["cookie"] {
             for part in cookie.components(separatedBy: ";") {
                 let kv = part.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1)
-                if kv.count == 2 && kv[0] == "mc_llm_token" {
+                if kv.count == 2 && (kv[0] == "mc_llm_token" || kv[0] == "mc_token") {
                     return String(kv[1])
                 }
             }
@@ -1024,6 +1136,12 @@ final class LocalLLMGatewayService: ObservableObject {
                 body: JSON.stringify({ model, messages, stream: true }),
                 signal: aborter.signal
               });
+              if (!res.ok) {
+                let errMsg = "HTTP " + res.status;
+                try { const ej = await res.json(); errMsg = (ej.error && ej.error.message) || errMsg; } catch (_) {}
+                bodySpan.textContent = "⚠️ " + errMsg;
+                return;
+              }
               const reader = res.body.getReader();
               const dec = new TextDecoder();
               let buf = "";

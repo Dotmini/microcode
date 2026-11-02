@@ -678,6 +678,27 @@ class LocalLLMService: ObservableObject {
         Self.registerEndpointAPIKey(endpoint: srv.endpoint, apiKey: srv.apiKey)
     }
 
+    func selectModelAcrossServers(modelId: String, endpointHint: String? = nil) {
+        let trimmed = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let hint = endpointHint, !hint.isEmpty,
+           let idx = detectedServers.firstIndex(where: { $0.endpoint == hint && $0.isOnline }) {
+            selectServer(at: idx, preferredModelId: trimmed)
+            return
+        }
+        if let idx = detectedServers.firstIndex(where: { $0.isOnline && $0.models.contains(where: { $0.id == trimmed }) }) {
+            selectServer(at: idx, preferredModelId: trimmed)
+            return
+        }
+        if let idx = detectedServers.firstIndex(where: { $0.isOnline && !$0.models.isEmpty }) {
+            selectServer(at: idx, preferredModelId: trimmed)
+            return
+        }
+        if !trimmed.isEmpty {
+            selectedModelId = trimmed
+            LocalLLMService.cachedModel = trimmed
+        }
+    }
+
     // MARK: - Bonjour / mDNS Zero-Config Discovery (LLM Services + LAN Computers)
 
     private func startBonjourDiscovery() {
@@ -2899,7 +2920,120 @@ class LocalLLMService: ObservableObject {
 
     // MARK: 1) Ollama Auto-Start + Real Byte-Streaming Pull + Connect
 
-    private func ensureLocalOllamaRunning() async -> DetectedLLMServer? {
+    @discardableResult
+    func ensureAnyLocalLLMServerRunning(excludedPort: Int? = nil) async -> DetectedLLMServer? {
+        func isEligible(_ srv: DetectedLLMServer) -> Bool {
+            guard srv.isOnline, !srv.requiresAuthToUnlock, !srv.models.isEmpty else { return false }
+            if let excludedPort, srv.port == excludedPort, ["127.0.0.1", "localhost"].contains(srv.host) {
+                return false
+            }
+            return true
+        }
+
+        if let active = activeServer, isEligible(active) {
+            return active
+        }
+        if let idx = detectedServers.firstIndex(where: isEligible) {
+            selectServer(at: idx)
+            return detectedServers[idx]
+        }
+
+        await scanForServers()
+        if let idx = detectedServers.firstIndex(where: isEligible) {
+            selectServer(at: idx)
+            return detectedServers[idx]
+        }
+
+        if let ollamaSrv = await ensureLocalOllamaRunning() {
+            if ollamaSrv.models.isEmpty {
+                await bootstrapLocalGGUFModelsIfNeeded()
+                await scanForServers()
+            }
+            if let idx = detectedServers.firstIndex(where: isEligible) {
+                selectServer(at: idx)
+                return detectedServers[idx]
+            }
+            return ollamaSrv
+        }
+        return nil
+    }
+
+    private func bootstrapLocalGGUFModelsIfNeeded() async {
+        guard let ollamaBin = ollamaBinaryPath else { return }
+        let home = NSHomeDirectory()
+        let candidates: [(tag: String, path: String)] = [
+            ("omni-o1", (home as NSString).appendingPathComponent("Documents/Omni-O1.gguf")),
+            ("tinyllama:1.1b", "/Volumes/MAC/llmget/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"),
+            ("tinyllama:1.1b", "/Volumes/MAC/USB/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
+        ]
+        var registeredAny = false
+        var seenTags = Set<String>()
+        for item in candidates {
+            guard !seenTags.contains(item.tag),
+                  FileManager.default.fileExists(atPath: item.path),
+                  let attrs = try? FileManager.default.attributesOfItem(atPath: item.path),
+                  let size = (attrs[.size] as? NSNumber)?.int64Value,
+                  size > 200_000_000 else { continue }
+            seenTags.insert(item.tag)
+            let modelfileURL = FileManager.default.temporaryDirectory.appendingPathComponent("MicroCode-Auto-\(UUID().uuidString).Modelfile")
+            let escaped = item.path.replacingOccurrences(of: "\"", with: "\\\"")
+            let isTinyLlama = item.tag.lowercased().contains("tinyllama")
+            let modelfileContent: String
+            if isTinyLlama {
+                modelfileContent = """
+                FROM "\(escaped)"
+                TEMPLATE \"\"\"<|system|>
+                {{ .System }}</s>
+                <|user|>
+                {{ .Prompt }}</s>
+                <|assistant|>
+                {{ .Response }}</s>\"\"\"
+                PARAMETER stop "</s>"
+                PARAMETER stop "<|user|>"
+                PARAMETER stop "<|system|>"
+                PARAMETER num_ctx 2048
+                PARAMETER num_predict 1024
+                """
+            } else {
+                modelfileContent = """
+                FROM "\(escaped)"
+                TEMPLATE \"\"\"{{ if .System }}<|im_start|>system
+                {{ .System }}<|im_end|>
+                {{ end }}{{ if .Prompt }}<|im_start|>user
+                {{ .Prompt }}<|im_end|>
+                {{ end }}<|im_start|>assistant
+                {{ .Response }}<|im_end|>\"\"\"
+                PARAMETER stop "<|im_start|>"
+                PARAMETER stop "<|im_end|>"
+                PARAMETER stop "<|endoftext|>"
+                PARAMETER num_ctx 4096
+                PARAMETER num_predict 1024
+                """
+            }
+            try? modelfileContent.write(to: modelfileURL, atomically: true, encoding: .utf8)
+            let ok = await Task.detached(priority: .utility) { () -> Bool in
+                defer { try? FileManager.default.removeItem(at: modelfileURL) }
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: ollamaBin)
+                p.arguments = ["create", item.tag, "-f", modelfileURL.path]
+                p.standardOutput = Pipe()
+                p.standardError = Pipe()
+                do {
+                    try p.run()
+                    p.waitUntilExit()
+                    return p.terminationStatus == 0
+                } catch {
+                    return false
+                }
+            }.value
+            if ok { registeredAny = true }
+        }
+        if registeredAny {
+            scanLog.append("Auto-registered local GGUF model(s) into Ollama runtime")
+        }
+    }
+
+    func ensureLocalOllamaRunning() async -> DetectedLLMServer? {
         if let existing = detectedServers.first(where: { $0.type == .ollama && $0.isOnline }) {
             return existing
         }

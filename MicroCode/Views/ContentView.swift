@@ -334,6 +334,9 @@ struct AgenticEditorWorkspace: View {
             if PhoneCompanionService.shared.isEnabled {
                 PhoneCompanionService.shared.startServerIfNeeded()
             }
+            if LocalLLMGatewayService.shared.isEnabled {
+                LocalLLMGatewayService.shared.startServerIfNeeded()
+            }
             if let workspace = appState.workspaceFolder {
                 agent.setWorkspace(workspace.path)
             }
