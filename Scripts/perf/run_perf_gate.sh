@@ -30,6 +30,22 @@ cp Scripts/perf/sanitizer_fuzz_main.swift "$WORK/main.swift"
 $SWIFTC_CMD -O "$WORK/Orig.swift" "$WORK/San.swift" "$WORK/main.swift" -o "$WORK/sanfuzz"
 "$WORK/sanfuzz" "$STREAMS"
 
+# 1b. Loopback MCP bridge origin/host policy: functions are extracted verbatim from MCPServer.swift.
+{
+  echo "import Foundation"
+  echo "enum MCPServer {"
+  awk '/nonisolated static func isAllowedBridgeOrigin/{p=1} /private func bridgeJSON/{p=0} p' MicroCode/Services/MCPServer.swift
+  echo "}"
+} > "$WORK/BridgePolicy.swift"
+mkdir -p "$WORK/bp" && cp "$WORK/BridgePolicy.swift" "$WORK/bp/BridgePolicy.swift" && cp Scripts/perf/bridge_policy_test_main.swift "$WORK/bp/main.swift"
+$SWIFTC_CMD -O "$WORK/bp/BridgePolicy.swift" "$WORK/bp/main.swift" -o "$WORK/bridgepolicy"
+"$WORK/bridgepolicy"
+
+# 1c. Android PNG-fallback incremental scan must behave exactly like the previous full-buffer scan.
+mkdir -p "$WORK/png" && cp Scripts/perf/png_scan_fuzz_main.swift "$WORK/png/main.swift"
+$SWIFTC_CMD -O "$WORK/png/main.swift" -o "$WORK/pngscan"
+"$WORK/pngscan"
+
 # 2. Editor lexer cache differential fuzz (added by the editor work), if present.
 if [ -x Scripts/perf/run_lexer_fuzz.sh ]; then
   SWIFTC_CMD="$SWIFTC_CMD" Scripts/perf/run_lexer_fuzz.sh

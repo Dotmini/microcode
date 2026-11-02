@@ -1207,6 +1207,9 @@ class MCPServer: ObservableObject {
         guard httpListener == nil else { return }
         do {
             let params = NWParameters.tcp
+            // SECURITY: this bridge exposes the full MCP tool surface (write_file, edit_file, run_terminal, execute_code, ...)
+            // with no credentials, so it must never be reachable from the LAN. Bind it to the loopback interface only.
+            params.requiredInterfaceType = .loopback
             let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port) ?? 18888)
             
             listener.newConnectionHandler = { [weak self] connection in
@@ -1253,19 +1256,77 @@ class MCPServer: ObservableObject {
         }
     }
 
+    // MARK: - Bridge request policy (loopback bridge hardening)
+
+    /// Origins a *browser* may call this bridge from: the Dotmini web properties (account sync / "open on Mac") and local dev servers.
+    nonisolated static func isAllowedBridgeOrigin(_ origin: String) -> Bool {
+        guard let comps = URLComponents(string: origin), let scheme = comps.scheme?.lowercased(),
+              let host = comps.host?.lowercased(), comps.path.isEmpty || comps.path == "/" else { return false }
+        if host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1" {
+            return scheme == "http" || scheme == "https"
+        }
+        return scheme == "https" && (host == "dotmini.net" || host.hasSuffix(".dotmini.net"))
+    }
+
+    /// Defeats DNS-rebinding: a rebinding page reaches 127.0.0.1 but still carries the attacker's hostname in `Host`.
+    nonisolated static func isLoopbackHostHeader(_ hostHeader: String?) -> Bool {
+        guard let raw = hostHeader?.trimmingCharacters(in: .whitespaces).lowercased(), !raw.isEmpty else { return true }
+        let host: String
+        if raw.hasPrefix("[") {
+            host = String(raw.dropFirst().prefix { $0 != "]" })
+        } else {
+            host = String(raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+        }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    private func bridgeJSON(status: String, body: String, origin: String?) -> Data {
+        var head = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n"
+        if let origin { head += "Access-Control-Allow-Origin: \(origin)\r\nVary: Origin\r\n" }
+        return (head + "\r\n" + body).data(using: .utf8) ?? Data()
+    }
+
     private func processHttpRequest(_ rawRequest: String) async -> Data {
-        let lines = rawRequest.components(separatedBy: "\r\n")
+        let headEnd = rawRequest.range(of: "\r\n\r\n")?.lowerBound ?? rawRequest.endIndex
+        let lines = String(rawRequest[..<headEnd]).components(separatedBy: "\r\n")
         guard let firstLine = lines.first else { return Data() }
         let parts = firstLine.components(separatedBy: " ")
         guard parts.count >= 2 else { return Data() }
         
         let method = parts[0].uppercased()
         let path = parts[1]
-        
-        let corsHeaders = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+
+        var requestHeaders: [String: String] = [:]
+        for line in lines.dropFirst() {
+            if let colon = line.firstIndex(of: ":") {
+                requestHeaders[String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased()] =
+                    String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        // SECURITY GATE 1: only loopback host names (blocks DNS rebinding).
+        guard Self.isLoopbackHostHeader(requestHeaders["host"]) else {
+            return bridgeJSON(status: "403 Forbidden", body: "{\"error\": \"Forbidden host\"}", origin: nil)
+        }
+        // SECURITY GATE 2: browsers always send `Origin` on cross-site requests. Only allow-listed origins may talk to the bridge;
+        // native clients (mcp-server.py, curl, Omni AI) send no `Origin` and are same-machine by construction of the loopback bind.
+        let browserOrigin = requestHeaders["origin"]
+        if let browserOrigin, !Self.isAllowedBridgeOrigin(browserOrigin) {
+            return bridgeJSON(status: "403 Forbidden", body: "{\"error\": \"Origin not allowed\"}", origin: nil)
+        }
+        let corsOrigin = browserOrigin   // echoed back (never "*")
+        let acao = corsOrigin.map { "Access-Control-Allow-Origin: \($0)\r\nVary: Origin\r\n" } ?? ""
+        let isBrowserRequest = browserOrigin != nil
+
+        let corsHeaders = "HTTP/1.1 200 OK\r\n\(acao)Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
         
         if method == "OPTIONS" {
             return corsHeaders.data(using: .utf8) ?? Data()
+        }
+
+        // SECURITY GATE 3: the MCP tool surface (write_file / edit_file / run_terminal / execute_code ...) is never available to web pages.
+        if isBrowserRequest && path.hasPrefix("/v1/mcp") {
+            return bridgeJSON(status: "403 Forbidden", body: "{\"error\": \"MCP tools are not available to browser origins\"}", origin: corsOrigin)
         }
         
         // Extract Body
@@ -1287,12 +1348,14 @@ class MCPServer: ObservableObject {
                     AuthService.shared.syncWithWebSession(email: email, token: token, displayName: name)
                 }
                 
-                // Open and run in app
-                _ = await self.executeOpenSnippet(["code": code, "language": lang, "action": "open_and_run"])
+                // Open and run in app. A web page (browser Origin) may only OPEN the snippet; the user presses Run in the IDE.
+                _ = await self.executeOpenSnippet(["code": code, "language": lang, "action": isBrowserRequest ? "open" : "open_and_run"])
                 
-                let resp = ["success": true, "status": "executed_on_mac", "message": "Loaded and running on MicroCode IDE"] as [String : Any]
+                let resp = isBrowserRequest
+                    ? ["success": true, "status": "opened_on_mac", "message": "Snippet opened in MicroCode IDE. Press Run to execute it."] as [String : Any]
+                    : ["success": true, "status": "executed_on_mac", "message": "Loaded and running on MicroCode IDE"] as [String : Any]
                 let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
-                let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+                let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
                 var data = httpResp.data(using: .utf8) ?? Data()
                 data.append(respBody)
                 return data
@@ -1309,7 +1372,7 @@ class MCPServer: ObservableObject {
                 
                 let resp = ["success": true, "synced_email": email] as [String : Any]
                 let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
-                let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+                let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
                 var data = httpResp.data(using: .utf8) ?? Data()
                 data.append(respBody)
                 return data
@@ -1325,7 +1388,7 @@ class MCPServer: ObservableObject {
                 "mcp_version": "2024-11-05"
             ]
             let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
-            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+            let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
             var data = httpResp.data(using: .utf8) ?? Data()
             data.append(respBody)
             return data
@@ -1335,7 +1398,7 @@ class MCPServer: ObservableObject {
         if (path.hasPrefix("/v1/mcp/sse") || path == "/v1/mcp" || path.hasPrefix("/v1/mcp?")) && method == "GET" {
             let sessionId = UUID().uuidString
             let endpointPayload = "event: endpoint\r\ndata: /v1/mcp/message?sessionId=\(sessionId)\r\n\r\n"
-            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: \(endpointPayload.utf8.count)\r\n\r\n\(endpointPayload)"
+            let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: \(endpointPayload.utf8.count)\r\n\r\n\(endpointPayload)"
             return httpResp.data(using: .utf8) ?? Data()
         }
         
@@ -1343,21 +1406,21 @@ class MCPServer: ObservableObject {
         if path.hasPrefix("/v1/mcp/message") && method == "POST" {
             let mcpRespString = await self.handleRequest(bodyString)
             let ssePayload = "event: message\r\ndata: \(mcpRespString)\r\n\r\n"
-            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: \(ssePayload.utf8.count)\r\n\r\n\(ssePayload)"
+            let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: \(ssePayload.utf8.count)\r\n\r\n\(ssePayload)"
             return httpResp.data(using: .utf8) ?? Data()
         }
 
         if path.hasPrefix("/v1/mcp") && method == "POST" {
             let mcpRespString = await self.handleRequest(bodyString)
             let respBody = mcpRespString.data(using: .utf8) ?? Data()
-            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+            let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
             var data = httpResp.data(using: .utf8) ?? Data()
             data.append(respBody)
             return data
         }
         
         let notFound = "{\"error\": \"Not Found\"}"
-        return ("HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(notFound.count)\r\nConnection: close\r\n\r\n" + notFound).data(using: .utf8) ?? Data()
+        return ("HTTP/1.1 404 Not Found\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(notFound.count)\r\nConnection: close\r\n\r\n" + notFound).data(using: .utf8) ?? Data()
     }
     
     private func log(_ detail: String, method: String, status: MCPLog.LogStatus) {
