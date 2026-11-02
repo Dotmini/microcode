@@ -380,6 +380,7 @@ class AgentService: ObservableObject {
             self.shouldProcessQueueAfterRun = autoProcessQueue
             self.streamThrottleTimer?.invalidate()
             self.streamThrottleTimer = nil
+            self.streamSanitizer.reset()
             self.executionTask?.cancel()
             self.executionTask = nil
             self.executionID = nil
@@ -3379,10 +3380,13 @@ class AgentService: ObservableObject {
     private var lastStreamUpdateUptime: TimeInterval = 0
     private var pendingStreamFullText: String = ""
     private var streamThrottleTimer: Timer? = nil
+    /// Incremental tool-call-artifact stripper: work per flush is proportional to the unfinished tail, not the whole answer.
+    private var streamSanitizer = StreamingArtifactSanitizer()
     
     private func detectStreamingRepetition(_ fullText: String) -> Bool {
-        // Inspect only the tail window so repetition detection stays O(1) instead of O(N^2) during long streams
-        let tail = fullText.count > 900 ? String(fullText.suffix(900)) : fullText
+        // Inspect only the tail window so repetition detection stays O(1) instead of O(N^2) during long streams.
+        // `suffix(900)` walks at most 900 characters from the END; never call `fullText.count` here (O(N) grapheme walk).
+        let tail = String(fullText.suffix(900))
         let lines = tail.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.count >= 8 }
@@ -3446,7 +3450,7 @@ class AgentService: ObservableObject {
     }
     
     private func updateStreamingMessage(_ text: String, toolResults: [ToolResultModel]) {
-        let sanitizedText = AIStructuredTurnCodec.stripToolCallArtifacts(text)
+        let sanitizedText = Perf.measure("agent.stream.sanitize") { streamSanitizer.sanitize(text) }
         let streamMsg = AgentMessageModel(
             id: "streaming", role: .assistant, content: sanitizedText,
             toolResults: toolResults, pendingChanges: [], timestamp: Date()
@@ -3476,9 +3480,9 @@ class AgentService: ObservableObject {
             }
         }
         if Thread.isMainThread {
-            block()
+            Perf.measure("agent.stream.publish") { block() }
         } else {
-            DispatchQueue.main.async(execute: block)
+            DispatchQueue.main.async { Perf.measure("agent.stream.publish") { block() } }
         }
     }
 

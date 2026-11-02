@@ -620,14 +620,9 @@ struct WelcomeScreen: View {
                     let repoName = repoUrlStr.split(separator: "/").last?.replacingOccurrences(of: ".git", with: "") ?? "cloned_repo"
                     let destUrl = parentUrl.appendingPathComponent(repoName)
                     
-                    let process = Process()
-                    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                    process.arguments = ["clone", repoUrlStr, destUrl.path]
+                    let result = try await Shell.run("/usr/bin/git", ["clone", repoUrlStr, destUrl.path])
                     
-                    try process.run()
-                    process.waitUntilExit()
-                    
-                    if process.terminationStatus == 0 {
+                    if result.status == 0 {
                         DispatchQueue.main.async {
                             self.appState.workspaceFolder = destUrl
                             self.showCloneSheet = false
@@ -636,7 +631,7 @@ struct WelcomeScreen: View {
                         }
                     } else {
                         DispatchQueue.main.async {
-                            self.cloneError = "Git clone failed with status \(process.terminationStatus)"
+                            self.cloneError = "Git clone failed with status \(result.status)"
                             self.isCloning = false
                         }
                     }

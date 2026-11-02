@@ -166,15 +166,19 @@ debug = 1
 split-debuginfo = "unpacked"
 
 [profile.release]
-## This binary ships inside the macOS application, so optimize the
-## distribution artifact for disk footprint. The prior speed-oriented profile
-## retained substantial duplicated code and inflated the application bundle.
-opt-level = "z"
+## This binary ships inside the macOS application. Size was previously minimised with opt-level "z", but the
+## backend (and the embedded dylib linked into the app) runs the CPU-bound hot paths: tokio/serde_json request
+## handling, regex/ignore file scanning, tree-sitter parsing and libgit2. Keep our own glue code compact (2) and
+## compile every dependency for speed (3, see the package override below). Measure the Lite DMG size delta in CI.
+opt-level = 2
 lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
 debug = false
+
+[profile.release.package."*"]
+opt-level = 3
 
 [[bin]]
 name = "microcode-backend"

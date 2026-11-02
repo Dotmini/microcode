@@ -8,6 +8,7 @@ import SwiftUI
 struct GitPanelView: View {
     @EnvironmentObject var appState: AppState
     @State private var showGitSettings = false
+    @State private var isDiscarding = false
     @State private var showCommitSheet = false
     @State private var commitMessage = ""
     @State private var selectedTab = 0 // 0=Changes, 1=Branches, 2=History, 3=Stash, 4=CI/CD
@@ -630,6 +631,7 @@ struct GitPanelView: View {
                 Button("Undo Last Commit (Keep Changes)") { appState.gitUndoLastCommit() }
                 Divider()
                 Button("Discard All", role: .destructive) { discardAll() }
+                    .disabled(isDiscarding)
             } label: {
                 Image(systemName: "ellipsis.circle").font(.system(size: 14))
             }.menuStyle(.borderlessButton).frame(width: 24)
@@ -735,11 +737,12 @@ struct GitPanelView: View {
     
     private func discardAll() {
         guard let folder = appState.workspaceFolder else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["checkout", "--", "."]
-        p.currentDirectoryURL = folder
-        try? p.run(); p.waitUntilExit()
-        appState.gitRefresh()
+        guard !isDiscarding else { return }
+        isDiscarding = true
+        Task { @MainActor in
+            _ = try? await Shell.git(["checkout", "--", "."], in: folder)
+            appState.gitRefresh()
+            isDiscarding = false
+        }
     }
 }

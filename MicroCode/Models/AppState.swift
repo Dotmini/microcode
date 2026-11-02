@@ -3668,8 +3668,35 @@ class AppState: ObservableObject {
                 let msgID = assistantMessage.id
                 aiChatMessages.append(assistantMessage)
                 
+                // Coalesce token deltas to one UI publish per ~75 ms (same cadence as AgentService). `aiChatMessages`
+                // lives on AppState, so every publish re-evaluates all views observing it; per-token publishes were
+                // unthrottled. Structural events flush the pending text first to preserve ordering.
+                var pendingTokens = ""
+                var lastTokenFlush = ProcessInfo.processInfo.systemUptime
+                let appendTokens: @Sendable (String) -> Void = { [weak self] batch in
+                    DispatchQueue.main.async {
+                        guard let self = self,
+                              let idx = self.aiChatMessages.firstIndex(where: { $0.id == msgID }) else { return }
+                        self.aiChatMessages[idx].content += batch
+                        self.aiChatMessages[idx].isThinking = false
+                    }
+                }
                 do {
                     for try await event in backend.agentEnhancedChatStream(request: request) {
+                        if case .token(let token) = event {
+                            pendingTokens += token
+                            let now = ProcessInfo.processInfo.systemUptime
+                            if now - lastTokenFlush >= 0.075 {
+                                lastTokenFlush = now
+                                appendTokens(pendingTokens)
+                                pendingTokens = ""
+                            }
+                            continue
+                        }
+                        if !pendingTokens.isEmpty {
+                            appendTokens(pendingTokens)
+                            pendingTokens = ""
+                        }
                         DispatchQueue.main.async {
                             if let idx = self.aiChatMessages.firstIndex(where: { $0.id == msgID }) {
                                 switch event {
@@ -3700,7 +3727,15 @@ class AppState: ObservableObject {
                             }
                         }
                     }
+                    if !pendingTokens.isEmpty {
+                        appendTokens(pendingTokens)
+                        pendingTokens = ""
+                    }
                 } catch {
+                    if !pendingTokens.isEmpty {
+                        appendTokens(pendingTokens)
+                        pendingTokens = ""
+                    }
                     DispatchQueue.main.async {
                         if let idx = self.aiChatMessages.firstIndex(where: { $0.id == msgID }) {
                             self.aiChatMessages[idx].content += "\n❌ Connection Error: \(error.localizedDescription)"
@@ -4632,19 +4667,14 @@ class AppState: ObservableObject {
         }
     }
     
-    func gitShowFileDiff(_ path: String) -> String {
-        // Synchronous wrapper for inline diff preview
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["diff", "--", path]
-        process.currentDirectoryURL = workspaceFolder
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try? process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? ""
+    func gitShowFileDiff(_ path: String) async -> String {
+        // Async wrapper for inline diff preview (runs off the main thread)
+        let result = try? await Shell.run(
+            "/usr/bin/git",
+            ["diff", "--", path],
+            cwd: workspaceFolder
+        )
+        return result?.out ?? ""
     }
     
     // MARK: - Stash Management

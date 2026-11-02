@@ -181,6 +181,11 @@ struct MicroCodeApp: App {
                 // Start Local MCP & HTTP Daemon Bridge for Omni AI
                 MCPServer.shared.startLocalHttpBridge(port: 18888)
                 TelemetryService.shared.start()
+                // Opt-in (`defaults write com.dotmini.microcode microcode.perfTelemetry -bool YES`): reports stores that publish
+                // faster than a 60 Hz view tree can show, i.e. the SwiftUI invalidation fan-out of large ObservableObjects.
+                if let appState = AppState.shared {
+                    PerfPublishRateMonitor.shared.watch("AppState", publisher: appState.objectWillChange)
+                }
             }
         }
         

@@ -118,6 +118,63 @@ public enum SyntaxTokenType: String, CaseIterable, Sendable {
     case error              // Syntax error tokens
 }
 
+// MARK: - Compact Encoding
+
+extension SyntaxTokenType {
+    /// Dense one-byte tag used by `SyntaxCache` to store tokens without a `String` raw value.
+    /// The tag is an implementation detail of the cache; it is stable only within one process
+    /// (the inverse is `SyntaxTokenType.compactTable`). The switch is deliberately exhaustive so that
+    /// adding a new case is a compile error here instead of a silent mis-decode.
+    @inline(__always)
+    var compactIndex: UInt8 {
+        switch self {
+        case .keyword: return 0
+        case .keywordControl: return 1
+        case .keywordOperator: return 2
+        case .keywordDeclaration: return 3
+        case .keywordModifier: return 4
+        case .string: return 5
+        case .stringInterpolation: return 6
+        case .character: return 7
+        case .number: return 8
+        case .boolean: return 9
+        case .null: return 10
+        case .identifier: return 11
+        case .type: return 12
+        case .function: return 13
+        case .parameter: return 14
+        case .property: return 15
+        case .variable: return 16
+        case .constant: return 17
+        case .enumMember: return 18
+        case .comment: return 19
+        case .commentBlock: return 20
+        case .commentDoc: return 21
+        case .operator: return 22
+        case .punctuation: return 23
+        case .delimiter: return 24
+        case .preprocessor: return 25
+        case .annotation: return 26
+        case .escape: return 27
+        case .regex: return 28
+        case .markup: return 29
+        case .unknown: return 30
+        case .whitespace: return 31
+        case .newline: return 32
+        case .error: return 33
+        }
+    }
+    
+    /// Inverse of `compactIndex`, indexed by tag. Built from `allCases` so it can never disagree with the switch above.
+    static let compactTable: [SyntaxTokenType] = {
+        var table = [SyntaxTokenType](repeating: .unknown, count: allCases.count)
+        for tokenType in allCases {
+            table[Int(tokenType.compactIndex)] = tokenType
+        }
+        return table
+    }()
+}
+
 // MARK: - Lexer State
 
 /// State machine states for the lexer.
@@ -153,7 +210,10 @@ public struct SyntaxToken: Equatable, Hashable, Sendable {
     /// The category of this token
     public let type: SyntaxTokenType
     
-    /// The source text of the token
+    /// The source text of the token.
+    /// Tokens produced by a lexer carry their text (the lexer reads `previousToken?.text` within one line).
+    /// Tokens materialised from `SyntaxCache` carry an EMPTY string: the cache stores line-relative
+    /// (column, length, type) triples only, and no consumer outside `Lexer.swift` reads `text`.
     public let text: String
     
     /// Location in the source document

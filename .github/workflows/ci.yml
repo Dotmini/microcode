@@ -48,7 +48,7 @@ jobs:
   security:
     name: "🔐 Security"
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +61,11 @@ jobs:
           fi
           chmod +x verify_checksums.sh
           ./verify_checksums.sh
+
+      - name: Performance gate (stream sanitizer + editor cache differential fuzz)
+        run: |
+          chmod +x Scripts/perf/*.sh
+          Scripts/perf/run_perf_gate.sh 600
 
       - name: Scan for hardcoded secrets
         run: |

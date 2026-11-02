@@ -499,13 +499,14 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         
         let content = documentContent
         let lexer = activeLexer
+        let lineStarts = cachedLineOffsets
         
         lock.unlock()
         
         // SyntaxTokenize
         let tokens: [SyntaxToken]
         if let lexer = lexer {
-            tokens = lexer.retokenizeDirtyRegions(in: content)
+            tokens = lexer.retokenizeDirtyRegions(in: content, lineStarts: lineStarts)
         } else {
             // Fallback: no tokens
             tokens = []
@@ -569,7 +570,8 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let content = documentContent
         let lexer = activeLexer
         let version = currentVersion
-        let cachedLines = cachedLineOffsets?.count ?? 200
+        let lineStarts = cachedLineOffsets
+        let cachedLines = lineStarts?.count ?? 200
         lock.unlock()
         
         guard let lexer = lexer else {
@@ -579,7 +581,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         
         if cachedLines < 150 && content.utf16.count < 6000 {
             // SYNC PATH (Zero Flash) — small files only
-            let update = lexer.retokenizeDirtyRegionsIncremental(in: content)
+            let update = lexer.retokenizeDirtyRegionsIncremental(in: content, lineStarts: lineStarts)
             self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version, visibleCharRange: visibleCharRange)
             completion?()
             return
@@ -598,7 +600,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             }
             
             // 1. Re-lex dirty regions incrementally
-            let update = lexer.retokenizeDirtyRegionsIncremental(in: content)
+            let update = lexer.retokenizeDirtyRegionsIncremental(in: content, lineStarts: lineStarts)
             
             if Task.isCancelled {
                 await MainActor.run { completion?() }
@@ -795,10 +797,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         lock.lock()
         let content = documentContent
         let lexer = activeLexer
+        let lineStarts = cachedLineOffsets
         lock.unlock()
         
         guard let lexer = lexer else { return }
-        let tokens = lexer.retokenizeDirtyRegions(in: content)
+        let tokens = lexer.retokenizeDirtyRegions(in: content, lineStarts: lineStarts)
         
         if Thread.isMainThread {
             MainActor.assumeIsolated {
@@ -819,15 +822,9 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         
-        guard let lexer = activeLexer else { return [] }
+        guard let lexer = activeLexer, let lineStarts = cachedLineOffsets, !range.isEmpty else { return [] }
         
-        var tokens: [SyntaxToken] = []
-        for line in range {
-            if let entry = lexer.cache.entry(forLine: line) {
-                tokens.append(contentsOf: entry.tokens)
-            }
-        }
-        return tokens
+        return lexer.cache.tokens(fromLine: range.lowerBound, toLine: range.upperBound - 1, lineStarts: lineStarts)
     }
     
     // MARK: - Attributed String Building

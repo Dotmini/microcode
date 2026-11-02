@@ -556,26 +556,15 @@ struct DotnetProjectView: View {
                 try fm.createDirectory(at: projectURL, withIntermediateDirectories: true)
                 
                 // Run dotnet new
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/dotnet")
-                process.arguments = ["new", selectedTemplate.cliName, "-n", projectName, "-o", "."]
-                process.currentDirectoryURL = projectURL
+                let result = try await Shell.run(
+                    "/opt/homebrew/bin/dotnet",
+                    ["new", selectedTemplate.cliName, "-n", projectName, "-o", "."],
+                    cwd: projectURL
+                )
                 
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
-                
-                try process.run()
-                process.waitUntilExit()
-                
-                if process.terminationStatus == 0 {
+                if result.status == 0 {
                     if useGit {
-                        let gitProcess = Process()
-                        gitProcess.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                        gitProcess.arguments = ["init"]
-                        gitProcess.currentDirectoryURL = projectURL
-                        try? gitProcess.run()
-                        gitProcess.waitUntilExit()
+                        _ = try? await Shell.git(["init"], in: projectURL)
                     }
                     
                     await MainActor.run {
@@ -584,8 +573,8 @@ struct DotnetProjectView: View {
                         isCreating = false
                     }
                 } else {
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? "Unknown error"
+                    let combined = result.out + result.err
+                    let output = combined.isEmpty ? "Unknown error" : combined
                     
                     await MainActor.run {
                         error = output
@@ -608,25 +597,17 @@ struct DotnetProjectView: View {
         buildOutput = "🔨 Building...\n"
         
         Task {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/dotnet")
-            process.arguments = ["build"]
-            process.currentDirectoryURL = URL(fileURLWithPath: path)
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            
             do {
-                try process.run()
-                process.waitUntilExit()
-                
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
+                let result = try await Shell.run(
+                    "/opt/homebrew/bin/dotnet",
+                    ["build"],
+                    cwd: URL(fileURLWithPath: path)
+                )
+                let output = result.out + result.err
                 
                 await MainActor.run {
                     buildOutput += output
-                    buildOutput += process.terminationStatus == 0 ? "\n✅ Build succeeded!" : "\n❌ Build failed!"
+                    buildOutput += result.status == 0 ? "\n✅ Build succeeded!" : "\n❌ Build failed!"
                     isBuilding = false
                 }
             } catch {
@@ -645,47 +626,49 @@ struct DotnetProjectView: View {
         buildOutput = "🚀 Running...\n"
         
         Task {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/dotnet")
-            process.arguments = ["run"]
-            process.currentDirectoryURL = URL(fileURLWithPath: path)
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            
             do {
-                try process.run()
-                
-                // For web projects, show preview after a delay
-                if selectedTemplate.isWebProject {
-                    await MainActor.run {
-                        buildOutput += "🌐 Starting web server...\n"
-                    }
-                    
-                    try await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
-                    
-                    await MainActor.run {
-                        showPreview = true
-                        buildOutput += "✅ Server running at \(previewURL)\n"
-                    }
-                }
-                
-                // Wait for process (non-blocking for web apps)
+                // Non-web projects run to completion: wait off the main thread.
                 if !selectedTemplate.isWebProject {
-                    process.waitUntilExit()
-                    
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
+                    let result = try await Shell.run(
+                        "/opt/homebrew/bin/dotnet",
+                        ["run"],
+                        cwd: URL(fileURLWithPath: path)
+                    )
+                    let output = result.out + result.err
                     
                     await MainActor.run {
                         buildOutput += output
                         isRunning = false
                     }
-                } else {
-                    await MainActor.run {
-                        isRunning = false
-                    }
+                    return
+                }
+                
+                // Web projects keep running; never wait for them.
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/dotnet")
+                process.arguments = ["run"]
+                process.currentDirectoryURL = URL(fileURLWithPath: path)
+                
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+                
+                try process.run()
+                
+                // For web projects, show preview after a delay
+                await MainActor.run {
+                    buildOutput += "🌐 Starting web server...\n"
+                }
+                
+                try await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
+                
+                await MainActor.run {
+                    showPreview = true
+                    buildOutput += "✅ Server running at \(previewURL)\n"
+                }
+                
+                await MainActor.run {
+                    isRunning = false
                 }
             } catch {
                 await MainActor.run {

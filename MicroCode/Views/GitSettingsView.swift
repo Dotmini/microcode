@@ -522,21 +522,11 @@ struct GitSettingsView: View {
     // MARK: - Actions
     
     private func loadGitConfig() {
-        // Load from git config
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["config", "--global", "--list"]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                for line in output.split(separator: "\n") {
+        // Load from git config (off the main thread)
+        Task { @MainActor in
+            do {
+                let result = try await Shell.run("/usr/bin/git", ["config", "--global", "--list"])
+                for line in result.out.split(separator: "\n") {
                     let parts = line.split(separator: "=", maxSplits: 1)
                     if parts.count == 2 {
                         let key = String(parts[0])
@@ -550,43 +540,35 @@ struct GitSettingsView: View {
                         }
                     }
                 }
+            } catch {
+                errorMessage = "Failed to load git config"
             }
-        } catch {
-            errorMessage = "Failed to load git config"
-        }
-        
-        loadBranches()
-        
-        if let status = appState.gitStatus {
-            currentBranch = status.branch
+            
+            await loadBranchesAsync()
+            
+            if let status = appState.gitStatus {
+                currentBranch = status.branch
+            }
         }
     }
     
     private func loadBranches() {
+        Task { @MainActor in await loadBranchesAsync() }
+    }
+    
+    @MainActor
+    private func loadBranchesAsync() async {
         guard let folder = appState.workspaceFolder else { return }
         
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["branch", "--list"]
-        process.currentDirectoryURL = folder
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
         do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                branches = output.split(separator: "\n").map { line in
-                    var name = String(line).trimmingCharacters(in: .whitespaces)
-                    if name.hasPrefix("* ") {
-                        name = String(name.dropFirst(2))
-                        currentBranch = name
-                    }
-                    return name
+            let result = try await Shell.git(["branch", "--list"], in: folder)
+            branches = result.out.split(separator: "\n").map { line in
+                var name = String(line).trimmingCharacters(in: .whitespaces)
+                if name.hasPrefix("* ") {
+                    name = String(name.dropFirst(2))
+                    currentBranch = name
                 }
+                return name
             }
         } catch {
             errorMessage = "Failed to load branches"
@@ -600,9 +582,9 @@ struct GitSettingsView: View {
         Task {
             do {
                 // Save user config
-                try runGitCommand(["config", "--global", "user.name", userName])
-                try runGitCommand(["config", "--global", "user.email", userEmail])
-                try runGitCommand(["config", "--global", "init.defaultBranch", defaultBranch])
+                try await runGitCommand(["config", "--global", "user.name", userName])
+                try await runGitCommand(["config", "--global", "user.email", userEmail])
+                try await runGitCommand(["config", "--global", "init.defaultBranch", defaultBranch])
                 
                 // Save preferences to UserDefaults
                 UserDefaults.standard.set(autoFetch, forKey: "git.autoFetch")
@@ -623,12 +605,8 @@ struct GitSettingsView: View {
         }
     }
     
-    private func runGitCommand(_ args: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = args
-        try process.run()
-        process.waitUntilExit()
+    private func runGitCommand(_ args: [String]) async throws {
+        _ = try await Shell.run("/usr/bin/git", args)
     }
     
     private func fetchRemote() {
@@ -637,12 +615,7 @@ struct GitSettingsView: View {
         isLoading = true
         Task {
             do {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                process.arguments = ["fetch", remoteName]
-                process.currentDirectoryURL = folder
-                try process.run()
-                process.waitUntilExit()
+                _ = try await Shell.git(["fetch", remoteName], in: folder)
                 
                 await MainActor.run {
                     successMessage = "Fetched from \(remoteName)"
@@ -662,23 +635,12 @@ struct GitSettingsView: View {
         guard let folder = appState.workspaceFolder, !remoteURL.isEmpty else { return }
         
         Task {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["remote", "set-url", remoteName, remoteURL]
-            process.currentDirectoryURL = folder
-            
             do {
-                try process.run()
-                process.waitUntilExit()
+                _ = try await Shell.git(["remote", "set-url", remoteName, remoteURL], in: folder)
                 successMessage = "Remote updated"
             } catch {
                 // Try adding if not exists
-                let addProcess = Process()
-                addProcess.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                addProcess.arguments = ["remote", "add", remoteName, remoteURL]
-                addProcess.currentDirectoryURL = folder
-                try? addProcess.run()
-                addProcess.waitUntilExit()
+                _ = try? await Shell.git(["remote", "add", remoteName, remoteURL], in: folder)
                 successMessage = "Remote added"
             }
         }
@@ -696,17 +658,16 @@ struct GitSettingsView: View {
     }
     
     private func generateSSHKey() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-        process.arguments = ["-t", "ed25519", "-C", userEmail, "-f", "\(NSHomeDirectory())/.ssh/id_ed25519_microcode", "-N", ""]
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            sshKeyPath = "\(NSHomeDirectory())/.ssh/id_ed25519_microcode"
-            successMessage = "SSH key generated"
-        } catch {
-            errorMessage = "Failed to generate SSH key"
+        let email = userEmail
+        let keyPath = "\(NSHomeDirectory())/.ssh/id_ed25519_microcode"
+        Task { @MainActor in
+            do {
+                _ = try await Shell.run("/usr/bin/ssh-keygen", ["-t", "ed25519", "-C", email, "-f", keyPath, "-N", ""])
+                sshKeyPath = keyPath
+                successMessage = "SSH key generated"
+            } catch {
+                errorMessage = "Failed to generate SSH key"
+            }
         }
     }
     
@@ -728,14 +689,8 @@ struct GitSettingsView: View {
         guard let folder = appState.workspaceFolder, !name.isEmpty else { return }
         
         Task {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["checkout", "-b", name]
-            process.currentDirectoryURL = folder
-            
             do {
-                try process.run()
-                process.waitUntilExit()
+                _ = try await Shell.git(["checkout", "-b", name], in: folder)
                 await MainActor.run {
                     loadBranches()
                     appState.gitRefresh()
@@ -754,14 +709,8 @@ struct GitSettingsView: View {
         
         isLoading = true
         Task {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["checkout", name]
-            process.currentDirectoryURL = folder
-            
             do {
-                try process.run()
-                process.waitUntilExit()
+                _ = try await Shell.git(["checkout", name], in: folder)
                 await MainActor.run {
                     currentBranch = name
                     loadBranches()
@@ -782,14 +731,8 @@ struct GitSettingsView: View {
         guard let folder = appState.workspaceFolder else { return }
         
         Task {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["branch", "-d", name]
-            process.currentDirectoryURL = folder
-            
             do {
-                try process.run()
-                process.waitUntilExit()
+                _ = try await Shell.git(["branch", "-d", name], in: folder)
                 await MainActor.run {
                     loadBranches()
                     successMessage = "Branch '\(name)' deleted"
