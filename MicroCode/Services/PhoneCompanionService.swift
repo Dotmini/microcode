@@ -16,6 +16,7 @@ import Combine
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Darwin
+import Security
 
 // MARK: - Models
 
@@ -156,13 +157,75 @@ final class PhoneCompanionService: ObservableObject {
            let mode = PhoneConnectionMode(rawValue: savedMode) {
             self.connectionMode = mode
         }
-        if let savedToken = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.token"), !savedToken.isEmpty {
-            self.pairingToken = savedToken
+        self.pairingToken = Self.loadOrCreatePairingToken()
+    }
+
+    // MARK: - Pairing token storage (Keychain, with expiry)
+
+    nonisolated private static let tokenLegacyDefaultsKey = "microcode.phoneCompanion.token"
+    nonisolated private static let tokenIssuedAtKey = "microcode.phoneCompanion.tokenIssuedAt"
+    nonisolated private static let tokenMaxAgeDaysKey = "microcode.phoneCompanion.tokenMaxAgeDays"
+    nonisolated private static let keychainService = "com.dotmini.microcode.phone-companion"
+    nonisolated private static let keychainAccount = "pairing-token"
+
+    nonisolated private static func keychainRead() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data, let token = String(data: data, encoding: .utf8), !token.isEmpty else { return nil }
+        return token
+    }
+
+    @discardableResult
+    nonisolated private static func keychainWrite(_ token: String) -> Bool {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount
+        ]
+        SecItemDelete(base as CFDictionary)
+        var add = base
+        add[kSecValueData as String] = Data(token.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+
+    /// Stores the token in the Keychain (plain UserDefaults only if the Keychain refuses) and restarts its expiry clock.
+    nonisolated private static func persistPairingToken(_ token: String) {
+        let defaults = UserDefaults.standard
+        if keychainWrite(token) {
+            defaults.removeObject(forKey: tokenLegacyDefaultsKey)
         } else {
-            let newToken = Self.generateSecureToken()
-            self.pairingToken = newToken
-            UserDefaults.standard.set(newToken, forKey: "microcode.phoneCompanion.token")
+            defaults.set(token, forKey: tokenLegacyDefaultsKey)
         }
+        defaults.set(Date(), forKey: tokenIssuedAtKey)
+    }
+
+    /// Returns the stored token, migrating a legacy UserDefaults token into the Keychain. A token older than
+    /// `microcode.phoneCompanion.tokenMaxAgeDays` (default 30, 0 disables expiry) is replaced, which un-pairs old phones.
+    nonisolated private static func loadOrCreatePairingToken() -> String {
+        let defaults = UserDefaults.standard
+        var token = keychainRead()
+        if token == nil, let legacy = defaults.string(forKey: tokenLegacyDefaultsKey), !legacy.isEmpty {
+            token = legacy
+            if keychainWrite(legacy) { defaults.removeObject(forKey: tokenLegacyDefaultsKey) }
+        }
+        let maxAgeDays = (defaults.object(forKey: tokenMaxAgeDaysKey) as? Int) ?? 30
+        let issuedAt = defaults.object(forKey: tokenIssuedAtKey) as? Date
+        let expired = maxAgeDays > 0 && (issuedAt.map { Date().timeIntervalSince($0) > Double(maxAgeDays) * 86_400 } ?? false)
+        if let existing = token, !expired {
+            if issuedAt == nil { defaults.set(Date(), forKey: tokenIssuedAtKey) }
+            return existing
+        }
+        let fresh = generateSecureToken()
+        persistPairingToken(fresh)
+        return fresh
     }
     
     // MARK: - URLs & QR Generation
@@ -204,12 +267,12 @@ final class PhoneCompanionService: ObservableObject {
     func rotatePairingToken() {
         let newToken = Self.generateSecureToken()
         pairingToken = newToken
-        UserDefaults.standard.set(newToken, forKey: "microcode.phoneCompanion.token")
+        Self.persistPairingToken(newToken)
         connectedDevices.removeAll()
         regenerateQRCode()
     }
     
-    private static func generateSecureToken() -> String {
+    nonisolated private static func generateSecureToken() -> String {
         var bytes = [UInt8](repeating: 0, count: 18)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         return Data(bytes).base64EncodedString()
@@ -519,11 +582,22 @@ final class PhoneCompanionService: ObservableObject {
     private func launchSSHReverseTunnel(port: Int) {
         tunnelState = .starting("Starting macOS Native SSH HTTPS Tunnel…")
         
+        // SECURITY: the tunnel carries the pairing token and the whole conversation, so the host key must be verified.
+        // Trust-on-first-use with a dedicated known_hosts file: the first key seen is pinned, and any later change makes ssh refuse
+        // to connect instead of silently talking to an impostor (previously verification was disabled entirely).
+        let supportDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroCode", isDirectory: true)
+        try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
+        let knownHostsURL = supportDir.appendingPathComponent("tunnel_known_hosts")
+        if !FileManager.default.fileExists(atPath: knownHostsURL.path) {
+            FileManager.default.createFile(atPath: knownHostsURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         proc.arguments = [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=\(knownHostsURL.path)",
             "-o", "ServerAliveInterval=30",
             "-o", "ExitOnForwardFailure=yes",
             "-R", "80:127.0.0.1:\(port)",
@@ -554,7 +628,7 @@ final class PhoneCompanionService: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self = self, self.tunnelProcess === proc else { return }
                 if case .starting = self.tunnelState {
-                    self.tunnelState = .failed("Could not establish online tunnel. Check internet connection or use Same Wi-Fi / LAN mode.")
+                    self.tunnelState = .failed("Could not establish online tunnel. Check your internet connection or use Same Wi-Fi / LAN mode. If this keeps happening after it worked before, the tunnel host key changed: do not connect on an untrusted network.")
                 }
             }
         }
@@ -706,6 +780,12 @@ final class PhoneCompanionService: ObservableObject {
             return makeHTTPResponse(status: "401 Unauthorized", contentType: "text/html; charset=utf-8", body: Data(unauthorizedHTML.utf8))
         }
         
+        // State-changing requests must carry the token in the custom `X-Companion-Token` header. Browsers cannot attach a custom
+        // header cross-site without a CORS preflight, which this server never approves, so a malicious page cannot forge them.
+        if method == "POST", !Self.constantTimeEquals(headers["x-companion-token"] ?? "", pairingToken) {
+            return makeJSONResponse(["ok": false, "error": "Missing X-Companion-Token header"], status: "403 Forbidden")
+        }
+
         // Record connected mobile device
         recordConnectedDevice(headers: headers, remoteIP: remoteIP)
         
@@ -714,7 +794,9 @@ final class PhoneCompanionService: ObservableObject {
         switch (method, path) {
         case ("GET", "/"):
             let html = buildMobileCompanionHTML(token: pairingToken)
-            let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Lax"]
+            // HttpOnly: the page never reads the cookie from JS. Secure whenever the request arrived over the HTTPS tunnel.
+            let viaHTTPS = (headers["x-forwarded-proto"]?.lowercased() == "https")
+            let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Strict; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
             return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", extraHeaders: extraHeaders, body: Data(html.utf8))
             
         case ("GET", "/api/state"):
@@ -812,6 +894,30 @@ final class PhoneCompanionService: ObservableObject {
             }
             return makeJSONResponse(["ok": false], status: "400 Bad Request")
             
+        case ("GET", "/api/devices"):
+            let wsPath = currentCompanionWorkspacePath()
+            await DeviceRuntimeService.shared.refresh(
+                workspace: (wsPath.isEmpty || wsPath == "__general__") ? nil : URL(fileURLWithPath: wsPath)
+            )
+            return makeJSONResponse([
+                "devices": DeviceRuntimeService.shared.companionDevicesPayload(),
+                "workspace": wsPath.isEmpty ? "__general__" : wsPath
+            ])
+
+        case ("GET", "/api/run/status"):
+            return makeJSONResponse(DeviceRuntimeService.shared.companionRunStatusPayload())
+
+        case ("POST", "/api/run"):
+            let json = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
+            let requestedDevice = (json["deviceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let wsPath = currentCompanionWorkspacePath()
+            let result = await DeviceRuntimeService.shared.companionStartRun(
+                deviceID: (requestedDevice?.isEmpty ?? true) ? nil : requestedDevice,
+                workspacePath: (wsPath.isEmpty || wsPath == "__general__") ? nil : wsPath
+            )
+            broadcastSSEStateNow()
+            return makeJSONResponse(["ok": result.ok, "message": result.message], status: result.ok ? "200 OK" : "409 Conflict")
+
         case ("POST", "/api/session/new"):
             let requestedPath = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any])?["projectPath"] as? String
             createRemoteSession(projectPath: requestedPath)
@@ -1782,6 +1888,20 @@ final class PhoneCompanionService: ObservableObject {
         return serialized
     }
     
+    /// Canonical path of the workspace the phone is currently looking at ("" when none), same rule as the state payload.
+    private func currentCompanionWorkspacePath() -> String {
+        let agent = AgentService.shared
+        if let activeId = agent.activeChatId,
+           let activeChat = agent.chatSessions.first(where: { $0.id == activeId }),
+           let canonical = AgentService.canonicalWorkspacePath(activeChat.projectPath) {
+            return canonical
+        }
+        if let ws = AgentService.canonicalWorkspacePath(agent.currentWorkspace ?? appState?.workspaceFolder?.path) {
+            return ws
+        }
+        return ""
+    }
+
     nonisolated private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
         let x = Array(a.utf8), y = Array(b.utf8)
         guard !y.isEmpty, x.count == y.count else { return false }
@@ -2308,6 +2428,12 @@ final class PhoneCompanionService: ObservableObject {
             font-family: var(--mono); font-size: 10px; color: var(--secondary);
             padding: 1px 5px; border-radius: 4px; background: rgba(255,255,255,0.05);
           }
+          .run-log {
+            font-family: var(--mono); font-size: 10.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word;
+            max-height: 30dvh; overflow-y: auto; margin: 6px 12px 0; padding: 8px 10px;
+            background: var(--surface); border: 1px solid var(--border); border-radius: 7px; color: var(--secondary);
+          }
+          .run-status { margin: 8px 12px 0; font-size: 12px; color: var(--text); }
         </style>
         </head>
         <body>
@@ -2337,6 +2463,7 @@ final class PhoneCompanionService: ObservableObject {
                 <select class="ws-select" id="sessionSelect" onchange="switchSession(this.value)" title="Chat in Workspace" style="font-weight:500"></select>
               </div>
               <button class="tb-btn" onclick="newSession()">+ Chat</button>
+               <button class="tb-btn" onclick="openRunModal()" title="Build and run on a device">Run</button>
             </div>
           </header>
 
@@ -2399,6 +2526,19 @@ final class PhoneCompanionService: ObservableObject {
               </div>
               <input class="modal-search" id="modelSearch" type="text" placeholder="Filter models (Gemini, Claude, GPT, Local…)" oninput="renderModelList()">
               <div class="modal-list" id="modelList"></div>
+            </div>
+          </div>
+
+          <!-- Build & Run Sheet -->
+          <div class="modal-backdrop" id="runModal" onclick="if(event.target===this)closeRunModal()">
+            <div class="modal-sheet">
+              <div class="modal-header">
+                <span>Build &amp; Run on Device</span>
+                <button class="tb-btn" onclick="closeRunModal()">Close</button>
+              </div>
+              <div class="modal-list" id="runDevices"></div>
+              <div class="run-status" id="runStatus"></div>
+              <pre class="run-log" id="runLog" style="display:none"></pre>
             </div>
           </div>
 
@@ -3231,6 +3371,70 @@ final class PhoneCompanionService: ObservableObject {
             await api("/api/model/select", { mode: m.mode, provider: m.provider, modelId: m.modelId });
             availableModels = [];
             pollState();
+          }
+
+          // ---- Build & Run on a device (Mac builds with xcodebuild/gradle and installs over USB/Wi-Fi) ----
+          let runDevices = [];
+          let runPollTimer = null;
+
+          function openRunModal() {
+            document.getElementById("runModal").style.display = "flex";
+            document.getElementById("runDevices").innerHTML = `<div style="padding:14px;color:var(--secondary);font-size:12px">Looking for devices…</div>`;
+            loadRunDevices();
+            pollRunStatus();
+          }
+
+          function closeRunModal() {
+            document.getElementById("runModal").style.display = "none";
+            if (runPollTimer) { clearTimeout(runPollTimer); runPollTimer = null; }
+          }
+
+          async function loadRunDevices() {
+            const listEl = document.getElementById("runDevices");
+            try {
+              const res = await api("/api/devices");
+              runDevices = (res && res.devices) || [];
+              if (runDevices.length === 0) {
+                listEl.innerHTML = `<div style="padding:14px;color:var(--secondary);font-size:12px">No device found. Connect an iPhone or iPad (unlocked, Developer Mode on) or start a simulator on the Mac.</div>`;
+                return;
+              }
+              listEl.innerHTML = runDevices.map((d, i) => {
+                const badge = esc(d.kind || "") + (d.ready ? "" : " · not ready");
+                return `<div class="model-option ${d.selected ? "active" : ""}" data-ridx="${i}" onclick="startRunByIndex(this)">
+                  <span>${esc(d.name)}</span><span class="model-badge">${badge}</span></div>`;
+              }).join("");
+            } catch (e) {
+              listEl.innerHTML = `<div style="padding:14px;color:var(--secondary);font-size:12px">Could not load devices.</div>`;
+            }
+          }
+
+          async function startRunByIndex(el) {
+            const d = runDevices[parseInt(el.getAttribute("data-ridx"), 10)];
+            if (!d) return;
+            if (!confirm("Build and run the current workspace on " + d.name + "?")) return;
+            document.getElementById("runStatus").textContent = "Starting…";
+            try {
+              const res = await api("/api/run", { deviceId: d.id });
+              document.getElementById("runStatus").textContent = res.message || (res.ok ? "Started." : "Could not start.");
+              if (res.ok) { pollRunStatus(); }
+            } catch (e) {
+              document.getElementById("runStatus").textContent = "Could not reach the Mac.";
+            }
+          }
+
+          async function pollRunStatus() {
+            if (runPollTimer) { clearTimeout(runPollTimer); runPollTimer = null; }
+            if (document.getElementById("runModal").style.display !== "flex") return;
+            try {
+              const s = await api("/api/run/status");
+              const prefix = s.isWorking ? "Running · " : "";
+              if (s.status) { document.getElementById("runStatus").textContent = prefix + s.status; }
+              const logEl = document.getElementById("runLog");
+              if (s.outputTail) { logEl.style.display = "block"; logEl.textContent = s.outputTail; logEl.scrollTop = logEl.scrollHeight; }
+              if (s.isWorking) { runPollTimer = setTimeout(pollRunStatus, 1500); }
+            } catch (e) {
+              runPollTimer = setTimeout(pollRunStatus, 4000);
+            }
           }
 
           promptInput.addEventListener("keydown", (e) => {

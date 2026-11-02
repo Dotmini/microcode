@@ -258,7 +258,20 @@ final class DeviceRuntimeService: ObservableObject {
     @Published private(set) var statusMessage = "Open a GUI app project to use real devices."
     @Published private(set) var output = ""
     @Published private(set) var isWorking = false
-    @Published var selectedDeviceID: String?
+    @Published var selectedDeviceID: String? {
+        didSet { if !assigningSelectionAutomatically { selectionWasExplicit = true } }
+    }
+    /// True when `selectedDeviceID` was last assigned by `refresh` (a default
+    /// pick) rather than by the user or an explicit request.
+    private var assigningSelectionAutomatically = false
+    private var selectionWasExplicit = false
+    /// Guards against two phone-remote runs being started by quick repeated taps.
+    private var companionRunInFlight = false
+    /// Friendly diagnosis of the last failed device build, kept so the generic
+    /// error handler does not overwrite it in `statusMessage`.
+    private var lastFriendlyFailure: String?
+    private static let xcodeAllowProvisioningUpdatesKey = "microcode.xcode.allowProvisioningUpdates"
+    private static let xcodeDevelopmentTeamKey = "microcode.xcode.developmentTeam"
     @Published private(set) var buildSchemes: [String] = []
     @Published var selectedScheme: String?
     /// A downsampled real screen capture from an Android device/AVD. The
@@ -409,7 +422,10 @@ final class DeviceRuntimeService: ObservableObject {
         // Simulator when one is installed; the chosen destination is then
         // retained until it disappears.
         if selectedDeviceID == nil || !devices.contains(where: { $0.id == selectedDeviceID }) {
+            assigningSelectionAutomatically = true
             selectedDeviceID = devices.first?.id
+            assigningSelectionAutomatically = false
+            selectionWasExplicit = false
         }
         let runnable = devices.filter(\.isReadyForLaunch)
         statusMessage = devices.isEmpty
@@ -531,6 +547,7 @@ final class DeviceRuntimeService: ObservableObject {
 
     func runSelectedProject() async {
         guard let project, let device = selectedDevice else { statusMessage = "Choose a project and device first."; return }
+        lastFriendlyFailure = nil
         do {
             // Android's destination is the live surface beside Chat. A Build & Run
             // must therefore attach/launch that surface first rather than making
@@ -546,7 +563,7 @@ final class DeviceRuntimeService: ObservableObject {
             }
             try await run(project: project, on: device)
         } catch {
-            statusMessage = error.localizedDescription
+            statusMessage = lastFriendlyFailure ?? error.localizedDescription
             appendOutput(error.localizedDescription)
         }
     }
@@ -602,31 +619,27 @@ final class DeviceRuntimeService: ObservableObject {
             throw ToolBoxError.invalidParams("operation must be one of: \(allowedOps.joined(separator: ", "))")
         }
         
-        await refresh(workspace: workspacePath.map(URL.init(fileURLWithPath:)))
-        if let deviceID, devices.contains(where: { $0.id == deviceID }) {
-            selectedDeviceID = deviceID
+        await refresh(workspace: workspacePath.map(URL.init(fileURLWithPath:)), force: true)
+        if safeOperation == "status" || safeOperation == "list_devices" {
+            return summary()
         }
-        
-        guard let targetDevice = selectedDevice ?? (deviceID.flatMap { id in devices.first(where: { $0.id == id }) } ?? devices.first) else {
-            if safeOperation == "status" || safeOperation == "list_devices" {
-                return summary()
-            }
-            throw ToolBoxError.executionFailed("No Android device or Apple Simulator detected. Connect an Android phone via USB/WiFi, or launch a simulator.")
+
+        guard let targetDevice = try resolveTargetDevice(deviceID: deviceID, operation: safeOperation) else {
+            throw ToolBoxError.executionFailed("No Android device, Apple Simulator or physical iPhone/iPad detected. Connect an Android phone via USB/WiFi, launch a simulator, or connect a paired, unlocked iPhone/iPad with Developer Mode enabled.")
         }
-        
+        adoptSelection(targetDevice.id, explicit: !(deviceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true))
+
         switch safeOperation {
         case "status", "list_devices":
             return summary()
             
         case "start":
-            selectedDeviceID = targetDevice.id
             await startSelectedDevice()
-            return "\(statusMessage)\n\n\(output.suffix(4_000))"
+            return agentLogSummary()
             
         case "run":
-            selectedDeviceID = targetDevice.id
             await runSelectedProject()
-            return "\(statusMessage)\n\n\(output.suffix(4_000))"
+            return agentLogSummary()
             
         case "stop":
             stopActiveRuntime()
@@ -676,6 +689,142 @@ final class DeviceRuntimeService: ObservableObject {
         default:
             return summary()
         }
+    }
+
+    // MARK: - Device Resolution
+
+    private func deviceKindLabel(_ device: RuntimeDevice) -> String {
+        switch device.platform {
+        case .macOS: return "mac"
+        case .ios: return device.kind == .physical ? "physical" : "simulator"
+        case .android: return (device.id.hasPrefix("emulator-") || device.id.hasPrefix("avd:")) ? "emulator" : "physical"
+        }
+    }
+
+    /// Selects a device without turning an automatic pick into a sticky user choice.
+    private func adoptSelection(_ id: String, explicit: Bool) {
+        let previouslyExplicit = selectionWasExplicit
+        selectedDeviceID = id
+        if !explicit { selectionWasExplicit = previouslyExplicit }
+    }
+
+    private func describeDevices(_ list: [RuntimeDevice]) -> String {
+        guard !list.isEmpty else { return "(none detected)" }
+        return list.map { "- \($0.name) [\($0.id)] (\(deviceKindLabel($0)))" }.joined(separator: "\n")
+    }
+
+    /// Single resolver shared by the agent tool and the phone-remote UI.
+    /// Order: explicit id, exact name, unique name substring; the user's
+    /// explicit selection; the only ready physical Apple device (for
+    /// run/install/launch/start); first booted ready device; first device.
+    private func resolveTargetDevice(deviceID: String?, operation: String) throws -> RuntimeDevice? {
+        if let raw = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            if let exact = devices.first(where: { $0.id == raw }) { return exact }
+            let byName = devices.filter { $0.name.caseInsensitiveCompare(raw) == .orderedSame }
+            if byName.count == 1 { return byName[0] }
+            if byName.count > 1 {
+                throw ToolBoxError.executionFailed("Several devices are named '\(raw)'. Pass one of these ids as device_id:\n\(describeDevices(byName))")
+            }
+            let bySubstring = devices.filter { $0.name.localizedCaseInsensitiveContains(raw) || $0.id.localizedCaseInsensitiveContains(raw) }
+            if bySubstring.count == 1 { return bySubstring[0] }
+            if bySubstring.count > 1 {
+                throw ToolBoxError.executionFailed("'\(raw)' matches several devices. Pass one of these ids as device_id:\n\(describeDevices(bySubstring))")
+            }
+            throw ToolBoxError.executionFailed("No device matches '\(raw)'. Available devices:\n\(describeDevices(devices))")
+        }
+        if devices.isEmpty { return nil }
+        if selectionWasExplicit, let selected = selectedDevice { return selected }
+        if ["run", "install_app", "launch_app", "start"].contains(operation) {
+            let physical = devices.filter { $0.isPhysicalAppleDevice && $0.isReadyForLaunch }
+            if physical.count == 1 { return physical[0] }
+        }
+        if let selected = selectedDevice, selected.isReadyForLaunch { return selected }
+        return devices.first(where: { $0.isBooted && $0.isReadyForLaunch })
+            ?? devices.first(where: { $0.isReadyForLaunch })
+            ?? devices.first
+    }
+
+    // MARK: - Agent Log Summary
+
+    private func agentLogSummary() -> String {
+        var errorLines: [String] = []
+        var seen = Set<String>()
+        for raw in String(output.suffix(12_000)).split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.contains("error:") || line.contains("** BUILD FAILED **") else { continue }
+            let clipped = line.count > 200 ? String(line.prefix(200)) + "..." : line
+            if seen.insert(clipped).inserted {
+                errorLines.append(clipped)
+                if errorLines.count >= 40 { break }
+            }
+        }
+        var parts = [statusMessage]
+        if !errorLines.isEmpty { parts.append("Build errors:\n" + errorLines.joined(separator: "\n")) }
+        parts.append(String(output.suffix(3_000)))
+        let joined = parts.joined(separator: "\n\n")
+        guard joined.count > 8_000 else { return joined }
+        return String(joined.prefix(4_500)) + "\n...[truncated]...\n" + String(joined.suffix(3_500))
+    }
+
+    // MARK: - Phone Companion API
+
+    func companionDevicesPayload() -> [[String: Any]] {
+        let platformLabel: (RuntimeDevice) -> String = { device in
+            switch device.platform {
+            case .ios: return "ios"
+            case .android: return "android"
+            case .macOS: return "macos"
+            }
+        }
+        return devices.map { device in
+            [
+                "id": device.id,
+                "name": device.name,
+                "platform": platformLabel(device),
+                "kind": deviceKindLabel(device),
+                "ready": device.isReadyForLaunch,
+                "selected": device.id == selectedDeviceID,
+                "state": device.state
+            ] as [String: Any]
+        }
+    }
+
+    func companionRunStatusPayload() -> [String: Any] {
+        [
+            "isWorking": isWorking || companionRunInFlight,
+            "status": statusMessage,
+            "outputTail": String(output.suffix(3_000)),
+            "selectedDeviceID": selectedDeviceID ?? "",
+            "projectName": project?.root.lastPathComponent ?? ""
+        ]
+    }
+
+    func companionStartRun(deviceID: String?, workspacePath: String?) async -> (ok: Bool, message: String) {
+        if isWorking || companionRunInFlight { return (false, "A run is already in progress.") }
+        companionRunInFlight = true
+        await refresh(workspace: workspacePath.map(URL.init(fileURLWithPath:)), force: true)
+        guard project != nil, project?.runtime != .unknown else {
+            companionRunInFlight = false
+            return (false, "No runnable project detected in this workspace.")
+        }
+        let target: RuntimeDevice
+        do {
+            guard let resolved = try resolveTargetDevice(deviceID: deviceID, operation: "run") else {
+                companionRunInFlight = false
+                return (false, "No device detected. Connect an Android phone, launch a simulator, or connect a paired, unlocked iPhone/iPad with Developer Mode enabled.")
+            }
+            target = resolved
+        } catch {
+            companionRunInFlight = false
+            return (false, error.localizedDescription)
+        }
+        adoptSelection(target.id, explicit: !(deviceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true))
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runSelectedProject()
+            self.companionRunInFlight = false
+        }
+        return (true, "Build and run started on \(target.name).")
     }
 
     // MARK: - Direct Device Action Executions
@@ -2005,8 +2154,25 @@ final class DeviceRuntimeService: ObservableObject {
         base += ["-scheme", scheme]
         if device.platform == .ios { base += ["-destination", "id=\(device.id)"] }
         if device.platform == .macOS { base += ["-destination", "platform=macOS"] }
+        if device.isPhysicalAppleDevice {
+            let defaults = UserDefaults.standard
+            if defaults.bool(forKey: Self.xcodeAllowProvisioningUpdatesKey) {
+                base += ["-allowProvisioningUpdates"]
+            }
+            let team = (defaults.string(forKey: Self.xcodeDevelopmentTeamKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil {
+                base += ["DEVELOPMENT_TEAM=\(team)"]
+            }
+        }
         base += ["build"]
-        let result = try await command("/usr/bin/xcodebuild", base, directory: project.root)
+        let result: CommandResult
+        do {
+            // Signing, dependency resolution and a cold build routinely exceed
+            // the 30 second default used for short device queries.
+            result = try await command("/usr/bin/xcodebuild", base, directory: project.root, timeoutSeconds: 1_800)
+        } catch {
+            throw classifyDeviceFailure(error, device: device)
+        }
         appendOutput(result.output)
 
         let settingsKey = "\(projectKey)::\(scheme)::\(device.id)"
@@ -2035,9 +2201,13 @@ final class DeviceRuntimeService: ObservableObject {
             }
             let launched: CommandResult
             if device.isPhysicalAppleDevice {
-                let installed = try await command("/usr/bin/xcrun", ["devicectl", "device", "install", "app", "--device", device.id, appURL.path], directory: project.root)
-                appendOutput(installed.output)
-                launched = try await command("/usr/bin/xcrun", ["devicectl", "device", "process", "launch", "--device", device.id, "--terminate-existing", bundleID], directory: project.root)
+                do {
+                    let installed = try await command("/usr/bin/xcrun", ["devicectl", "device", "install", "app", "--device", device.id, appURL.path], directory: project.root, timeoutSeconds: 300)
+                    appendOutput(installed.output)
+                    launched = try await command("/usr/bin/xcrun", ["devicectl", "device", "process", "launch", "--device", device.id, "--terminate-existing", bundleID], directory: project.root, timeoutSeconds: 120)
+                } catch {
+                    throw classifyDeviceFailure(error, device: device)
+                }
             } else {
                 _ = try await simctlCommand(["install", device.id, appURL.path], directory: project.root)
                 launched = try await simctlCommand(["launch", "--terminate-running-process", device.id, bundleID], directory: project.root)
@@ -2048,6 +2218,48 @@ final class DeviceRuntimeService: ObservableObject {
             _ = try await command("/usr/bin/open", ["-n", appURL.path], directory: project.root)
             statusMessage = "Launched \(scheme) on My Mac."
         }
+    }
+
+    /// Scans xcodebuild/devicectl output for well-known physical-device failure
+    /// causes and returns a short, actionable message, or nil when unrecognised.
+    private static func friendlyDeviceFailure(from output: String) -> String? {
+        let text = output.lowercased()
+        func has(_ needles: String...) -> Bool { needles.contains { text.contains($0) } }
+        let signingHint = " Enable automatic signing updates with `defaults write com.dotmini.microcode microcode.xcode.allowProvisioningUpdates -bool YES` and/or set `microcode.xcode.developmentTeam` to your 10-character Team ID, and sign in to Xcode > Settings > Accounts."
+        if (text.contains("locked") && !text.contains("database is locked")) || text.contains("unlock") {
+            return "The device is locked. Unlock the iPhone/iPad and keep it awake, then run again."
+        }
+        if has("developer mode") {
+            return "Developer Mode is disabled on the device. Enable it in Settings > Privacy & Security > Developer Mode, restart the device, then run again."
+        }
+        if has("not trusted", "untrusted developer", "trust") {
+            return "The device does not trust this Mac or the developer profile. Tap Trust on the device, or approve the developer under Settings > General > VPN & Device Management, then run again."
+        }
+        if has("not registered", "register the device") {
+            return "The device is not registered in your Apple Developer team." + signingHint
+        }
+        if has("requires a development team", "no profiles for", "no provisioning profile", "provisioning profile") {
+            return "Code signing failed: no development team or provisioning profile is available for this app." + signingHint
+        }
+        if has("expired") {
+            return "A signing certificate or provisioning profile has expired." + signingHint
+        }
+        if has("unavailable", "not connected", "no devices matched", "could not be found") {
+            return "The device is unavailable or not connected. Reconnect it by USB (or pair it in Xcode), unlock it, and confirm it appears in `list_devices`."
+        }
+        return nil
+    }
+
+    /// Converts a failed xcodebuild/devicectl invocation into an actionable
+    /// error for physical devices; other errors pass through unchanged.
+    private func classifyDeviceFailure(_ error: Error, device: RuntimeDevice) -> Error {
+        guard device.isPhysicalAppleDevice else { return error }
+        let raw: String
+        if case ToolBoxError.executionFailed(let message) = error { raw = message } else { raw = error.localizedDescription }
+        guard let friendly = Self.friendlyDeviceFailure(from: raw) else { return error }
+        lastFriendlyFailure = friendly
+        statusMessage = friendly
+        return ToolBoxError.executionFailed(friendly + "\n\n" + String(raw.suffix(1_500)))
     }
 
     private func runAndroid(_ project: GUIProjectDescriptor, device: RuntimeDevice) async throws {

@@ -19,7 +19,7 @@ echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.microcode"
-VERSION="2.5.36"
+VERSION="2.5.37"
 
 # Directories
 BUILD_ROOT=".build_dist"
@@ -248,7 +248,7 @@ package_variant() {
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>${BUILD_NUMBER:-36}</string>
+    <string>${BUILD_NUMBER:-37}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

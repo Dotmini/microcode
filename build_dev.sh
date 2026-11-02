@@ -150,9 +150,9 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.36</string>
+    <string>2.5.37</string>
     <key>CFBundleVersion</key>
-    <string>36</string>
+    <string>37</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

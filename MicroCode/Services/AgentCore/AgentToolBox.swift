@@ -1108,7 +1108,7 @@ struct DeviceRuntimeTool: AgentTool {
     let description = "Full control and inspection for Android Emulators, iOS Simulators, and Physical Devices (via ADB/simctl). Supports: status, list_devices, start, run, stop, tap (x, y), swipe (x, y, x2, y2, duration), type_text (text), key_event (key), screenshot (file_path), launch_app (package_name), install_app (file_path), adb_shell (command)."
     let parameters = [
         ToolParameter(name: "operation", type: "string", description: "One of: status, list_devices, start, run, stop, tap, swipe, type_text, key_event, screenshot, launch_app, install_app, adb_shell", required: true),
-        ToolParameter(name: "device_id", type: "string", description: "Optional device ID/serial (e.g. emulator-5554, avd:Pixel_9, iOS UDID, or physical device serial). Defaults to selected/first device.", required: false),
+        ToolParameter(name: "device_id", type: "string", description: "Optional device ID/serial (e.g. emulator-5554, avd:Pixel_9, iOS UDID, or physical device serial). Also accepts a device name from list_devices (e.g. 'My iPhone'). Always pass it when the user names a device; otherwise a single ready physical iPhone/iPad is preferred, then the selected device.", required: false),
         ToolParameter(name: "x", type: "integer", description: "X pixel coordinate for tap or swipe start", required: false),
         ToolParameter(name: "y", type: "integer", description: "Y pixel coordinate for tap or swipe start", required: false),
         ToolParameter(name: "x2", type: "integer", description: "X2 pixel coordinate for swipe end", required: false),

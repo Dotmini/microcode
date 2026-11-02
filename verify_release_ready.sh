@@ -18,19 +18,19 @@ echo "=========================================="
 # 1. Secret & Hardcoded IP Scan
 echo "🔍 [1/4] Scanning for hardcoded secrets & non-localhost IPs..."
 FOUND=0
-if grep -rE "AIza[a-zA-Z0-9_-]{30,}" --include="*.swift" --include="*.rs" MicroCode backend microcode_core 2>/dev/null; then
+if git grep --untracked -nE "AIza[a-zA-Z0-9_-]{30,}" -- '*.swift' '*.rs' 2>/dev/null; then
     echo "❌ Found Google API key"; FOUND=1
 fi
-if grep -rE "sk-[a-zA-Z0-9]{20,}" --include="*.swift" --include="*.rs" MicroCode backend microcode_core 2>/dev/null | grep -v 'placeholder\|"sk-..."'; then
+if git grep --untracked -nE "sk-[a-zA-Z0-9]{20,}" -- '*.swift' '*.rs' 2>/dev/null | grep -v 'placeholder\|"sk-..."'; then
     echo "❌ Found OpenAI key"; FOUND=1
 fi
-if grep -rE "AKIA[0-9A-Z]{16}" --include="*.swift" --include="*.rs" MicroCode backend microcode_core 2>/dev/null; then
+if git grep --untracked -nE "AKIA[0-9A-Z]{16}" -- '*.swift' '*.rs' 2>/dev/null; then
     echo "❌ Found AWS key"; FOUND=1
 fi
-if grep -rE "BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY" --include="*.swift" --include="*.rs" --include="*.pem" MicroCode backend microcode_core 2>/dev/null; then
+if git grep --untracked -nE "BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY" -- '*.swift' '*.rs' '*.pem' 2>/dev/null; then
     echo "❌ Found private key"; FOUND=1
 fi
-if grep -rE "http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" --include="*.swift" --include="*.rs" MicroCode backend microcode_core 2>/dev/null | grep -v "127.0.0.1\|0.0.0.0"; then
+if git grep --untracked -nE "http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" -- '*.swift' '*.rs' 2>/dev/null | grep -v "127.0.0.1\|0.0.0.0"; then
     echo "❌ Found hardcoded non-localhost IP"; FOUND=1
 fi
 if [ ! -f "LICENSE" ]; then

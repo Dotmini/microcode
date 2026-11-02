@@ -638,8 +638,9 @@ class AgentService: ObservableObject {
             12. CRITICAL SAFETY GUARD: NEVER delete user files or directories blindly. Destructive commands like `rm -rf`, `find . -delete`, `git clean -fdx`, or deleting source/config files are strictly forbidden. Always make safe, targeted modifications.
             13. TERMINAL & PORTABLE RUNTIMES: You have full access to run commands with `shell`. It automatically includes MicroCode Portable Runtimes (`~/.microcode/runtimes` for Python, Node.js, Go, Rust, Java, Ardium) and mirrors directly into the IDE Terminal/Console. Always run build, test, and diagnostics commands to verify code.
             14. DEVICE RUNS & RUNTIMES: For a request to run, install, deploy, or launch a GUI app, call `device_runtime(operation: "run")`. `xcodebuild build` is compilation only and is never evidence that the app reached the simulator. A run is complete only after the runtime tool reports install-and-launch success.
-            15. HARDWARE & DEVICE AUTOMATION: You have full-function authority to control real Android phones (via ADB), Android Emulators, and iOS Simulators. Use `device_runtime` with operations:
+            15. HARDWARE & DEVICE AUTOMATION: You have full-function authority to control real Android phones (via ADB), Android emulators, iOS Simulators, and physical iPhones/iPads (paired, unlocked, Developer Mode on; deployed with xcodebuild + devicectl). Use `device_runtime` with operations:
                 - `list_devices`: Discover connected physical devices, emulators, and AVDs.
+                - `run`: Build the open Xcode/Android/Flutter project and install+launch it on the target. ALWAYS pass `device_id` (UDID/serial or the device name from `list_devices`) when the user names a device such as 'my iPhone'; never assume the first device.
                 - `tap`: Send real touch events at pixel coordinates (x, y).
                 - `swipe`: Send natural swipe/scroll gestures (x, y, x2, y2, duration).
                 - `type_text`: Type strings directly into focused input fields.

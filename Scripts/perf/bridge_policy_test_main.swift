@@ -5,7 +5,7 @@ func check(_ name: String, _ got: Bool, _ want: Bool) { if got != want { failure
 for o in ["https://dotmini.net", "https://microcode.dotmini.net", "https://a.b.dotmini.net", "http://localhost:3000", "https://localhost", "http://127.0.0.1:8080", "http://[::1]:3000"] {
     check("origin allowed \(o)", MCPServer.isAllowedBridgeOrigin(o), true)
 }
-for o in ["https://evil.example", "https://dotmini.net.evil.com", "http://dotmini.net", "https://evildotmini.net", "null", "", "file://", "https://x.dotmini.net/path", "https://dotmini.net:8443@evil.com", "http://192.168.1.47:3000", "ftp://localhost"] {
+for o in ["https://evil.example", "https://dotmini.net.evil.com", "http://dotmini.net", "https://evildotmini.net", "null", "", "file://", "https://x.dotmini.net/path", "https://dotmini.net:8443@evil.com", "http://lan-host.local:3000", "ftp://localhost"] {
     check("origin denied \(o)", MCPServer.isAllowedBridgeOrigin(o), false)
 }
 for h in ["127.0.0.1:18888", "localhost:18888", "[::1]:18888", "localhost", "LOCALHOST:1", "127.0.0.1"] {
