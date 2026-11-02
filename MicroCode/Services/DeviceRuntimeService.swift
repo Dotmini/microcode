@@ -736,7 +736,12 @@ final class DeviceRuntimeService: ObservableObject {
         if selectionWasExplicit, let selected = selectedDevice { return selected }
         if ["run", "install_app", "launch_app", "start"].contains(operation) {
             let physical = devices.filter { $0.isPhysicalAppleDevice && $0.isReadyForLaunch }
+            let activelyConnected = physical.filter { $0.state == "Connected" }
+            if activelyConnected.count == 1 { return activelyConnected[0] }
             if physical.count == 1 { return physical[0] }
+            if let preferredIPhone = physical.first(where: { $0.runtime.localizedCaseInsensitiveContains("iPhone") }) {
+                return preferredIPhone
+            }
         }
         if let selected = selectedDevice, selected.isReadyForLaunch { return selected }
         return devices.first(where: { $0.isBooted && $0.isReadyForLaunch })
@@ -2220,31 +2225,66 @@ final class DeviceRuntimeService: ObservableObject {
         }
     }
 
-    /// Scans xcodebuild/devicectl output for well-known physical-device failure
-    /// causes and returns a short, actionable message, or nil when unrecognised.
-    private static func friendlyDeviceFailure(from output: String) -> String? {
-        let text = output.lowercased()
+    /// Scans xcodebuild/devicectl diagnostic lines for well-known physical-device
+    /// failure causes and returns a short, actionable message, or nil when unrecognised.
+    /// Restricts matching to diagnostic lines and specific phrases/codes so source
+    /// filenames or identifiers containing words like "trust" or "unlock" never misclassify.
+    nonisolated static func friendlyDeviceFailure(from output: String) -> String? {
+        let diagnosticMarkers = [
+            "error:", "warning:", "nserror", "coredeviceerror", "dtdevicekit",
+            "amdevice", "0xe800", "code=", "failure reason", "recovery suggestion",
+            "unable to install", "unable to launch", "inaccessible", "no profiles for",
+            "provisioning profile", "requires a development team", "not registered",
+            "timed out", "devicectl", "lockdownd", "mobileimagemounter"
+        ]
+        let compilerNoisePrefixes = [
+            "compileswift ", "compilec ", "swift-frontend ", "ld ", "builtin-", "cd /", "export "
+        ]
+        let diagnosticLines: [String] = output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { rawLine in
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces).lowercased()
+                guard !trimmed.isEmpty else { return nil }
+                if compilerNoisePrefixes.contains(where: { trimmed.hasPrefix($0) }) && !trimmed.contains("error:") {
+                    return nil
+                }
+                guard diagnosticMarkers.contains(where: { trimmed.contains($0) }) else { return nil }
+                return trimmed
+            }
+        let text = diagnosticLines.isEmpty ? "" : diagnosticLines.joined(separator: "\n")
+        guard !text.isEmpty else { return nil }
         func has(_ needles: String...) -> Bool { needles.contains { text.contains($0) } }
         let signingHint = " Enable automatic signing updates with `defaults write com.dotmini.microcode microcode.xcode.allowProvisioningUpdates -bool YES` and/or set `microcode.xcode.developmentTeam` to your 10-character Team ID, and sign in to Xcode > Settings > Accounts."
-        if (text.contains("locked") && !text.contains("database is locked")) || text.contains("unlock") {
+        if has(
+            "device is locked", "iphone is locked", "ipad is locked", "locked and cannot",
+            "unlock the device", "please unlock", "devicelocked", "0xe8000015", "0xe80000e2",
+            "mobileimagemounterdevicelocked", "is currently locked"
+        ) {
             return "The device is locked. Unlock the iPhone/iPad and keep it awake, then run again."
         }
-        if has("developer mode") {
+        if has("developer mode is disabled", "developer mode disabled", "enable developer mode", "requires developer mode", "0xe80000ef") {
             return "Developer Mode is disabled on the device. Enable it in Settings > Privacy & Security > Developer Mode, restart the device, then run again."
         }
-        if has("not trusted", "untrusted developer", "trust") {
+        if has(
+            "untrusted developer", "has not been explicitly trusted", "verify the developer app certificate",
+            "developer app certificate is not trusted", "profile has not been explicitly trusted",
+            "invalid hostid", "0xe8008015", "0xe8000087", "pair with the device"
+        ) {
             return "The device does not trust this Mac or the developer profile. Tap Trust on the device, or approve the developer under Settings > General > VPN & Device Management, then run again."
         }
-        if has("not registered", "register the device") {
+        if has(
+            "not registered in your developer account", "not registered in your account",
+            "register the device", "none of the valid provisioning profiles allowed the specified device"
+        ) {
             return "The device is not registered in your Apple Developer team." + signingHint
         }
-        if has("requires a development team", "no profiles for", "no provisioning profile", "provisioning profile") {
+        if has("requires a development team", "no profiles for", "no provisioning profile", "requires a provisioning profile", "provisioning profile \"") {
             return "Code signing failed: no development team or provisioning profile is available for this app." + signingHint
         }
-        if has("expired") {
+        if has("certificate has expired", "provisioning profile has expired", "signing certificate has expired", "0xe8008011") {
             return "A signing certificate or provisioning profile has expired." + signingHint
         }
-        if has("unavailable", "not connected", "no devices matched", "could not be found") {
+        if has("device is unavailable", "device is not connected", "no devices matched", "connection to the device was lost", "device was disconnected", "timed out waiting for device") {
             return "The device is unavailable or not connected. Reconnect it by USB (or pair it in Xcode), unlock it, and confirm it appears in `list_devices`."
         }
         return nil
@@ -2996,13 +3036,18 @@ final class DeviceRuntimeService: ObservableObject {
     /// `instruments` parser. The JSON schema is versioned by Apple and lists
     /// both USB and paired wireless iPhone/iPad destinations.
     private func listApplePhysicalDevices() async -> [RuntimeDevice] {
-        guard let result = try? await command(
+        let jsonURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("microcode-devicectl-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: jsonURL) }
+        _ = try? await command(
             "/usr/bin/xcrun",
-            ["devicectl", "list", "devices", "--json-output", "-", "--omit-deprecated-fields-in-json", "--timeout", "5"],
+            ["devicectl", "list", "devices", "--json-output", jsonURL.path, "--omit-deprecated-fields-in-json", "--timeout", "5"],
             directory: nil
-        ), let root = try? JSONSerialization.jsonObject(with: Data(result.output.utf8)) as? [String: Any],
-           let payload = root["result"] as? [String: Any],
-           let rawDevices = payload["devices"] as? [[String: Any]] else { return [] }
+        )
+        guard let jsonData = try? Data(contentsOf: jsonURL),
+              let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let payload = root["result"] as? [String: Any],
+              let rawDevices = payload["devices"] as? [[String: Any]] else { return [] }
 
         return rawDevices.compactMap { raw in
             guard let properties = raw["properties"] as? [String: Any],
@@ -3019,16 +3064,36 @@ final class DeviceRuntimeService: ObservableObject {
                 ?? (hardware["marketingName"] as? String)
                 ?? "Apple device"
             let connectionState = (connection?["state"] as? String) ?? "Unavailable"
-            let connected = connectionState.caseInsensitiveCompare("connected") == .orderedSame
+            let pairingState = (connection?["pairingState"] as? String) ?? ""
+            let bootState = (stateProperties?["bootState"] as? String) ?? ""
+            let isConnected = connectionState.caseInsensitiveCompare("connected") == .orderedSame
+            let isAvailablePaired = !isConnected
+                && connectionState.caseInsensitiveCompare("unavailable") != .orderedSame
+                && pairingState.caseInsensitiveCompare("paired") == .orderedSame
+                && bootState.caseInsensitiveCompare("booted") == .orderedSame
+            let devModeDict = stateProperties?["developerModeStatus"] as? [String: Any]
+            let devModeDisabled = (devModeDict != nil && devModeDict?["enabled"] == nil)
+            let ready = (isConnected || isAvailablePaired) && !devModeDisabled
             let model = (hardware["marketingName"] as? String) ?? (hardware["productType"] as? String) ?? "iPhone/iPad"
-            let preflight = connected ? nil : "Connect/unlock this device by USB or pair it in Xcode Device Hub; enable Developer Mode before Build & Run."
+            let stateLabel: String = {
+                if devModeDisabled { return "Developer Mode Off" }
+                if isConnected { return "Connected" }
+                if isAvailablePaired { return "Available (Paired)" }
+                return connectionState.capitalized
+            }()
+            let preflight: String? = {
+                if devModeDisabled {
+                    return "Enable Developer Mode in Settings > Privacy & Security > Developer Mode on this device before Build & Run."
+                }
+                return ready ? nil : "Connect/unlock this device by USB or pair it in Xcode Device Hub; enable Developer Mode before Build & Run."
+            }()
             return RuntimeDevice(
                 id: identifier,
                 name: name,
                 platform: .ios,
-                state: connected ? "Connected" : connectionState.capitalized,
+                state: stateLabel,
                 runtime: "Physical · \(model)",
-                isReadyForLaunch: connected,
+                isReadyForLaunch: ready,
                 preflightMessage: preflight,
                 kind: .physical
             )

@@ -315,7 +315,7 @@ struct PhoneCompanionSettingsView: View {
             } else {
                 switch companion.tunnelState {
                 case .connected(let publicURL, let provider):
-                    endpointURLRow(url: "\(publicURL)/?token=\(companion.pairingToken)", label: provider)
+                    endpointURLRow(url: companion.onlinePairingURL ?? "\(publicURL)/?pair=\(companion.oneTimePairingCode)", label: provider)
                 case .starting(let msg):
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
@@ -350,9 +350,9 @@ struct PhoneCompanionSettingsView: View {
                     .font(.system(size: 12))
                     .frame(width: 18)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Session Access Token")
+                    Text("One-Time QR Pairing & Session Token")
                         .font(.system(size: 11.5, weight: .semibold))
-                    Text("192-bit token embedded in pairing URL. Rotating invalidates existing mobile sessions.")
+                    Text("QR code uses a single-use pairing code and strips it from the URL. Rotating revokes all sessions.")
                         .font(.system(size: 10.5))
                         .foregroundColor(.secondary)
                 }
@@ -362,6 +362,27 @@ struct PhoneCompanionSettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            }
+
+            Divider().opacity(0.4)
+
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.shield")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 12))
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Require Mac Approval for New Devices")
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Text("New phones scanning the QR code must be approved on this Mac before accessing the workspace.")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $companion.requireMacApprovalForNewDevices)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
             }
         }
         .padding(14)
@@ -446,13 +467,49 @@ struct PhoneCompanionSettingsView: View {
                         
                         Spacer()
                         
-                        Text("Connected")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.05))
-                            .cornerRadius(4)
+                        if device.approvalState == .pending {
+                            HStack(spacing: 6) {
+                                Button("Approve") {
+                                    companion.approveDevice(id: device.id)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                
+                                Button("Deny") {
+                                    companion.rejectDevice(id: device.id)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        } else if device.approvalState == .rejected {
+                            HStack(spacing: 6) {
+                                Text("Denied")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                Button("Approve") {
+                                    companion.approveDevice(id: device.id)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        } else {
+                            HStack(spacing: 8) {
+                                Text("Approved")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.primary.opacity(0.05))
+                                    .cornerRadius(4)
+                                
+                                Button("Revoke") {
+                                    companion.revokeDevice(id: device.id)
+                                }
+                                .font(.system(size: 10.5))
+                                .buttonStyle(.plain)
+                                .foregroundColor(.secondary)
+                            }
+                        }
                     }
                     .padding(.vertical, 4)
                 }

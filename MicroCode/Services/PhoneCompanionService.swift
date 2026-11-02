@@ -55,6 +55,12 @@ enum OnlineTunnelState: Equatable {
     case failed(String)
 }
 
+enum PhoneDeviceApprovalState: String, Codable, Equatable {
+    case pending
+    case approved
+    case rejected
+}
+
 struct ConnectedPhoneDevice: Identifiable, Equatable {
     let id: String
     var name: String
@@ -62,6 +68,7 @@ struct ConnectedPhoneDevice: Identifiable, Equatable {
     var connectionVia: String // "LAN" or "Online"
     var firstConnectedAt: Date
     var lastSeenAt: Date
+    var approvalState: PhoneDeviceApprovalState = .approved
 }
 
 // MARK: - PhoneCompanionService
@@ -105,6 +112,12 @@ final class PhoneCompanionService: ObservableObject {
     @Published private(set) var allNetworkAddresses: [(interface: String, ip: String)] = []
     @Published private(set) var bonjourHostname: String = ""
     @Published private(set) var pairingToken: String = ""
+    @Published private(set) var oneTimePairingCode: String = ""
+    @Published var requireMacApprovalForNewDevices: Bool = true {
+        didSet {
+            UserDefaults.standard.set(requireMacApprovalForNewDevices, forKey: Self.requireApprovalDefaultsKey)
+        }
+    }
     @Published private(set) var tunnelState: OnlineTunnelState = .stopped {
         didSet {
             regenerateQRCode()
@@ -140,6 +153,8 @@ final class PhoneCompanionService: ObservableObject {
     private var lastBroadcastFingerprint: String = ""
     private var sseTickCounter: Int = 0
     private var workspaceLanguageCache: [String: (primary: String, label: String, langs: [String])] = [:]
+    private var approvedDeviceIDs: Set<String> = []
+    private var promptedPendingDeviceIDs: Set<String> = []
     private lazy var cachedMacName: String = {
         let raw = ProcessInfo.processInfo.hostName
             .replacingOccurrences(of: ".local", with: "")
@@ -157,18 +172,72 @@ final class PhoneCompanionService: ObservableObject {
            let mode = PhoneConnectionMode(rawValue: savedMode) {
             self.connectionMode = mode
         }
+        self.requireMacApprovalForNewDevices = (UserDefaults.standard.object(forKey: Self.requireApprovalDefaultsKey) as? Bool) ?? true
+        if let savedApproved = UserDefaults.standard.stringArray(forKey: Self.approvedDevicesDefaultsKey) {
+            self.approvedDeviceIDs = Set(savedApproved)
+        }
         self.pairingToken = Self.loadOrCreatePairingToken()
+        self.oneTimePairingCode = Self.generateSecureToken()
     }
 
-    // MARK: - Pairing token storage (Keychain, with expiry)
+    // MARK: - Pairing token storage (Keychain when signed with Team ID; 0600 file fallback for ad-hoc dev builds)
 
     nonisolated private static let tokenLegacyDefaultsKey = "microcode.phoneCompanion.token"
     nonisolated private static let tokenIssuedAtKey = "microcode.phoneCompanion.tokenIssuedAt"
     nonisolated private static let tokenMaxAgeDaysKey = "microcode.phoneCompanion.tokenMaxAgeDays"
+    nonisolated private static let requireApprovalDefaultsKey = "microcode.phoneCompanion.requireApproval"
+    nonisolated private static let approvedDevicesDefaultsKey = "microcode.phoneCompanion.approvedDeviceIDs"
     nonisolated private static let keychainService = "com.dotmini.microcode.phone-companion"
     nonisolated private static let keychainAccount = "pairing-token"
 
+    /// Returns true only when the running executable is signed with a stable Apple Developer / Developer ID TeamIdentifier
+    /// (e.g. XT657U53XT or A58QB9B355). Ad-hoc (`codesign --sign -`) builds change CDHash on every recompile, which would
+    /// cause the legacy macOS Keychain to prompt for the login password on update; those builds use an owner-only (0600) file.
+    nonisolated static func hasStableCodeSigningIdentity() -> Bool {
+        var selfCode: SecCode?
+        guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let code = selfCode else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let sCode = staticCode else { return false }
+        var infoRef: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard SecCodeCopySigningInformation(sCode, flags, &infoRef) == errSecSuccess,
+              let info = infoRef as? [String: Any] else { return false }
+        if let teamID = info[kSecCodeInfoTeamIdentifier as String] as? String, !teamID.isEmpty {
+            return true
+        }
+        return false
+    }
+
+    nonisolated private static func localTokenFileURL() -> URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroCode", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("companion_token.secret")
+    }
+
+    nonisolated private static func fileTokenRead() -> String? {
+        let url = localTokenFileURL()
+        guard let data = try? Data(contentsOf: url),
+              let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else { return nil }
+        return token
+    }
+
+    @discardableResult
+    nonisolated private static func fileTokenWrite(_ token: String) -> Bool {
+        let url = localTokenFileURL()
+        let data = Data(token.utf8)
+        if FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
+        }
+        return false
+    }
+
     nonisolated private static func keychainRead() -> String? {
+        guard hasStableCodeSigningIdentity() else {
+            return fileTokenRead()
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
@@ -177,13 +246,19 @@ final class PhoneCompanionService: ObservableObject {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var out: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data, let token = String(data: data, encoding: .utf8), !token.isEmpty else { return nil }
-        return token
+        if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+           let data = out as? Data, let token = String(data: data, encoding: .utf8), !token.isEmpty {
+            return token
+        }
+        return fileTokenRead()
     }
 
     @discardableResult
     nonisolated private static func keychainWrite(_ token: String) -> Bool {
+        _ = fileTokenWrite(token)
+        guard hasStableCodeSigningIdentity() else {
+            return true
+        }
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
@@ -196,7 +271,7 @@ final class PhoneCompanionService: ObservableObject {
         return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
-    /// Stores the token in the Keychain (plain UserDefaults only if the Keychain refuses) and restarts its expiry clock.
+    /// Stores the token in the Keychain (or 0600 Application Support file for ad-hoc builds) and restarts its expiry clock.
     nonisolated private static func persistPairingToken(_ token: String) {
         let defaults = UserDefaults.standard
         if keychainWrite(token) {
@@ -207,7 +282,7 @@ final class PhoneCompanionService: ObservableObject {
         defaults.set(Date(), forKey: tokenIssuedAtKey)
     }
 
-    /// Returns the stored token, migrating a legacy UserDefaults token into the Keychain. A token older than
+    /// Returns the stored token, migrating a legacy UserDefaults token into secure storage. A token older than
     /// `microcode.phoneCompanion.tokenMaxAgeDays` (default 30, 0 disables expiry) is replaced, which un-pairs old phones.
     nonisolated private static func loadOrCreatePairingToken() -> String {
         let defaults = UserDefaults.standard
@@ -244,13 +319,13 @@ final class PhoneCompanionService: ObservableObject {
     }
     
     var lanPairingURL: String {
-        "http://\(activeLANHost):\(listeningPort)/?token=\(pairingToken)"
+        "http://\(activeLANHost):\(listeningPort)/?pair=\(oneTimePairingCode)"
     }
     
     var onlinePairingURL: String? {
         if case .connected(let base, _) = tunnelState {
             let cleanBase = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            return "\(cleanBase)/?token=\(pairingToken)"
+            return "\(cleanBase)/?pair=\(oneTimePairingCode)"
         }
         return nil
     }
@@ -267,9 +342,35 @@ final class PhoneCompanionService: ObservableObject {
     func rotatePairingToken() {
         let newToken = Self.generateSecureToken()
         pairingToken = newToken
+        oneTimePairingCode = Self.generateSecureToken()
         Self.persistPairingToken(newToken)
         connectedDevices.removeAll()
+        approvedDeviceIDs.removeAll()
+        promptedPendingDeviceIDs.removeAll()
+        UserDefaults.standard.removeObject(forKey: Self.approvedDevicesDefaultsKey)
         regenerateQRCode()
+    }
+
+    func approveDevice(id: String) {
+        approvedDeviceIDs.insert(id)
+        UserDefaults.standard.set(Array(approvedDeviceIDs), forKey: Self.approvedDevicesDefaultsKey)
+        if let idx = connectedDevices.firstIndex(where: { $0.id == id }) {
+            connectedDevices[idx].approvalState = .approved
+        }
+    }
+
+    func rejectDevice(id: String) {
+        approvedDeviceIDs.remove(id)
+        UserDefaults.standard.set(Array(approvedDeviceIDs), forKey: Self.approvedDevicesDefaultsKey)
+        if let idx = connectedDevices.firstIndex(where: { $0.id == id }) {
+            connectedDevices[idx].approvalState = .rejected
+        }
+    }
+
+    func revokeDevice(id: String) {
+        approvedDeviceIDs.remove(id)
+        UserDefaults.standard.set(Array(approvedDeviceIDs), forKey: Self.approvedDevicesDefaultsKey)
+        connectedDevices.removeAll { $0.id == id }
     }
     
     nonisolated private static func generateSecureToken() -> String {
@@ -579,24 +680,28 @@ final class PhoneCompanionService: ObservableObject {
         }
     }
     
+    nonisolated private static let pinnedLocalhostRunHostKeys = """
+    localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9
+    localhost.run ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3lJnhW1oCXuAYV9IBdcJA+Vx7AHL5S/ZQvV2fhceOAPgO2kNQZla6xvUwoE4iw8lYu3zoE1KtieCU9yInWOVI6W/wFaT/ETH1tn55T2FVsK/zaxPiHZVJGLPPdEEid0vS2p1JDfc9onZ0pNSHLl1QusIOeMUyZ2bUMMLLgw46KOT9S3s/LmxgoJ3PocVUn5rVXz/Dng7Y8jYNe4IFrZOAUsi7hNBa+OYja6ceefpDvNDEJ1BdhbYfGolBdNA7f+FNl0kfaWru4Cblr843wBe2ckO/sNqgeAMXO/qH+SSgQxUXF2AgAw+TGp3yCIyYoOPvOgvcPsQziJLmDbUuQpnH
+    """
+
     private func launchSSHReverseTunnel(port: Int) {
         tunnelState = .starting("Starting macOS Native SSH HTTPS Tunnel…")
         
-        // SECURITY: the tunnel carries the pairing token and the whole conversation, so the host key must be verified.
-        // Trust-on-first-use with a dedicated known_hosts file: the first key seen is pinned, and any later change makes ssh refuse
-        // to connect instead of silently talking to an impostor (previously verification was disabled entirely).
+        // SECURITY: Pin the verified Ed25519 and RSA host keys of localhost.run and enforce StrictHostKeyChecking=yes
+        // so even the very first connection rejects any MITM impostor (eliminating the TOFU window).
         let supportDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/MicroCode", isDirectory: true)
         try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
         let knownHostsURL = supportDir.appendingPathComponent("tunnel_known_hosts")
-        if !FileManager.default.fileExists(atPath: knownHostsURL.path) {
-            FileManager.default.createFile(atPath: knownHostsURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        }
+        let pinnedData = Data((Self.pinnedLocalhostRunHostKeys + "\n").utf8)
+        FileManager.default.createFile(atPath: knownHostsURL.path, contents: pinnedData, attributes: [.posixPermissions: 0o600])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: knownHostsURL.path)
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         proc.arguments = [
-            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "StrictHostKeyChecking=yes",
             "-o", "UserKnownHostsFile=\(knownHostsURL.path)",
             "-o", "ServerAliveInterval=30",
             "-o", "ExitOnForwardFailure=yes",
@@ -747,7 +852,8 @@ final class PhoneCompanionService: ObservableObject {
         let path = urlComponents?.path ?? "/"
         let queryItems = urlComponents?.queryItems ?? []
         
-        // Extract token from query, X-Companion-Token header, or Cookie
+        // Extract one-time pairing code (`?pair=`) or session token (`X-Companion-Token` header, `mc_token` cookie, or legacy `?token=`)
+        let queryPairCode = queryItems.first(where: { $0.name == "pair" })?.value
         let queryToken = queryItems.first(where: { $0.name == "token" })?.value
         let headerToken = headers["x-companion-token"]
         let cookieToken: String? = {
@@ -762,12 +868,13 @@ final class PhoneCompanionService: ObservableObject {
         }()
         
         let suppliedToken = queryToken ?? headerToken ?? cookieToken ?? ""
+        let matchedOneTimePair = (queryPairCode != nil) && Self.constantTimeEquals(queryPairCode ?? "", oneTimePairingCode)
+        let matchedSessionToken = Self.constantTimeEquals(suppliedToken, pairingToken)
         let isForwardedTunnel = (headers["cf-connecting-ip"] != nil || headers["x-forwarded-for"] != nil)
-        // SECURITY: only the Mac itself is trusted without the pairing token. Every other peer, including devices on the same
-        // Wi-Fi / office LAN (192.168.x, 10.x and the *whole* 172.x range, which is mostly public space), must present the token
-        // that is delivered by the pairing QR code (query, header or the `mc_token` cookie set on first load).
+        // SECURITY: only the Mac itself is trusted without the pairing token/code. Every other peer, including devices on the same
+        // Wi-Fi / office LAN, must present either the one-time QR pairing code (`?pair=`) or the `mc_token` session token.
         let isLocalMac = !isForwardedTunnel && (remoteIP == "127.0.0.1" || remoteIP == "::1")
-        guard Self.constantTimeEquals(suppliedToken, pairingToken) || isLocalMac else {
+        guard matchedOneTimePair || matchedSessionToken || isLocalMac else {
             let unauthorizedHTML = """
             <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
             <title>MicroCode Companion — Scan QR Code</title>
@@ -775,20 +882,51 @@ final class PhoneCompanionService: ObservableObject {
             .card{max-width:360px;background:#161922;border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:28px}
             h2{margin:0 0 10px;font-size:18px}p{color:#9ca3af;font-size:14px;line-height:1.5}</style></head>
             <body><div class="card"><h2>🔒 Session Token Expired or Missing</h2>
-            <p>Please open <b>MicroCode → Settings → Connect with Phone</b> on your Mac and scan the QR Code again.</p></div></body></html>
+            <p>Please open <b>MicroCode → Settings → Connect with Phone</b> on your Mac and scan the fresh one-time QR Code.</p></div></body></html>
             """
             return makeHTTPResponse(status: "401 Unauthorized", contentType: "text/html; charset=utf-8", body: Data(unauthorizedHTML.utf8))
         }
         
+        // Rotate the one-time QR pairing code immediately on redemption so the scanned URL cannot be reused from history.
+        if matchedOneTimePair {
+            oneTimePairingCode = Self.generateSecureToken()
+            regenerateQRCode()
+        }
+
         // State-changing requests must carry the token in the custom `X-Companion-Token` header. Browsers cannot attach a custom
         // header cross-site without a CORS preflight, which this server never approves, so a malicious page cannot forge them.
         if method == "POST", !Self.constantTimeEquals(headers["x-companion-token"] ?? "", pairingToken) {
             return makeJSONResponse(["ok": false, "error": "Missing X-Companion-Token header"], status: "403 Forbidden")
         }
 
-        // Record connected mobile device
-        recordConnectedDevice(headers: headers, remoteIP: remoteIP)
-        
+        // Record connected mobile device & enforce Mac-side new device approval
+        let device = recordConnectedDevice(headers: headers, remoteIP: remoteIP, isLocalMac: isLocalMac)
+        if !isLocalMac {
+            if device.approvalState == .rejected {
+                return makeHTTPResponse(status: "403 Forbidden", contentType: "text/plain; charset=utf-8", body: Data("Connection denied on Mac.".utf8))
+            }
+            if path == "/api/pair/status" {
+                return makeJSONResponse([
+                    "ok": true,
+                    "approved": device.approvalState == .approved,
+                    "status": device.approvalState.rawValue,
+                    "deviceId": device.id,
+                    "deviceName": device.name
+                ])
+            }
+            if device.approvalState == .pending {
+                promptMacApprovalIfNeeded(for: device)
+                if method == "GET" && path == "/" {
+                    let viaHTTPS = (headers["x-forwarded-proto"]?.lowercased() == "https")
+                    let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Strict; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
+                    let pendingHTML = buildPendingApprovalHTML(device: device, token: pairingToken)
+                    return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", extraHeaders: extraHeaders, body: Data(pendingHTML.utf8))
+                }
+                return makeJSONResponse(["ok": false, "error": "Pending approval on Mac"], status: "403 Forbidden")
+            }
+        } else if path == "/api/pair/status" {
+            return makeJSONResponse(["ok": true, "approved": true, "status": "approved", "deviceId": device.id])
+        }
 
         // Route endpoints
         switch (method, path) {
@@ -1024,7 +1162,8 @@ final class PhoneCompanionService: ObservableObject {
         }
     }
 
-    private func recordConnectedDevice(headers: [String: String], remoteIP: String) {
+    @discardableResult
+    private func recordConnectedDevice(headers: [String: String], remoteIP: String, isLocalMac: Bool = false) -> ConnectedPhoneDevice {
         let ua = headers["user-agent"] ?? ""
         let forwardedFor = headers["cf-connecting-ip"] ?? headers["x-forwarded-for"]
         let effectiveIP = forwardedFor?.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? remoteIP
@@ -1043,19 +1182,72 @@ final class PhoneCompanionService: ObservableObject {
         if let idx = connectedDevices.firstIndex(where: { $0.id == deviceId }) {
             connectedDevices[idx].lastSeenAt = now
             connectedDevices[idx].connectionVia = via
+            return connectedDevices[idx]
         } else {
-            connectedDevices.insert(
-                ConnectedPhoneDevice(
-                    id: deviceId,
-                    name: deviceName,
-                    ipAddress: effectiveIP,
-                    connectionVia: via,
-                    firstConnectedAt: now,
-                    lastSeenAt: now
-                ),
-                at: 0
+            let initialApproval: PhoneDeviceApprovalState = {
+                if isLocalMac || !requireMacApprovalForNewDevices || approvedDeviceIDs.contains(deviceId) {
+                    return .approved
+                }
+                return .pending
+            }()
+            let created = ConnectedPhoneDevice(
+                id: deviceId,
+                name: deviceName,
+                ipAddress: effectiveIP,
+                connectionVia: via,
+                firstConnectedAt: now,
+                lastSeenAt: now,
+                approvalState: initialApproval
             )
+            connectedDevices.insert(created, at: 0)
+            return created
         }
+    }
+
+    private func promptMacApprovalIfNeeded(for device: ConnectedPhoneDevice) {
+        guard !promptedPendingDeviceIDs.contains(device.id) else { return }
+        promptedPendingDeviceIDs.insert(device.id)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSApp.requestUserAttention(.informationalRequest)
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Approve Mobile Companion Connection?"
+            alert.informativeText = "\(device.name) (\(device.ipAddress) via \(device.connectionVia)) scanned your one-time QR code and is requesting access to this MicroCode workspace."
+            alert.addButton(withTitle: "Approve Device")
+            alert.addButton(withTitle: "Deny")
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                self.approveDevice(id: device.id)
+            } else {
+                self.rejectDevice(id: device.id)
+            }
+        }
+    }
+
+    private func buildPendingApprovalHTML(device: ConnectedPhoneDevice, token: String) -> String {
+        return """
+        <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>MicroCode Companion — Approve on Mac</title>
+        <style>body{background:#09090b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;height:90vh;margin:0;padding:24px;text-align:center}
+        .card{max-width:360px;background:#121215;border:1px solid rgba(255,255,255,0.1);border-radius:14px;padding:28px}
+        h2{margin:0 0 10px;font-size:17px;font-weight:600}p{color:#a1a1aa;font-size:13.5px;line-height:1.5;margin:0 0 12px}
+        .meta{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#d4d4d8;background:rgba(255,255,255,0.05);padding:8px 10px;border-radius:8px}</style></head>
+        <body><div class="card"><h2>Confirm Connection on Your Mac</h2>
+        <p>Click <b>Approve Device</b> on your Mac (or in <b>Settings → Connect with Phone</b>) to authorize this session.</p>
+        <div class="meta">\(device.name) · \(device.ipAddress)</div></div>
+        <script>
+        if (window.location.search) { try { window.history.replaceState(null, "", window.location.pathname); } catch (_) {} }
+        setInterval(async () => {
+          try {
+            const r = await fetch("/api/pair/status", { headers: { "X-Companion-Token": "\(token)" } });
+            if (r.status === 403) { document.querySelector("p").textContent = "Connection was denied on your Mac."; return; }
+            const j = await r.json();
+            if (j && j.approved) { window.location.reload(); }
+          } catch (_) {}
+        }, 1200);
+        </script></body></html>
+        """
     }
     
     private func selectRemoteModel(mode: String, provider: String, modelId: String) {
@@ -2544,6 +2736,9 @@ final class PhoneCompanionService: ObservableObject {
 
         <script>
           const TOKEN = "\#(token)";
+          if (window.location.search) {
+            try { window.history.replaceState(null, "", window.location.pathname); } catch (_) {}
+          }
           let lastRenderKey = "";
           let autoScroll = true;
           let isAgentLoading = false;

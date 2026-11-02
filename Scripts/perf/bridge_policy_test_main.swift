@@ -15,5 +15,17 @@ check("host allowed nil (HTTP/1.0 native client)", MCPServer.isLoopbackHostHeade
 for h in ["evil.example:18888", "192.168.1.47:18888", "127.0.0.1.evil.com", "localhost.evil.com:80", "[::2]:1", "0.0.0.0:18888"] {
     check("host denied \(h)", MCPServer.isLoopbackHostHeader(h), false)
 }
+// Device failure classifier must NOT misclassify source filenames or normal Swift compiler errors containing words like "trust" or "unlock"
+for benign in [
+    "CompileSwift normal arm64 /work/TrustManager.swift\n/work/TrustManager.swift:42:10: error: cannot find 'trustPolicy' in scope\n** BUILD FAILED **",
+    "CompileSwift normal arm64 /work/UnlockView.swift\n/work/UnlockView.swift:12:5: error: value of type 'UnlockState' has no member 'locked'\n** BUILD FAILED **",
+    "warning: sqlite database is locked during test fixture setup"
+] {
+    check("benign build log not misclassified", DeviceRuntimeService.friendlyDeviceFailure(from: benign) == nil, true)
+}
+check("locked device classified", DeviceRuntimeService.friendlyDeviceFailure(from: "CoreDeviceError: The device is locked (0xe8000015)")?.contains("locked") == true, true)
+check("untrusted developer classified", DeviceRuntimeService.friendlyDeviceFailure(from: "error: Untrusted Developer (0xe8008015): Verify the Developer App certificate")?.contains("trust") == true, true)
+check("developer mode classified", DeviceRuntimeService.friendlyDeviceFailure(from: "CoreDeviceError: Developer Mode is disabled on the device")?.contains("Developer Mode") == true, true)
+check("signing team classified", DeviceRuntimeService.friendlyDeviceFailure(from: "error: Signing for \"MyApp\" requires a development team.")?.contains("Code signing failed") == true, true)
 print("bridge-policy: failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

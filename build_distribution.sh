@@ -19,7 +19,7 @@ echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.microcode"
-VERSION="2.5.37"
+VERSION="2.5.38"
 
 # Directories
 BUILD_ROOT=".build_dist"
@@ -138,11 +138,11 @@ compile_arch() {
         --out-dir build/gen_swift \
         --no-format
     mkdir -p ../MicroCode/Services/MicroCore
-    cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/microcode_core.swift
-    cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/MicroCore.swift
-    cp build/gen_swift/microcode_coreFFI.h ../MicroCode/Services/MicroCore/microcode_coreFFI.h
-    cp build/gen_swift/microcode_coreFFI.h ../MicrocodeCoreSupport/include/microcode_coreFFI.h
-    cp build/gen_swift/microcode_coreFFI.modulemap ../MicrocodeCoreSupport/include/module.modulemap
+    cmp -s build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/microcode_core.swift || cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/microcode_core.swift
+    cmp -s build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/MicroCore.swift || cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/MicroCore.swift
+    cmp -s build/gen_swift/microcode_coreFFI.h ../MicroCode/Services/MicroCore/microcode_coreFFI.h || cp build/gen_swift/microcode_coreFFI.h ../MicroCode/Services/MicroCore/microcode_coreFFI.h
+    cmp -s build/gen_swift/microcode_coreFFI.h ../MicrocodeCoreSupport/include/microcode_coreFFI.h || cp build/gen_swift/microcode_coreFFI.h ../MicrocodeCoreSupport/include/microcode_coreFFI.h
+    cmp -s build/gen_swift/microcode_coreFFI.modulemap ../MicrocodeCoreSupport/include/module.modulemap || cp build/gen_swift/microcode_coreFFI.modulemap ../MicrocodeCoreSupport/include/module.modulemap
     cd ..
     
     MICROCORE_LIB_PATH="$(pwd)/microcode_core/target/${RUST_TARGET}/release"
