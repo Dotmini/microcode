@@ -340,6 +340,8 @@ final class TelemetryService: ObservableObject {
     private var flushing = false
     private var portalReportTask: Task<Void, Never>?
     private var heartbeatTimer: Timer?
+    private var lifecycleCancellables = Set<AnyCancellable>()
+    private var lastPortalPingDate: Date = .distantPast
     private var lastReportedPortalEventType: String = "macapp_active"
 
     private init() {
@@ -418,6 +420,7 @@ final class TelemetryService: ObservableObject {
         let nextCount = UserDefaults.standard.integer(forKey: Key.launchCount) + 1
         UserDefaults.standard.set(nextCount, forKey: Key.launchCount)
         warmGitEmailCacheIfNeeded()
+        setupLifecycleObservers()
         guard isEnabled else { return }
 
         let currentMode = UserDefaults.standard.string(forKey: Key.lastMode) ?? "code"
@@ -427,6 +430,34 @@ final class TelemetryService: ObservableObject {
         record(name: "app_launch", mode: currentMode, feature: modeFeature)
         startHeartbeatTimerIfNeeded()
         flush(immediatePortalSync: true)
+    }
+
+    private func setupLifecycleObservers() {
+        guard lifecycleCancellables.isEmpty else { return }
+
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isEnabled else { return }
+                    if Date().timeIntervalSince(self.lastPortalPingDate) >= 45 {
+                        await self.reportActiveMacAppToPortal(eventType: "macapp_active")
+                    }
+                }
+            }
+            .store(in: &lifecycleCancellables)
+
+        SupabaseAuthService.shared.$session
+            .map { $0?.email ?? "" }
+            .removeDuplicates()
+            .sink { [weak self] email in
+                guard !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.isEnabled else { return }
+                    await self.syncInstallRecordToSupabase()
+                    await self.reportActiveMacAppToPortal(eventType: "macapp_active")
+                }
+            }
+            .store(in: &lifecycleCancellables)
     }
 
     private func startHeartbeatTimerIfNeeded() {
@@ -724,13 +755,23 @@ final class TelemetryService: ObservableObject {
     private var resolvedUserEmail: String {
         let supa = SupabaseAuthService.shared.currentEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         if !supa.isEmpty { return supa }
-        if let persisted = UserDefaults.standard.string(forKey: "microcode_account_email")?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !persisted.isEmpty {
-            return persisted
+        if let authEmail = AuthService.shared.currentUser?.email.trimmingCharacters(in: .whitespacesAndNewlines),
+           !authEmail.isEmpty, authEmail.contains("@") {
+            return authEmail
+        }
+        for key in ["microcode_account_email", "dotminiUserEmail", "userEmail"] {
+            if let persisted = UserDefaults.standard.string(forKey: key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !persisted.isEmpty, persisted.contains("@"), !persisted.hasSuffix(".local") {
+                return persisted
+            }
         }
         if let gitEmail = UserDefaults.standard.string(forKey: Key.cachedGitEmail)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !gitEmail.isEmpty {
             return gitEmail
+        }
+        if let fastGit = Self.readGitConfigEmailFast(), !fastGit.isEmpty {
+            UserDefaults.standard.set(fastGit, forKey: Key.cachedGitEmail)
+            return fastGit
         }
         let user = NSUserName().trimmingCharacters(in: .whitespacesAndNewlines)
         let host = (Host.current().localizedName ?? ProcessInfo.processInfo.hostName)
@@ -739,8 +780,45 @@ final class TelemetryService: ObservableObject {
         return "\(user.isEmpty ? "macuser" : user)@\(host.isEmpty ? "mac" : host).local"
     }
 
+    private nonisolated static func readGitConfigEmailFast() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent(".gitconfig"),
+            home.appendingPathComponent(".config/git/config")
+        ]
+        for url in candidates {
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            var inUserSection = false
+            for rawLine in content.components(separatedBy: .newlines) {
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                if line.hasPrefix("#") || line.hasPrefix(";") || line.isEmpty { continue }
+                if line.hasPrefix("[") && line.hasSuffix("]") {
+                    let section = line.dropFirst().dropLast().trimmingCharacters(in: .whitespaces).lowercased()
+                    inUserSection = (section == "user" || section.hasPrefix("user "))
+                    continue
+                }
+                if inUserSection, line.lowercased().hasPrefix("email") {
+                    let parts = line.split(separator: "=", maxSplits: 1)
+                    if parts.count == 2 {
+                        let key = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+                        var val = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                        val = val.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                        if key == "email", val.contains("@"), !val.hasSuffix(".local") {
+                            return val
+                        }
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     private func warmGitEmailCacheIfNeeded() {
         if let cached = UserDefaults.standard.string(forKey: Key.cachedGitEmail), !cached.isEmpty {
+            return
+        }
+        if let fast = Self.readGitConfigEmailFast(), !fast.isEmpty {
+            UserDefaults.standard.set(fast, forKey: Key.cachedGitEmail)
             return
         }
         Task.detached(priority: .utility) {
@@ -809,23 +887,31 @@ final class TelemetryService: ObservableObject {
 
             let events = queuedEvents()
             guard !events.isEmpty else { return }
+            let token = cloudToken
+            guard let bodyData = try? JSONEncoder().encode(TelemetryEnvelope(events: events)) else { return }
+
             var request = URLRequest(url: endpoint)
             request.httpMethod = "POST"
-            request.timeoutInterval = 10
+            request.timeoutInterval = 6
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("1", forHTTPHeaderField: "X-MicroCode-Telemetry-Schema")
-            if let token = cloudToken, !token.isEmpty {
+            if let token, !token.isEmpty {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
+            request.httpBody = bodyData
 
-            do {
-                request.httpBody = try JSONEncoder().encode(TelemetryEnvelope(events: events))
-                let (_, response) = try await URLSession.shared.data(for: request)
-                if let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
-                    save([])
-                }
-            } catch {
-                // Retain bounded queue for next launch
+            var delivered = false
+            if let (_, response) = try? await URLSession.shared.data(for: request),
+               let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
+                delivered = true
+            } else {
+                let targetURL = portalBaseURL.appending(path: "api/telemetry/events").absoluteString
+                delivered = await Task.detached(priority: .utility) {
+                    Self.postJSONViaIPv4Curl(url: targetURL, bodyData: bodyData, bearerToken: token)
+                }.value
+            }
+            if delivered {
+                save([])
             }
         }
     }
@@ -834,12 +920,16 @@ final class TelemetryService: ObservableObject {
     /// to `https://microcode.dotmini.net/api/telemetry/install`, matching `Dotmini/microcode-web/main.go`.
     private func reportActiveMacAppToPortal(eventType: String = "macapp_active") async {
         let record = buildCurrentInstallRecord()
+        let token = cloudToken
 
         let url = portalBaseURL.appending(path: "api/telemetry/install")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.timeoutInterval = 12
+        req.timeoutInterval = 6
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token, !token.isEmpty {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         let payload: [String: Any] = [
             "email": record.email,
             "name": record.displayName,
@@ -859,11 +949,41 @@ final class TelemetryService: ObservableObject {
             "launch_count": record.launchCount,
             "installed_agents": record.installedAgents
         ]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        req.httpBody = bodyData
+
+        var delivered = false
         if let (_, resp) = try? await URLSession.shared.data(for: req),
            let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) {
+            delivered = true
+        } else {
+            let urlStr = url.absoluteString
+            delivered = await Task.detached(priority: .utility) {
+                Self.postJSONViaIPv4Curl(url: urlStr, bodyData: bodyData, bearerToken: token)
+            }.value
+        }
+        if delivered {
+            lastPortalPingDate = Date()
             UserDefaults.standard.set(appVersion, forKey: Key.reportedPortalVersion)
         }
+    }
+
+    private nonisolated static func postJSONViaIPv4Curl(url: String, bodyData: Data, bearerToken: String?) -> Bool {
+        guard let bodyString = String(data: bodyData, encoding: .utf8) else { return false }
+        var args = [
+            "-4", "-sS", "--connect-timeout", "3", "--max-time", "6",
+            "-X", "POST", url,
+            "-H", "Content-Type: application/json",
+            "-H", "X-MicroCode-Telemetry-Schema: 1"
+        ]
+        if let bearerToken, !bearerToken.isEmpty {
+            args.append(contentsOf: ["-H", "Authorization: Bearer \(bearerToken)"])
+        }
+        args.append(contentsOf: ["-d", bodyString])
+        guard let out = runProcessOutput(executable: "/usr/bin/curl", arguments: args) else {
+            return false
+        }
+        return !out.isEmpty
     }
 
     /// Upserts this Mac's InstallRecord into Supabase `public.app_config` (`microcode_installs/<installID>`)

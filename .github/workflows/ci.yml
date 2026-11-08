@@ -139,6 +139,7 @@ jobs:
 
       - name: Rust check & lint
         run: |
+          brew install protobuf 2>/dev/null || true
           export PATH="$HOME/.cargo/bin:$PATH"
           if [ -d "backend" ] && command -v cargo &>/dev/null; then
             cd backend
