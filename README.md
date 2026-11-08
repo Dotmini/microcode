@@ -47,9 +47,10 @@ Every contribution directly funds engineering time, Apple Developer infrastructu
 
 <p align="center">
   <a href="https://microcode.dotmini.net"><strong>🌐 Official Website</strong></a> ·
-  <a href="https://github.com/Dotmini/microcode/releases/tag/v2.5.27"><strong>Download v2.5.27 (Latest Release)</strong></a> ·
+  <a href="https://github.com/Dotmini/microcode/releases/tag/v2.5.40"><strong>Download v2.5.40 (Latest Release)</strong></a> ·
+  <a href="#whats-new-in-v2540"><strong>What's New in v2.5.40</strong></a> ·
   <a href="#operational-modes"><strong>Operational Modes</strong></a> ·
-  <a href="#features"><strong>Features</strong></a> ·
+  <a href="#core-engineering-specifications"><strong>Features</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
   <a href="#getting-started"><strong>Getting Started</strong></a>
 </p>
@@ -67,8 +68,36 @@ We built a **fully native macOS IDE from scratch** using SwiftUI, Rust, and Meta
 | **Startup time** | < 1s | 3-8s |
 | **Memory (idle)** | ~80 MB | 400-800 MB |
 | **GPU rendering** | Metal (native) | WebGL (emulated) |
-| **AI integration** | 7 providers, native | Plugin-dependent |
+| **AI integration** | 7+ Cloud providers + Multi-Node Local LLM Pool, native | Plugin-dependent |
+| **Multi-Workspace Agent** | Concurrent parallel execution across workspaces | Single-window / blocking |
 | **File indexing** | Tree-sitter + Rust | JS-based |
+
+---
+
+## What's New in v2.5.40
+
+### 1. AI Agent as a Real-Time Teammate in Collaboration Mode (`MicroCode AI` + Follow Mode)
+- **Live AI Participant (Collab-Only Activation)**: Exclusively when a Collaboration session is active (`isCollabSessionActive`), **`MicroCode AI`** (`role: "AI Agent"`, `#A855F7`) joins the room as a real-time teammate. Normal single-user IDE usage outside Collab remains completely untouched with zero overhead.
+- **Real-Time Cursor, Line-Range & Buffer Sync**: Every time the AI Agent reads, searches, or edits files (`file_read`, `replace_in_file`, `multi_replace_in_file`, `file_write`, `patch_file`), its live cursor position, modified line range (`line`..`endLine`), active tool status, and updated file contents are broadcast over WebSockets in real time.
+- **1-Click Follow Mode (`Follow AI` / `Follow Peer`)**: Both **Native macOS IDE** users and **WebApp Collaboration Portal** teammates can click **Follow AI** (or follow any human peer). Your editor automatically switches files and scrolls smoothly to the exact line the AI Agent is inspecting or modifying in real time.
+- **`@ai` Team Chat Dispatch**: Mention `@ai` (or click the `@ai` quick button) inside **Session Chat** from either the WebApp browser portal or the Native IDE to assign tasks to the AI Agent and receive its response directly in the shared team chat.
+
+### 2. WebApp Collaboration Portal: Vector SVG Icons & Syntax Highlighting
+- **Authentic File & Folder SVG Icons**: Replaced generic monochrome placeholders with color-coded vector SVG icons across the Workspace File Tree and Editor Tab Bar (`.tsx`/`.jsx`, `.ts`, `.js`, `.css`, `.html`, `.json`, `.swift`, `.py`, `.rs`, `.md`, images, audio, and folder types).
+- **Live Syntax Color Highlighting & Collaborator Overlay**: Upgraded the browser editor with a synchronized line-number gutter (`#lineGutter`), single-pass syntax color highlighting (`#codeHighlightContent`), and in-editor collaborator line-range highlight strips with floating cursor badges (`#editorCollabOverlay`).
+
+### 3. Concurrent Multi-Workspace AI Agent Execution
+- **Parallel Per-Workspace Agent Slots**: Each workspace and conversation runs inside an isolated `WorkspaceExecutionContext`. Multiple AI Agents can plan, edit files, and run builds/commands across multiple workspaces simultaneously without blocking the UI or mixing workspace paths.
+- **Live Background Workspace Indicators**: The sidebar displays per-workspace spinning indicators when background agents are active and completion badges when background runs finish.
+
+### 4. Multi-Endpoint Local LLM Connection Pool
+- **Simultaneous Multi-Node Local LLM Connections**: Register and connect to multiple Local LLM servers at the same time (local Ollama `:11434`, LM Studio `:1234`, vLLM `:8000`, llama.cpp `:8080`, Apple MLX, or remote LAN/Tailscale GPU workstations).
+- **Unified Model Pool & Auto-Failover**: Concurrently health-checks all enabled endpoints, aggregates every model into the unified picker (`endpointId::modelId`), routes inference to the exact node that hosts the selected model, and automatically fails over to another online Local LLM node if a server drops.
+
+### 5. Enterprise AI Governance, DLP & Cryptographic Audit Ledger
+- **DLP Secret & PII Redaction Gate**: Automatically scans and masks API keys (`sk-*`, `AIza*`, `AKIA*`), Bearer tokens, Private Keys, and PII before any prompt leaves the device, with support for strict **Air-Gapped / Local-Only Mode**.
+- **Tamper-Evident SHA-256 Audit Ledger**: Every AI prompt, model call, and tool execution is recorded in a hash-chained JSONL ledger (`enterprise_audit_chain.jsonl`) with one-click integrity verification and compliance export.
+- **Spend Caps & Organization Policy (`.microcode-org-policy.json`)**: Enforce daily/monthly USD budget limits, approved provider/model allowlists, and mandatory tool approval gates across engineering teams.
 
 ---
 
@@ -244,22 +273,29 @@ Everything you need to build, test, and ship in one unified native workspace:
 - **CI/CD Pipeline Viewer**: Direct GitHub Actions integration to track workflow runs, inspect step logs, and re-trigger jobs without context-switching to a browser.
 - **Interactive Playground & Cell Notebooks**: REPL scratchpad supporting instant code execution across Swift, Rust, Python, and Ardium with rich visual outputs.
 
-### 6. Real-Time CRDT Collaboration and Voice Dictation
+### 6. Real-Time CRDT Collaboration, AI Teammate & Voice Dictation
 Designed for modern distributed engineering teams:
-- **P2P CRDT Collaboration Engine**: Conflict-Free Replicated Data Types enabling real-time multi-user document editing with live remote cursor presence and zero merge conflicts.
+- **P2P & Tunnel Collaboration Engine**: Real-time multi-user document editing across Native macOS IDEs and the zero-install WebApp Collaboration Portal (`trycloudflare` / LAN / P2P) with live remote cursor presence and zero merge conflicts.
+- **AI Agent Teammate (`MicroCode AI`) & Live Follow Mode**: Exclusively during active Collab sessions, `MicroCode AI` participates as a visible teammate with live cursor/line-range highlights in both the Native AppKit editor and WebApp editor, 1-click **Follow AI** auto-scrolling, and `@ai` command dispatch in Session Chat.
 - **Voice Coding & Dictation**: Apple Speech-powered low-latency dictation and voice commands allowing hands-free code navigation and refactoring.
 
-### 7. Native Ardium Language Toolchain (v2.3)
+### 7. Enterprise Governance, Multi-Local LLM Pool & Multi-Workspace Concurrency
+Built for both sovereign local workflows and enterprise security requirements:
+- **Multi-Endpoint Local LLM Pool**: Connect simultaneously to multiple local and LAN inference servers (Ollama, LM Studio, vLLM, llama.cpp, Apple MLX, Dotmini Omni) with unified model routing and automatic node failover.
+- **Concurrent Multi-Workspace Agents**: Run autonomous AI agents in parallel across multiple workspaces at the same time with isolated per-workspace state and tool sandboxes.
+- **Enterprise DLP, Spend Caps & SHA-256 Audit Chain**: Pre-flight secret/PII redaction, Air-Gapped Local-Only enforcement, daily/monthly budget guardrails, and a tamper-evident SHA-256 hash-chained audit log.
+
+### 8. Native Ardium Language Toolchain (v2.3)
 Full first-class IDE support for the Ardium programming language:
 - **Full Syntax & AST Grammar**: Native Tree-sitter parser with syntax highlighting, CoreUI declarative UI syntax, and RAII `@owned` ownership tracking.
 - **Compiler Diagnostics & Runner**: In-editor diagnostic linting, playground evaluation, and live execution via `ArdiumRunner`.
 
-### 8. Dotmini Cloud GPU Dispatch and Sovereign AI
+### 9. Dotmini Cloud GPU Dispatch and Sovereign AI
 High-performance compute offloading when local hardware isn't enough:
 - **Cloud GPU Remote Dispatch**: One-click compute offloading to remote NVIDIA A100/H100 clusters for heavy training, fine-tuning, and batch inference.
 - **Dotmini Omni Sovereign Models**: Native local support for Dotmini Omni O1X Lite (0.8B) and Omni O1X Pro (3B MoE) for privacy-preserving offline inference.
 
-### 9. Native High-Performance macOS Core Architecture
+### 10. Native High-Performance macOS Core Architecture
 - **Pure Swift + SwiftUI + AppKit**: Built specifically for macOS 13+ (Ventura, Sonoma, Sequoia). Zero web engine overhead.
 - **Metal GPU Text Pipeline**: Smooth 120 FPS kinetic scrolling, sub-second cold boot, and less than 80 MB idle RAM consumption.
 - **Full PTY Terminal**: Native virtual terminal with ANSI 24-bit TrueColor, zsh/bash integration, and split panes.
@@ -406,13 +442,13 @@ flowchart TB
 
 ### Install from Release
 
-Download directly from our official portal at [**microcode.dotmini.net**](https://microcode.dotmini.net) or from [**GitHub Releases (v2.5.27)**](https://github.com/Dotmini/microcode/releases/tag/v2.5.27):
+Download directly from our official portal at [**microcode.dotmini.net**](https://microcode.dotmini.net) or from [**GitHub Releases (v2.5.40)**](https://github.com/Dotmini/microcode/releases/tag/v2.5.40):
 
-| Package | Size | Architecture | Direct Download Link |
-|:---|:---:|:---:|:---|
-| 💿 **macOS Disk Image (DMG)** | 127 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.27.dmg**](https://github.com/Dotmini/microcode/releases/download/v2.5.27/MicroCode-v2.5.27.dmg) |
-| 📦 **Component Installer (PKG)** | 59 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.27.pkg**](https://github.com/Dotmini/microcode/releases/download/v2.5.27/MicroCode-v2.5.27.pkg) |
-| 📄 **Cryptographic Checksums** | 176 B | All | [**View SHA256SUMS-v2.5.27.txt**](https://github.com/Dotmini/microcode/releases/download/v2.5.27/SHA256SUMS-v2.5.27.txt) |
+| Package | Architecture | Direct Download Link |
+|:---|:---:|:---|
+| 💿 **macOS Disk Image (DMG)** | Apple Silicon (ARM64) / Intel (x86_64) | [**Download MicroCode v2.5.40 DMG**](https://github.com/Dotmini/microcode/releases/tag/v2.5.40) |
+| 📦 **Component Installer (PKG)** | Apple Silicon (ARM64) / Intel (x86_64) | [**Download MicroCode v2.5.40 PKG**](https://github.com/Dotmini/microcode/releases/tag/v2.5.40) |
+| 📄 **Cryptographic Checksums** | All (`SHA256SUMS.txt`) | [**View v2.5.40 Release Checksums**](https://github.com/Dotmini/microcode/releases/tag/v2.5.40) |
 
 > **System Requirements**: macOS 13.0 (Ventura) or later · Native on Apple Silicon (M1/M2/M3/M4/M5).  
 > **Official Portal & Updates**: [https://microcode.dotmini.net](https://microcode.dotmini.net)
@@ -483,7 +519,7 @@ MicroCode is engineered with enterprise-grade defense-in-depth:
 - **100-Step Deep Security & Secret Leak Audit**: All tracked source code, commit history, and release packages pass our exhaustive 100-step credential scan. Zero hardcoded API keys, JWTs, or private keys.
 - **Strict Sandbox Isolation**: AI agent file edits and terminal commands are constrained to the active workspace directory with strict path boundary validation.
 - **Human-in-the-Loop (`⌘↵`) Gate**: High-risk tool calls (writing files, executing shell scripts, running git commands) are paused until explicitly authorized by the developer.
-- **Cryptographic Source Integrity**: 444 source files verified with SHA256 checksums (`CHECKSUMS.sha256`) checked in CI.
+- **Cryptographic Source Integrity**: 442 source files verified with SHA256 checksums (`CHECKSUMS.sha256`) checked in CI.
 - **macOS Keychain Storage**: User API keys and sessions are stored in the secure macOS Keychain (Apple Security Framework), never in plain-text project files.
 
 ---
