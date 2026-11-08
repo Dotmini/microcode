@@ -94,10 +94,28 @@ We built a **fully native macOS IDE from scratch** using SwiftUI, Rust, and Meta
 - **Simultaneous Multi-Node Local LLM Connections**: Register and connect to multiple Local LLM servers at the same time (local Ollama `:11434`, LM Studio `:1234`, vLLM `:8000`, llama.cpp `:8080`, Apple MLX, or remote LAN/Tailscale GPU workstations).
 - **Unified Model Pool & Auto-Failover**: Concurrently health-checks all enabled endpoints, aggregates every model into the unified picker (`endpointId::modelId`), routes inference to the exact node that hosts the selected model, and automatically fails over to another online Local LLM node if a server drops.
 
-### 5. Enterprise AI Governance, DLP & Cryptographic Audit Ledger
+### 5. Direct Subscription AI Login (Zero API-Key Cost)
+- **Use Your Existing AI Subscriptions Directly (`SubscriptionAuthManager` & `LocalSubscriptionGatewayService`)**: Sign in with 1-Click OAuth or embedded browser session to use **ChatGPT Plus / Pro / Team (Codex)**, **Claude Pro / Max**, **Google Gemini Advanced / CodeAssist**, **GitHub Copilot**, **Cursor**, **Qwen**, **Kimi**, and **Zhipu GLM** directly inside MicroCode — without paying extra per-token API fees.
+- **Automatic Token Refresh & Multi-Account Failover**: Credentials are stored in the macOS Keychain with background token refresh and automatic fallback across Subscription, BYOK API keys, and Local LLM pools.
+
+### 6. Bidirectional ACP (Agent Client Protocol) — Host, Server & Ghost Text
+- **ACP Host (`ACPHostService`)**: Connect external ACP-compatible coding agents (**Claude Code**, **Gemini CLI**, **OpenAI Codex CLI**, **Goose**, or any JSON-RPC 2.0 ACP binary) directly into MicroCode's native UI, streaming timeline, inline diff reviewer, and `⌘↵` permission gate.
+- **ACP Server (`ACPServerService`)**: Run MicroCode itself as a standards-compliant ACP Server over `stdio` or WebSocket so external orchestrators and CLI pipelines can invoke MicroCode's native agent and workspace tools.
+- **ACP Ghost Text Bridge (`ACPGhostTextBridge`)**: Real-time inline ghost-text code completions streamed directly from ACP agents and active subscription sessions.
+
+### 7. Two-Way Model Context Protocol (MCP Client + Built-In 35-Tool IDE MCP Server)
+- **External MCP Client (`ExternalMCPManager`)**: Auto-imports MCP servers from Claude Desktop (`claude_desktop_config.json`), Cursor, or custom `stdio`/SSE endpoints and injects their tools & resources directly into MicroCode's autonomous agent loop.
+- **Built-In MicroCode MCP Server (`MCPServer` / `microcode_mcp` / `mcp-server.py`)**: Exposes **35+ native MicroCode IDE tools** over loopback HTTP/SSE and `stdio` — including AST `find_symbol`, `file_read`/`patch_file`, `lsp_intelligence`, `computer_use_*` GUI automation, `device_interact` / `adb_execute` (iOS Sim & Android Emu), `preview_control`, `cell_run`, `ardium_run`, `api_studio`, and `database_studio`.
+
+### 8. Enterprise AI Governance, DLP & Cryptographic Audit Ledger
 - **DLP Secret & PII Redaction Gate**: Automatically scans and masks API keys (`sk-*`, `AIza*`, `AKIA*`), Bearer tokens, Private Keys, and PII before any prompt leaves the device, with support for strict **Air-Gapped / Local-Only Mode**.
 - **Tamper-Evident SHA-256 Audit Ledger**: Every AI prompt, model call, and tool execution is recorded in a hash-chained JSONL ledger (`enterprise_audit_chain.jsonl`) with one-click integrity verification and compliance export.
 - **Spend Caps & Organization Policy (`.microcode-org-policy.json`)**: Enforce daily/monthly USD budget limits, approved provider/model allowlists, and mandatory tool approval gates across engineering teams.
+
+### 9. Native Computer Use, Phone Companion & Portable `.arx` Capsules
+- **Vision-Guided Native Computer Use (`NativeComputerUseService`)**: Autonomous screen inspection, element clicking, typing, and keyboard shortcuts across macOS apps and embedded simulators.
+- **Phone Companion & QR Local LLM Gateway (`PhoneCompanionService`)**: Scan a QR code from your iPhone or Android to trigger **Build & Run**, approve agent tools, inspect live previews, or chat with your Mac's Local LLMs from your phone.
+- **Portable `.arx` Agent Capsules (`ARXCapsuleService`)**: Package and share complete agent threads, implementation plans, and workspace memory snapshots as native `.arx` files.
 
 ---
 
@@ -259,11 +277,14 @@ Test mobile and desktop applications without leaving your code editor:
 - **Android Physical & Emulator Mirroring**: High-performance ADB screen mirroring via custom `scrcpy-server` streaming pipeline with full touch, scroll, and keyboard forwarding.
 - **Photorealistic Metal 120 FPS Shaders**: Custom Metal shader pipeline rendering hardware device bezels, dynamic glass reflections, and simulated Dynamic Island / camera punch-holes at 120 Hz on ProMotion displays.
 
-### 4. Open VSX Marketplace and Extension Compatibility Host
-Extensibility without Electron's memory bloat:
+### 4. Open VSX Marketplace, Bidirectional ACP & 2-Way MCP Ecosystem
+Extensibility and agent interoperability without Electron's memory bloat:
+- **Bidirectional ACP (Agent Client Protocol)**: Act as an **ACP Host** to run external agents (Claude Code, Gemini CLI, Codex CLI, Goose) inside MicroCode's native UI and diff engine, or act as an **ACP Server** exposing MicroCode's agent over JSON-RPC 2.0 (`stdio` / WebSocket), plus real-time inline completions via **ACP Ghost Text Bridge**.
+- **2-Way Model Context Protocol (MCP)**:
+  - **MCP Client**: Connect to any external MCP server (databases, cloud APIs, browser tools, Slack/GitHub/Linear) with one-click import from Claude Desktop & Cursor configs.
+  - **Built-In MicroCode IDE MCP Server**: Exposes **35+ native IDE capabilities** (`file_read`, `patch_file`, `find_symbol`, `lsp_intelligence`, `computer_use_*`, `device_interact`, `adb_execute`, `preview_control`, `cell_run`, `ardium_compile`, `api_studio`, `database_studio`) so external agents can control MicroCode directly.
 - **Open VSX Marketplace Integration**: Search, download, install, and manage extensions directly from the open-source Open VSX registry.
 - **VS Code Extension Compatibility Host**: Integrated Node.js runtime (`vscode-compat-host`) emulating VS Code extension APIs for syntax grammars, themes, and snippets.
-- **Model Context Protocol (MCP)**: Full client/server MCP manager allowing MicroCode to interface with any external MCP server for live data, database querying, or cloud APIs.
 - **Sandboxed WASM Plugins**: Embedded Wasmtime engine executing lightweight WebAssembly plugins with strict CPU/memory quotas and zero unauthorized disk access.
 
 ### 5. Native Developer Studios (Database, API, CI/CD, Notebooks)
@@ -524,11 +545,34 @@ MicroCode is engineered with enterprise-grade defense-in-depth:
 
 ---
 
-## AI Provider Setup & Real-Time Dynamic Model Discovery
+## AI Provider Setup: Subscriptions, ACP, MCP, BYOK & Local LLM Pool
 
-MicroCode features a **100% Real-Time Model Discovery Engine**. Unlike legacy tools that hardcode or mock model names, MicroCode connects directly to official provider APIs (`/v1/models`) to fetch available models live with zero hardcoding. When providers release new models, they instantly appear in your model picker.
+MicroCode supports **four unified ways to power AI** inside the IDE — switchable on the fly from the chat bar:
 
-### Supported Providers (BYOK — Bring Your Own Key)
+### 1. Direct Subscription Login (Zero Per-Token API Fees)
+Sign in with your existing AI subscription via 1-Click OAuth or embedded web session (`SubscriptionAuthManager` & `LocalSubscriptionGatewayService`):
+
+| Subscription Provider | Supported Plans | Auth Method | Capabilities in MicroCode |
+|:---|:---|:---|:---|
+| **OpenAI ChatGPT** | Plus / Pro / Team | OAuth / Session Bridge | Autonomous Agent, Codex, ACP Ghost Text |
+| **Anthropic Claude** | Pro / Max / Team | OAuth / Claude Code CLI | Autonomous Agent, Extended Thinking, ACP |
+| **Google Gemini** | Gemini Advanced / CodeAssist | Google OAuth 2.0 | Autonomous Agent, 1M+ Context, Multimodal |
+| **GitHub Copilot** | Individual / Business / Enterprise | GitHub Device OAuth | SuperTab Autocomplete, Chat & Agent |
+| **Qwen / Kimi / GLM** | Consumer & Pro Subscriptions | Web Session / OAuth | Multi-turn Coding Agent & Fast Completions |
+
+### 2. Agent Client Protocol (ACP) & Model Context Protocol (MCP)
+
+| Protocol | Direction | Implementation | What It Enables |
+|:---|:---|:---|:---|
+| **ACP Host** | External Agent → MicroCode UI | `ACPHostService` (JSON-RPC 2.0 `stdio`) | Run `claude`, `gemini`, `codex`, `goose`, or custom ACP agents inside MicroCode with native diff cards & `⌘↵` approval |
+| **ACP Server** | External Client → MicroCode Agent | `ACPServerService` (`stdio` / WS) | Drive MicroCode's autonomous agent and workspace tools from external orchestrators |
+| **ACP Ghost Text** | ACP Agent → Editor Inline | `ACPGhostTextBridge` | Low-latency inline ghost-text completions powered by your active ACP agent |
+| **MCP Client** | External MCP → MicroCode Agent | `ExternalMCPManager` (`stdio` / SSE) | Auto-discover & call tools from Claude Desktop / Cursor MCP servers inside MicroCode |
+| **MCP Server** | External Agent → MicroCode IDE | `MCPServer` / `microcode_mcp` (`35+ tools`) | Let any MCP client control MicroCode's Editor, LSP, Device Dock, ADB/simctl, Computer Use, DB & API Studios |
+
+### 3. Supported Cloud & Local Providers (BYOK + Multi-Endpoint Local Pool)
+
+MicroCode also features a **100% Real-Time Model Discovery Engine** (`/v1/models`) with zero hardcoding:
 
 | Provider | Model Discovery | Local / Cloud | Environment Variable | Configuration View |
 |:---|:---|:---:|:---|:---|
@@ -537,8 +581,7 @@ MicroCode features a **100% Real-Time Model Discovery Engine**. Unlike legacy to
 | **Anthropic Claude** | Real-time live endpoint | Cloud | `ANTHROPIC_API_KEY` | Settings → AI Providers → Anthropic |
 | **DeepSeek** | Real-time via OpenAI-compat API | Cloud | `DEEPSEEK_API_KEY` | Settings → AI Providers → DeepSeek |
 | **xAI Grok** | Real-time via `/v1/models` | Cloud | `GROK_API_KEY` | Settings → AI Providers → Grok |
-| **Apple MLX** | On-device Apple Silicon server | **Local** | None (Local socket) | Settings → AI Providers → Local LLM |
-| **Ollama** | Automatic local port detection (`11434`) | **Local** | None (Local daemon) | Settings → AI Providers → Ollama |
+| **Multi-Node Local LLM Pool** | Concurrent discovery across Ollama (`11434`), LM Studio (`1234`), vLLM (`8000`), llama.cpp (`8080`), Apple MLX & LAN/Tailscale nodes | **Local / LAN Pool** | None (Multi-endpoint pool) | Settings → AI Providers → Local LLM |
 | **Alibaba Qwen** | Real-time DashScope endpoint | Cloud | `QWEN_API_KEY` | Settings → AI Providers → Qwen |
 | **Zhipu GLM** | Real-time BigModel endpoint | Cloud | `GLM_API_KEY` | Settings → AI Providers → GLM |
 | **Dotmini Omni** | Sovereign AI (0.8B / 3B MoE) | **Local / Cloud** | `DOTMINI_PLATFORM_KEY` | Settings → AI Providers → Dotmini |
