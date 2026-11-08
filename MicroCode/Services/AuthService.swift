@@ -107,6 +107,7 @@ final class AuthService: ObservableObject {
         guard let session = SupabaseAuthService.shared.session else { return }
         let name = displayName.isEmpty ? cleanEmail.components(separatedBy: "@").first ?? "User" : displayName
         let userID = session.userID
+        let planLower = SupabaseAuthService.shared.entitlement.plan.lowercased()
         let user = IDXUser(
             id: userID.isEmpty ? cleanEmail : userID,
             email: cleanEmail,
@@ -115,7 +116,7 @@ final class AuthService: ObservableObject {
             provider: .email,
             createdAt: Date(),
             lastLoginAt: Date(),
-            isPremium: ["pro", "enterprise", "admin"].contains(SupabaseAuthService.shared.entitlement.plan),
+            isPremium: ["starter", "lite", "pro", "advanced", "business", "team", "bundle_pro", "bundle", "enterprise", "admin"].contains(where: { planLower.contains($0) }),
             isEarlyAccess: false
         )
         currentUser = user

@@ -22,6 +22,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     let remoteURL: String?
     
     @Published var isConnected = false
+    @Published private(set) var isHandshakeReady = false
     @Published var availableTools: [MCPClient.MCPToolSchema] = []
     @Published var error: String? = nil
     @Published var callCount: Int = 0
@@ -36,6 +37,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     private var pendingRequests: [Int: (Result<Any, Error>) -> Void] = [:]
     private var requestIdCounter = 1
     private var manuallyStopped = false
+    private var isStarting = false
     private var readCache: [String: (output: String, timestamp: Date)] = [:]
     
     init(server: DiscoveredMCPServer) {
@@ -51,11 +53,12 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     // MARK: - Lifecycle
     
     func start() {
-        guard !isConnected else { return }
+        guard !isConnected && !isStarting else { return }
         manuallyStopped = false
+        isStarting = true
+        isHandshakeReady = false
         
         if let httpURL = remoteURL, !httpURL.isEmpty {
-            isConnected = true
             error = nil
             sendRequest(method: "initialize", params: [
                 "protocolVersion": "2025-06-18",
@@ -64,12 +67,17 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             ] as [String: Any]) { [weak self] result in
                 switch result {
                 case .success(_):
+                    self?.isStarting = false
+                    self?.isConnected = true
+                    self?.isHandshakeReady = true
                     self?.sendNotification(method: "notifications/initialized")
                     self?.fetchTools()
                     print("[ExternalMCP:\(self?.serverName ?? "?")] HTTP Initialized (\(httpURL))")
                 case .failure(let err):
+                    self?.isStarting = false
                     self?.error = "HTTP Init failed: \(err.localizedDescription)"
                     self?.isConnected = false
+                    self?.isHandshakeReady = false
                 }
             }
             return
@@ -80,6 +88,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         // Resolve command path (prioritizing MicroCode Portable Runtimes)
         let commandPath = resolveCommand(command)
         guard let execPath = commandPath else {
+            isStarting = false
             error = "Command not found: \(command)"
             print("[ExternalMCP:\(serverName)] Command not found: \(command)")
             return
@@ -141,7 +150,9 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         process.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.isStarting = false
                 self.isConnected = false
+                self.isHandshakeReady = false
                 self.availableTools = []
                 let crashErr = NSError(
                     domain: "ExternalMCP",
@@ -169,7 +180,6 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         
         do {
             try process.run()
-            isConnected = true
             error = nil
             print("[ExternalMCP:\(serverName)] Started: \(execPath) \(args.joined(separator: " "))")
             
@@ -177,27 +187,37 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             sendRequest(method: "initialize", params: [
                 "protocolVersion": "2025-06-18",
                 "capabilities": ["roots": ["listChanged": false]],
-                "clientInfo": ["name": "MicroCode-HyperMesh", "version": "2.3.1"]
+                "clientInfo": ["name": "MicroCode-HyperMesh", "version": "3.0.0"]
             ] as [String: Any]) { [weak self] result in
                 switch result {
                 case .success(_):
+                    self?.isStarting = false
+                    self?.isConnected = true
+                    self?.isHandshakeReady = true
                     self?.sendNotification(method: "notifications/initialized")
                     self?.fetchTools()
                     print("[ExternalMCP:\(self?.serverName ?? "?")] Initialized")
                 case .failure(let err):
+                    self?.isStarting = false
+                    self?.isConnected = false
+                    self?.isHandshakeReady = false
                     self?.error = "Init failed: \(err.localizedDescription)"
                     print("[ExternalMCP:\(self?.serverName ?? "?")] Init error: \(err)")
                 }
             }
         } catch {
+            self.isStarting = false
             self.error = "Failed to start: \(error.localizedDescription)"
-            isConnected = false
+            self.isConnected = false
+            self.isHandshakeReady = false
             print("[ExternalMCP:\(serverName)] Failed to start: \(error)")
         }
     }
     
     func stop() {
         manuallyStopped = true
+        isStarting = false
+        isHandshakeReady = false
         let shutdownError = NSError(domain: "ExternalMCP", code: -2, userInfo: [NSLocalizedDescriptionKey: "Connection closed"])
         let callbacks = pendingRequests.values
         pendingRequests.removeAll()
@@ -212,14 +232,30 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         availableTools = []
         stdoutBuffer.removeAll(keepingCapacity: false)
     }
+
+    /// Wakes a dormant/hibernated MCP server on demand and awaits full JSON-RPC `initialize` handshake completion.
+    func ensureReadyForCall(timeoutSeconds: TimeInterval = 12.0) async throws {
+        if isHandshakeReady && isConnected { return }
+        if !isStarting && !isConnected {
+            start()
+        }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if isHandshakeReady && isConnected { return }
+            if !isStarting && !isConnected, let err = error {
+                throw NSError(domain: "ExternalMCP", code: -4, userInfo: [NSLocalizedDescriptionKey: "MCP server '\(serverName)' failed to initialize: \(err)"])
+            }
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        if !isHandshakeReady {
+            throw NSError(domain: "ExternalMCP", code: -5, userInfo: [NSLocalizedDescriptionKey: "MCP server '\(serverName)' handshake timed out after \(Int(timeoutSeconds))s"])
+        }
+    }
     
     // MARK: - Tool Calling (with Telemetry & Read Cache)
     
     func callTool(name: String, arguments: [String: Any]) async throws -> String {
-        if !isConnected {
-            start()
-            try? await Task.sleep(nanoseconds: 600_000_000)
-        }
+        try await ensureReadyForCall(timeoutSeconds: 12.0)
         
         // Check 3s read-only cache for idempotent inspection calls
         let lower = name.lowercased()
@@ -445,11 +481,19 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     }
     
     private func registerToolsWithAgent() {
-        for schema in availableTools {
+        registerToolSchemas(availableTools)
+    }
+
+    func registerCachedToolsIfNeeded(_ schemas: [MCPClient.MCPToolSchema]) {
+        registerToolSchemas(schemas)
+    }
+
+    private func registerToolSchemas(_ schemas: [MCPClient.MCPToolSchema]) {
+        for schema in schemas {
             let namespacedName = "mcp__\(serverName)__\(schema.name)"
             let proxyTool = ExternalMCPTool(connection: self, schema: schema, serverName: serverName)
             AgentToolBox.shared.register(proxyTool)
-            print("[ExternalMCP:\(serverName)] Registered tool: \(namespacedName)")
+            _ = namespacedName
         }
     }
     
@@ -548,6 +592,17 @@ struct ExternalMCPTool: AgentTool {
         }
         return params
     }
+
+    var rawParametersSchema: [String: Any]? {
+        var unwrapped = AnyCodable.unwrapJSONObject(schema.inputSchema)
+        if unwrapped["type"] == nil {
+            unwrapped["type"] = "object"
+        }
+        if (unwrapped["type"] as? String) == "object" && unwrapped["properties"] == nil {
+            unwrapped["properties"] = [String: Any]()
+        }
+        return unwrapped
+    }
     
     func execute(params: [String: Any]) async throws -> String {
         try await connection.callTool(name: schema.name, arguments: params)
@@ -562,10 +617,15 @@ class ExternalMCPManager: ObservableObject {
     
     @Published var connections: [String: ExternalMCPConnection] = [:]
     @Published var totalToolCount: Int = 0
+    @Published var explicitlyMountedTools: Set<String> = []
+    private var failedProbeServers: Set<String> = []
+    private var activeProbeTask: Task<Void, Never>?
     
     private init() {}
     
-    /// Discover MCP servers from workspace & IDE config files (lazy by default so opening a folder doesn't spawn 5+ Node/Python processes)
+    /// Discover MCP servers from workspace & IDE config files.
+    /// Cached manifests are mounted instantaneously at 0 MB RAM cost; newly discovered servers
+    /// without a cached manifest are probed in a bounded background queue (max 2 concurrent) and cached permanently.
     func syncWithDiscoveredServers(_ servers: [DiscoveredMCPServer], autoStart: Bool = false) {
         let currentNames = Set(servers.map(\.name))
         for (name, conn) in connections where !currentNames.contains(name) && conn.source != "Synthesized" {
@@ -573,17 +633,113 @@ class ExternalMCPManager: ObservableObject {
             connections.removeValue(forKey: name)
         }
         
+        var uncachedServerNames: [String] = []
+        let router = PNSGanglionRouter.shared
+        
         for server in servers {
-            if connections[server.name] == nil {
-                let connection = ExternalMCPConnection(server: server)
-                connections[server.name] = connection
+            let conn: ExternalMCPConnection
+            if let existing = connections[server.name] {
+                conn = existing
+            } else {
+                let created = ExternalMCPConnection(server: server)
+                connections[server.name] = created
+                conn = created
+            }
+            
+            if let cached = router.cachedServerManifests[server.name], !cached.isEmpty {
+                conn.registerCachedToolsIfNeeded(cached)
                 if autoStart {
-                    connection.start()
+                    conn.start()
                 }
+            } else if autoStart {
+                conn.start()
+            } else if !failedProbeServers.contains(server.name) {
+                uncachedServerNames.append(server.name)
             }
         }
         
-        updateToolCount()
+        router.syncManifestsFromExternalMCP()
+        refreshToolCountNow()
+        
+        if !uncachedServerNames.isEmpty {
+            scheduleBackgroundManifestProbe(serverNames: uncachedServerNames, hibernateAfterProbe: !autoStart)
+        }
+    }
+
+    private func scheduleBackgroundManifestProbe(serverNames: [String], hibernateAfterProbe: Bool) {
+        activeProbeTask?.cancel()
+        activeProbeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let batchSize = 2
+            var idx = 0
+            while idx < serverNames.count {
+                if Task.isCancelled { return }
+                let end = min(idx + batchSize, serverNames.count)
+                let slice = Array(serverNames[idx..<end])
+                await withTaskGroup(of: Void.self) { group in
+                    for name in slice {
+                        group.addTask { @MainActor [weak self] in
+                            guard let self else { return }
+                            await self.probeSingleServer(name: name, hibernateAfterProbe: hibernateAfterProbe, timeoutSeconds: 6.5)
+                        }
+                    }
+                }
+                idx = end
+            }
+            self.refreshToolCountNow()
+        }
+    }
+
+    private func probeSingleServer(name: String, hibernateAfterProbe: Bool, timeoutSeconds: TimeInterval) async {
+        guard let conn = connections[name] else { return }
+        if let cached = PNSGanglionRouter.shared.cachedServerManifests[name], !cached.isEmpty {
+            conn.registerCachedToolsIfNeeded(cached)
+            return
+        }
+        conn.start()
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if Task.isCancelled { return }
+            if !conn.availableTools.isEmpty { break }
+            if !conn.isConnected && conn.error != nil { break }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+        if !conn.availableTools.isEmpty {
+            let discoveredTools = conn.availableTools
+            conn.registerCachedToolsIfNeeded(discoveredTools)
+            let shouldHibernate = hibernateAfterProbe && conn.remoteURL == nil && conn.callCount == 0
+            if shouldHibernate {
+                conn.stop()
+            }
+            PNSGanglionRouter.shared.cacheManifest(
+                serverName: name,
+                tools: discoveredTools,
+                isHibernated: shouldHibernate
+            )
+            refreshToolCountNow()
+        } else {
+            failedProbeServers.insert(name)
+            if hibernateAfterProbe && conn.remoteURL == nil && conn.callCount == 0 {
+                conn.stop()
+            }
+        }
+    }
+
+    /// Ensures uncached MCP servers (optionally matching a keyword) are probed immediately before `search_tools`.
+    func probeServersNowIfNeeded(matching query: String = "") async {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let candidates = connections.keys.filter { name in
+            let hasLive = !(connections[name]?.availableTools.isEmpty ?? true)
+            let hasCached = !(PNSGanglionRouter.shared.cachedServerManifests[name]?.isEmpty ?? true)
+            if hasLive || hasCached || failedProbeServers.contains(name) { return false }
+            if q.isEmpty { return true }
+            return name.lowercased().contains(q) || true
+        }.sorted()
+        guard !candidates.isEmpty else { return }
+        for name in candidates.prefix(4) {
+            await probeSingleServer(name: name, hibernateAfterProbe: true, timeoutSeconds: 4.0)
+        }
+        refreshToolCountNow()
     }
     
     /// Get all connected server names
@@ -591,11 +747,15 @@ class ExternalMCPManager: ObservableObject {
         connections.filter(\.value.isConnected).map(\.key).sorted()
     }
     
-    /// Get all available tools across all servers
+    /// Get all available tools across both live connected servers and hibernated cached-manifest servers
     var allTools: [(serverName: String, tool: MCPClient.MCPToolSchema)] {
         var tools: [(String, MCPClient.MCPToolSchema)] = []
-        for (name, conn) in connections where conn.isConnected {
-            for tool in conn.availableTools {
+        let router = PNSGanglionRouter.shared
+        for (name, conn) in connections.sorted(by: { $0.key < $1.key }) {
+            let effectiveTools = !conn.availableTools.isEmpty
+                ? conn.availableTools
+                : (router.cachedServerManifests[name] ?? [])
+            for tool in effectiveTools {
                 tools.append((name, tool))
             }
         }
@@ -749,6 +909,9 @@ class ExternalMCPManager: ObservableObject {
         refreshToolCountNow()
         
         let registeredNames = conn.availableTools.map { "mcp__\(slug)__\($0.name)" }
+        for name in registeredNames {
+            explicitlyMountedTools.insert(name)
+        }
         return """
         ✅ Synthesized & Hot-Mounted MCP Server '\(slug)'
         Script: \(scriptURL.path)
@@ -763,17 +926,32 @@ class ExternalMCPManager: ObservableObject {
         if connections.isEmpty {
             return "No external MCP servers configured. Use `mcp_orchestrator` with action='synthesize' to create a custom MCP server on the fly."
         }
+        refreshToolCountNow()
+        let router = PNSGanglionRouter.shared
         var lines: [String] = ["Hyper-Mesh MCP Status (\(connections.count) servers, \(totalToolCount) external tools):"]
         for (name, conn) in connections.sorted(by: { $0.key < $1.key }) {
-            let state = conn.isConnected ? "ONLINE" : "OFFLINE"
-            let toolsList = conn.availableTools.map(\.name).joined(separator: ", ")
-            lines.append("- [\(state)] \(name) (source: \(conn.source), calls: \(conn.callCount), avg: \(conn.avgLatencyMs)ms, heals: \(conn.autoRestartCount)) -> tools: [\(toolsList)]")
+            let effectiveTools = !conn.availableTools.isEmpty
+                ? conn.availableTools
+                : (router.cachedServerManifests[name] ?? [])
+            let state: String
+            if conn.isConnected {
+                state = "ONLINE"
+            } else if !effectiveTools.isEmpty {
+                state = "READY (HIBERNATED)"
+            } else if let err = conn.error, !err.isEmpty {
+                state = "ERROR: \(err)"
+            } else {
+                state = "STANDBY"
+            }
+            let toolsList = effectiveTools.map(\.name).joined(separator: ", ")
+            lines.append("- [\(state)] \(name) (source: \(conn.source), calls: \(conn.callCount), avg: \(conn.avgLatencyMs)ms, heals: \(conn.autoRestartCount)) -> tools (\(effectiveTools.count)): [\(toolsList)]")
         }
         return lines.joined(separator: "\n")
     }
     
     /// Stop all connections
     func stopAll() {
+        activeProbeTask?.cancel()
         for (_, conn) in connections {
             conn.stop()
         }
@@ -783,6 +961,7 @@ class ExternalMCPManager: ObservableObject {
     
     /// Restart a specific server
     func restartServer(_ name: String) {
+        failedProbeServers.remove(name)
         if let conn = connections[name] {
             conn.stop()
             conn.start()
@@ -790,7 +969,12 @@ class ExternalMCPManager: ObservableObject {
     }
     
     func refreshToolCountNow() {
-        totalToolCount = connections.values.reduce(0) { $0 + $1.availableTools.count }
+        let router = PNSGanglionRouter.shared
+        totalToolCount = connections.reduce(0) { sum, entry in
+            let liveCount = entry.value.availableTools.count
+            if liveCount > 0 { return sum + liveCount }
+            return sum + (router.cachedServerManifests[entry.key]?.count ?? 0)
+        }
     }
     
     private func updateToolCount() {

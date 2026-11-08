@@ -48,9 +48,39 @@ struct JSONRPCNotification<T: Codable>: Codable {
 
 // MARK: - LSP Initialize Types
 
+enum LSPJSONValue: Codable {
+    case bool(Bool)
+    case int(Int)
+    case string(String)
+    case array([LSPJSONValue])
+    case object([String: LSPJSONValue])
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let v = try? c.decode(Bool.self) { self = .bool(v); return }
+        if let v = try? c.decode(Int.self) { self = .int(v); return }
+        if let v = try? c.decode(String.self) { self = .string(v); return }
+        if let v = try? c.decode([LSPJSONValue].self) { self = .array(v); return }
+        if let v = try? c.decode([String: LSPJSONValue].self) { self = .object(v); return }
+        self = .object([:])
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .bool(let v): try c.encode(v)
+        case .int(let v): try c.encode(v)
+        case .string(let v): try c.encode(v)
+        case .array(let v): try c.encode(v)
+        case .object(let v): try c.encode(v)
+        }
+    }
+}
+
 struct InitializeParams: Codable {
     let processId: Int?
     let rootUri: String?
+    let initializationOptions: [String: LSPJSONValue]?
     let capabilities: ClientCapabilities
 }
 
@@ -62,6 +92,83 @@ struct TextDocumentClientCapabilities: Codable {
     let completion: CompletionClientCapabilities?
     let hover: HoverClientCapabilities?
     let definition: DefinitionClientCapabilities?
+    var semanticTokens: SemanticTokensClientCapabilities? = nil
+}
+
+/// LSP 3.16 semantic tokens client capability (VS Code-style compiler-accurate highlighting).
+struct SemanticTokensClientCapabilities: Codable {
+    struct Requests: Codable {
+        let full: Bool
+        let range: Bool
+    }
+    let dynamicRegistration: Bool
+    let requests: Requests
+    let tokenTypes: [String]
+    let tokenModifiers: [String]
+    let formats: [String]
+    let overlappingTokenSupport: Bool
+    let multilineTokenSupport: Bool
+
+    static let standard = SemanticTokensClientCapabilities(
+        dynamicRegistration: false,
+        requests: Requests(full: true, range: false),
+        tokenTypes: ["namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
+                     "parameter", "variable", "property", "enumMember", "event", "function", "method",
+                     "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator",
+                     "decorator"],
+        tokenModifiers: ["declaration", "definition", "readonly", "static", "deprecated", "abstract",
+                         "async", "modification", "documentation", "defaultLibrary"],
+        formats: ["relative"],
+        overlappingTokenSupport: false,
+        multilineTokenSupport: false
+    )
+}
+
+struct LSPSemanticTokensLegend: Codable {
+    let tokenTypes: [String]
+    let tokenModifiers: [String]
+}
+
+/// `semanticTokensProvider` may be an object (with legend) or absent. Decoding never throws so that
+/// unusual server shapes can't break `initialize`.
+struct LSPSemanticTokensProvider: Codable {
+    let legend: LSPSemanticTokensLegend?
+    let full: Bool
+
+    private enum CodingKeys: String, CodingKey { case legend, full }
+
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        legend = try? c?.decodeIfPresent(LSPSemanticTokensLegend.self, forKey: .legend)
+        if let b = try? c?.decodeIfPresent(Bool.self, forKey: .full) {
+            full = b
+        } else {
+            full = (try? c?.decodeIfPresent(LSPJSONValue.self, forKey: .full)) != nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(legend, forKey: .legend)
+        try c.encode(full, forKey: .full)
+    }
+}
+
+struct LSPSemanticTokensResult: Decodable {
+    let data: [Int]
+}
+
+struct LSPSemanticTokensParams: Codable {
+    let textDocument: TextDocumentIdentifier
+}
+
+/// A decoded semantic token (absolute position, UTF-16 columns).
+struct LSPSemanticToken: Sendable {
+    let line: Int
+    let character: Int
+    let length: Int
+    let type: String
+    let modifiers: Set<String>
 }
 
 struct CompletionClientCapabilities: Codable {
@@ -89,6 +196,7 @@ struct ServerCapabilities: Codable {
     let completionProvider: CompletionOptions?
     let hoverProvider: Bool?
     let definitionProvider: Bool?
+    var semanticTokensProvider: LSPSemanticTokensProvider? = nil
 }
 
 struct CompletionOptions: Codable {
@@ -645,6 +753,7 @@ class LSPClientService: ObservableObject {
     private let decoder = JSONDecoder()
     
     private var readTask: Task<Void, Never>?
+    private var stderrTask: Task<Void, Never>?
     
     // Thread-safe cache for resolved binaries (stores Optional<String> so missing binaries are also cached)
     nonisolated(unsafe) private static var resolvedBinariesCache: [String: String?] = [:]
@@ -714,20 +823,52 @@ class LSPClientService: ObservableObject {
         // Setup process
         let process = Process()
         process.executableURL = URL(fileURLWithPath: serverPath)
+        var procEnv = ProcessInfo.processInfo.environment
         
-        // Server-specific arguments
+        // Server-specific arguments & memory bounds
         switch serverType {
         case .pyright, .typescriptServer, .intelephense:
             process.arguments = ["--stdio"]
+            procEnv["NODE_OPTIONS"] = "--max-old-space-size=384"
         case .dart:
             process.arguments = ["language-server", "--protocol=lsp"]
         case .solargraph:
             process.arguments = ["stdio"]
+        case .gopls:
+            // Cap Go runtime heap & disable persistent remote daemon so ChildRSS stays <320MB instead of ~1GB
+            process.arguments = ["-remote=off"]
+            procEnv["GOMEMLIMIT"] = "280MiB"
+            procEnv["GOGC"] = "50"
+        case .rustAnalyzer:
+            process.arguments = []
+            procEnv["RA_LRU_CAP"] = "64"
+        case .clangd:
+            let rootPath = URL(string: rootUri)?.path ?? ""
+            let fm = FileManager.default
+            let hasCompileDB = !rootPath.isEmpty && (
+                fm.fileExists(atPath: (rootPath as NSString).appendingPathComponent("compile_commands.json")) ||
+                fm.fileExists(atPath: (rootPath as NSString).appendingPathComponent("build/compile_commands.json")) ||
+                fm.fileExists(atPath: (rootPath as NSString).appendingPathComponent("compile_flags.txt"))
+            )
+            var clangdArgs = [
+                "--limit-results=50",
+                "--limit-references=100",
+                "--header-insertion=never",
+                "--function-arg-placeholders=0",
+                "--pch-storage=disk",
+                "-j=1",
+                "--background-index-priority=background"
+            ]
+            if !hasCompileDB {
+                clangdArgs.append("--background-index=false")
+            }
+            process.arguments = clangdArgs
         case .sourcekitLSP:
             process.arguments = []
         default:
             process.arguments = []
         }
+        process.environment = procEnv
         
         // Setup pipes
         let stdinPipe = Pipe()
@@ -765,10 +906,12 @@ class LSPClientService: ObservableObject {
         
         // Monitor stderr (capture the pipe before entering detached task)
         let stderrHandle = stderrPipe.fileHandleForReading
-        Task.detached {
-            for try await line in stderrHandle.bytes.lines {
-                print("[LSP stderr] \(line)")
-            }
+        self.stderrTask = Task.detached(priority: .background) {
+            do {
+                for try await _ in stderrHandle.bytes.lines {
+                    if Task.isCancelled { break }
+                }
+            } catch {}
         }
         
         // Send initialize request
@@ -781,13 +924,32 @@ class LSPClientService: ObservableObject {
         print("✅ [LSP] \(serverType.rawValue) initialized successfully")
     }
     
-    /// Stop the language server
+    /// Stop the language server and reap child process asynchronously so zero zombie (<defunct>) processes remain
     func stop() {
         readTask?.cancel()
         readTask = nil
+        stderrTask?.cancel()
+        stderrTask = nil
         
-        process?.terminate()
-        process = nil
+        try? stdin?.fileHandleForWriting.close()
+        try? stdout?.fileHandleForReading.close()
+        try? stderr?.fileHandleForReading.close()
+        if let proc = process {
+            process = nil
+            DispatchQueue.global(qos: .utility).async {
+                if proc.isRunning {
+                    proc.terminate()
+                    let deadline = Date().addingTimeInterval(0.8)
+                    while proc.isRunning && Date() < deadline {
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                    if proc.isRunning {
+                        kill(proc.processIdentifier, SIGKILL)
+                    }
+                }
+                proc.waitUntilExit()
+            }
+        }
         stdin = nil
         stdout = nil
         stderr = nil
@@ -1090,11 +1252,42 @@ class LSPClientService: ObservableObject {
     
     // MARK: - LSP Protocol Methods
     
-    /// Initialize the server
+    /// Initialize the server with memory-bounded options for heavy language servers
     private func initialize(rootUri: String) async throws -> InitializeResult {
+        let initOptions: [String: LSPJSONValue]? = {
+            switch serverType {
+            case .rustAnalyzer:
+                return [
+                    "lru": .object(["capacity": .int(64)]),
+                    "numThreads": .int(2),
+                    "checkOnSave": .bool(false),
+                    "files": .object(["watcher": .string("client")]),
+                    "cargo": .object([
+                        "buildScripts": .object(["enable": .bool(false)])
+                    ]),
+                    "procMacro": .object(["enable": .bool(false)])
+                ]
+            case .gopls:
+                return [
+                    "staticcheck": .bool(false),
+                    "completeUnimported": .bool(false),
+                    "directoryFilters": .array([
+                        .string("-node_modules"),
+                        .string("-vendor"),
+                        .string("-target"),
+                        .string("-build"),
+                        .string("-.git")
+                    ])
+                ]
+            default:
+                return nil
+            }
+        }()
+
         let params = InitializeParams(
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             rootUri: rootUri,
+            initializationOptions: initOptions,
             capabilities: ClientCapabilities(
                 textDocument: TextDocumentClientCapabilities(
                     completion: CompletionClientCapabilities(
@@ -1108,7 +1301,8 @@ class LSPClientService: ObservableObject {
                     ),
                     definition: DefinitionClientCapabilities(
                         linkSupport: true
-                    )
+                    ),
+                    semanticTokens: .standard
                 )
             )
         )
@@ -1171,6 +1365,41 @@ class LSPClientService: ObservableObject {
             let arrResp = try decoder.decode(JSONRPCResponse<[CompletionItem]>.self, from: responseData)
             if let error = arrResp.error { throw LSPError.serverError(error.code, error.message) }
             return arrResp.result ?? []
+        }.value
+    }
+    
+    /// Request full-document semantic tokens and decode them with the server legend (LSP 3.16).
+    func semanticTokens(uri: String) async throws -> [LSPSemanticToken] {
+        guard let provider = serverCapabilities?.semanticTokensProvider,
+              provider.full, let legend = provider.legend else { return [] }
+        let params = LSPSemanticTokensParams(textDocument: TextDocumentIdentifier(uri: uri))
+        let responseData = try await sendRawRequest(method: "textDocument/semanticTokens/full", params: params)
+        return try await Task.detached(priority: .utility) {
+            let decoder = JSONDecoder()
+            let resp = try decoder.decode(JSONRPCResponse<LSPSemanticTokensResult>.self, from: responseData)
+            if let error = resp.error { throw LSPError.serverError(error.code, error.message) }
+            guard let data = resp.result?.data else { return [] }
+            var out: [LSPSemanticToken] = []
+            out.reserveCapacity(data.count / 5)
+            var line = 0
+            var col = 0
+            var i = 0
+            while i + 4 < data.count {
+                let dLine = data[i], dStart = data[i + 1], len = data[i + 2], typeIdx = data[i + 3], modBits = data[i + 4]
+                if dLine > 0 { line += dLine; col = dStart } else { col += dStart }
+                if typeIdx >= 0, typeIdx < legend.tokenTypes.count, len > 0 {
+                    var mods = Set<String>()
+                    if modBits != 0 {
+                        for (bit, name) in legend.tokenModifiers.enumerated() where (modBits >> bit) & 1 == 1 {
+                            mods.insert(name)
+                        }
+                    }
+                    out.append(LSPSemanticToken(line: line, character: col, length: len,
+                                                type: legend.tokenTypes[typeIdx], modifiers: mods))
+                }
+                i += 5
+            }
+            return out
         }.value
     }
     

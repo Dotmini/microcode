@@ -566,6 +566,27 @@ public final class SyntaxCache: @unchecked Sendable {
 
 // MARK: - Incremental Lexer
 
+/// Cooperative cancellation flag shared into `DispatchQueue.concurrentPerform` worker threads
+/// (where Swift Concurrency's task-local `Task.isCancelled` is not propagated).
+public final class LexerCancelToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _cancelled = false
+
+    public init() {}
+
+    public var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _cancelled
+    }
+
+    public func cancel() {
+        lock.lock()
+        _cancelled = true
+        lock.unlock()
+    }
+}
+
 /// Wraps a lexer to provide incremental tokenization using a cache.
 ///
 /// All `retokenize*` entry points accept an optional `lineStarts` table (`lineStarts[i]` = UTF-16 offset of the
@@ -588,13 +609,30 @@ public final class IncrementalLexer: @unchecked Sendable {
     
     /// Initialize with a document
     public func initialize(with document: String) {
-        // Count lines without materialising them (equivalent to `components(separatedBy: "\n").count`).
-        var lineCount = 1
-        for byte in document.utf8 where byte == 0x0A { lineCount += 1 }
+        let lineCount = Self.countNewlinesFast(in: document) + 1
         cache.initialize(withLineCount: lineCount)
-        
-        // Initial tokenization is deferred to the first retokenizeDirtyRegions call
-        // This prevents blocking the main thread during document load
+    }
+
+    /// Initialize directly from a precomputed line count (O(1), zero character scans).
+    public func initialize(withLineCount lineCount: Int) {
+        cache.initialize(withLineCount: max(1, lineCount))
+    }
+
+    private static func countNewlinesFast(in document: String) -> Int {
+        var newlines = 0
+        let usedContiguous: Void? = document.utf8.withContiguousStorageIfAvailable { buf in
+            guard let base = buf.baseAddress else { return }
+            let n = buf.count
+            var i = 0
+            while i < n {
+                if base[i] == 0x0A { newlines += 1 }
+                i &+= 1
+            }
+        }
+        if usedContiguous == nil {
+            for byte in document.utf8 where byte == 0x0A { newlines += 1 }
+        }
+        return newlines
     }
     
     /// Full document tokenization (used for initial load)
@@ -628,7 +666,7 @@ public final class IncrementalLexer: @unchecked Sendable {
         // ZOMBIE KILLER: Check if this task is already cancelled
         if Task.isCancelled { return [] }
         
-        guard let pass = runDirtyPass(in: document, lineStarts: lineStarts) else {
+        guard let pass = runDirtyPass(in: document, lineStarts: lineStarts, cancelToken: nil) else {
             // Nothing dirty: materialise from the cache.
             if let starts = lineStarts, starts.count == cache.lineCount {
                 return cache.allSyntaxTokens(lineStarts: starts)
@@ -648,19 +686,34 @@ public final class IncrementalLexer: @unchecked Sendable {
         public let isFullDocument: Bool
     }
     
-    public func retokenizeDirtyRegionsIncremental(in document: String, lineStarts: [Int]? = nil) -> IncrementalHighlightUpdate {
-        if Task.isCancelled {
+    public func retokenizeDirtyRegionsIncremental(
+        in document: String,
+        lineStarts: [Int]? = nil,
+        cancelToken: LexerCancelToken? = nil,
+        initialMaxLine: Int? = nil
+    ) -> IncrementalHighlightUpdate {
+        if Task.isCancelled || cancelToken?.isCancelled == true {
             return IncrementalHighlightUpdate(tokens: [], dirtyCharRange: nil, isFullDocument: false)
         }
         
-        guard let pass = runDirtyPass(in: document, lineStarts: lineStarts) else {
+        guard let pass = runDirtyPass(in: document, lineStarts: lineStarts, cancelToken: cancelToken) else {
             return IncrementalHighlightUpdate(tokens: [], dirtyCharRange: NSRange(location: 0, length: 0), isFullDocument: false)
         }
-        if pass.cancelled {
+        if pass.cancelled || cancelToken?.isCancelled == true {
             return IncrementalHighlightUpdate(tokens: [], dirtyCharRange: nil, isFullDocument: false)
         }
         
         if pass.isInitialFullPass || pass.minLine > pass.maxLine || (pass.maxLine - pass.minLine) > 80 {
+            if pass.isInitialFullPass, let maxLine = initialMaxLine {
+                if maxLine < 0 {
+                    // Viewport was already pre-colored off-MainActor; full CompactLine cache is now populated for lazy scroll!
+                    return IncrementalHighlightUpdate(tokens: [], dirtyCharRange: nil, isFullDocument: true)
+                }
+                if pass.starts.count > maxLine + 1 {
+                    let cappedTokens = cache.tokens(fromLine: 0, toLine: maxLine, lineStarts: pass.starts)
+                    return IncrementalHighlightUpdate(tokens: cappedTokens, dirtyCharRange: nil, isFullDocument: true)
+                }
+            }
             return IncrementalHighlightUpdate(
                 tokens: cache.allSyntaxTokens(lineStarts: pass.starts),
                 dirtyCharRange: nil,
@@ -692,7 +745,7 @@ public final class IncrementalLexer: @unchecked Sendable {
     
     /// Pop the dirty regions, re-lex them against `document` and commit the result to the cache.
     /// Returns nil when nothing was dirty.
-    private func runDirtyPass(in document: String, lineStarts providedStarts: [Int]?) -> DirtyPass? {
+    private func runDirtyPass(in document: String, lineStarts providedStarts: [Int]?, cancelToken: LexerCancelToken?) -> DirtyPass? {
         var regions = cache.popDirtyRegions()
         guard !regions.isEmpty else { return nil }
         
@@ -721,13 +774,18 @@ public final class IncrementalLexer: @unchecked Sendable {
             
             // Fast Multi-Core Parallel Path for Initial Full-Document Tokenization (>= 400 lines)
             if pass.isInitialFullPass && totalLines >= 400 {
+                if Task.isCancelled || cancelToken?.isCancelled == true {
+                    pass.cancelled = true
+                    restore(regions: regions[...])
+                    return pass
+                }
                 let lines = document.components(separatedBy: "\n")
                 if lines.count != starts.count {
                     starts = Self.computeLineStarts(of: lines)
                     computedOwnStarts = true
                     continue
                 }
-                if !retokenizeFullDocumentParallel(lines: lines, lineStarts: starts) {
+                if !retokenizeFullDocumentParallel(lines: lines, lineStarts: starts, cancelToken: cancelToken) {
                     pass.cancelled = true
                     restore(regions: regions[...])
                 }
@@ -739,7 +797,7 @@ public final class IncrementalLexer: @unchecked Sendable {
             
             for (index, region) in regions.enumerated() {
                 // ZOMBIE KILLER: Stop processing if cancelled (re-queue what was not finished)
-                if Task.isCancelled {
+                if Task.isCancelled || cancelToken?.isCancelled == true {
                     restore(regions: regions[index...])
                     pass.cancelled = true
                     return pass
@@ -752,7 +810,7 @@ public final class IncrementalLexer: @unchecked Sendable {
                     layoutMismatch: &layoutMismatch
                 ) else {
                     if layoutMismatch { break }
-                    if Task.isCancelled {
+                    if Task.isCancelled || cancelToken?.isCancelled == true {
                         restore(regions: regions[index...])
                         pass.cancelled = true
                         return pass
@@ -782,13 +840,35 @@ public final class IncrementalLexer: @unchecked Sendable {
         }
     }
     
-    /// One O(document) scan for `"\n"`: `result[i]` = UTF-16 offset of the first character of line `i`.
+    /// One O(document) scan for `"\n"` using contiguous UTF-8 buffer pointers:
+    /// `result[i]` = UTF-16 offset of the first character of line `i`.
     static func computeLineStarts(of document: String) -> [Int] {
         var starts: [Int] = [0]
-        var offset = 0
-        for unit in document.utf16 {
-            offset += 1
-            if unit == 0x0A { starts.append(offset) }
+        starts.reserveCapacity(max(16, document.utf8.count / 36))
+        let usedFast: Void? = document.utf8.withContiguousStorageIfAvailable { buf in
+            guard let base = buf.baseAddress else { return }
+            let n = buf.count
+            var utf16Offset = 0
+            var i = 0
+            while i < n {
+                let b = base[i]
+                if b < 0x80 {
+                    utf16Offset &+= 1
+                    if b == 0x0A {
+                        starts.append(utf16Offset)
+                    }
+                } else if (b & 0xC0) != 0x80 {
+                    utf16Offset &+= (b >= 0xF0 ? 2 : 1)
+                }
+                i &+= 1
+            }
+        }
+        if usedFast == nil {
+            var offset = 0
+            for unit in document.utf16 {
+                offset += 1
+                if unit == 0x0A { starts.append(offset) }
+            }
         }
         return starts
     }
@@ -810,9 +890,10 @@ public final class IncrementalLexer: @unchecked Sendable {
     /// chunks than the slower E-cores (static one-chunk-per-core splits are bounded by the slowest core).
     /// Cross-chunk multiline comment/string state is reconciled afterwards and the result is committed in 1 batch lock.
     /// Returns false if the task was cancelled (nothing committed).
-    private func retokenizeFullDocumentParallel(lines: [String], lineStarts: [Int]) -> Bool {
+    private func retokenizeFullDocumentParallel(lines: [String], lineStarts: [Int], cancelToken: LexerCancelToken?) -> Bool {
         let totalLines = lines.count
         guard totalLines > 0 else { return true }
+        if Task.isCancelled || cancelToken?.isCancelled == true { return false }
         
         let workerCount = min(PerformanceManager.totalCores, max(2, totalLines / 200))
         let targetChunks = workerCount * 8
@@ -826,6 +907,7 @@ public final class IncrementalLexer: @unchecked Sendable {
             // Each iteration writes a disjoint index range, so concurrent writes through the raw address are race-free.
             let rawAddr = UInt(bitPattern: UnsafeMutableRawPointer(buf.baseAddress!))
             DispatchQueue.concurrentPerform(iterations: chunkCount) { chunkIdx in
+                if cancelToken?.isCancelled == true { return }
                 let start = chunkIdx * chunkSize
                 let end = min(totalLines, start + chunkSize)
                 guard start < end else { return }
@@ -834,6 +916,7 @@ public final class IncrementalLexer: @unchecked Sendable {
                 var state: SyntaxLexerState = .normal
                 
                 for lineNum in start..<end {
+                    if (lineNum & 63) == 0 && cancelToken?.isCancelled == true { return }
                     let line = lines[lineNum]
                     let (tokens, nextState) = lexer.tokenizeLine(
                         line,
@@ -853,7 +936,7 @@ public final class IncrementalLexer: @unchecked Sendable {
             }
         }
         
-        if Task.isCancelled { return false }
+        if Task.isCancelled || cancelToken?.isCancelled == true { return false }
         
         // Reconcile chunk boundaries if a multiline comment/string crossed from chunk (c - 1) into chunk c
         for chunkIdx in 1..<max(1, chunkCount) {

@@ -90,7 +90,7 @@ final class RepoMapService: @unchecked Sendable {
     private let cacheLock = NSLock()
     private var workspaceCaches: [String: (map: RepoMap, timestamp: Date)] = [:]
     private var fileEntryCache: [String: CachedFileRecord] = [:]
-    private let maxCachedWorkspaces = 4
+    private let maxCachedWorkspaces = 2
     private let cacheTTL: TimeInterval = 120  // 2 minutes
     
     // Directories to always skip
@@ -137,6 +137,47 @@ final class RepoMapService: @unchecked Sendable {
         workspaceCaches[canonicalWs] = (map: map, timestamp: Date())
     }
 
+    /// Non-blocking cache lookup: returns an exact cached RepoMap for `directory`, or projects
+    /// a cached ancestor workspace's RepoMap onto `directory` without touching disk.
+    func peekCachedRepoMap(for directory: String) -> RepoMap? {
+        let canonicalDir = URL(fileURLWithPath: directory).standardizedFileURL.path
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let now = Date()
+        if let exact = workspaceCaches[canonicalDir], now.timeIntervalSince(exact.timestamp) < cacheTTL {
+            return exact.map
+        }
+        // Check if an ancestor workspace root already has a fresh RepoMap
+        for (wsRoot, entry) in workspaceCaches where now.timeIntervalSince(entry.timestamp) < cacheTTL {
+            let wsPrefix = wsRoot.hasSuffix("/") ? wsRoot : wsRoot + "/"
+            guard canonicalDir.hasPrefix(wsPrefix) else { continue }
+            let subRelPrefix = String(canonicalDir.dropFirst(wsPrefix.count)) + "/"
+            let scopedFiles: [RepoFileEntry] = entry.map.files.compactMap { f in
+                guard f.relativePath.hasPrefix(subRelPrefix) else { return nil }
+                let trimmedRel = String(f.relativePath.dropFirst(subRelPrefix.count))
+                let remappedSyms = f.symbols.map { s in
+                    RepoSymbol(name: s.name, kind: s.kind, signature: s.signature, line: s.line, filePath: trimmedRel)
+                }
+                return RepoFileEntry(
+                    relativePath: trimmedRel,
+                    extension_: f.extension_,
+                    sizeBytes: f.sizeBytes,
+                    symbolCount: f.symbolCount,
+                    symbols: remappedSyms
+                )
+            }
+            let totalSyms = scopedFiles.reduce(0) { $0 + $1.symbolCount }
+            return RepoMap(
+                workspaceRoot: canonicalDir,
+                totalFiles: scopedFiles.count,
+                totalSymbols: totalSyms,
+                generatedAt: entry.map.generatedAt,
+                files: scopedFiles
+            )
+        }
+        return nil
+    }
+
     /// Generate or return cached repo map (multi-workspace safe + incremental mtime file cache)
     func getRepoMap(workspace: String, forceRefresh: Bool = false) async -> RepoMap {
         let canonicalWs = URL(fileURLWithPath: workspace).standardizedFileURL.path
@@ -158,6 +199,16 @@ final class RepoMapService: @unchecked Sendable {
         } else {
             workspaceCaches.removeAll()
         }
+        cacheLock.unlock()
+    }
+
+    /// Evict cached RepoMaps and per-file symbol entries belonging to inactive workspaces
+    func pruneInactiveWorkspaces(keeping activeWorkspace: String) {
+        let canonicalWs = URL(fileURLWithPath: activeWorkspace).standardizedFileURL.path
+        let prefix = canonicalWs.hasSuffix("/") ? canonicalWs : canonicalWs + "/"
+        cacheLock.lock()
+        workspaceCaches = workspaceCaches.filter { $0.key == canonicalWs }
+        fileEntryCache = fileEntryCache.filter { $0.key.hasPrefix(prefix) }
         cacheLock.unlock()
     }
 

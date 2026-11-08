@@ -131,6 +131,19 @@ enum AppTheme: String, CaseIterable {
         }
     }
 
+    /// Enables smoked black behind-window vibrancy on the left navigation sidebar
+    /// while keeping the main editor/agent canvas crisp and opaque.
+    var usesDarkGlassSidebar: Bool {
+        switch self {
+        case .dark, .xcodeDark, .keynote, .xnuDark, .obsidianGlass, .transparent, .extraClear:
+            return true
+        case .system:
+            return isDark
+        default:
+            return false
+        }
+    }
+
     /// Opaque workspace colors used by native panes. Only glass themes are
     /// allowed to expose the desktop through the app window.
     var workspaceBackground: NSColor {
@@ -141,7 +154,7 @@ enum AppTheme: String, CaseIterable {
 
     var panelBackground: NSColor {
         if isGlass { return editorBackground }
-        if self == .dark || self == .xcodeDark { return NSColor(white: 0.06, alpha: 1.0) }
+        if self == .dark || self == .xcodeDark { return NSColor(white: 0.02, alpha: 1.0) }
         let target: NSColor = isDark ? .white : .black
         return (editorBackground.blended(withFraction: isDark ? 0.035 : 0.025, of: target) ?? editorBackground)
             .withAlphaComponent(1.0)
@@ -668,18 +681,7 @@ enum AppTheme: String, CaseIterable {
         let gutterHex = editorBackground.hexString
         let gutterTextHex = isDark ? "#4A4A50" : "#B2BEC3"
 
-        return Theme(
-            name: self.rawValue,
-            displayName: self.displayName,
-            isDark: self.isDark,
-            editorBackground: editorBackground.hexString,
-            editorForeground: editorText.hexString,
-            editorSelection: selectionHex,
-            editorLineHighlight: lineHighlightHex,
-            editorCursor: cursorHex,
-            editorGutter: gutterHex,
-            editorGutterText: gutterTextHex,
-            tokenColors: [
+        var tokenColors: [String: TokenStyleConfig] = [
                 "keyword": TokenStyleConfig(foreground: keywordColor.hexString),
                 "keywordControl": TokenStyleConfig(foreground: keywordColor.hexString),
                 "keywordDeclaration": TokenStyleConfig(foreground: keywordColor.hexString),
@@ -696,6 +698,9 @@ enum AppTheme: String, CaseIterable {
                 "variable": TokenStyleConfig(foreground: editorText.hexString),
                 "property": TokenStyleConfig(foreground: typeColor.hexString),
                 "parameter": TokenStyleConfig(foreground: editorText.hexString),
+                "constant": TokenStyleConfig(foreground: numberColor.hexString),
+                "enumMember": TokenStyleConfig(foreground: numberColor.hexString),
+                "stringInterpolation": TokenStyleConfig(foreground: keywordColor.hexString),
                 "boolean": TokenStyleConfig(foreground: keywordColor.hexString),
                 "null": TokenStyleConfig(foreground: keywordColor.hexString),
                 "operator": TokenStyleConfig(foreground: editorText.hexString),
@@ -704,8 +709,78 @@ enum AppTheme: String, CaseIterable {
                 "annotation": TokenStyleConfig(foreground: "#FD8F3F"),
                 "preprocessor": TokenStyleConfig(foreground: "#FD8F3F"),
                 "escape": TokenStyleConfig(foreground: numberColor.hexString)
-            ]
+        ]
+        if let overrides = Self.fullPalette(for: self) {
+            for (k, v) in overrides { tokenColors[k] = TokenStyleConfig(foreground: v.0, fontStyle: v.1) }
+        }
+
+        return Theme(
+            name: self.rawValue,
+            displayName: self.displayName,
+            isDark: self.isDark,
+            editorBackground: editorBackground.hexString,
+            editorForeground: editorText.hexString,
+            editorSelection: selectionHex,
+            editorLineHighlight: lineHighlightHex,
+            editorCursor: cursorHex,
+            editorGutter: gutterHex,
+            editorGutterText: gutterTextHex,
+            tokenColors: tokenColors
         )
+    }
+
+    /// Full 16+ slot token palettes that mirror each editor's real TextMate theme,
+    /// so keyword/variable/property/constant/escape tokens get distinct colors (VS Code parity).
+    /// Value tuple = (hex, optional fontStyle).
+    static func fullPalette(for theme: AppTheme) -> [String: (String, String?)]? {
+        func pal(_ kw: String, _ ctl: String, _ decl: String, _ str: String, _ num: String, _ fn: String,
+                 _ ty: String, _ v: String, _ prop: String, _ param: String, _ const: String, _ cm: String,
+                 _ op: String, _ punct: String, _ esc: String, _ interp: String, _ bool: String,
+                 _ ann: String, _ pre: String) -> [String: (String, String?)] {
+            [
+                "keyword": (kw, nil), "keywordControl": (ctl, nil), "keywordDeclaration": (decl, nil),
+                "keywordModifier": (decl, nil), "keywordOperator": (decl, nil),
+                "string": (str, nil), "number": (num, nil), "function": (fn, nil), "type": (ty, nil),
+                "variable": (v, nil), "identifier": (v, nil), "property": (prop, nil), "parameter": (param, nil),
+                "constant": (const, nil), "enumMember": (const, nil),
+                "comment": (cm, "italic"), "commentDoc": (cm, "italic"), "commentBlock": (cm, "italic"),
+                "operator": (op, nil), "punctuation": (punct, nil), "delimiter": (punct, nil),
+                "escape": (esc, nil), "stringInterpolation": (interp, nil),
+                "boolean": (bool, nil), "null": (bool, nil),
+                "annotation": (ann, nil), "preprocessor": (pre, nil),
+                "regex": ("#D16969", nil), "markup": (decl, nil)
+            ]
+        }
+        switch theme {
+        case .vscodeDefault:   // VS Code Dark Modern / Dark+
+            var p = pal("#C586C0", "#C586C0", "#569CD6", "#CE9178", "#B5CEA8", "#DCDCAA",
+                        "#4EC9B0", "#9CDCFE", "#9CDCFE", "#9CDCFE", "#4FC1FF", "#6A9955",
+                        "#D4D4D4", "#D4D4D4", "#D7BA7D", "#569CD6", "#569CD6", "#DCDCAA", "#C586C0")
+            p["comment"] = ("#6A9955", nil); p["commentDoc"] = ("#6A9955", nil); p["commentBlock"] = ("#6A9955", nil)
+            return p
+        case .oneDarkPro:
+            return pal("#C678DD", "#C678DD", "#C678DD", "#98C379", "#D19A66", "#61AFEF",
+                       "#E5C07B", "#E06C75", "#E06C75", "#E06C75", "#D19A66", "#5C6370",
+                       "#56B6C2", "#ABB2BF", "#56B6C2", "#C678DD", "#D19A66", "#E5C07B", "#C678DD")
+        case .githubDark:
+            return pal("#FF7B72", "#FF7B72", "#FF7B72", "#A5D6FF", "#79C0FF", "#D2A8FF",
+                       "#FFA657", "#C9D1D9", "#79C0FF", "#C9D1D9", "#79C0FF", "#8B949E",
+                       "#FF7B72", "#C9D1D9", "#79C0FF", "#FF7B72", "#79C0FF", "#D2A8FF", "#FF7B72")
+        case .tokyoNight:
+            return pal("#BB9AF7", "#BB9AF7", "#BB9AF7", "#9ECE6A", "#FF9E64", "#7AA2F7",
+                       "#2AC3DE", "#C0CAF5", "#7DCFFF", "#E0AF68", "#FF9E64", "#565F89",
+                       "#89DDFF", "#89DDFF", "#89DDFF", "#89DDFF", "#FF9E64", "#7AA2F7", "#BB9AF7")
+        case .dracula:
+            return pal("#FF79C6", "#FF79C6", "#FF79C6", "#F1FA8C", "#BD93F9", "#50FA7B",
+                       "#8BE9FD", "#F8F8F2", "#F8F8F2", "#FFB86C", "#BD93F9", "#6272A4",
+                       "#FF79C6", "#F8F8F2", "#FF79C6", "#FF79C6", "#BD93F9", "#50FA7B", "#FF79C6")
+        case .catppuccin:
+            return pal("#CBA6F7", "#CBA6F7", "#CBA6F7", "#A6E3A1", "#FAB387", "#89B4FA",
+                       "#F9E2AF", "#CDD6F4", "#89B4FA", "#EBA0AC", "#FAB387", "#6C7086",
+                       "#89DCEB", "#9399B2", "#F5C2E7", "#F5C2E7", "#FAB387", "#F9E2AF", "#CBA6F7")
+        default:
+            return nil
+        }
     }
 }
 
@@ -717,7 +792,6 @@ enum EditorMode: String, CaseIterable, Identifiable {
     case playground = "playground"
     case notebook = "notebook"
     case scenario = "scenario"
-    case design = "design"
     case remoteX = "Remote X"
     case embedded = "Embedded Studio"
     case aiAgent = "AI Agent"
@@ -735,7 +809,6 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .remoteX: return "Remote Explorer"
         case .notebook: return "Notebook"
         case .scenario: return "Scenario"
-        case .design: return "Design"
         case .embedded: return "Embed & IoT Studio"
         case .aiAgent: return "AI Agent"
         case .browser: return "Browser"
@@ -752,7 +825,6 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .remoteX: return "server.rack"
         case .notebook: return "book.pages"
         case .scenario: return "flowchart"
-        case .design: return "paintbrush.pointed" // Penpot style icon
         case .embedded: return "cpu.fill" // Chip icon
         case .aiAgent: return "brain.head.profile" // AI brain icon
         case .browser: return "globe" // Browser icon
@@ -776,6 +848,55 @@ struct PythonVersionInfo: Identifiable, Hashable {
 }
 
 // MARK: - Project Type (Moved to ProjectManager.swift)
+
+// MARK: - Dedicated Zero-Broadcast Sidebar State Controller
+
+@MainActor
+final class SidebarStateController: ObservableObject {
+    static let shared = SidebarStateController()
+
+    @Published var isVisible: Bool
+    @Published var width: Double
+
+    private var persistWorkItem: DispatchWorkItem?
+
+    private init() {
+        let defaults = UserDefaults.standard
+        self.isVisible = defaults.object(forKey: "sidebarVisible") == nil ? true : defaults.bool(forKey: "sidebarVisible")
+        let savedWidth = defaults.double(forKey: "microcode_agentic_sidebar_width")
+        self.width = savedWidth >= 160 ? min(600, savedWidth) : 270
+    }
+
+    func setVisible(_ visible: Bool) {
+        guard isVisible != visible else { return }
+        isVisible = visible
+        schedulePersist()
+    }
+
+    func toggle() {
+        setVisible(!isVisible)
+    }
+
+    func setWidth(_ newWidth: Double) {
+        let clamped = max(160, min(600, round(newWidth)))
+        guard abs(width - clamped) > 0.25 else { return }
+        width = clamped
+        schedulePersist()
+    }
+
+    private func schedulePersist() {
+        persistWorkItem?.cancel()
+        let vis = isVisible
+        let w = width
+        let item = DispatchWorkItem {
+            let defaults = UserDefaults.standard
+            defaults.set(vis, forKey: "sidebarVisible")
+            defaults.set(w, forKey: "microcode_agentic_sidebar_width")
+        }
+        persistWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
+    }
+}
 
 @MainActor
 class AppState: ObservableObject {
@@ -811,10 +932,13 @@ class AppState: ObservableObject {
     @Published var currentFile: CodeFile?
     @Published var microCodeService: MicroCodeService? // AI Core
 
-    @Published var sidebarVisible: Bool = true
+    var sidebarVisible: Bool {
+        get { SidebarStateController.shared.isVisible }
+        set { SidebarStateController.shared.setVisible(newValue) }
+    }
     @Published var consoleVisible: Bool = true
     @Published var gitPanelVisible: Bool = false
-    @Published var agenticContextVisible: Bool = true
+    @Published var agenticContextVisible: Bool = false
     @Published var selectedInspectorTab: AgenticInspectorTab = .context
 
     @Published var consoleOutput: String = ""
@@ -901,8 +1025,13 @@ class AppState: ObservableObject {
     
     // Custom HPC Configuration
     @AppStorage("hpcEndpoint") var hpcEndpoint: String = "ws://127.0.0.1:8080/v1/agent"
-    @Published var hpcToken: String = JupyterCredentialStore.token {
-        didSet { JupyterCredentialStore.token = hpcToken }
+    private var isHydratingHPCToken: Bool = false
+    @Published var hpcToken: String = "" {
+        didSet {
+            if !isHydratingHPCToken {
+                JupyterCredentialStore.token = hpcToken
+            }
+        }
     }
 
     @Published var fontSize: CGFloat = 16
@@ -918,12 +1047,12 @@ class AppState: ObservableObject {
     
     // Playground Font Settings
     @Published var playgroundFontName: String = "SF Mono"
-    @Published var playgroundFontSize: CGFloat = 16.0
+    @Published var playgroundFontSize: CGFloat = 13.0
     @Published var playgroundFontWeight: Int = 2 // 0: Thin, 1: Light, 2: Regular, 3: Medium, 4: Semibold, 5: Bold
     
     // Notebook Cell Font Settings
     @Published var cellFontName: String = "SF Mono"
-    @Published var cellFontSize: CGFloat = 16.0
+    @Published var cellFontSize: CGFloat = 13.0
     @Published var cellFontWeight: Int = 2 // Regular
     @Published var selectedLanguage: String = "python"
     
@@ -938,12 +1067,6 @@ class AppState: ObservableObject {
     @Published var pendingPlaygroundCode: String? = nil
     @Published var pendingPlaygroundLanguage: String? = nil
 
-    @Published var showingRefactorDialog: Bool = false
-    @Published var showingRefactorProWindow: Bool = false
-    @Published var showingExpandCodeWindow: Bool = false
-    @Published var showingFormatCodeWindow: Bool = false
-    @Published var showingCodeAnalysisWindow: Bool = false
-    // Removed showingExportWindow
     @Published var showingCommitDialog: Bool = false
     @Published var showingSettingsDialog: Bool = false
     @Published var settingsSelectedTab: Int = 2
@@ -968,7 +1091,18 @@ class AppState: ObservableObject {
     @Published var currentProjectType: ProjectType = .unknown
     
     // Editor Mode - exclusive selection
-    @Published var editorMode: EditorMode = .code
+    @Published var editorMode: EditorMode = .code {
+        didSet {
+            if oldValue == .code && editorMode != .code {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if self.editorMode != .code {
+                        SyntaxHighlightedCodeView.purgeNonVisibleViewCache()
+                    }
+                }
+            }
+        }
+    }
     
     // Python Version Selection
     @Published var selectedPythonVersion: String = "python3"
@@ -990,11 +1124,9 @@ class AppState: ObservableObject {
         set { if newValue { setEditorMode(.scenario) } else if editorMode == .scenario { setEditorMode(.code) } }
     }
     
-    @Published var showingDotnetProject: Bool = false
     @Published var showingAITrainer: Bool = false
     @Published var showingPythonEnv: Bool = false
     @Published var showingRuntimeManager: Bool = false
-    @Published var showingCodeAnalysis: Bool = false
     @Published var showingGitSettings: Bool = false
     @Published var showingAuthView: Bool = false
 
@@ -1106,7 +1238,10 @@ class AppState: ObservableObject {
             return LocalLLMService.shared.activeServer?.isOnline == true
         }
         if keyMode == "cloud" || aiProvider == "omni" {
-            return AuthService.shared.currentUser != nil || !resolveApiKey(for: "omni").isEmpty
+            return SupabaseAuthService.shared.session != nil
+                || AuthService.shared.currentUser != nil
+                || DotminiPlatformKeyService.shared.authorizationToken != nil
+                || !resolveApiKey(for: "omni").isEmpty
         }
         return !resolveApiKey(for: aiProvider).isEmpty
     }
@@ -1124,7 +1259,7 @@ class AppState: ObservableObject {
 
     // MARK: - Services
 
-    private let backend = BackendService.shared
+    private var backend: BackendService { BackendService.shared }
     private var cancellables = Set<AnyCancellable>()
     private var workspaceLoadGeneration = UUID()
     private var rootScanGeneration = UUID()
@@ -1134,10 +1269,11 @@ class AppState: ObservableObject {
     var hasBootstrappedCLITargets: Bool = false
 
     nonisolated private static let maximumDirectoryEntries = 2_000
-    nonisolated private static let maximumEditableFileBytes = 2 * 1_024 * 1_024
-    nonisolated private static let maximumLargeFilePreviewBytes = 1 * 1_024 * 1_024
-    nonisolated private static let syntaxHighlightByteLimit = 512 * 1_024
-    nonisolated private static let lspContentByteLimit = 512 * 1_024
+    /// Full Read-Write editing up to 64 MB via APFS zero-copy mmap + TextKit non-contiguous viewport layout.
+    nonisolated private static let maximumEditableFileBytes = 64 * 1_024 * 1_024
+    nonisolated private static let maximumLargeFilePreviewBytes = 4 * 1_024 * 1_024
+    nonisolated private static let syntaxHighlightByteLimit = 384 * 1_024
+    nonisolated private static let lspContentByteLimit = 256 * 1_024
 
     // MARK: - Initialization
 
@@ -1189,6 +1325,7 @@ class AppState: ObservableObject {
     }
 
     func openLaunchTargetsParallel(_ urls: [URL]) {
+        var arxURLs: [URL] = []
         var directoryURLs: [URL] = []
         var fileURLs: [URL] = []
         for url in urls {
@@ -1196,9 +1333,26 @@ class AppState: ObservableObject {
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
             if isDir.boolValue {
                 directoryURLs.append(url)
+            } else if url.pathExtension.lowercased() == "arx" {
+                arxURLs.append(url)
             } else {
                 fileURLs.append(url)
             }
+        }
+        if !arxURLs.isEmpty {
+            Task { @MainActor in
+                if let dir = directoryURLs.first {
+                    await self.openWorkspace(url: dir, autoOpenEntryFile: false)
+                }
+                for arxURL in arxURLs {
+                    do {
+                        _ = try ARXCapsuleService.shared.importAndResumeCapsule(from: arxURL, appState: self)
+                    } catch {
+                        self.alertMessage = "Failed to open .ARX capsule: \(error.localizedDescription)"
+                    }
+                }
+            }
+            if directoryURLs.isEmpty && fileURLs.isEmpty { return }
         }
         guard !directoryURLs.isEmpty || !fileURLs.isEmpty else { return }
 
@@ -1347,11 +1501,27 @@ class AppState: ObservableObject {
         agentFontSize = CGFloat(defaults.double(forKey: "agentFontSize")) == 0 ? 16.0 : CGFloat(defaults.double(forKey: "agentFontSize"))
         
         playgroundFontName = defaults.string(forKey: "playgroundFontName") ?? "SF Mono"
-        playgroundFontSize = CGFloat(defaults.double(forKey: "playgroundFontSize")) == 0 ? 16.0 : CGFloat(defaults.double(forKey: "playgroundFontSize"))
+        let cellFontMigrationKey = "cellFontSizeDefault13MigrationV1"
+        let needsCellFontMigration = !defaults.bool(forKey: cellFontMigrationKey)
+        let rawPlaygroundFontSize = CGFloat(defaults.double(forKey: "playgroundFontSize"))
+        if needsCellFontMigration && (rawPlaygroundFontSize == 0 || rawPlaygroundFontSize == 16.0) {
+            playgroundFontSize = 13.0
+            defaults.set(13.0, forKey: "playgroundFontSize")
+        } else {
+            playgroundFontSize = rawPlaygroundFontSize == 0 ? 13.0 : rawPlaygroundFontSize
+        }
         playgroundFontWeight = defaults.object(forKey: "playgroundFontWeight") == nil ? 2 : defaults.integer(forKey: "playgroundFontWeight")
         
         cellFontName = defaults.string(forKey: "cellFontName") ?? "SF Mono"
-        cellFontSize = CGFloat(defaults.double(forKey: "cellFontSize")) == 0 ? 16.0 : CGFloat(defaults.double(forKey: "cellFontSize"))
+        let rawCellFontSize = CGFloat(defaults.double(forKey: "cellFontSize"))
+        if needsCellFontMigration && (rawCellFontSize == 0 || rawCellFontSize == 16.0) {
+            cellFontSize = 13.0
+            defaults.set(13.0, forKey: "cellFontSize")
+            defaults.set(true, forKey: cellFontMigrationKey)
+        } else {
+            defaults.set(true, forKey: cellFontMigrationKey)
+            cellFontSize = rawCellFontSize == 0 ? 13.0 : rawCellFontSize
+        }
         cellFontWeight = defaults.object(forKey: "cellFontWeight") == nil ? 2 : defaults.integer(forKey: "cellFontWeight")
         let lineNumberMigrationKey = "lineNumbersOverlayEnabledByDefaultV2"
         if defaults.bool(forKey: lineNumberMigrationKey) {
@@ -1446,16 +1616,20 @@ class AppState: ObservableObject {
         defaults.set(aiProvider, forKey: "aiProvider")
         defaults.set(aiModel, forKey: "aiModel")
 
-        // Set default aiKeyMode and repair stale "cloud" mode when using standard providers (Gemini, Claude, OpenAI, DeepSeek, etc.)
+        // Set default aiKeyMode when not yet configured; preserve explicit "cloud" (Dotmini Cloud Subscription) selection across all cloud-routed models
         let savedKeyMode = defaults.string(forKey: "aiKeyMode")
-        if savedKeyMode == nil || (savedKeyMode == "cloud" && aiProvider != "omni") {
-            let hasDirectKeyForActive = !(apiKeys[aiProvider]?.isEmpty ?? true)
-            if hasDirectKeyForActive || hasGemini || hasDeepSeek || hasOpenAI || hasAnthropic {
-                defaults.set("direct", forKey: "aiKeyMode")
-            } else if SubscriptionAuthManager.shared.hasAnyConnected {
-                defaults.set("subscription", forKey: "aiKeyMode")
+        if savedKeyMode == nil {
+            if SupabaseAuthService.shared.session != nil {
+                defaults.set("cloud", forKey: "aiKeyMode")
             } else {
-                defaults.set("direct", forKey: "aiKeyMode")
+                let hasDirectKeyForActive = !(apiKeys[aiProvider]?.isEmpty ?? true)
+                if hasDirectKeyForActive || hasGemini || hasDeepSeek || hasOpenAI || hasAnthropic {
+                    defaults.set("direct", forKey: "aiKeyMode")
+                } else if SubscriptionAuthManager.shared.hasAnyConnected {
+                    defaults.set("subscription", forKey: "aiKeyMode")
+                } else {
+                    defaults.set("direct", forKey: "aiKeyMode")
+                }
             }
         }
 
@@ -1485,7 +1659,17 @@ class AppState: ObservableObject {
         // Use object check to properly default booleans
         sidebarVisible = defaults.object(forKey: "sidebarVisible") == nil ? true : defaults.bool(forKey: "sidebarVisible")
         consoleVisible = defaults.object(forKey: "consoleVisible") == nil ? true : defaults.bool(forKey: "consoleVisible")
-        agenticContextVisible = defaults.object(forKey: "agenticContextVisible") == nil ? true : defaults.bool(forKey: "agenticContextVisible")
+        agenticContextVisible = defaults.object(forKey: "agenticContextVisible") == nil ? false : defaults.bool(forKey: "agenticContextVisible")
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self else { return }
+            let storedToken = JupyterCredentialStore.token
+            if !storedToken.isEmpty {
+                self.isHydratingHPCToken = true
+                self.hpcToken = storedToken
+                self.isHydratingHPCToken = false
+            }
+        }
         
         derivedDataQuotaLimitGB = defaults.object(forKey: "derivedDataQuotaLimitGB") == nil ? 10.0 : defaults.double(forKey: "derivedDataQuotaLimitGB")
         enableDerivedDataAutoPurge = defaults.bool(forKey: "enableDerivedDataAutoPurge")
@@ -1715,6 +1899,11 @@ class AppState: ObservableObject {
                 try content.write(to: targetURL, atomically: true, encoding: .utf8)
                 filePath = targetURL.path
                 isUnsaved = false
+                CollaborationService.shared.notifyLocalFileSystemEvent(
+                    op: "write",
+                    path: targetURL.path,
+                    content: content
+                )
                 
                 // Refresh file tree to show the new file
                 Task {
@@ -1744,6 +1933,7 @@ class AppState: ObservableObject {
         let url = URL(fileURLWithPath: path).appendingPathComponent(name)
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+            CollaborationService.shared.notifyLocalFileSystemEvent(op: "mkdir", path: url.path)
             // Refresh parent?? Or just refresh tree?
             // Since we have lazy load, we might need to refresh specific node.
             // But refreshing whole tree is safer for now (recursive refresh is gone).
@@ -2046,7 +2236,7 @@ class AppState: ObservableObject {
         UserDefaults.standard.set(url.path, forKey: "lastWorkspacePath")
         Self.recordRecentWorkspace(url: url)
         
-        // Project Isolation: Clear open files that do not belong to the newly opened project
+        // Project Isolation: Clear open files & cached RepoMaps that do not belong to the newly opened project
         let standardPath = url.standardizedFileURL.path
         self.openFiles.removeAll { file in
             !file.path.hasPrefix(standardPath)
@@ -2054,24 +2244,28 @@ class AppState: ObservableObject {
         if let cur = self.currentFile, !cur.path.hasPrefix(standardPath) {
             self.currentFile = self.openFiles.first
         }
+        SyntaxHighlightedCodeView.purgeNonVisibleViewCache()
+        RepoMapService.shared.pruneInactiveWorkspaces(keeping: standardPath)
         
-        AgentService.shared.setWorkspace(url.path)
-        
-        // Initialize MicroCode AI Core
-        self.microCodeService = MicroCodeService(workspacePath: url.path)
-        
-        // Deferred MCP Server startup (staggered to avoid idle RAM bloating)
-        Task.detached(priority: .background) { [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+        // Defer AI Core, Agent Transcript SQLite, Auth Keychain, and MCP Server startup off the
+        // critical cold-start Frame-0 path so opening a workspace + C file completes immediately.
+        Task.detached(priority: .utility) { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            await MainActor.run {
+                guard let self = self, self.workspaceLoadGeneration == loadGeneration else { return }
+                AIProviderAuthService.shared.syncToAppState(self)
+                if self.editorMode == .aiAgent || self.aiChatVisible || self.agenticContextVisible {
+                    AgentService.shared.setWorkspace(url.path)
+                    if self.microCodeService == nil {
+                        self.microCodeService = MicroCodeService(workspacePath: url.path)
+                    }
+                }
+            }
+            try? await Task.sleep(nanoseconds: 3_200_000_000)
             await MainActor.run {
                 guard let self = self, self.workspaceLoadGeneration == loadGeneration else { return }
                 MCPServer.shared.start(workspace: url.path)
             }
-        }
-        
-        // Sync AI Provider Auth keys to AppState
-        Task { @MainActor in
-            AIProviderAuthService.shared.syncToAppState(self)
         }
         
         // Step 2: Load file tree (main operation, already optimized)
@@ -2096,9 +2290,7 @@ class AppState: ObservableObject {
             }.first ?? rootFiles.first
 
             if let entryNode = candidateNode {
-                let savedMode = self.editorMode
-                await self.loadFile(url: URL(fileURLWithPath: entryNode.path))
-                self.editorMode = savedMode
+                await self.loadFile(url: URL(fileURLWithPath: entryNode.path), preserveEditorMode: true)
             }
         }
         
@@ -2165,6 +2357,11 @@ class AppState: ObservableObject {
         
         do {
             try FileManager.default.moveItem(at: oldURL, to: newURL)
+            CollaborationService.shared.notifyLocalFileSystemEvent(
+                op: "rename",
+                path: oldPath,
+                newPath: newPath
+            )
             
             // Sync internal state: Update open files
             await MainActor.run {
@@ -2257,7 +2454,7 @@ class AppState: ObservableObject {
         saveSettings()
     }
 
-    func loadFile(url: URL) async {
+    func loadFile(url: URL, preserveEditorMode: Bool = false) async {
         let normalizedURL = url.standardizedFileURL
 
         // Selecting an already-open tab must be instant and must not start a
@@ -2282,6 +2479,11 @@ class AppState: ObservableObject {
         let scienceExtensions = Set(["pdb", "ent", "cif", "mmcif", "fasta", "fa", "faa", "fna", "a3m", "json", "csv", "tsv", "png", "jpg", "jpeg", "gif", "webp", "svg", "html", "htm", "pdf", "tex", "bib", "md"])
         let result: SafeFileLoadResult
 
+        let language = detectLanguage(from: normalizedURL)
+        let capturedFontSize = fontSize
+        let capturedThemeRaw = appTheme.rawValue
+        let capturedIsDark = appTheme.isDark
+
         if previewExtensions.contains(ext) {
             result = SafeFileLoadResult(
                 content: "[Binary File]",
@@ -2292,8 +2494,36 @@ class AppState: ObservableObject {
                 errorMessage: nil
             )
         } else {
+            let filePath = normalizedURL.path
+            let shouldPrebuild = openFiles.isEmpty
             result = await Task.detached(priority: .userInitiated) {
-                Self.readFileSafely(at: normalizedURL)
+                let loaded = Self.readFileSafely(at: normalizedURL)
+                guard shouldPrebuild,
+                      loaded.errorMessage == nil,
+                      !loaded.isReadOnly,
+                      !loaded.shouldUsePlainTextMode,
+                      ext != "md",
+                      loaded.content.utf8.count >= 16 * 1024,
+                      loaded.content.utf8.count <= 160 * 1024 else {
+                    return loaded
+                }
+                let normalized = SyntaxHighlightingEngine.prebuildDocumentOffMainActor(
+                    path: filePath,
+                    rawContent: loaded.content,
+                    language: language,
+                    fontSize: capturedFontSize,
+                    themeName: capturedThemeRaw,
+                    isDark: capturedIsDark,
+                    enableHighlighting: !loaded.shouldUsePlainTextMode
+                )
+                return SafeFileLoadResult(
+                    content: normalized,
+                    originalByteSize: loaded.originalByteSize,
+                    isReadOnly: loaded.isReadOnly,
+                    isTruncated: loaded.isTruncated,
+                    shouldUsePlainTextMode: loaded.shouldUsePlainTextMode,
+                    errorMessage: nil
+                )
             }.value
         }
 
@@ -2303,7 +2533,6 @@ class AppState: ObservableObject {
             return
         }
 
-        let language = detectLanguage(from: normalizedURL)
         let file = CodeFile(
             id: UUID(),
             name: normalizedURL.lastPathComponent,
@@ -2319,9 +2548,9 @@ class AppState: ObservableObject {
 
         openFiles.append(file)
         selectFile(at: openFiles.count - 1)
-        // Keep Science Mode active when opening a scientific artifact from its
-        // navigator. Other file types retain the editor's established behavior.
-        if !(editorMode == .science && scienceExtensions.contains(ext)) {
+        // Keep Science Mode or explicit caller mode (e.g. background entry-file preload
+        // while staying in AI Agent mode) intact so we never flash or close the active surface.
+        if !preserveEditorMode && !(editorMode == .science && scienceExtensions.contains(ext)) {
             editorMode = .code
         }
         sidebarVisible = true
@@ -2332,11 +2561,21 @@ class AppState: ObservableObject {
         if !result.isReadOnly,
            !result.shouldUsePlainTextMode,
            result.originalByteSize <= Self.lspContentByteLimit {
-            let content = result.content
+            let filePath = normalizedURL.path
             let fileUri = normalizedURL.absoluteString
-            Task.detached(priority: .utility) {
+            Task.detached(priority: .utility) { [weak self] in
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
-                await LSPManager.shared.documentOpened(uri: fileUri, language: language, content: content)
+                let activeContent: String? = await MainActor.run {
+                    guard let self = self,
+                          self.editorMode == .code,
+                          self.currentFile?.path == filePath else {
+                        return nil
+                    }
+                    return self.currentFile?.content
+                }
+                if let activeContent {
+                    await LSPManager.shared.documentOpened(uri: fileUri, language: language, content: activeContent)
+                }
             }
         }
     }
@@ -2446,7 +2685,7 @@ class AppState: ObservableObject {
             let content = isLarge
                 ? decoded + "\n\n[Large-file preview truncated. The original file is read-only in MicroCode.]"
                 : decoded
-            let longUnbrokenLine = content.count > 50_000 && !content.prefix(50_000).contains("\n")
+            let longUnbrokenLine = content.utf8.count > 50_000 && !content.utf8.prefix(50_000).contains(0x0A)
             let plainMode = isLarge || visibleData.count > syntaxHighlightByteLimit || longUnbrokenLine
 
             return SafeFileLoadResult(
@@ -2494,16 +2733,29 @@ class AppState: ObservableObject {
         consoleOutput += "📦 Detected: \(projectType.rawValue) project\n"
         consoleOutput += "⚙️ Configuration: \(projectManager.buildConfiguration.name)\n\n"
         
-        // Execute build using ProjectManager
-        projectManager.execute(action: .build, projectPath: folder) { [weak self] success, output in
-            DispatchQueue.main.async {
-                self?.consoleOutput = output
-                self?.isExecuting = false
-                if success {
-                    self?.checkDerivedDataSize()
+        // Execute build using ProjectManager with live console streaming
+        let headerPrefix = consoleOutput
+        var streamedAny = false
+        projectManager.execute(
+            action: .build,
+            projectPath: folder,
+            onOutput: { [weak self] chunk in
+                streamedAny = true
+                self?.consoleOutput += chunk
+            },
+            completion: { [weak self] success, output in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if !streamedAny {
+                        self.consoleOutput = headerPrefix + output
+                    }
+                    self.isExecuting = false
+                    if success {
+                        self.checkDerivedDataSize()
+                    }
                 }
             }
-        }
+        )
     }
     
     func runProject() {
@@ -2527,13 +2779,110 @@ class AppState: ObservableObject {
         }
         
         consoleOutput += "📦 Running: \(projectType.rawValue) project\n\n"
-        
-        projectManager.execute(action: .run, projectPath: folder) { [weak self] success, output in
-            DispatchQueue.main.async {
-                self?.consoleOutput = output
-                self?.isExecuting = false
-            }
+
+        let runViaProjectManager: () -> Void = { [weak self] in
+            guard let self else { return }
+            let headerPrefix = self.consoleOutput
+            var streamedAny = false
+            projectManager.execute(
+                action: .run,
+                projectPath: folder,
+                onOutput: { [weak self] chunk in
+                    streamedAny = true
+                    self?.consoleOutput += chunk
+                },
+                completion: { [weak self] _, output in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        if !streamedAny {
+                            self.consoleOutput = headerPrefix + output
+                        }
+                        self.isExecuting = false
+                    }
+                }
+            )
         }
+
+        // Delegate GUI/device projects (.xcode, .android, .flutter) to DeviceRuntimeService
+        // when a runnable target device/simulator/Mac destination is available so Run builds, installs, AND launches.
+        if projectType == .xcode || projectType == .android || projectType == .flutter {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let runtime = DeviceRuntimeService.shared
+                await runtime.refresh(workspace: folder, force: false)
+
+                if let guiProject = runtime.project,
+                   guiProject.runtime != .unknown,
+                   let targetDevice = runtime.selectedDevice {
+                    self.consoleOutput += "📱 Destination: \(targetDevice.name) (\(targetDevice.platform.rawValue))\n"
+                    if let scheme = runtime.selectedScheme, !scheme.isEmpty {
+                        self.consoleOutput += "🎯 Scheme: \(scheme)\n"
+                    }
+                    self.consoleOutput += "\n"
+
+                    let basePrefix = self.consoleOutput
+                    let baselineMarker = String(runtime.output.suffix(256))
+                    var recordedStatuses: [String] = []
+                    var latestDeltaOutput = ""
+
+                    let rebuildMirroredConsole: () -> Void = { [weak self] in
+                        guard let self else { return }
+                        var composed = basePrefix
+                        if !recordedStatuses.isEmpty {
+                            composed += recordedStatuses.map { "• \($0)" }.joined(separator: "\n") + "\n\n"
+                        }
+                        if !latestDeltaOutput.isEmpty {
+                            composed += latestDeltaOutput
+                            if !latestDeltaOutput.hasSuffix("\n") {
+                                composed += "\n"
+                            }
+                        }
+                        self.consoleOutput = composed
+                    }
+
+                    var mirrorCancellables = Set<AnyCancellable>()
+                    runtime.$statusMessage
+                        .dropFirst()
+                        .sink { status in
+                            let clean = status.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !clean.isEmpty, recordedStatuses.last != clean else { return }
+                            recordedStatuses.append(clean)
+                            rebuildMirroredConsole()
+                        }
+                        .store(in: &mirrorCancellables)
+
+                    runtime.$output
+                        .dropFirst()
+                        .sink { fullOutput in
+                            if baselineMarker.isEmpty {
+                                latestDeltaOutput = fullOutput
+                            } else if let range = fullOutput.range(of: baselineMarker, options: .backwards) {
+                                latestDeltaOutput = String(fullOutput[range.upperBound...])
+                                    .trimmingCharacters(in: .newlines)
+                            } else {
+                                latestDeltaOutput = fullOutput
+                            }
+                            rebuildMirroredConsole()
+                        }
+                        .store(in: &mirrorCancellables)
+
+                    await runtime.runSelectedProject()
+                    mirrorCancellables.removeAll()
+
+                    let finalStatus = runtime.statusMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !finalStatus.isEmpty && recordedStatuses.last != finalStatus {
+                        recordedStatuses.append(finalStatus)
+                    }
+                    rebuildMirroredConsole()
+                    self.isExecuting = false
+                } else {
+                    runViaProjectManager()
+                }
+            }
+            return
+        }
+
+        runViaProjectManager()
     }
     
     func cleanProject() {
@@ -2543,11 +2892,24 @@ class AppState: ObservableObject {
         consoleOutput = "🧹 Cleaning Project...\n"
         
         let projectManager = ProjectManager.shared
-        projectManager.execute(action: .clean, projectPath: folder) { [weak self] success, output in
-            DispatchQueue.main.async {
-                self?.consoleOutput = output
+        let headerPrefix = consoleOutput
+        var streamedAny = false
+        projectManager.execute(
+            action: .clean,
+            projectPath: folder,
+            onOutput: { [weak self] chunk in
+                streamedAny = true
+                self?.consoleOutput += chunk
+            },
+            completion: { [weak self] _, output in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if !streamedAny {
+                        self.consoleOutput = headerPrefix + output
+                    }
+                }
             }
-        }
+        )
     }
     
     func testProject() {
@@ -2559,12 +2921,25 @@ class AppState: ObservableObject {
         isExecuting = true
         
         let projectManager = ProjectManager.shared
-        projectManager.execute(action: .test, projectPath: folder) { [weak self] success, output in
-            DispatchQueue.main.async {
-                self?.consoleOutput = output
-                self?.isExecuting = false
+        let headerPrefix = consoleOutput
+        var streamedAny = false
+        projectManager.execute(
+            action: .test,
+            projectPath: folder,
+            onOutput: { [weak self] chunk in
+                streamedAny = true
+                self?.consoleOutput += chunk
+            },
+            completion: { [weak self] _, output in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if !streamedAny {
+                        self.consoleOutput = headerPrefix + output
+                    }
+                    self.isExecuting = false
+                }
             }
-        }
+        )
     }
 
     func saveCurrentFile() {
@@ -2625,8 +3000,8 @@ class AppState: ObservableObject {
         do {
             var fileContentToSave = file.content
             
-            // Auto-format if enabled
-            if autoFormatOnSave {
+            // Auto-format if enabled (skip multi-hundred-KB / large files to avoid IPC stalls)
+            if autoFormatOnSave && fileContentToSave.utf8.count <= 512 * 1_024 {
                 // Determine language based on file extension if not set
                 var language = file.language
                 if language.isEmpty || language == "Text" {
@@ -2688,6 +3063,11 @@ class AppState: ObservableObject {
                 content: fileContentToSave,
                 source: "Editor"
             )
+            CollaborationService.shared.notifyLocalFileSystemEvent(
+                op: "write",
+                path: url.path,
+                content: fileContentToSave
+            )
 
             // Remote sync if enabled
             if remoteSyncEnabled, let syncServer = activeRemoteSync {
@@ -2724,14 +3104,53 @@ class AppState: ObservableObject {
     func selectFile(at index: Int) {
         guard index >= 0 && index < openFiles.count else { return }
         openFiles[index].decompress()
+        // Offload LZFSE compression of clean large (>128 KB) inactive tabs off `@MainActor`
+        // so opening 8+ monster files at 0ms delay releases multi-megabyte buffers with 0ms UI stall.
+        if openFiles.count > 3 {
+            var pendingCompression: [(id: UUID, content: String, byteCount: Int)] = []
+            for i in 0..<openFiles.count where i != index {
+                if !openFiles[i].isUnsaved && !openFiles[i].isCompressed {
+                    let bytes = openFiles[i].uncompressedUTF8ByteCount
+                    if bytes > 128 * 1024 {
+                        pendingCompression.append((openFiles[i].id, openFiles[i].content, bytes))
+                    }
+                }
+            }
+            if !pendingCompression.isEmpty {
+                Task.detached(priority: .utility) { [weak self] in
+                    var compressedResults: [(UUID, Data, Int)] = []
+                    compressedResults.reserveCapacity(pendingCompression.count)
+                    for item in pendingCompression {
+                        if let data = StateCompressionEngine.compressString(item.content) {
+                            compressedResults.append((item.id, data, item.byteCount))
+                        }
+                    }
+                    guard !compressedResults.isEmpty else { return }
+                    await MainActor.run {
+                        guard let self = self else { return }
+                        for (fileID, data, byteCount) in compressedResults {
+                            if let idx = self.openFiles.firstIndex(where: { $0.id == fileID }),
+                               idx != self.currentFileIndex,
+                               !self.openFiles[idx].isUnsaved,
+                               !self.openFiles[idx].isCompressed {
+                                self.openFiles[idx].applyPrecompressedData(data, expectedByteCount: byteCount)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         currentFileIndex = index
         let selected = openFiles[index]
         currentFile = selected
         IdleStateCompactor.shared.recordActivity()
         if CollaborationService.shared.currentSession != nil {
-            Task {
-                await CollaborationService.shared.updateCursor(filePath: selected.path, line: 1, column: 1)
-            }
+            CollaborationService.shared.updateLocalEditorSelection(
+                filePath: selected.path,
+                line: 1,
+                column: 1,
+                isTyping: false
+            )
         }
     }
 
@@ -3923,7 +4342,7 @@ class AppState: ObservableObject {
     }
 
     func showRefactorDialog() {
-        showingRefactorDialog = true
+        switchToMode(.aiAgent)
     }
 
     func refactorCode(instructions: String) async {
@@ -4991,11 +5410,20 @@ class AppState: ObservableObject {
 
     @Published var selectedConsoleTab: Int = 0
 
-    func toggleSidebar() {
-        withAnimation(.easeInOut(duration: 0.22)) {
-            sidebarVisible.toggle()
+    private func persistLayoutVisibilityFlagsAsync() {
+        let sb = sidebarVisible
+        let con = consoleVisible
+        let ctx = agenticContextVisible
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            let defaults = UserDefaults.standard
+            defaults.set(sb, forKey: "sidebarVisible")
+            defaults.set(con, forKey: "consoleVisible")
+            defaults.set(ctx, forKey: "agenticContextVisible")
         }
-        saveSettings()
+    }
+
+    func toggleSidebar() {
+        SidebarStateController.shared.toggle()
     }
 
     func toggleConsole(tab: Int? = nil) {
@@ -5005,7 +5433,7 @@ class AppState: ObservableObject {
         } else {
             consoleVisible.toggle()
         }
-        saveSettings()
+        persistLayoutVisibilityFlagsAsync()
     }
 
     func toggleGitPanel() {
@@ -5027,7 +5455,7 @@ class AppState: ObservableObject {
             } else {
                 agenticContextVisible = true
             }
-            saveSettings()
+            persistLayoutVisibilityFlagsAsync()
         }
     }
 
@@ -5041,7 +5469,9 @@ class AppState: ObservableObject {
     }
 
     func showPreviewInspector(tab: String? = nil) {
-        agenticContextVisible = true
+        if editorMode == .browser {
+            setEditorMode(.aiAgent)
+        }
         selectedInspectorTab = .preview
         showingPreviewView = true
         DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
@@ -5052,7 +5482,8 @@ class AppState: ObservableObject {
             let autoTab = detectBestPreviewTab()
             PreviewDockService.shared.selectTab(id: autoTab)
         }
-        saveSettings()
+        agenticContextVisible = (editorMode != .aiAgent)
+        persistLayoutVisibilityFlagsAsync()
     }
 
     func hidePreviewInspector() {
@@ -5062,7 +5493,7 @@ class AppState: ObservableObject {
         DeviceRuntimeService.shared.stopEmbeddedAndroid()
         DeviceRuntimeService.shared.stopEmbeddedAppleSimulator(shutdownSimulator: true)
         PreviewDockService.shared.isDockVisible = false
-        saveSettings()
+        persistLayoutVisibilityFlagsAsync()
     }
 
     /// Intelligently detect the best preview platform for the current workspace (defaulting to Web)
@@ -5502,12 +5933,22 @@ struct CodeFile: Identifiable, Equatable {
         self.isTruncated = isTruncated
     }
 
+    var uncompressedUTF8ByteCount: Int {
+        _content.utf8.count
+    }
+
     mutating func compress() {
         guard !_content.isEmpty, _content.utf8.count > 256 else { return }
         if let compressed = StateCompressionEngine.compressString(_content) {
             _compressedData = compressed
             _content = ""
         }
+    }
+
+    mutating func applyPrecompressedData(_ data: Data, expectedByteCount: Int) {
+        guard !_content.isEmpty, _content.utf8.count == expectedByteCount else { return }
+        _compressedData = data
+        _content = ""
     }
 
     mutating func decompress() {

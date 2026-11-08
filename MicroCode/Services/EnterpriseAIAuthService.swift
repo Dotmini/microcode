@@ -97,6 +97,46 @@ public struct EnterprisePolicyStatus: Codable, Equatable {
     public var allowedModels: [String]
 }
 
+public struct WorkspaceEnterprisePolicy: Codable, Equatable {
+    public var policyVersion: String
+    public var organizationName: String
+    public var enforceZeroDataRetention: Bool
+    public var enforceBidirectionalDLP: Bool
+    public var enforceCommandFirewall: Bool
+    public var enforceConfidentialSplitRouting: Bool
+    public var airGappedLockdown: Bool
+    public var confidentialPathPatterns: [String]
+    public var blockedShellPatterns: [String]
+    public var allowedModels: [String]
+
+    public static let defaultTemplate = WorkspaceEnterprisePolicy(
+        policyVersion: "2.0",
+        organizationName: "Enterprise Security Policy",
+        enforceZeroDataRetention: true,
+        enforceBidirectionalDLP: true,
+        enforceCommandFirewall: true,
+        enforceConfidentialSplitRouting: true,
+        airGappedLockdown: false,
+        confidentialPathPatterns: [
+            ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+            "id_rsa*", "secrets/*", "confidential/*", "*credentials*.json"
+        ],
+        blockedShellPatterns: [
+            #"rm\s+-rf\s+(/|~|\$HOME)\b"#,
+            #"curl\s+[^|]*\|\s*(ba)?sh"#,
+            #"wget\s+[^|]*\|\s*(ba)?sh"#,
+            #"\bterraform\s+destroy\b"#,
+            #"\bkubectl\s+delete\s+(namespace|ns|all|--all)"#,
+            #"(?i)\bDROP\s+(DATABASE|SCHEMA|TABLE)\b"#,
+            #"git\s+push\s+.*--force.*\b(main|master|production)\b"#
+        ],
+        allowedModels: [
+            "omni-o1x-pro", "omni-o1x-lite", "gemini-2.5-pro", "gemini-2.5-flash",
+            "claude-3-7-sonnet-20250219", "gpt-4o"
+        ]
+    )
+}
+
 // MARK: - Enterprise AI Auth Service
 
 @MainActor
@@ -200,6 +240,20 @@ public final class EnterpriseAIAuthService: ObservableObject {
     @Published public var localDLPRedaction: Bool {
         didSet { UserDefaults.standard.set(localDLPRedaction, forKey: "enterprise_local_dlp_enabled") }
     }
+    @Published public var commandFirewallEnabled: Bool {
+        didSet { UserDefaults.standard.set(commandFirewallEnabled, forKey: "enterprise_cmd_firewall_enabled") }
+    }
+    @Published public var enforceConfidentialSplitRouting: Bool {
+        didSet { UserDefaults.standard.set(enforceConfidentialSplitRouting, forKey: "enterprise_confidential_split_routing") }
+    }
+    @Published public var isAirGappedLockdownEnabled: Bool {
+        didSet { UserDefaults.standard.set(isAirGappedLockdownEnabled, forKey: "enterprise_airgapped_lockdown") }
+    }
+    @Published public var blockedCommandsCount: Int = 0
+    @Published public var confidentialFilesAccessedCount: Int = 0
+    @Published public var confidentialTurnActive: Bool = false
+    @Published public var lastConfidentialFilePath: String = ""
+    @Published public var activeWorkspacePolicy: WorkspaceEnterprisePolicy? = nil
     @Published public var isMDMManaged: Bool = false
     @Published public var isVerifying: Bool = false
     @Published public var isVerified: Bool = false
@@ -259,6 +313,24 @@ public final class EnterpriseAIAuthService: ObservableObject {
             self.localDLPRedaction = std.bool(forKey: "enterprise_local_dlp_enabled")
         } else {
             self.localDLPRedaction = true
+        }
+
+        if std.object(forKey: "enterprise_cmd_firewall_enabled") != nil {
+            self.commandFirewallEnabled = std.bool(forKey: "enterprise_cmd_firewall_enabled")
+        } else {
+            self.commandFirewallEnabled = true
+        }
+
+        if std.object(forKey: "enterprise_confidential_split_routing") != nil {
+            self.enforceConfidentialSplitRouting = std.bool(forKey: "enterprise_confidential_split_routing")
+        } else {
+            self.enforceConfidentialSplitRouting = true
+        }
+
+        if std.object(forKey: "enterprise_airgapped_lockdown") != nil {
+            self.isAirGappedLockdownEnabled = std.bool(forKey: "enterprise_airgapped_lockdown")
+        } else {
+            self.isAirGappedLockdownEnabled = false
         }
 
         self.isMDMManaged = (mdm?.string(forKey: "enterprise_connection_mode") != nil)
@@ -608,23 +680,144 @@ public final class EnterpriseAIAuthService: ObservableObject {
         }
     }
 
-    /// Redacts high-risk credentials and private keys before prompts leave the client in Enterprise mode
+    /// Tokenizes high-risk credentials and private keys into the Reversible Secret Vault before prompts leave the client.
     public func redactPromptIfNeeded(_ text: String) -> String {
-        guard isEnterpriseActive && localDLPRedaction else { return text }
-        var output = text
-        let patterns: [(String, String)] = [
-            (#"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"#, "[REDACTED_PRIVATE_KEY]"),
-            (#"AKIA[0-9A-Z]{16}"#, "[REDACTED_AWS_KEY]"),
-            (#"ghp_[A-Za-z0-9]{36}"#, "[REDACTED_GITHUB_TOKEN]"),
-            (#"xox[baprs]-[A-Za-z0-9-]{10,}"#, "[REDACTED_SLACK_TOKEN]")
-        ]
-        for (pattern, replacement) in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                let range = NSRange(location: 0, length: output.utf16.count)
-                output = regex.stringByReplacingMatches(in: output, range: range, withTemplate: replacement)
-            }
+        guard localDLPRedaction else { return text }
+        let beforeCount = AgentPrivacyGuard.totalDLPInterceptCount
+        let output = AgentPrivacyGuard.tokenizeAndVault(text)
+        let delta = AgentPrivacyGuard.totalDLPInterceptCount - beforeCount
+        if delta > 0 {
+            FlightRecorder.shared.record(
+                action: .securityDLPIntercept,
+                summary: "Reversible Secret Vault tokenized \(delta) credential(s) in outbound prompt (\(AgentPrivacyGuard.vaultedSecretCount) unique in vault)"
+            )
         }
         return output
+    }
+
+    // MARK: - Enterprise Policy & Shell Firewall Engine
+
+    /// Validates a shell command against Enterprise Command Firewall rules.
+    /// Returns a human-readable block reason if the command violates policy, or `nil` if allowed.
+    public func validateShellCommand(_ command: String) -> String? {
+        guard commandFirewallEnabled else { return nil }
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let patterns = activeWorkspacePolicy?.blockedShellPatterns ?? WorkspaceEnterprisePolicy.defaultTemplate.blockedShellPatterns
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []),
+               regex.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: (trimmed as NSString).length)) != nil {
+                blockedCommandsCount += 1
+                let reason = "Blocked by Enterprise Command Firewall (matched rule `\(pattern)`): `\(trimmed.prefix(120))`"
+                FlightRecorder.shared.record(
+                    action: .securityFirewallBlock,
+                    summary: reason,
+                    command: String(trimmed.prefix(200))
+                )
+                return reason
+            }
+        }
+        return nil
+    }
+
+    /// Checks whether a file path matches confidential file rules (`.env*`, `*.pem`, `*.key`, `secrets/*`, etc.).
+    public func isConfidentialPath(_ path: String) -> Bool {
+        let lowerPath = path.lowercased()
+        let fileName = URL(fileURLWithPath: lowerPath).lastPathComponent
+        if fileName == ".env" || fileName.hasPrefix(".env.") ||
+           fileName.hasSuffix(".pem") || fileName.hasSuffix(".key") ||
+           fileName.hasSuffix(".p12") || fileName.hasSuffix(".pfx") ||
+           fileName.hasPrefix("id_rsa") || fileName.hasPrefix("id_ed25519") ||
+           lowerPath.contains("/secrets/") || lowerPath.contains("/confidential/") ||
+           (fileName.contains("credentials") && fileName.hasSuffix(".json")) {
+            return true
+        }
+        if let customPatterns = activeWorkspacePolicy?.confidentialPathPatterns {
+            for pat in customPatterns {
+                let clean = pat.lowercased().replacingOccurrences(of: "*", with: "")
+                if !clean.isEmpty && (fileName.contains(clean) || lowerPath.contains(clean)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// Marks that a confidential file was read in the current turn so Split-Routing can enforce Local/VPC execution.
+    public func markConfidentialFileAccessed(_ path: String) {
+        confidentialFilesAccessedCount += 1
+        lastConfidentialFilePath = path
+        if enforceConfidentialSplitRouting {
+            confidentialTurnActive = true
+            let fileName = URL(fileURLWithPath: path).lastPathComponent
+            FlightRecorder.shared.record(
+                action: .securityDLPIntercept,
+                summary: "Confidential file accessed (`\(fileName)`). Split-Routing & Reversible Secret Vault active for this turn.",
+                filePath: path
+            )
+        }
+    }
+
+    public func resetConfidentialTurn() {
+        confidentialTurnActive = false
+    }
+
+    /// Loads `.microcode/enterprise-policy.json` from the active workspace if present.
+    public func loadWorkspacePolicy(workspacePath: String?) {
+        guard let root = workspacePath, !root.isEmpty else {
+            activeWorkspacePolicy = nil
+            return
+        }
+        let policyURL = URL(fileURLWithPath: root)
+            .appendingPathComponent(".microcode")
+            .appendingPathComponent("enterprise-policy.json")
+        guard FileManager.default.fileExists(atPath: policyURL.path),
+              let data = try? Data(contentsOf: policyURL),
+              let decoded = try? JSONDecoder().decode(WorkspaceEnterprisePolicy.self, from: data) else {
+            return
+        }
+        activeWorkspacePolicy = decoded
+        zeroDataRetention = decoded.enforceZeroDataRetention
+        localDLPRedaction = decoded.enforceBidirectionalDLP
+        commandFirewallEnabled = decoded.enforceCommandFirewall
+        enforceConfidentialSplitRouting = decoded.enforceConfidentialSplitRouting
+        if decoded.airGappedLockdown {
+            isAirGappedLockdownEnabled = true
+        }
+        statusMessage = "Loaded workspace policy (.microcode/enterprise-policy.json)"
+    }
+
+    /// Writes a default `.microcode/enterprise-policy.json` template into the workspace and activates it.
+    @discardableResult
+    public func exportWorkspacePolicyTemplate(workspacePath: String?) -> URL? {
+        let baseDir: URL
+        if let root = workspacePath, !root.isEmpty {
+            baseDir = URL(fileURLWithPath: root).appendingPathComponent(".microcode", isDirectory: true)
+        } else {
+            baseDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".microcode", isDirectory: true)
+        }
+        try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        let fileURL = baseDir.appendingPathComponent("enterprise-policy.json")
+        var template = WorkspaceEnterprisePolicy.defaultTemplate
+        if !organizationId.isEmpty {
+            template.organizationName = organizationId
+        }
+        template.enforceZeroDataRetention = zeroDataRetention
+        template.enforceBidirectionalDLP = localDLPRedaction
+        template.enforceCommandFirewall = commandFirewallEnabled
+        template.enforceConfidentialSplitRouting = enforceConfidentialSplitRouting
+        template.airGappedLockdown = isAirGappedLockdownEnabled
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(template) {
+            try? data.write(to: fileURL, options: .atomic)
+            activeWorkspacePolicy = template
+            statusMessage = "Saved Enterprise Policy to \(fileURL.path)"
+            return fileURL
+        }
+        return nil
     }
 
     // MARK: - Connection Verification

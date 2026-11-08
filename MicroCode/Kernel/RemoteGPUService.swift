@@ -193,8 +193,22 @@ final class RemoteGPUService: ObservableObject {
         //    so network drops or disconnecting the local tunnel never kills running GPU jobs.
         let remoteCmd = """
         set -e
-        TOKEN_FILE="$HOME/.microcode_jupyter.token"
-        LOG_FILE="$HOME/.microcode_jupyter.log"
+        RUNTIME_DIR="$HOME/.microcode/runtime"
+        mkdir -p "$RUNTIME_DIR"
+        chmod 700 "$RUNTIME_DIR"
+        TOKEN_FILE="$RUNTIME_DIR/jupyter.token"
+        LOG_FILE="$RUNTIME_DIR/jupyter.log"
+        if [ -f "$HOME/.microcode_jupyter.token" ] && [ ! -f "$TOKEN_FILE" ]; then
+            mv -f "$HOME/.microcode_jupyter.token" "$TOKEN_FILE" 2>/dev/null || true
+            chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+        else
+            rm -f "$HOME/.microcode_jupyter.token" 2>/dev/null || true
+        fi
+        if [ -f "$HOME/.microcode_jupyter.log" ] && [ ! -f "$LOG_FILE" ]; then
+            mv -f "$HOME/.microcode_jupyter.log" "$LOG_FILE" 2>/dev/null || true
+        else
+            rm -f "$HOME/.microcode_jupyter.log" 2>/dev/null || true
+        fi
         if [ -f "$TOKEN_FILE" ] && pgrep -f "jupyter.*--port=\(remotePort)" >/dev/null 2>&1; then
             EXISTING_TOK=$(cat "$TOKEN_FILE" | tr -d '[:space:]')
             if [ -n "$EXISTING_TOK" ]; then
@@ -209,8 +223,9 @@ final class RemoteGPUService: ObservableObject {
         nohup jupyter server --no-browser --ip=127.0.0.1 --port=\(remotePort) \
             --ServerApp.token='\(generatedToken)' --ServerApp.disable_check_xsrf=True --ServerApp.allow_origin='*' \
             > "$LOG_FILE" 2>&1 < /dev/null &
+        chmod 600 "$LOG_FILE" 2>/dev/null || true
         echo "MC_TOKEN:\(generatedToken)"
-        echo "• Persistent Jupyter daemon started (nohup, log: ~/.microcode_jupyter.log)"
+        echo "• Persistent Jupyter daemon started (nohup, log: ~/.microcode/runtime/jupyter.log)"
         """
         let jp = Process()
         jp.executableURL = URL(fileURLWithPath: sshPath)
@@ -311,7 +326,7 @@ final class RemoteGPUService: ObservableObject {
         guard let t = target else { return }
         let killProc = Process()
         killProc.executableURL = URL(fileURLWithPath: sshPath)
-        killProc.arguments = sshBaseArgs(t) + ["\(t.user)@\(t.host)", "pkill -f 'jupyter.*--port=\(remotePort)' || true; rm -f ~/.microcode_jupyter.token"]
+        killProc.arguments = sshBaseArgs(t) + ["\(t.user)@\(t.host)", "pkill -f 'jupyter.*--port=\(remotePort)' || true; rm -f ~/.microcode/runtime/jupyter.token ~/.microcode_jupyter.token"]
         try? killProc.run()
         append("• Stopped remote Jupyter daemon on \(t.host).\n")
     }

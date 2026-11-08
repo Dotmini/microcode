@@ -13,6 +13,7 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
     case refactor = "refactor"
     case review = "review"
     case learn = "learn"
+    case arx = "arx"
     case compare = "compare"
     case squad = "squad"
     case pns = "pns"
@@ -36,6 +37,7 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
         case .refactor: return "Refactor selected code"
         case .review: return "Perform a comprehensive senior code review"
         case .learn: return "Save a persistent rule into .microcode/rules.md"
+        case .arx: return "Export, import, or apply patch from a Portable .ARX Agent Capsule"
         case .compare: return "Compare responses from 2 AI models side-by-side"
         case .squad: return "Configure or launch multi-agent specialist team"
         case .pns: return "Open PNS 24/7 Neural System Console or dispatch a 24/7 marathon mission"
@@ -59,6 +61,7 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
         case .refactor: return "hammer"
         case .review: return "checkmark.shield"
         case .learn: return "bookmark"
+        case .arx: return "shippingbox.fill"
         case .compare: return "rectangle.split.2x1"
         case .squad: return "square.stack.3d.up"
         case .pns: return "point.3.connected.trianglepath.dotted"
@@ -149,6 +152,8 @@ class SlashCommandService: ObservableObject {
         case .review:
             return "Perform a thorough senior engineering code review (bugs, edge cases, security, performance, architecture) on the current changes or specified target:\n\(argument)"
         case .learn:
+            return nil
+        case .arx:
             return nil
         case .compare:
             return argument

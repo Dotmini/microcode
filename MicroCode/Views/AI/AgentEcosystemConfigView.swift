@@ -62,6 +62,7 @@ public struct AgentEcosystemConfigView: View {
     @State private var selectedTab: EcosystemTab
     @State private var filterQuery: String = ""
     @State private var expandedRuleId: String? = nil
+    @State private var newLearnedRuleText: String = ""
     
     // Agent config state
     @State private var detectedPaths: [ACPAgentType: String] = [:]
@@ -111,7 +112,8 @@ public struct AgentEcosystemConfigView: View {
         .onAppear {
             detectInstalledAgents()
             loadExistingConfigs()
-            rulesEngine.refresh(workspaceRoot: rulesEngine.currentWorkspace)
+            let ws = appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace ?? rulesEngine.currentWorkspace
+            rulesEngine.refresh(workspaceRoot: ws)
         }
     }
 
@@ -242,12 +244,26 @@ public struct AgentEcosystemConfigView: View {
 
     private var externalAgentsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Autonomous & External Coding Agents")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("Connect external CLI coding agents via stdio Agent Client Protocol (ACP). Agents execute tasks and report streaming events directly into MicroCode.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Autonomous & External Coding Agents")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Configure binary paths and ACP flags, or launch the 1-Click Wizard to install and sign in.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button {
+                    presentationMode.wrappedValue.dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        NotificationCenter.default.post(name: NSNotification.Name("MicroCode.OpenAgentConnections"), object: nil)
+                    }
+                } label: {
+                    Label("1-Click Install & Login Wizard…", systemImage: "sparkles")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
 
             VStack(spacing: 10) {
@@ -561,10 +577,43 @@ public struct AgentEcosystemConfigView: View {
                 Text("Discovered Workspace Guidelines, Rules & Lifecycle Hooks")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.primary)
-                Text("Rules automatically loaded from AGENTS.md (root & nested), CLAUDE.md, Cursor (.cursorrules, .cursor/rules/*.mdc), Windsurf, Cline, Zed, Copilot, TX Code (.txcode-rules), and MicroCode.")
+                Text("Rules automatically loaded across ~/.microcode/workspaces/<id>/{rules.md,agent.md} (/learn), .microcode/, AGENTS.md, CLAUDE.md, Cursor, Windsurf, Cline, Zed, and Copilot — shared identically across Main Agent, SubAgents, and Rust Engine.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
+
+            // Quick Add Persistent Rule (/learn sync)
+            HStack(spacing: 8) {
+                Image(systemName: "bookmark.fill")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.accentColor)
+                TextField("Add a persistent workspace rule (synced with /learn in ~/.microcode)…", text: $newLearnedRuleText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .onSubmit {
+                        let trimmed = newLearnedRuleText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+                        let ws = appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace ?? rulesEngine.currentWorkspace
+                        ProjectMemoryService.shared.appendLearnedRule(trimmed, workspace: ws)
+                        newLearnedRuleText = ""
+                    }
+
+                Button("Add Rule") {
+                    let trimmed = newLearnedRuleText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    let ws = appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace ?? rulesEngine.currentWorkspace
+                    ProjectMemoryService.shared.appendLearnedRule(trimmed, workspace: ws)
+                    newLearnedRuleText = ""
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(newLearnedRuleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(inputBackground)
+            .cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorder, lineWidth: 1))
 
             // Search Bar
             HStack {

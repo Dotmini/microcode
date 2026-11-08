@@ -3,15 +3,18 @@
 //  MicroCode
 //
 //  Feature 10: Voice Coding — macOS Speech Recognition to agent chat.
-//  Uses SFSpeechRecognizer for on-device voice-to-text transcription,
-//  then feeds the result into the AI agent conversation.
+//  Uses SFSpeechRecognizer for on-device/cloud voice-to-text transcription,
+//  isolated safely from @MainActor on CoreAudio & Speech XPC callbacks,
+//  and guarded with ExceptionCatcher against CoreAudio NSExceptions.
 //  Tirawat Nantamas Founder and CEO of Dotmini Software.
-//  Copyright © 2025 Dotmini Software. All rights reserved.
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
 
 import Foundation
 import Speech
 import AVFoundation
+import AppKit
+import MicroCodeSupport
 
 // MARK: - Voice Coding State
 
@@ -27,15 +30,15 @@ enum VoiceCodingState: String {
 
 @MainActor
 class VoiceCodingService: ObservableObject {
-    
+
     static let shared = VoiceCodingService()
-    
+
     @Published var state: VoiceCodingState = .idle
     @Published var currentTranscription: String = ""
-    @Published var isAvailable: Bool = false
+    @Published var isAvailable: Bool = true
     @Published var recentTranscriptions: [VoiceTranscription] = []
     @Published var errorMessage: String?
-    
+
     struct VoiceTranscription: Identifiable {
         let id = UUID()
         let text: String
@@ -43,163 +46,320 @@ class VoiceCodingService: ObservableObject {
         let confidence: Float
         var sentToAgent: Bool = false
     }
-    
-    private let speechRecognizer: SFSpeechRecognizer?
+
+    private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private let audioEngine = AVAudioEngine()
-    
+    private var audioEngine: AVAudioEngine?
+    private var audioConfigObserver: NSObjectProtocol?
+    private var activeSessionID = UUID()
+
     // Configuration
-    var locale: Locale = Locale(identifier: "en-US")
+    private static let localeDefaultsKey = "voiceCodingLocale"
+    @Published var locale: Locale
     var autoSendToAgent: Bool = true
-    var silenceTimeoutSeconds: Double = 3.0
+    var silenceTimeoutSeconds: Double = 2.8
     private var silenceTimer: Task<Void, Never>?
-    
+
     private init() {
-        speechRecognizer = SFSpeechRecognizer(locale: locale)
-        checkAvailability()
+        self.locale = Self.resolveDefaultLocale()
     }
-    
+
+    private static func resolveDefaultLocale() -> Locale {
+        if let saved = UserDefaults.standard.string(forKey: localeDefaultsKey), !saved.isEmpty {
+            return Locale(identifier: saved)
+        }
+        // Prefer Thai when Thai is among user's preferred macOS languages or region is Thailand
+        let preferred = Locale.preferredLanguages.map { $0.lowercased() }
+        if preferred.contains(where: { $0.hasPrefix("th") }) || Locale.current.region?.identifier == "TH" {
+            return Locale(identifier: "th-TH")
+        }
+        return Locale(identifier: Locale.current.identifier)
+    }
+
+    private static var hasRequiredInfoPlistKeys: Bool {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let hasMic = (info["NSMicrophoneUsageDescription"] as? String)?.isEmpty == false
+        let hasSpeech = (info["NSSpeechRecognitionUsageDescription"] as? String)?.isEmpty == false
+        return hasMic && hasSpeech
+    }
+
+    // MARK: - Nonisolated Callback Bridges (Prevents Swift 6 @MainActor Runtime Traps!)
+
+    /// Requests Microphone TCC access outside @MainActor so AVFoundation's background XPC callback never triggers `_swift_task_checkIsolated`.
+    nonisolated private static func requestMicrophoneAccessOffMain() async -> Bool {
+        let current = AVCaptureDevice.authorizationStatus(for: .audio)
+        if current == .authorized { return true }
+        if current == .denied || current == .restricted { return false }
+        return await withCheckedContinuation { continuation in
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+
+    /// Requests Speech Recognition TCC access outside @MainActor so Speech.framework's XPC callback never triggers `_swift_task_checkIsolated`.
+    nonisolated private static func requestSpeechAuthOffMain() async -> SFSpeechRecognizerAuthorizationStatus {
+        let current = SFSpeechRecognizer.authorizationStatus()
+        if current != .notDetermined { return current }
+        return await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { status in
+                continuation.resume(returning: status)
+            }
+        }
+    }
+
+    /// Builds the CoreAudio realtime tap block in a strictly `nonisolated` context so `com.apple.audio.IOThread.client`
+    /// never executes a `@MainActor` thunk (`EXC_BREAKPOINT` / `SIGTRAP`).
+    nonisolated private static func makeRealtimeAudioTap(
+        for request: SFSpeechAudioBufferRecognitionRequest
+    ) -> AVAudioNodeTapBlock {
+        return { buffer, _ in
+            guard buffer.frameLength > 0 else { return }
+            request.append(buffer)
+        }
+    }
+
+    /// Starts `SFSpeechRecognitionTask` in a `nonisolated` context so background Speech XPC callbacks hop safely via `Task { @MainActor in }`.
+    nonisolated private static func startRecognitionTaskOffMain(
+        recognizer: SFSpeechRecognizer,
+        request: SFSpeechAudioBufferRecognitionRequest,
+        onEvent: @escaping @Sendable (_ transcript: String?, _ confidence: Float, _ isFinal: Bool, _ nsErrorDomain: String?, _ nsErrorCode: Int?, _ errorDesc: String?) -> Void
+    ) -> SFSpeechRecognitionTask {
+        return recognizer.recognitionTask(with: request) { result, error in
+            let transcript = result?.bestTranscription.formattedString
+            let confidence = result?.bestTranscription.segments.first?.confidence ?? 0.8
+            let isFinal = result?.isFinal ?? false
+            let nsErr = error as NSError?
+            onEvent(transcript, confidence, isFinal, nsErr?.domain, nsErr?.code, error?.localizedDescription)
+        }
+    }
+
     // MARK: - Permissions & Availability
-    
+
     func checkAvailability() {
-        guard let recognizer = speechRecognizer else {
+        guard Self.hasRequiredInfoPlistKeys else {
             isAvailable = false
             return
         }
-        isAvailable = recognizer.isAvailable
+        let rec = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        speechRecognizer = rec
+        isAvailable = rec?.isAvailable ?? false
     }
-    
+
     func requestPermission() async -> Bool {
-        return await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
-                Task { @MainActor in
-                    switch status {
-                    case .authorized:
-                        self.isAvailable = true
-                        self.state = .idle
-                        continuation.resume(returning: true)
-                    case .denied, .restricted:
-                        self.state = .noPermission
-                        self.isAvailable = false
-                        self.errorMessage = "Speech recognition permission denied. Enable in System Settings → Privacy → Speech Recognition."
-                        continuation.resume(returning: false)
-                    case .notDetermined:
-                        self.state = .idle
-                        continuation.resume(returning: false)
-                    @unknown default:
-                        continuation.resume(returning: false)
-                    }
-                }
-            }
+        guard Self.hasRequiredInfoPlistKeys else {
+            state = .error
+            isAvailable = false
+            errorMessage = "App bundle Info.plist is missing NSMicrophoneUsageDescription or NSSpeechRecognitionUsageDescription. Rebuild via ./build_dev.sh."
+            return false
+        }
+
+        let micGranted = await Self.requestMicrophoneAccessOffMain()
+        guard micGranted else {
+            state = .noPermission
+            isAvailable = false
+            errorMessage = "ไม่ได้รับสิทธิ์ไมโครโฟน — เปิดได้ที่ System Settings → Privacy & Security → Microphone"
+            return false
+        }
+
+        let speechStatus = await Self.requestSpeechAuthOffMain()
+        switch speechStatus {
+        case .authorized:
+            isAvailable = true
+            if state == .noPermission { state = .idle }
+            return true
+        case .denied, .restricted:
+            state = .noPermission
+            isAvailable = false
+            errorMessage = "ไม่ได้รับสิทธิ์รู้จำเสียงพูด — เปิดได้ที่ System Settings → Privacy & Security → Speech Recognition"
+            return false
+        case .notDetermined:
+            state = .idle
+            return false
+        @unknown default:
+            return false
         }
     }
-    
+
     // MARK: - Start / Stop Listening
-    
+
     func startListening() async throws {
-        // Check permission
-        let authStatus = SFSpeechRecognizer.authorizationStatus()
-        if authStatus != .authorized {
-            let granted = await requestPermission()
-            if !granted {
-                throw VoiceCodingError.permissionDenied
-            }
+        errorMessage = nil
+
+        let granted = await requestPermission()
+        guard granted else {
+            throw VoiceCodingError.permissionDenied
         }
-        
-        guard let recognizer = speechRecognizer, recognizer.isAvailable else {
+
+        guard AVCaptureDevice.default(for: .audio) != nil else {
+            throw VoiceCodingError.audioSetupFailed("ไม่พบอุปกรณ์ไมโครโฟนที่เชื่อมต่ออยู่")
+        }
+
+        // Stop any existing session cleanly before creating a fresh engine
+        teardownActiveRecognition(finalizePartial: false)
+
+        let recognizer = SFSpeechRecognizer(locale: locale)
+            ?? SFSpeechRecognizer(locale: Locale.current)
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        self.speechRecognizer = recognizer
+
+        guard let recognizer, recognizer.isAvailable else {
             throw VoiceCodingError.notAvailable
         }
-        
-        // Stop any existing session
-        stopListening()
-        
-        // Create recognition request
-        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let request = recognitionRequest else {
-            throw VoiceCodingError.requestCreationFailed
-        }
-        
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        
-        // Enable on-device recognition if available (privacy + speed)
         if #available(macOS 13.0, *) {
-            request.requiresOnDeviceRecognition = false // Fall back to server if needed
+            request.requiresOnDeviceRecognition = false
+            request.addsPunctuation = true
         }
-        
-        // Configure audio session
-        let inputNode = audioEngine.inputNode
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
-        
-        // Validate format
-        guard recordingFormat.sampleRate > 0, recordingFormat.channelCount > 0 else {
-            throw VoiceCodingError.audioSetupFailed("Invalid audio format: sampleRate=\(recordingFormat.sampleRate), channels=\(recordingFormat.channelCount)")
+        self.recognitionRequest = request
+
+        let engine = AVAudioEngine()
+        self.audioEngine = engine
+        let tapBlock = Self.makeRealtimeAudioTap(for: request)
+
+        // Guard every CoreAudio / AVAudioEngine Objective-C call with ExceptionCatcher
+        // so broken hardware sample rates or Bluetooth route glitches NEVER crash the app!
+        var audioFormatErrorMsg: String? = nil
+        do {
+            try ExceptionCatcher.catchException {
+                let inputNode = engine.inputNode
+                inputNode.removeTap(onBus: 0)
+                let hwFormat = inputNode.inputFormat(forBus: 0)
+                let outputFormat = inputNode.outputFormat(forBus: 0)
+                let chosenFormat = (outputFormat.sampleRate > 0 && outputFormat.channelCount > 0) ? outputFormat : hwFormat
+                guard chosenFormat.sampleRate > 0 && chosenFormat.channelCount > 0 else {
+                    audioFormatErrorMsg = "Invalid microphone audio format (\(chosenFormat.sampleRate) Hz, \(chosenFormat.channelCount) ch)"
+                    return
+                }
+                inputNode.installTap(onBus: 0, bufferSize: 1024, format: chosenFormat, block: tapBlock)
+                engine.prepare()
+            }
+        } catch {
+            teardownActiveRecognition(finalizePartial: false)
+            throw VoiceCodingError.audioSetupFailed(error.localizedDescription)
         }
-        
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
-            self?.recognitionRequest?.append(buffer)
+
+        if let audioFormatErrorMsg {
+            teardownActiveRecognition(finalizePartial: false)
+            throw VoiceCodingError.audioSetupFailed(audioFormatErrorMsg)
         }
-        
-        // Start audio engine
-        audioEngine.prepare()
-        try audioEngine.start()
-        
-        state = .listening
-        currentTranscription = ""
-        errorMessage = nil
-        
-        // Start recognition task
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            Task { @MainActor in
-                guard let self = self else { return }
-                
-                if let result = result {
-                    let text = result.bestTranscription.formattedString
+
+        do {
+            try ExceptionCatcher.catchException {
+                try? engine.start()
+            }
+            if !engine.isRunning {
+                try engine.start()
+            }
+        } catch {
+            teardownActiveRecognition(finalizePartial: false)
+            throw VoiceCodingError.audioSetupFailed(error.localizedDescription)
+        }
+
+        let sessionID = UUID()
+        self.activeSessionID = sessionID
+        self.state = .listening
+        self.currentTranscription = ""
+
+        NotificationCenter.default.post(
+            name: .voiceCodingSessionStateChanged,
+            object: nil,
+            userInfo: ["listening": true]
+        )
+
+        // Gracefully handle AirPods / USB mic hot-plugging without crashing
+        audioConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.state == .listening else { return }
+                self.stopListening()
+            }
+        }
+
+        recognitionTask = Self.startRecognitionTaskOffMain(recognizer: recognizer, request: request) { [weak self] transcript, confidence, isFinal, errDomain, errCode, errDesc in
+            Task { @MainActor [weak self] in
+                guard let self, self.activeSessionID == sessionID else { return }
+
+                if let text = transcript {
                     self.currentTranscription = text
-                    
-                    // Reset silence timer on new text
+                    NotificationCenter.default.post(
+                        name: .voiceCodingLiveUpdate,
+                        object: nil,
+                        userInfo: ["text": text, "isFinal": isFinal]
+                    )
                     self.resetSilenceTimer()
-                    
-                    if result.isFinal {
-                        self.finishTranscription(text: text, confidence: result.bestTranscription.segments.first?.confidence ?? 0)
+
+                    if isFinal {
+                        self.finishTranscription(text: text, confidence: confidence)
+                        return
                     }
                 }
-                
-                if let error = error {
-                    // Ignore cancellation errors (expected when stopping)
-                    let nsError = error as NSError
-                    if nsError.domain != "kAFAssistantErrorDomain" || nsError.code != 216 {
-                        self.errorMessage = error.localizedDescription
-                        self.state = .error
-                        print("❌ [VoiceCoding] Recognition error: \(error)")
+
+                if let errDesc {
+                    // Ignore expected cancellation codes (216 / 301 / 1110 "No speech detected" on manual stop)
+                    let ignoredCodes: Set<Int> = [216, 301, 203]
+                    if errDomain == "kAFAssistantErrorDomain", let code = errCode, ignoredCodes.contains(code) {
+                        self.teardownActiveRecognition(finalizePartial: true)
+                        return
                     }
-                    self.stopAudioEngine()
+                    if errDomain == "kAFAssistantErrorDomain", errCode == 1110 {
+                        // Silence / no speech detected
+                        self.teardownActiveRecognition(finalizePartial: true)
+                        return
+                    }
+                    self.errorMessage = errDesc
+                    self.teardownActiveRecognition(finalizePartial: false)
+                    self.state = .error
                 }
             }
         }
-        
-        print("🎤 [VoiceCoding] Started listening...")
     }
-    
+
     func stopListening() {
+        teardownActiveRecognition(finalizePartial: true)
+    }
+
+    private func teardownActiveRecognition(finalizePartial: Bool) {
+        let pendingText = currentTranscription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let wasListening = (state == .listening)
+
+        activeSessionID = UUID()
         silenceTimer?.cancel()
         silenceTimer = nil
-        
-        recognitionTask?.cancel()
-        recognitionTask = nil
+
+        if let obs = audioConfigObserver {
+            NotificationCenter.default.removeObserver(obs)
+            audioConfigObserver = nil
+        }
+
+        stopAudioEngine()
+
         recognitionRequest?.endAudio()
         recognitionRequest = nil
-        
-        stopAudioEngine()
-        
-        // If we have partial transcription, finalize it
-        if !currentTranscription.isEmpty && state == .listening {
-            finishTranscription(text: currentTranscription, confidence: 0.5)
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
+        if finalizePartial && wasListening && !pendingText.isEmpty {
+            finishTranscription(text: pendingText, confidence: 0.75)
+        } else {
+            currentTranscription = ""
+            if state == .listening || state == .processing {
+                state = .idle
+            }
+            NotificationCenter.default.post(
+                name: .voiceCodingSessionStateChanged,
+                object: nil,
+                userInfo: ["listening": false]
+            )
         }
-        
-        state = .idle
     }
-    
+
     func toggleListening() async {
         if state == .listening {
             stopListening()
@@ -208,96 +368,130 @@ class VoiceCodingService: ObservableObject {
                 try await startListening()
             } catch {
                 errorMessage = error.localizedDescription
-                state = .error
+                if state != .noPermission {
+                    state = .error
+                }
             }
         }
     }
-    
+
     // MARK: - Transcription Processing
-    
+
     private func finishTranscription(text: String, confidence: Float) {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            currentTranscription = ""
+            state = .idle
+            NotificationCenter.default.post(
+                name: .voiceCodingSessionStateChanged,
+                object: nil,
+                userInfo: ["listening": false]
+            )
+            return
+        }
+
         state = .processing
-        
+
         let transcription = VoiceTranscription(
-            text: text,
+            text: cleaned,
             timestamp: Date(),
             confidence: confidence
         )
         recentTranscriptions.insert(transcription, at: 0)
-        
-        // Keep max 50 transcriptions
         if recentTranscriptions.count > 50 {
             recentTranscriptions = Array(recentTranscriptions.prefix(50))
         }
-        
-        print("🎤 [VoiceCoding] Transcription: \"\(text)\" (confidence: \(String(format: "%.2f", confidence)))")
-        
+
         currentTranscription = ""
         state = .idle
-        
+
+        // Ensure audio engine is cleanly stopped once finalized
+        stopAudioEngine()
+        recognitionRequest?.endAudio()
+        recognitionRequest = nil
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
+        NotificationCenter.default.post(
+            name: .voiceCodingSessionStateChanged,
+            object: nil,
+            userInfo: ["listening": false]
+        )
+
         if autoSendToAgent {
-            sendToAgent(text: text)
+            sendToAgent(text: cleaned)
         }
     }
-    
+
     // MARK: - Send to Agent
-    
+
     func sendToAgent(text: String) {
-        // Mark as sent
         if let idx = recentTranscriptions.firstIndex(where: { $0.text == text && !$0.sentToAgent }) {
             recentTranscriptions[idx].sentToAgent = true
         }
-        
-        // Post notification for agent to pick up
+
         NotificationCenter.default.post(
             name: .voiceCodingInput,
             object: nil,
             userInfo: ["text": text]
         )
-        
-        print("🎤→🤖 [VoiceCoding] Sent to agent: \"\(text.prefix(60))...\"")
     }
-    
+
     func sendLatestToAgent() {
         guard let latest = recentTranscriptions.first, !latest.sentToAgent else { return }
         sendToAgent(text: latest.text)
     }
-    
+
     // MARK: - Silence Detection
-    
+
     private func resetSilenceTimer() {
         silenceTimer?.cancel()
-        silenceTimer = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(silenceTimeoutSeconds * 1_000_000_000))
+        silenceTimer = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(self.silenceTimeoutSeconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            
-            // Auto-stop after silence
             if self.state == .listening && !self.currentTranscription.isEmpty {
                 self.stopListening()
             }
         }
     }
-    
+
     // MARK: - Audio Engine
-    
+
     private func stopAudioEngine() {
-        if audioEngine.isRunning {
-            audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
+        guard let engine = audioEngine else { return }
+        audioEngine = nil
+        _ = try? ExceptionCatcher.catchException {
+            if engine.isRunning {
+                engine.stop()
+            }
+            engine.inputNode.removeTap(onBus: 0)
+            engine.reset()
         }
     }
-    
+
     // MARK: - Locale Management
-    
+
     func setLocale(_ identifier: String) {
+        let wasListening = (state == .listening)
+        if wasListening {
+            stopListening()
+        }
         locale = Locale(identifier: identifier)
-        // Must recreate recognizer for new locale — handled on next startListening
+        UserDefaults.standard.set(identifier, forKey: Self.localeDefaultsKey)
+        if wasListening {
+            Task { try? await startListening() }
+        }
     }
-    
+
     func supportedLocales() -> [Locale] {
         return Array(SFSpeechRecognizer.supportedLocales())
+    }
+
+    func openPrivacySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition") {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 
@@ -308,25 +502,27 @@ enum VoiceCodingError: LocalizedError {
     case notAvailable
     case requestCreationFailed
     case audioSetupFailed(String)
-    
+
     var errorDescription: String? {
         switch self {
         case .permissionDenied:
-            return "Speech recognition permission denied. Enable in System Settings → Privacy → Speech Recognition."
+            return "ไม่ได้รับสิทธิ์ไมโครโฟนหรือการรู้จำเสียงพูด — กรุณาอนุญาตใน System Settings → Privacy & Security"
         case .notAvailable:
-            return "Speech recognition is not available on this device."
+            return "ระบบรู้จำเสียงพูดยังไม่พร้อมใช้งานสำหรับภาษาที่เลือก"
         case .requestCreationFailed:
-            return "Failed to create speech recognition request."
+            return "ไม่สามารถสร้างคำขอรู้จำเสียงพูดได้"
         case .audioSetupFailed(let detail):
-            return "Audio setup failed: \(detail)"
+            return "ตั้งค่าไมโครโฟนไม่สำเร็จ: \(detail)"
         }
     }
 }
 
-// MARK: - Notification Name
+// MARK: - Notification Names
 
 extension Notification.Name {
     static let voiceCodingInput = Notification.Name("VoiceCodingInput")
+    static let voiceCodingLiveUpdate = Notification.Name("VoiceCodingLiveUpdate")
+    static let voiceCodingSessionStateChanged = Notification.Name("VoiceCodingSessionStateChanged")
 }
 
 // MARK: - Agent Tool
@@ -339,29 +535,28 @@ struct VoiceCodingTool: AgentTool {
         ToolParameter(name: "text", type: "string", description: "Text to send to agent (for 'send' action)", required: false),
         ToolParameter(name: "locale_id", type: "string", description: "Locale identifier e.g. 'th-TH', 'en-US', 'ja-JP' (for 'locale' action)", required: false)
     ]
-    
+
     func execute(params: [String: Any]) async throws -> String {
         guard let action = params["action"] as? String else {
             throw ToolBoxError.invalidParams("Missing 'action'")
         }
-        
+
         switch action.lowercased() {
         case "start":
-            // startListening() is @MainActor async throws — auto-dispatches to MainActor
             try await VoiceCodingService.shared.startListening()
             return "🎤 Voice coding started. Listening for speech..."
-            
+
         case "stop":
             await MainActor.run {
                 VoiceCodingService.shared.stopListening()
             }
             return "🎤 Voice coding stopped."
-            
+
         case "toggle":
             await VoiceCodingService.shared.toggleListening()
             let stateVal = await MainActor.run { VoiceCodingService.shared.state.rawValue }
             return "🎤 Voice coding: \(stateVal)"
-            
+
         case "status":
             let output: String = await MainActor.run {
                 let service = VoiceCodingService.shared
@@ -370,11 +565,11 @@ struct VoiceCodingTool: AgentTool {
                 out += "• Available: \(service.isAvailable)\n"
                 out += "• Locale: \(service.locale.identifier)\n"
                 out += "• Auto-send: \(service.autoSendToAgent)\n"
-                
+
                 if !service.currentTranscription.isEmpty {
                     out += "• Current: \"\(service.currentTranscription)\"\n"
                 }
-                
+
                 if !service.recentTranscriptions.isEmpty {
                     out += "\nRecent Transcriptions:\n"
                     for t in service.recentTranscriptions.prefix(5) {
@@ -382,15 +577,15 @@ struct VoiceCodingTool: AgentTool {
                         out += "  \(sent) \"\(t.text.prefix(60))\"\n"
                     }
                 }
-                
+
                 if let err = service.errorMessage {
                     out += "\n⚠️ Error: \(err)\n"
                 }
-                
+
                 return out
             }
             return output
-            
+
         case "send":
             if let text = params["text"] as? String, !text.isEmpty {
                 await MainActor.run {
@@ -403,7 +598,7 @@ struct VoiceCodingTool: AgentTool {
                 }
                 return "Sent latest transcription to agent."
             }
-            
+
         case "locale":
             guard let localeId = params["locale_id"] as? String else {
                 let locales: [String] = await MainActor.run {
@@ -415,7 +610,7 @@ struct VoiceCodingTool: AgentTool {
                 VoiceCodingService.shared.setLocale(localeId)
             }
             return "Voice coding locale set to: \(localeId)"
-            
+
         default:
             throw ToolBoxError.invalidParams("Unknown action '\(action)'. Use: start, stop, toggle, status, send, locale")
         }

@@ -22,9 +22,14 @@ class ACPServerService: ObservableObject {
     
     private var ndjsonParser = ACPNDJSONParser()
     private var sessions: [String: String] = [:] // sessionId -> cwd
-    private var sessionHistory: [String: [(role: String, content: String)]] = [:]
+    private var sessionModels: [String: String] = [:] // sessionId -> optional model override
+    private var sessionModes: [String: String] = [:] // sessionId -> agent/plan/ask
+    private var sessionHistory: [String: [[(String, Any)]]] = [:]
     private var activePromptTasks: [String: Task<Void, Never>] = [:]
     private var cancelledSessions: Set<String> = []
+    private var supportsClientReadTextFile = false
+    private var supportsClientWriteTextFile = false
+    private var supportsClientTerminal = false
     
     // MARK: - Server Lifecycle
     
@@ -128,6 +133,13 @@ class ACPServerService: ObservableObject {
                let name = clientInfo["name"] as? String {
                 self.clientName = name
             }
+            if let clientCaps = params["clientCapabilities"] as? [String: Any] {
+                if let fsCaps = clientCaps["fs"] as? [String: Any] {
+                    supportsClientReadTextFile = (fsCaps["readTextFile"] as? Bool) ?? false
+                    supportsClientWriteTextFile = (fsCaps["writeTextFile"] as? Bool) ?? false
+                }
+                supportsClientTerminal = (clientCaps["terminal"] as? Bool) ?? false
+            }
             guard let id = reqId else { return }
             writeNDJSON([
                 "jsonrpc": "2.0",
@@ -136,11 +148,15 @@ class ACPServerService: ObservableObject {
                     "protocolVersion": 1,
                     "agentInfo": [
                         "name": "microcode",
-                        "title": "MicroCode Native AI Agent",
-                        "version": "2.3.1"
+                        "title": "MicroCode Sovereign Agentic Harness",
+                        "version": "2.4.0"
                     ],
                     "agentCapabilities": [
                         "loadSession": true,
+                        "mcpCapabilities": [
+                            "http": true,
+                            "sse": true
+                        ],
                         "promptCapabilities": [
                             "image": true,
                             "embeddedContext": true
@@ -159,12 +175,21 @@ class ACPServerService: ObservableObject {
             let cwd = params["cwd"] as? String ?? defaultWorkspace
             let sid = "sess_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
             sessions[sid] = cwd
+            sessionModes[sid] = "agent"
             sessionHistory[sid] = []
             writeNDJSON([
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": [
-                    "sessionId": sid
+                    "sessionId": sid,
+                    "modes": [
+                        "currentModeId": "agent",
+                        "availableModes": [
+                            ["id": "agent", "name": "Autonomous Agent", "description": "Full workspace read/edit/terminal/MCP agentic execution"],
+                            ["id": "plan", "name": "Architect Plan", "description": "Read-only codebase research & architectural blueprint"],
+                            ["id": "arena", "name": "Best-of-N Arena", "description": "Parallel cross-vendor Git Worktree Arena"]
+                        ]
+                    ]
                 ]
             ])
             
@@ -175,6 +200,24 @@ class ACPServerService: ObservableObject {
             sessions[sid] = cwd
             if sessionHistory[sid] == nil { sessionHistory[sid] = [] }
             writeNDJSON(["jsonrpc": "2.0", "id": id, "result": [:] as [String: Any]])
+
+        case "session/set_mode", "session/setMode":
+            let sid = params["sessionId"] as? String ?? "default"
+            if let modeId = params["modeId"] as? String {
+                sessionModes[sid] = modeId
+            }
+            if let id = reqId {
+                writeNDJSON(["jsonrpc": "2.0", "id": id, "result": [:] as [String: Any]])
+            }
+
+        case "session/set_model", "session/setModel":
+            let sid = params["sessionId"] as? String ?? "default"
+            if let modelId = params["modelId"] as? String {
+                sessionModels[sid] = modelId
+            }
+            if let id = reqId {
+                writeNDJSON(["jsonrpc": "2.0", "id": id, "result": [:] as [String: Any]])
+            }
             
         case "session/cancel":
             if let sid = params["sessionId"] as? String {
@@ -222,43 +265,195 @@ class ACPServerService: ObservableObject {
     private func handleAcpSessionPrompt(requestId: Any, sessionId: String, promptText: String, workspacePath: String) {
         cancelledSessions.remove(sessionId)
         var history = sessionHistory[sessionId] ?? []
-        let sysPrompt = "You are MicroCode Sovereign AI Agent operating in workspace \(workspacePath). Provide accurate, concise code and engineering solutions."
-        
+        let activeMode = sessionModes[sessionId] ?? "agent"
+        let customModel = sessionModels[sessionId]
+
         let task = Task { @MainActor in
-            var fullResponse = ""
             do {
-                var messages = [(role: "system", content: sysPrompt)]
-                messages.append(contentsOf: history)
-                messages.append((role: "user", content: promptText))
-                
-                let stream = try await AIClient.shared.streamCompletion(messages: messages)
-                for try await chunk in stream {
+                // Special Mode: Best-of-N Arena directly inside Zed / JetBrains / Neovim via ACP!
+                if activeMode == "arena" {
+                    let arenaReport = await SubAgentHarness.shared.runBestOfNArena(
+                        objective: promptText,
+                        workspacePath: workspacePath
+                    )
+                    self.emitMessageChunk(sessionId: sessionId, text: arenaReport)
+                    history.append([("_role", "user"), ("text", promptText)])
+                    history.append([("_role", "assistant"), ("text", arenaReport)])
+                    self.sessionHistory[sessionId] = history
+                    self.activePromptTasks.removeValue(forKey: sessionId)
+                    self.writeNDJSON([
+                        "jsonrpc": "2.0",
+                        "id": requestId,
+                        "result": ["stopReason": "end_turn"]
+                    ])
+                    return
+                }
+
+                await MCPClient.shared.ensureConnected(workspacePath: workspacePath)
+                let toolbox = AgentToolBox.shared
+                let allSchemas = toolbox.toolSchemas()
+                let filteredSchemas: [[String: Any]] = {
+                    if activeMode == "plan" {
+                        let readOnlyNames: Set<String> = [
+                            "file_read", "multi_file_read", "grep_search", "list_directory_tree",
+                            "find_symbol", "git_status", "git_diff", "get_diagnostics", "lsp_intelligence"
+                        ]
+                        return allSchemas.filter { readOnlyNames.contains($0["name"] as? String ?? "") }
+                    }
+                    return PNSGanglionRouter.shared.filterMCPToolsForSubAgent(
+                        archetype: "autonomous_loop",
+                        taskPrompt: promptText,
+                        workspacePath: workspacePath,
+                        allSchemas: allSchemas,
+                        maxMCPTools: 12,
+                        synapseLookup: { cat, tract, node, proj in
+                            PNSOrchestrator.shared.lookupSynapse(taskCategory: cat, tract: tract, targetNodeId: node, projectPath: proj)
+                        }
+                    )
+                }()
+
+                let rulesSnippet = MultiPlatformRulesEngine.shared.formatPromptSection(maxTokens: 450)
+                let sysPrompt = """
+                You are MicroCode Sovereign AI Agent operating via Agent Client Protocol (ACP v1) in workspace: \(workspacePath).
+                Mode: \(activeMode.uppercased()).
+                \(rulesSnippet)
+                Use workspace tools (`file_read`, `replace_in_file`, `file_write`, `shell`, `grep_search`, `get_diagnostics`, `swarm_orchestrator`, `mcp__*`) autonomously to inspect, edit, and verify code before presenting your final answer.
+                """
+
+                history.append([("_role", "user"), ("text", promptText)])
+                let endpoint = AgentModelEndpoint(
+                    authSource: .auto,
+                    provider: "inherit",
+                    model: customModel ?? "inherit"
+                )
+
+                let maxIterations = 12
+                var iteration = 0
+
+                while iteration < maxIterations {
                     if Task.isCancelled || self.cancelledSessions.contains(sessionId) {
                         break
                     }
-                    fullResponse += chunk
-                    self.writeNDJSON([
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": [
-                            "sessionId": sessionId,
-                            "update": [
-                                "sessionUpdate": "agent_message_chunk",
-                                "content": [
-                                    "type": "text",
-                                    "text": chunk
+                    iteration += 1
+
+                    let rawTurn = try await SubAgentHarness.shared.dispatchModelTurnWithFailover(
+                        messages: history,
+                        systemPrompt: sysPrompt,
+                        endpoint: endpoint,
+                        tools: filteredSchemas
+                    )
+                    let parsedFallback = SubAgentHarness.shared.parseUniversalFallbackToolCalls(
+                        from: rawTurn.text,
+                        senderRole: "ACP Server",
+                        senderBadge: "MicroCode ACP"
+                    )
+                    let toolCalls = rawTurn.toolCalls.isEmpty ? parsedFallback.toolCalls : rawTurn.toolCalls
+                    let assistantText = AIStructuredTurnCodec.stripThoughtTags(parsedFallback.cleanedText)
+
+                    if !assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.emitMessageChunk(sessionId: sessionId, text: assistantText + (toolCalls.isEmpty ? "" : "\n\n"))
+                    }
+
+                    if toolCalls.isEmpty {
+                        history.append([("_role", "assistant"), ("text", assistantText)])
+                        break
+                    }
+
+                    var toolSummaryLines: [String] = []
+                    var toolResultBlocks: [String] = []
+
+                    for tc in toolCalls {
+                        if Task.isCancelled || self.cancelledSessions.contains(sessionId) {
+                            break
+                        }
+                        let tcId = tc.id.isEmpty ? ("tc_" + UUID().uuidString.prefix(10)) : tc.id
+                        let kind = Self.acpToolKind(for: tc.name)
+                        let title = Self.acpToolTitle(name: tc.name, args: tc.arguments)
+
+                        self.writeNDJSON([
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": [
+                                "sessionId": sessionId,
+                                "update": [
+                                    "sessionUpdate": "tool_call",
+                                    "toolCallId": tcId,
+                                    "title": title,
+                                    "kind": kind,
+                                    "status": "in_progress",
+                                    "rawInput": Self.jsonSafeDictionary(tc.arguments)
                                 ]
                             ]
-                        ]
-                    ])
+                        ])
+
+                        do {
+                            let rawOut = try await AgentExecutionContext.$workspaceRoot.withValue(workspacePath) {
+                                try await toolbox.execute(tc.name, params: tc.arguments)
+                            }
+                            let compressed = TokenOptimizer.shared.compressToolOutput(rawOut, toolName: tc.name, budget: 12_000)
+                            self.writeNDJSON([
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": [
+                                    "sessionId": sessionId,
+                                    "update": [
+                                        "sessionUpdate": "tool_call_update",
+                                        "toolCallId": tcId,
+                                        "status": "completed",
+                                        "content": [
+                                            [
+                                                "type": "content",
+                                                "content": [
+                                                    "type": "text",
+                                                    "text": String(compressed.prefix(4000))
+                                                ]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ])
+                            toolSummaryLines.append("[Called tool: \(tc.name)]")
+                            toolResultBlocks.append("✅ \(tc.name) output:\n\(compressed)")
+                        } catch {
+                            let errText = error.localizedDescription
+                            self.writeNDJSON([
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": [
+                                    "sessionId": sessionId,
+                                    "update": [
+                                        "sessionUpdate": "tool_call_update",
+                                        "toolCallId": tcId,
+                                        "status": "failed",
+                                        "content": [
+                                            [
+                                                "type": "content",
+                                                "content": [
+                                                    "type": "text",
+                                                    "text": "❌ \(tc.name) failed: \(errText)"
+                                                ]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ])
+                            toolSummaryLines.append("[Called tool: \(tc.name) (failed)]")
+                            toolResultBlocks.append("❌ \(tc.name) error: \(errText)")
+                        }
+                    }
+
+                    let combinedAssistant = assistantText.isEmpty
+                        ? toolSummaryLines.joined(separator: "\n")
+                        : assistantText + "\n" + toolSummaryLines.joined(separator: "\n")
+                    history.append([("_role", "assistant"), ("text", combinedAssistant)])
+                    history.append([("_role", "user"), ("text", toolResultBlocks.joined(separator: "\n\n---\n\n"))])
                 }
-                
+
                 let wasCancelled = Task.isCancelled || self.cancelledSessions.contains(sessionId)
-                if !wasCancelled {
-                    history.append((role: "user", content: promptText))
-                    history.append((role: "assistant", content: fullResponse))
-                    self.sessionHistory[sessionId] = history
+                if history.count > 30, let first = history.first {
+                    history = [first] + Array(history.suffix(26))
                 }
+                self.sessionHistory[sessionId] = history
                 self.activePromptTasks.removeValue(forKey: sessionId)
                 self.writeNDJSON([
                     "jsonrpc": "2.0",
@@ -290,6 +485,69 @@ class ACPServerService: ObservableObject {
             }
         }
         activePromptTasks[sessionId] = task
+    }
+
+    private func emitMessageChunk(sessionId: String, text: String) {
+        guard !text.isEmpty else { return }
+        writeNDJSON([
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": [
+                "sessionId": sessionId,
+                "update": [
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": [
+                        "type": "text",
+                        "text": text
+                    ]
+                ]
+            ]
+        ])
+    }
+
+    private static func acpToolKind(for toolName: String) -> String {
+        let lower = toolName.lowercased()
+        if lower.contains("read") || lower.contains("list") || lower.contains("status") || lower.contains("diff") {
+            return "read"
+        }
+        if lower.contains("write") || lower.contains("replace") || lower.contains("patch") || lower.contains("edit") {
+            return "edit"
+        }
+        if lower.contains("grep") || lower.contains("search") || lower.contains("find") {
+            return "search"
+        }
+        if lower.contains("shell") || lower.contains("run") || lower.contains("test") || lower.contains("compile") {
+            return "execute"
+        }
+        return "other"
+    }
+
+    private static func acpToolTitle(name: String, args: [String: Any]) -> String {
+        if let path = (args["path"] as? String) ?? (args["file_path"] as? String) {
+            return "\(name): \(path)"
+        }
+        if let cmd = args["command"] as? String {
+            let short = cmd.count > 64 ? String(cmd.prefix(61)) + "..." : cmd
+            return "\(name): \(short)"
+        }
+        if let query = (args["query"] as? String) ?? (args["pattern"] as? String) {
+            return "\(name): \(query.prefix(50))"
+        }
+        return name
+    }
+
+    private static func jsonSafeDictionary(_ dict: [String: Any]) -> [String: Any] {
+        if JSONSerialization.isValidJSONObject(dict) {
+            return dict
+        }
+        var out: [String: Any] = [:]
+        for (k, v) in dict {
+            if let s = v as? String { out[k] = s }
+            else if let n = v as? NSNumber { out[k] = n }
+            else if let b = v as? Bool { out[k] = b }
+            else { out[k] = String(describing: v) }
+        }
+        return out
     }
     
     private func handleLegacyTask(requestId: String, content: String, workspacePath: String) {

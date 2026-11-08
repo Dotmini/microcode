@@ -31,6 +31,8 @@ final class DeviceMetalNSView: NSView {
     var onSwipe: ((CGFloat, CGFloat, CGFloat, CGFloat, Int) -> Void)?
     /// Trackpad / mouse scroll wheel callback: (deltaX, deltaY)
     var onScroll: ((CGFloat, CGFloat) -> Void)?
+    /// Pointer position (normalized) reported before each scroll event
+    var onHover: ((CGFloat, CGFloat) -> Void)?
     /// Physical Mac keyboard key down callback
     var onKeyDown: ((NSEvent) -> Void)?
 
@@ -164,6 +166,8 @@ final class DeviceMetalNSView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        let hp = normalizedPoint(event)
+        onHover?(hp.x, hp.y)
         onScroll?(event.scrollingDeltaX, event.scrollingDeltaY)
     }
 
@@ -307,8 +311,13 @@ struct IOSDeviceMetalSurface: NSViewRepresentable {
     func makeNSView(context: Context) -> DeviceMetalNSView {
         let view = DeviceMetalNSView()
         iosCapture.onFrame = { [weak view] pixelBuffer, _ in
+            let w = CVPixelBufferGetWidth(pixelBuffer)
+            let h = CVPixelBufferGetHeight(pixelBuffer)
             DispatchQueue.main.async {
                 view?.renderFrame(pixelBuffer)
+                IOSDeviceControlService.shared.updateLogicalScreenSizeIfNeeded(
+                    capturePixelSize: CGSize(width: w, height: h)
+                )
             }
         }
         view.onTap = { normX, normY in
@@ -316,6 +325,9 @@ struct IOSDeviceMetalSurface: NSViewRepresentable {
         }
         view.onSwipe = { x1, y1, x2, y2, durationMs in
             IOSDeviceControlService.shared.sendSwipe(fromX: x1, fromY: y1, toX: x2, toY: y2, durationMs: durationMs)
+        }
+        view.onHover = { x, y in
+            IOSDeviceControlService.shared.updateCursor(normalizedX: x, normalizedY: y)
         }
         view.onScroll = { dx, dy in
             IOSDeviceControlService.shared.sendScroll(deltaX: dx, deltaY: dy)
@@ -367,7 +379,7 @@ struct AppleDeviceFrameSpec {
         frameImageName: "apple_iphone16_pro_black"
     )
 
-    /// Official Apple iPad Air / Pro hardware frame (1446 × 1108 px)
+    /// Official Apple iPad Air / Pro Landscape hardware frame (1446 × 1108 px)
     static let iPadAir = AppleDeviceFrameSpec(
         frameWidth: 1446,
         frameHeight: 1108,
@@ -379,9 +391,25 @@ struct AppleDeviceFrameSpec {
         frameImageName: "apple_ipad_frame_dark"
     )
 
+    /// Official Apple iPad Air / Pro Portrait hardware frame (1108 × 1446 px)
+    static let iPadPortrait = AppleDeviceFrameSpec(
+        frameWidth: 1108,
+        frameHeight: 1446,
+        screenTop: 48,
+        screenLeft: 48,
+        screenWidth: 1012,
+        screenHeight: 1350,
+        screenCornerRadius: 36,
+        frameImageName: "apple_ipad_frame_dark_portrait"
+    )
+
     static func specFor(resolution: CGSize, modelName: String? = nil) -> AppleDeviceFrameSpec {
         let name = (modelName ?? "").lowercased()
-        if name.contains("ipad") || (resolution.width > 0 && resolution.height > 0 && (resolution.width / resolution.height) > 0.65) {
+        let isIPad = name.contains("ipad") || (resolution.width > 0 && resolution.height > 0 && (resolution.width / resolution.height) > 0.65)
+        if isIPad {
+            if resolution.width > 0 && resolution.height > resolution.width {
+                return .iPadPortrait
+            }
             return .iPadAir
         }
         if name.contains("pro") || name.contains("max") {
@@ -521,6 +549,11 @@ struct PhysicalIPhoneFrameView<Content: View>: View {
 struct PhysicalIOSDeviceTabView: View {
     @ObservedObject private var capture = IOSDeviceCaptureService.shared
     @ObservedObject private var control = IOSDeviceControlService.shared
+    @State private var showingTextSheet = false
+    @State private var textInput = ""
+    @State private var showingURLSheet = false
+    @State private var urlInput = ""
+    @State private var showingUSBDriverPopover = false
     var canvasColor: Color? = nil
 
     var body: some View {
@@ -530,7 +563,7 @@ struct PhysicalIOSDeviceTabView: View {
 
                 switch capture.state {
                 case .streaming:
-                    // Live Screen rendered inside authentic iPhone Hardware Frame (Zero FPS badge)
+                    // Live Screen rendered inside authentic iPhone / iPad Hardware Frame
                     PhysicalIPhoneFrameView(
                         resolution: capture.deviceResolution,
                         deviceName: capture.connectedDeviceName ?? control.deviceModelName
@@ -544,10 +577,10 @@ struct PhysicalIOSDeviceTabView: View {
                             Image(systemName: "cable.connector")
                                 .font(.system(size: 36))
                                 .foregroundColor(.green)
-                            Text(capture.connectedDeviceName ?? "iPhone Connected")
+                            Text(capture.connectedDeviceName ?? control.deviceModelName)
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(.white)
-                            Text("Connected via USB · Ready to Stream & Control")
+                            Text("Connected via USB · Native In-Preview Stream & Control")
                                 .font(.system(size: 10))
                                 .foregroundColor(.white.opacity(0.6))
                             Button("Start Live Preview") {
@@ -606,10 +639,10 @@ struct PhysicalIOSDeviceTabView: View {
                             Image(systemName: "iphone.and.arrow.right.inward")
                                 .font(.system(size: 38))
                                 .foregroundColor(.white.opacity(0.5))
-                            Text("Connect iPhone via USB")
+                            Text("Connect iPhone or iPad via USB")
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(.white)
-                            Text("Plug in your device and tap 'Trust This Computer' on your iPhone screen.")
+                            Text("Plug in your iPhone or iPad via USB and tap 'Trust This Computer' for 60 FPS native preview and direct USB control.")
                                 .font(.system(size: 11))
                                 .foregroundColor(.white.opacity(0.6))
                                 .multilineTextAlignment(.center)
@@ -630,7 +663,6 @@ struct PhysicalIOSDeviceTabView: View {
                             }
 
                             HStack(spacing: 8) {
-                                // Scan button
                                 Button {
                                     capture.scanForDevices()
                                     control.discoverPhysicalUDID()
@@ -660,7 +692,7 @@ struct PhysicalIOSDeviceTabView: View {
                                             capture.startCapture(device: device)
                                         } label: {
                                             HStack(spacing: 8) {
-                                                Image(systemName: "iphone")
+                                                Image(systemName: device.localizedName.lowercased().contains("ipad") ? "ipad" : "iphone")
                                                     .foregroundColor(.accentColor)
                                                 Text(device.localizedName)
                                                     .font(.system(size: 12))
@@ -690,6 +722,7 @@ struct PhysicalIOSDeviceTabView: View {
             capture.startMonitoring()
             capture.scanForDevices()
             control.discoverPhysicalUDID()
+            control.startUSBTouchBridge()
         }
         .onDisappear {
             capture.stopCapture()

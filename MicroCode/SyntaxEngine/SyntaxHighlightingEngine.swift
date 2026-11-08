@@ -171,6 +171,26 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     
     /// Cached Line Offsets for O(log N) lookup of line numbers
     private var cachedLineOffsets: [Int]?
+    /// Merged UTF-16 intervals already colored in the active NSTextStorage (enables O(visible) lazy scroll highlighting)
+    private var appliedHighlightRanges: [NSRange] = []
+    private var initialLexCompletedVersion: Int = -1
+    
+    // MARK: Rainbow bracket pair colorization (VS Code parity)
+    /// Last LSP semantic overlay, keyed by UTF-16 start location. Re-applied whenever the lexer repaints a
+    /// region (e.g. lazy scroll highlighting) so colors never flip between lexical and semantic.
+    private var semanticByLocation: [Int: (length: Int, type: SyntaxTokenType)] = [:]
+    private var semanticStorageLength: Int = -1
+    
+    private var bracketCacheVersion: Int = -1
+    private var bracketCacheLang: String = ""
+    private var bracketCacheLength: Int = -1
+    private var bracketLocations: [Int32] = []
+    private var bracketLevels: [UInt8] = []
+    
+    /// Toggle with `defaults write ... rainbowBracketsEnabled -bool NO`. Default ON.
+    public static var rainbowBracketsEnabled: Bool {
+        (UserDefaults.standard.object(forKey: "rainbowBracketsEnabled") as? Bool) ?? true
+    }
     
     /// Cached Paragraph Style (to prevent layout churn)
     private var cachedParagraphStyle: NSMutableParagraphStyle?
@@ -225,12 +245,289 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     }
     
 
+    // MARK: - Off-MainActor Document Pre-Builder
+
+    public struct PrebuiltEditorDocument: @unchecked Sendable {
+        public let path: String
+        public let language: String
+        public let normalizedText: String
+        public let attributedString: NSAttributedString
+        public let lineStarts: [Int]
+        public let precoloredUTF16End: Int
+        public let fontSize: CGFloat
+        public let activeThemeID: String
+        public let fontName: String
+        public let fontWeight: Int
+        public let enableHighlighting: Bool
+    }
+
+    private static let prebuildLock = NSLock()
+    private static var prebuiltDocuments: [PrebuiltEditorDocument] = []
+    private static let maxPrebuiltDocuments = 1
+
+    public static func clearPrebuiltDocuments() {
+        prebuildLock.lock()
+        prebuiltDocuments.removeAll()
+        prebuildLock.unlock()
+    }
+
+    /// Contiguous UTF-8 raw-pointer scan computing UTF-16 line-start offsets in <0.5ms even in `-Onone`,
+    /// handling `\n`, `\r\n`, lone `\r`, and UTF-16 surrogate-pair widths accurately.
+    nonisolated public static func computeUTF16LineStartsFast(_ content: String) -> [Int] {
+        var offsets: [Int] = [0]
+        offsets.reserveCapacity(max(16, content.utf8.count / 36))
+        let usedContiguous: Void? = content.utf8.withContiguousStorageIfAvailable { buf in
+            guard let base = buf.baseAddress else { return }
+            let n = buf.count
+            var utf16Index = 0
+            var prevCR = false
+            var i = 0
+            while i < n {
+                let b = base[i]
+                if b < 0x80 {
+                    utf16Index &+= 1
+                    if b == 0x0A {
+                        if prevCR {
+                            offsets[offsets.count - 1] = utf16Index
+                            prevCR = false
+                        } else {
+                            offsets.append(utf16Index)
+                        }
+                    } else if b == 0x0D {
+                        offsets.append(utf16Index)
+                        prevCR = true
+                    } else {
+                        prevCR = false
+                    }
+                } else {
+                    prevCR = false
+                    if (b & 0xC0) != 0x80 {
+                        utf16Index &+= (b >= 0xF0 ? 2 : 1)
+                    }
+                }
+                i &+= 1
+            }
+        }
+        if usedContiguous == nil {
+            var utf16Index = 0
+            var prevCR = false
+            for unit in content.utf16 {
+                utf16Index += 1
+                if unit == 0x0A {
+                    if prevCR {
+                        offsets[offsets.count - 1] = utf16Index
+                        prevCR = false
+                    } else {
+                        offsets.append(utf16Index)
+                    }
+                } else if unit == 0x0D {
+                    offsets.append(utf16Index)
+                    prevCR = true
+                } else {
+                    prevCR = false
+                }
+            }
+        }
+        return offsets
+    }
+
+    /// Prebuilds a detached `NSAttributedString`, UTF-16 line-start table, and Frame-0 viewport syntax colors
+    /// entirely on a background thread during `AppState.loadFile`, cutting `@MainActor` mount work to a single
+    /// `textStorage.setAttributedString` assignment.
+    nonisolated public static func prebuildDocumentOffMainActor(
+        path: String,
+        rawContent: String,
+        language: String,
+        fontSize: CGFloat,
+        themeName: String?,
+        isDark: Bool,
+        fontName: String = "Menlo",
+        fontWeight: Int = 2,
+        enableHighlighting: Bool
+    ) -> String {
+        let normalizedText = rawContent.utf8.contains(0x0D)
+            ? rawContent.replacingOccurrences(of: "\r\n", with: "\n")
+            : rawContent
+        let lineStarts = computeUTF16LineStartsFast(normalizedText)
+
+        let lowerTheme = themeName?.lowercased() ?? ""
+        let activeThemeID: String
+        if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeName {
+            activeThemeID = tn
+        } else {
+            activeThemeID = isDark ? "dark" : "light"
+        }
+
+        let themeMgr = ThemeManager()
+        themeMgr.setActiveTheme(activeThemeID)
+        let fgColor = themeMgr.editorForegroundColor
+
+        let weight: NSFont.Weight
+        switch fontWeight {
+        case 0: weight = .ultraLight
+        case 1: weight = .light
+        case 2: weight = .regular
+        case 3: weight = .medium
+        case 4: weight = .semibold
+        case 5: weight = .bold
+        default: weight = .regular
+        }
+        let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: weight)
+        let customFont = NSFont(name: fontName, size: fontSize) ?? baseFont
+
+        let mutableAttr = NSMutableAttributedString(
+            string: normalizedText,
+            attributes: [.foregroundColor: fgColor, .font: customFont, .ligature: 0]
+        )
+
+        var precoloredEnd = 0
+        let docLen = mutableAttr.length
+        let langKey = language.lowercased().trimmingCharacters(in: .whitespaces)
+        if enableHighlighting && docLen > 0 && !langKey.isEmpty,
+           let factory = lexerFactories[langKey] ?? lexerFactories["javascript"] {
+            let lexer = factory()
+            let ns = normalizedText as NSString
+            let maxLines = min(lineStarts.count, 260)
+            var state: SyntaxLexerState = .normal
+            var preTokens: [SyntaxToken] = []
+            preTokens.reserveCapacity(min(2_000, maxLines * 8))
+
+            for lineIdx in 0..<maxLines {
+                let startOffset = lineStarts[lineIdx]
+                let rawEnd = (lineIdx + 1 < lineStarts.count) ? lineStarts[lineIdx + 1] : docLen
+                var lineEnd = rawEnd
+                if lineEnd > startOffset {
+                    let c = ns.character(at: lineEnd - 1)
+                    if c == 0x0A || c == 0x0D {
+                        lineEnd -= 1
+                        if c == 0x0A && lineEnd > startOffset && ns.character(at: lineEnd - 1) == 0x0D {
+                            lineEnd -= 1
+                        }
+                    }
+                }
+                let lineStr = lineEnd > startOffset
+                    ? ns.substring(with: NSRange(location: startOffset, length: lineEnd - startOffset))
+                    : ""
+                let (tokens, nextState) = lexer.tokenizeLine(
+                    lineStr,
+                    lineNumber: lineIdx,
+                    startState: state,
+                    startOffset: startOffset
+                )
+                preTokens.append(contentsOf: tokens)
+                state = nextState
+            }
+
+            if !preTokens.isEmpty {
+                let boldFont = NSFont(descriptor: customFont.fontDescriptor.withSymbolicTraits(.bold), size: fontSize) ?? customFont
+                let italicFont = NSFont(descriptor: customFont.fontDescriptor.withSymbolicTraits(.italic), size: fontSize) ?? customFont
+                let boldItalicFont = NSFont(descriptor: customFont.fontDescriptor.withSymbolicTraits([.bold, .italic]), size: fontSize) ?? customFont
+                var styleCache: [SyntaxTokenType: (attrs: [NSAttributedString.Key: Any], isPlain: Bool)] = [:]
+                styleCache.reserveCapacity(24)
+
+                mutableAttr.beginEditing()
+                for token in preTokens {
+                    let r = token.range.nsRange
+                    guard r.location >= 0 && r.length > 0 && r.location + r.length <= docLen else { continue }
+                    let styleEntry: (attrs: [NSAttributedString.Key: Any], isPlain: Bool)
+                    if let hit = styleCache[token.type] {
+                        styleEntry = hit
+                    } else {
+                        let targetColor = themeMgr.color(for: token.type)
+                        let style = themeMgr.style(for: token.type)
+                        var attrs: [NSAttributedString.Key: Any] = [.foregroundColor: targetColor, .ligature: 0]
+                        if style.isBold && style.isItalic {
+                            attrs[.font] = boldItalicFont
+                        } else if style.isBold {
+                            attrs[.font] = boldFont
+                        } else if style.isItalic {
+                            attrs[.font] = italicFont
+                        }
+                        if style.isUnderline {
+                            attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                        }
+                        let isPlain = (targetColor == fgColor && !style.isBold && !style.isItalic && !style.isUnderline)
+                        let built = (attrs: attrs, isPlain: isPlain)
+                        styleCache[token.type] = built
+                        styleEntry = built
+                    }
+                    if !styleEntry.isPlain {
+                        mutableAttr.addAttributes(styleEntry.attrs, range: r)
+                    }
+                }
+                mutableAttr.endEditing()
+            }
+            precoloredEnd = (maxLines < lineStarts.count) ? lineStarts[maxLines] : docLen
+        }
+
+        let entry = PrebuiltEditorDocument(
+            path: path,
+            language: langKey,
+            normalizedText: normalizedText,
+            attributedString: mutableAttr,
+            lineStarts: lineStarts,
+            precoloredUTF16End: precoloredEnd,
+            fontSize: fontSize,
+            activeThemeID: activeThemeID,
+            fontName: fontName,
+            fontWeight: fontWeight,
+            enableHighlighting: enableHighlighting
+        )
+
+        prebuildLock.lock()
+        prebuiltDocuments.removeAll { $0.path == path }
+        prebuiltDocuments.append(entry)
+        if prebuiltDocuments.count > maxPrebuiltDocuments {
+            prebuiltDocuments.removeFirst(prebuiltDocuments.count - maxPrebuiltDocuments)
+        }
+        prebuildLock.unlock()
+
+        return normalizedText
+    }
+
+    @MainActor
+    public static func consumePrebuiltDocument(
+        path: String?,
+        normalizedText: String,
+        language: String,
+        fontSize: CGFloat,
+        activeThemeID: String,
+        fontName: String,
+        fontWeight: Int,
+        enableHighlighting: Bool
+    ) -> PrebuiltEditorDocument? {
+        prebuildLock.lock()
+        defer { prebuildLock.unlock() }
+        let langKey = language.lowercased().trimmingCharacters(in: .whitespaces)
+        if let idx = prebuiltDocuments.lastIndex(where: { doc in
+            (path == nil || doc.path == path)
+                && doc.language == langKey
+                && doc.fontSize == fontSize
+                && doc.activeThemeID == activeThemeID
+                && doc.fontName == fontName
+                && doc.fontWeight == fontWeight
+                && doc.enableHighlighting == enableHighlighting
+                && doc.normalizedText.utf8.count == normalizedText.utf8.count
+                && doc.normalizedText == normalizedText
+        }) {
+            return prebuiltDocuments.remove(at: idx)
+        }
+        return nil
+    }
+
     // MARK: - Document Management
-    
-    /// Set the document to highlight
-    public func setDocument(_ content: String, language: String) {
+
+    public var currentLineOffsets: [Int]? {
         lock.lock()
         defer { lock.unlock() }
+        return cachedLineOffsets
+    }
+    
+    /// Set the document to highlight
+    public func setDocument(_ content: String, language: String, precomputedLineStarts: [Int]? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        if content != documentContent { semanticByLocation.removeAll(); semanticStorageLength = -1 }
         
         let langKey = language.lowercased().trimmingCharacters(in: .whitespaces)
         if langKey.isEmpty {
@@ -247,57 +544,40 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         currentLanguage = langKey
         currentVersion += 1
         cachedAttributedString = nil
+        appliedHighlightRanges.removeAll(keepingCapacity: true)
+        initialLexCompletedVersion = -1
         
-        // Initialize line offsets cache efficiently
-        var newOffsets: [Int] = [0]
-        let nsString = content as NSString
-        var index = 0
-        let length = nsString.length
-        
-        // Robust O(N) line scan
-        while index < length {
-            var lineEnd = 0
-            var contentEnd = 0
-            nsString.getLineStart(nil, end: &lineEnd, contentsEnd: &contentEnd, for: NSRange(location: index, length: 0))
-            if lineEnd > index {
-                index = lineEnd
-                // Check if we advanced past a separator (newline)
-                let hasSeparator = contentEnd < lineEnd
-                if index < length || hasSeparator {
-                    newOffsets.append(index)
-                }
-            } else {
-                 break // Should not happen unless empty or non-advancing
-            }
+        let newOffsets: [Int]
+        if let precomputed = precomputedLineStarts, !precomputed.isEmpty {
+            newOffsets = precomputed
+        } else {
+            newOffsets = Self.computeUTF16LineStartsFast(content)
         }
         cachedLineOffsets = newOffsets
+        let lineCount = newOffsets.count
         
-        // Get or create lexer for language (Lazy)
+        // Get or create lexer for language (Lazy) — reuse `lineCount` directly to avoid a second full-file byte scan!
         if let lexer = loadedLexers[langKey] {
             activeLexer = lexer
-            lexer.initialize(with: content)
+            lexer.initialize(withLineCount: lineCount)
         } else if let factory = Self.lexerFactories[langKey] {
-            // Instantiate on demand!
             let newLexer = IncrementalLexer(lexer: factory())
             loadedLexers[langKey] = newLexer
             activeLexer = newLexer
-            newLexer.initialize(with: content)
+            newLexer.initialize(withLineCount: lineCount)
         } else {
-            // Fallback to JavaScript lexer factory
             if let jsFactory = Self.lexerFactories["javascript"] {
-                // Check if we already loaded 'javascript' key
                 if let jsLexer = loadedLexers["javascript"] {
-                     activeLexer = jsLexer
-                     jsLexer.initialize(with: content)
+                    activeLexer = jsLexer
+                    jsLexer.initialize(withLineCount: lineCount)
                 } else {
                     let newLexer = IncrementalLexer(lexer: jsFactory())
                     loadedLexers["javascript"] = newLexer
                     activeLexer = newLexer
-                    newLexer.initialize(with: content)
+                    newLexer.initialize(withLineCount: lineCount)
                 }
             } else {
-                // Total fallback if JS not registered (should not happen)
-                 activeLexer = nil
+                activeLexer = nil
             }
         }
     }
@@ -328,6 +608,8 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     /// Process a text change incrementally
     @MainActor
     public func processEdit(range: NSRange, changeInLength: Int, newContent: String) {
+        semanticByLocation.removeAll()
+        semanticStorageLength = -1
         lock.lock()
         let oldContent = documentContent
         lock.unlock()
@@ -437,9 +719,17 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         }
         
         // 4. Update content
+        if initialLexCompletedVersion == currentVersion {
+            initialLexCompletedVersion = currentVersion + 1
+        }
         documentContent = newContent
         currentVersion += 1
         cachedAttributedString = nil
+        appliedHighlightRanges = appliedHighlightRanges.compactMap { r in
+            guard r.location < range.location else { return nil }
+            let clippedLen = min(r.length, range.location - r.location)
+            return clippedLen > 0 ? NSRange(location: r.location, length: clippedLen) : nil
+        }
         
         // 5. Notify the active lexer's cache of the structural change
         activeLexer?.cache.handleDocumentChange(
@@ -531,11 +821,15 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     
     /// Currently running highlight task
     private var currentHighlightTask: Task<Void, Never>?
+    /// Cooperative cancellation flag shared with `DispatchQueue.concurrentPerform` workers
+    private var currentCancelToken: LexerCancelToken?
     /// Currently running chunked attribute-application task on MainActor
     private var currentApplyTask: Task<Void, Never>?
     
     /// Cancel any in-flight highlighting task
     public func cancelHighlighting() {
+        currentCancelToken?.cancel()
+        currentCancelToken = nil
         currentHighlightTask?.cancel()
         currentHighlightTask = nil
         currentApplyTask?.cancel()
@@ -544,11 +838,100 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     
     /// Releases cached document string, attributed string, and lexer line cache from RAM.
     public func clearCache() {
+        currentCancelToken?.cancel()
+        currentCancelToken = nil
         lock.lock()
         documentContent = ""
         cachedAttributedString = nil
+        appliedHighlightRanges.removeAll(keepingCapacity: false)
+        initialLexCompletedVersion = -1
         activeLexer = nil
         lock.unlock()
+    }
+
+    public func recordPrebuiltHighlightedRange(_ range: NSRange) {
+        recordHighlightedRange(range)
+    }
+
+    private func recordHighlightedRange(_ range: NSRange) {
+        guard range.length > 0 else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        appliedHighlightRanges.append(range)
+        appliedHighlightRanges.sort { $0.location < $1.location }
+        var merged: [NSRange] = []
+        merged.reserveCapacity(appliedHighlightRanges.count)
+        for r in appliedHighlightRanges {
+            if let last = merged.last, r.location <= NSMaxRange(last) + 64 {
+                let end = max(NSMaxRange(last), NSMaxRange(r))
+                merged[merged.count - 1] = NSRange(location: last.location, length: end - last.location)
+            } else {
+                merged.append(r)
+            }
+        }
+        appliedHighlightRanges = merged
+    }
+
+    private func isRangeFullyHighlighted(_ range: NSRange) -> Bool {
+        guard range.length > 0 else { return true }
+        lock.lock()
+        defer { lock.unlock() }
+        for r in appliedHighlightRanges {
+            if r.location <= range.location && NSMaxRange(r) >= NSMaxRange(range) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Lazily applies cached syntax tokens to newly scrolled viewport regions in O(visible lines) (<1.5ms),
+    /// eliminating upfront full-document NSTextStorage attribute storms on multi-thousand-line files.
+    @MainActor
+    public func highlightViewportOnScroll(
+        visibleCharRange: NSRange,
+        to textStorage: NSTextStorage,
+        fontSize: CGFloat,
+        font: NSFont?
+    ) {
+        let storageLen = textStorage.length
+        guard storageLen > 0, visibleCharRange.length > 0 else { return }
+        let safeStart = max(0, min(visibleCharRange.location, storageLen))
+        let safeEnd = max(safeStart, min(NSMaxRange(visibleCharRange), storageLen))
+        let clampedVis = NSRange(location: safeStart, length: safeEnd - safeStart)
+        guard clampedVis.length > 0, !isRangeFullyHighlighted(clampedVis) else { return }
+
+        lock.lock()
+        let isLexReady = (initialLexCompletedVersion == currentVersion && documentContent.utf16.count == storageLen)
+        let offsets = cachedLineOffsets
+        lock.unlock()
+        guard isLexReady, let offsets, !offsets.isEmpty else { return }
+
+        let windowStart = max(0, safeStart - 14_000)
+        let windowEnd = min(storageLen, safeEnd + 14_000)
+        let windowRange = NSRange(location: windowStart, length: windowEnd - windowStart)
+
+        func lineIndex(for utf16Offset: Int) -> Int {
+            var low = 0
+            var high = offsets.count
+            while low < high {
+                let mid = (low + high) / 2
+                if offsets[mid] <= utf16Offset { low = mid + 1 } else { high = mid }
+            }
+            return max(0, low - 1)
+        }
+
+        let startLine = lineIndex(for: windowStart)
+        let endLine = min(offsets.count, lineIndex(for: windowEnd) + 1)
+        guard startLine < endLine else { return }
+
+        let sliceTokens = tokens(forLines: startLine..<endLine)
+        if !sliceTokens.isEmpty {
+            let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            textStorage.beginEditing()
+            applyTokensBatch(sliceTokens, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
+            textStorage.endEditing()
+        }
+        recordHighlightedRange(windowRange)
     }
     
     /// Asynchronously apply highlighting to an existing NSTextStorage.
@@ -560,9 +943,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         fontSize: CGFloat,
         font: NSFont? = nil,
         visibleCharRange: NSRange? = nil,
+        skipMainActorApplyIfFullDocument: Bool = false,
         completion: (@MainActor @Sendable () -> Void)? = nil
     ) {
-        // Cancel previous tasks to prevent "task explosion" and race conditions
+        // Cancel previous tasks + concurrentPerform workers to prevent "task explosion" and race conditions
+        currentCancelToken?.cancel()
         currentHighlightTask?.cancel()
         currentApplyTask?.cancel()
         
@@ -579,13 +964,22 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             return
         }
         
-        if cachedLines < 150 && content.utf16.count < 6000 {
+        if cachedLines < 150 && content.utf8.count < 6000 {
             // SYNC PATH (Zero Flash) — small files only
             let update = lexer.retokenizeDirtyRegionsIncremental(in: content, lineStarts: lineStarts)
-            self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version, visibleCharRange: visibleCharRange)
+            lock.lock()
+            initialLexCompletedVersion = version
+            lock.unlock()
+            if !(skipMainActorApplyIfFullDocument && update.isFullDocument) {
+                self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version, visibleCharRange: visibleCharRange)
+            }
             completion?()
             return
         }
+        
+        let cancelToken = LexerCancelToken()
+        currentCancelToken = cancelToken
+        let initialMaxLine: Int? = skipMainActorApplyIfFullDocument ? -1 : 420
         
         // ASYNC PATH (Large Docs)
         currentHighlightTask = Task.detached(priority: .userInitiated) { [weak self] in
@@ -594,29 +988,43 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 return
             }
             
-            if Task.isCancelled {
+            // During 0ms multi-tab bursts on large (>800-line) files, yield briefly so rapidly superseded
+            // intermediate tabs cancel BEFORE splitting 10k+ lines or entering `DispatchQueue.concurrentPerform`.
+            if cachedLines > 800 {
+                try? await Task.sleep(nanoseconds: 18_000_000)
+            }
+            
+            if Task.isCancelled || cancelToken.isCancelled {
                 await MainActor.run { completion?() }
                 return
             }
             
-            // 1. Re-lex dirty regions incrementally
-            let update = lexer.retokenizeDirtyRegionsIncremental(in: content, lineStarts: lineStarts)
+            // 1. Re-lex dirty regions incrementally (with cooperative cancelToken + bounded token unpacking)
+            let update = lexer.retokenizeDirtyRegionsIncremental(
+                in: content,
+                lineStarts: lineStarts,
+                cancelToken: cancelToken,
+                initialMaxLine: initialMaxLine
+            )
             
-            if Task.isCancelled {
+            if Task.isCancelled || cancelToken.isCancelled {
                 await MainActor.run { completion?() }
                 return
             }
             
-            // 2. Apply attributes on the main thread (only dirty lines for edits, viewport-first for full open!)
+            // 2. Apply attributes on the main thread (0ms no-op when Frame-0 viewport was already pre-colored off-MainActor!)
             await MainActor.run {
                 defer { completion?() }
-                if Task.isCancelled { return }
+                if Task.isCancelled || cancelToken.isCancelled { return }
                 
                 self.lock.lock()
                 let isStillValid = (self.currentVersion == version && self.documentContent.utf16.count == textStorage.length)
+                if isStillValid {
+                    self.initialLexCompletedVersion = version
+                }
                 self.lock.unlock()
                 
-                if isStillValid {
+                if isStillValid && !(skipMainActorApplyIfFullDocument && update.isFullDocument) {
                     self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version, visibleCharRange: visibleCharRange)
                 }
             }
@@ -656,11 +1064,12 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         textStorage.removeAttribute(.underlineStyle, range: safeRange)
         applyTokensBatch(update.tokens, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
         textStorage.endEditing()
+        recordHighlightedRange(safeRange)
     }
     
     /// Internal helper to apply attributes for specific tokens.
     /// CRITICAL: Must be called on the main thread.
-    /// Uses chunking to prevent Main Thread blocking on large updates.
+    /// Uses chunking + viewport-bounded lookahead to prevent TextKit 1 contiguous glyph layout stalls on MainActor.
     @MainActor
     private func applyTokens(
         _ tokens: [SyntaxToken],
@@ -674,35 +1083,47 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         currentApplyTask?.cancel()
         
         let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let storageLen = textStorage.length
         
-        // CHUNK SIZE: Apply 2000 tokens at a time to keep frame rate high
-        // 2000 tokens ~ 200 lines of code roughly.
-        let chunkSize = 2000
+        // CHUNK SIZE: Apply 1200 tokens at a time and yield back to CFRunLoop between chunks
+        let chunkSize = 1200
         // If small enough, apply synchronously (fast path)
         if tokens.count <= chunkSize {
             textStorage.beginEditing()
             applyTokensBatch(tokens, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
             textStorage.endEditing()
+            recordHighlightedRange(NSRange(location: 0, length: storageLen))
             return
         }
 
         // VIEWPORT-FIRST PRIORITY PASS: Immediately color tokens inside/around the visible viewport
-        // synchronously so Frame 0 never renders unhighlighted text, even when jumping to line 3000+.
+        // synchronously so Frame 0 never renders unhighlighted text, while bounding offscreen TextKit 1
+        // attribute runs on >2,000-token files (scroll events lazily color further down via highlightViewportOnScroll).
         var remainingTokens = tokens
+        let centerAnchor = visibleCharRange?.location ?? 0
+        let visLength = max(visibleCharRange?.length ?? 2500, 2500)
+        var targetWindowRange = NSRange(location: 0, length: storageLen)
         if let vis = visibleCharRange, vis.length > 0 {
-            let priorityStart = max(0, vis.location - 4000)
-            let priorityEnd = vis.location + vis.length + 4000
+            let priorityStart = max(0, vis.location - 3500)
+            let priorityEnd = min(storageLen, vis.location + vis.length + 3500)
             var viewportTokens: [SyntaxToken] = []
             var deferredTokens: [SyntaxToken] = []
-            viewportTokens.reserveCapacity(min(tokens.count, 1500))
-            deferredTokens.reserveCapacity(tokens.count)
+            viewportTokens.reserveCapacity(min(tokens.count, 1200))
+            deferredTokens.reserveCapacity(min(tokens.count, 3000))
+
+            // Tight smooth-scroll lookahead (±9,000 UTF-16 units ~ ±220 lines) for any medium/large file (>2,000 tokens);
+            // deeper scrolling triggers O(visible) `highlightViewportOnScroll` from cached IncrementalLexer tokens.
+            let maxOffscreenRadius = tokens.count > 2_000 ? 9_000 : Int.max / 2
+            let windowMin = max(0, centerAnchor - maxOffscreenRadius)
+            let windowMax = min(storageLen, centerAnchor + visLength + maxOffscreenRadius)
+            targetWindowRange = NSRange(location: windowMin, length: max(0, windowMax - windowMin))
 
             for tok in tokens {
                 let r = tok.range.nsRange
                 let tokEnd = r.location + r.length
                 if tokEnd >= priorityStart && r.location <= priorityEnd {
                     viewportTokens.append(tok)
-                } else {
+                } else if tokEnd >= windowMin && r.location <= windowMax {
                     deferredTokens.append(tok)
                 }
             }
@@ -711,13 +1132,22 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 textStorage.beginEditing()
                 applyTokensBatch(viewportTokens, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
                 textStorage.endEditing()
-                remainingTokens = deferredTokens
             }
+            recordHighlightedRange(NSRange(location: priorityStart, length: max(0, priorityEnd - priorityStart)))
+            remainingTokens = deferredTokens
+        } else if tokens.count > 2_000 {
+            let capEnd = min(storageLen, 10_000)
+            remainingTokens = tokens.filter { $0.range.nsRange.location <= capEnd }
+            targetWindowRange = NSRange(location: 0, length: capEnd)
         }
         
-        guard !remainingTokens.isEmpty else { return }
+        guard !remainingTokens.isEmpty else {
+            recordHighlightedRange(targetWindowRange)
+            return
+        }
 
-        // Large offscreen remainder: Chunk asynchronously on Main Actor to allow 60/120fps scrolling & UI events
+        let capturedWindowRange = targetWindowRange
+        // Bounded lookahead remainder: Chunk asynchronously and yield to AppKit CFRunLoop
         currentApplyTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             var startIndex = 0
@@ -739,33 +1169,277 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 
                 startIndex += chunkSize
                 
-                // Allow UI to breathe
-                await Task.yield()
+                // Sleep 6ms to genuinely yield to AppKit CFRunLoop (Task.yield() alone stays in MainActor turn)
+                try? await Task.sleep(nanoseconds: 6_000_000)
             }
+            self.recordHighlightedRange(capturedWindowRange)
         }
+    }
+    
+    // MARK: - LSP Semantic Token Overlay (compiler-accurate colors on top of the instant lexical pass)
+
+    nonisolated static func syntaxType(forSemantic type: String, modifiers: Set<String>) -> SyntaxTokenType? {
+        switch type {
+        case "namespace", "type", "class", "struct", "enum", "interface", "typeParameter", "typeAlias":
+            return .type
+        case "parameter":
+            return .parameter
+        case "variable":
+            return modifiers.contains("readonly") ? .constant : .variable
+        case "property":
+            return modifiers.contains("readonly") ? .constant : .property
+        case "enumMember":
+            return .enumMember
+        case "function", "method":
+            return .function
+        case "macro":
+            return .preprocessor
+        case "decorator":
+            return .annotation
+        default:
+            return nil
+        }
+    }
+
+    /// Overlays LSP semantic token colors on `textStorage`. `text` must be the exact string the tokens were
+    /// computed against; aborts (no-op) if the storage has since changed. Applied in cooperative chunks.
+    @MainActor
+    func applySemanticTokens(_ tokens: [LSPSemanticToken], to textStorage: NSTextStorage, text: String) async {
+        let expectedLength = textStorage.length
+        guard !tokens.isEmpty, text.utf16.count == expectedLength else { return }
+
+        // UTF-16 line starts
+        var lineStarts: [Int] = [0]
+        var pos = 0
+        for u in text.utf16 {
+            pos += 1
+            if u == 0x0A { lineStarts.append(pos) }
+        }
+
+        var map: [Int: (length: Int, type: SyntaxTokenType)] = [:]
+        map.reserveCapacity(tokens.count)
+        for t in tokens {
+            guard t.line < lineStarts.count, let st = Self.syntaxType(forSemantic: t.type, modifiers: t.modifiers) else { continue }
+            let loc = lineStarts[t.line] + t.character
+            if loc >= 0, loc + t.length <= expectedLength { map[loc] = (t.length, st) }
+        }
+        semanticByLocation = map
+        semanticStorageLength = expectedLength
+
+        var colorCache: [SyntaxTokenType: NSColor] = [:]
+        let chunk = 1500
+        var idx = 0
+        while idx < tokens.count {
+            if Task.isCancelled || textStorage.length != expectedLength { return }
+            let end = min(idx + chunk, tokens.count)
+            textStorage.beginEditing()
+            for t in tokens[idx..<end] {
+                guard t.line < lineStarts.count,
+                      let st = Self.syntaxType(forSemantic: t.type, modifiers: t.modifiers) else { continue }
+                let loc = lineStarts[t.line] + t.character
+                guard loc >= 0, loc + t.length <= expectedLength else { continue }
+                let color: NSColor
+                if let c = colorCache[st] { color = c } else {
+                    color = themeManager.color(for: st)
+                    colorCache[st] = color
+                }
+                textStorage.addAttribute(.foregroundColor, value: color, range: NSRange(location: loc, length: t.length))
+            }
+            textStorage.endEditing()
+            idx = end
+            try? await Task.sleep(nanoseconds: 4_000_000)
+        }
+    }
+
+    // MARK: - Rainbow Brackets
+
+    /// Builds (once per document version) a sorted map of bracket UTF-16 location -> nesting level (0...2),
+    /// skipping brackets inside comments and strings. Disabled for very large files to protect latency.
+    private func ensureBracketMap(storageLength: Int) -> Bool {
+        lock.lock()
+        let content = documentContent
+        let ver = currentVersion
+        let lang = currentLanguage.lowercased()
+        lock.unlock()
+        
+        if bracketCacheVersion == ver && bracketCacheLang == lang && bracketCacheLength == storageLength {
+            return !bracketLocations.isEmpty
+        }
+        bracketLocations.removeAll(keepingCapacity: true)
+        bracketLevels.removeAll(keepingCapacity: true)
+        bracketCacheVersion = ver
+        bracketCacheLang = lang
+        bracketCacheLength = storageLength
+        
+        let unsupported: Set<String> = ["markdown", "plaintext", "text", "txt", "html", "xml", "log"]
+        guard !unsupported.contains(lang), content.utf8.count <= 600_000 else { return false }
+        
+        let hashComment: Set<String> = ["python", "shell", "ruby", "yaml", "toml", "r", "julia", "elixir"]
+        let singleQuoteStrings: Set<String> = ["python", "javascript", "typescript", "php", "ruby", "shell", "dart", "yaml", "toml", "lua", "sql", "julia", "css", "elixir", "r", "json"]
+        let tripleQuote: Set<String> = ["python", "swift", "kotlin", "julia", "elixir"]
+        let backtickStrings: Set<String> = ["javascript", "typescript", "go", "shell"]
+        let useHash = hashComment.contains(lang)
+        let useDash = (lang == "sql" || lang == "lua")
+        let useSlash = !useHash && !useDash && lang != "json"
+        let useBlock = useSlash || lang == "css"
+        let useSingle = singleQuoteStrings.contains(lang)
+        let useTriple = tripleQuote.contains(lang)
+        let useBacktick = backtickStrings.contains(lang)
+        
+        var c = content
+        var locs: [Int32] = []
+        var levels: [UInt8] = []
+        var totalUTF16 = 0
+        
+        c.withUTF8 { buf in
+            let n = buf.count
+            var i = 0
+            var pos = 0
+            var depth = 0
+            
+            @inline(__always) func advance() {
+                let b = buf[i]
+                if b < 0x80 { pos += 1 }
+                else if b >= 0xF0 { pos += 2 }
+                else if b >= 0xC0 { pos += 1 }
+                i += 1
+            }
+            @inline(__always) func skipToLineEnd() {
+                while i < n, buf[i] != 0x0A { advance() }
+            }
+            
+            while i < n {
+                let b = buf[i]
+                switch b {
+                case 0x2F where useSlash && i + 1 < n && buf[i + 1] == 0x2F:      // //
+                    skipToLineEnd()
+                case 0x2F where useBlock && i + 1 < n && buf[i + 1] == 0x2A:      // /* */
+                    advance(); advance()
+                    while i < n, !(buf[i] == 0x2A && i + 1 < n && buf[i + 1] == 0x2F) { advance() }
+                    if i < n { advance(); if i < n { advance() } }
+                case 0x23 where useHash:                                           // #
+                    skipToLineEnd()
+                case 0x2D where useDash && i + 1 < n && buf[i + 1] == 0x2D:       // --
+                    skipToLineEnd()
+                case 0x22:                                                         // "
+                    if useTriple, i + 2 < n, buf[i + 1] == 0x22, buf[i + 2] == 0x22 {
+                        advance(); advance(); advance()
+                        while i < n, !(buf[i] == 0x22 && i + 2 < n && buf[i + 1] == 0x22 && buf[i + 2] == 0x22) { advance() }
+                        for _ in 0..<3 where i < n { advance() }
+                    } else {
+                        advance()
+                        while i < n, buf[i] != 0x22, buf[i] != 0x0A {
+                            if buf[i] == 0x5C, i + 1 < n, buf[i + 1] != 0x0A { advance() }
+                            advance()
+                        }
+                        if i < n, buf[i] == 0x22 { advance() }
+                    }
+                case 0x27:                                                         // '
+                    if useSingle {
+                        advance()
+                        while i < n, buf[i] != 0x27, buf[i] != 0x0A {
+                            if buf[i] == 0x5C, i + 1 < n, buf[i + 1] != 0x0A { advance() }
+                            advance()
+                        }
+                        if i < n, buf[i] == 0x27 { advance() }
+                    } else if i + 2 < n, buf[i + 2] == 0x27 {                      // 'x'
+                        advance(); advance(); advance()
+                    } else if i + 3 < n, buf[i + 1] == 0x5C, buf[i + 3] == 0x27 {  // '\n'
+                        advance(); advance(); advance(); advance()
+                    } else {
+                        advance()
+                    }
+                case 0x60 where useBacktick:                                       // `
+                    advance()
+                    while i < n, buf[i] != 0x60 {
+                        if buf[i] == 0x5C, i + 1 < n { advance() }
+                        advance()
+                    }
+                    if i < n { advance() }
+                case 0x28, 0x5B, 0x7B:                                             // ( [ {
+                    locs.append(Int32(truncatingIfNeeded: pos))
+                    levels.append(UInt8(depth % 3))
+                    depth += 1
+                    advance()
+                case 0x29, 0x5D, 0x7D:                                             // ) ] }
+                    depth = max(0, depth - 1)
+                    locs.append(Int32(truncatingIfNeeded: pos))
+                    levels.append(UInt8(depth % 3))
+                    advance()
+                default:
+                    advance()
+                }
+            }
+            totalUTF16 = pos
+        }
+        
+        guard totalUTF16 == storageLength else { return false }
+        bracketLocations = locs
+        bracketLevels = levels
+        return !locs.isEmpty
+    }
+    
+    private func bracketLevel(at location: Int) -> Int? {
+        var low = 0
+        var high = bracketLocations.count
+        let target = Int32(truncatingIfNeeded: location)
+        while low < high {
+            let mid = (low + high) / 2
+            if bracketLocations[mid] < target { low = mid + 1 } else { high = mid }
+        }
+        if low < bracketLocations.count, bracketLocations[low] == target { return Int(bracketLevels[low]) }
+        return nil
+    }
+    
+    private func rainbowColors(isDark: Bool) -> [NSColor] {
+        if isDark {
+            return [NSColor(srgbRed: 1.0, green: 0.843, blue: 0.0, alpha: 1),        // #FFD700
+                    NSColor(srgbRed: 0.855, green: 0.439, blue: 0.839, alpha: 1),    // #DA70D6
+                    NSColor(srgbRed: 0.090, green: 0.624, blue: 1.0, alpha: 1)]      // #179FFF
+        }
+        return [NSColor(srgbRed: 0.016, green: 0.192, blue: 0.980, alpha: 1),        // #0431FA
+                NSColor(srgbRed: 0.192, green: 0.576, blue: 0.192, alpha: 1),        // #319331
+                NSColor(srgbRed: 0.482, green: 0.220, blue: 0.078, alpha: 1)]        // #7B3814
     }
     
     private func applyTokensBatch(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, defaultFont: NSFont, fontSize: CGFloat) {
          // NOTE: Callers (applyTokens / applyHighlighting) are responsible for wrapping in beginEditing/endEditing.
-         // Do NOT call beginEditing/endEditing here to avoid double-nesting which triggers NSTextStorage assertions.
          let boldFont = NSFont(descriptor: defaultFont.fontDescriptor.withSymbolicTraits(.bold), size: fontSize) ?? defaultFont
          let italicFont = NSFont(descriptor: defaultFont.fontDescriptor.withSymbolicTraits(.italic), size: fontSize) ?? defaultFont
          let boldItalicFont = NSFont(descriptor: defaultFont.fontDescriptor.withSymbolicTraits([.bold, .italic]), size: fontSize) ?? defaultFont
+         let defaultColor = themeManager.editorForegroundColor
          let storageLength = textStorage.length
          let forceUpdateSmall = storageLength < 500
-         
+
+         // Pre-build attribute dictionaries per SyntaxTokenType (<= ~20 entries instead of allocating 35,000 dicts)
+         var styleCache: [SyntaxTokenType: (color: NSColor, attrs: [NSAttributedString.Key: Any], isDefaultPlain: Bool)] = [:]
+         styleCache.reserveCapacity(24)
+
+         let rainbowOn = Self.rainbowBracketsEnabled && ensureBracketMap(storageLength: storageLength)
+         let rainbowPalette = rainbowOn ? rainbowColors(isDark: themeManager.currentTheme.isDark) : []
+
          for token in tokens {
              let nsRange = token.range.nsRange
+             guard nsRange.location >= 0 && nsRange.length > 0 && nsRange.location + nsRange.length <= storageLength else {
+                 continue
+             }
              
-             // Ensure range is within bounds
-             if nsRange.location >= 0 && nsRange.length > 0 && nsRange.location + nsRange.length <= storageLength {
+             if rainbowOn, token.type == .punctuation, nsRange.length == 1,
+                let level = bracketLevel(at: nsRange.location) {
+                 textStorage.addAttribute(.foregroundColor, value: rainbowPalette[level], range: nsRange)
+                 continue
+             }
+
+             let cached: (color: NSColor, attrs: [NSAttributedString.Key: Any], isDefaultPlain: Bool)
+             if let hit = styleCache[token.type] {
+                 cached = hit
+             } else {
                  let targetColor = themeManager.color(for: token.type)
+                 let style = themeManager.style(for: token.type)
                  var attributes: [NSAttributedString.Key: Any] = [
                      .foregroundColor: targetColor,
                      .ligature: 0
                  ]
-                 
-                 let style = themeManager.style(for: token.type)
                  if style.isBold && style.isItalic {
                      attributes[.font] = boldItalicFont
                  } else if style.isBold {
@@ -773,21 +1447,43 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                  } else if style.isItalic {
                      attributes[.font] = italicFont
                  }
-                 
                  if style.isUnderline {
                      attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
                  }
-                 
-                 // Optimization: Skip update if color matches (Prevent Flicker)
-                 if forceUpdateSmall {
-                     textStorage.addAttributes(attributes, range: nsRange)
-                 } else {
-                     let currentAttrs = textStorage.attributes(at: nsRange.location, effectiveRange: nil)
-                     let currentColor = currentAttrs[.foregroundColor] as? NSColor
-                     if currentColor != targetColor {
-                         textStorage.addAttributes(attributes, range: nsRange)
+                 let isPlain = (targetColor == defaultColor && !style.isBold && !style.isItalic && !style.isUnderline)
+                 let built = (color: targetColor, attrs: attributes, isDefaultPlain: isPlain)
+                 styleCache[token.type] = built
+                 cached = built
+             }
+
+             if forceUpdateSmall {
+                 textStorage.addAttributes(cached.attrs, range: nsRange)
+             } else {
+                 // Query single .foregroundColor attribute instead of bridging full NSDictionary per token
+                 let currentColor = textStorage.attribute(.foregroundColor, at: nsRange.location, effectiveRange: nil) as? NSColor
+                 if cached.isDefaultPlain && currentColor == defaultColor {
+                     continue
+                 }
+                 if currentColor != cached.color || !cached.isDefaultPlain {
+                     if currentColor != cached.color || cached.attrs.count > 2 {
+                         textStorage.addAttributes(cached.attrs, range: nsRange)
                      }
                  }
+             }
+         }
+
+         // Re-assert LSP semantic colors over freshly painted lexical colors (prevents color flips on scroll).
+         if semanticStorageLength == storageLength, !semanticByLocation.isEmpty {
+             var semColors: [SyntaxTokenType: NSColor] = [:]
+             for token in tokens {
+                 let loc = token.range.startOffset
+                 guard let sem = semanticByLocation[loc], loc + sem.length <= storageLength else { continue }
+                 let color: NSColor
+                 if let c = semColors[sem.type] { color = c } else {
+                     color = themeManager.color(for: sem.type)
+                     semColors[sem.type] = color
+                 }
+                 textStorage.addAttribute(.foregroundColor, value: color, range: NSRange(location: loc, length: sem.length))
              }
          }
     }
@@ -902,13 +1598,15 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         _ code: String,
         language: String,
         fontSize: CGFloat,
-        isDark: Bool = true
+        isDark: Bool = true,
+        themeName: String? = nil
     ) -> AttributedString {
         var hasher = Hasher()
         hasher.combine(code)
         hasher.combine(language.lowercased())
         hasher.combine(Int(fontSize * 10))
         hasher.combine(isDark)
+        hasher.combine(themeName ?? "")
         let key = hasher.finalize()
         
         quickHighlightLock.lock()
@@ -917,7 +1615,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             return cached
         }
         
-        sharedQuickEngine.themeManager.setActiveTheme(isDark ? "dark" : "light")
+        if let themeName, !themeName.isEmpty, themeName.lowercased() != "system" {
+            sharedQuickEngine.themeManager.setActiveTheme(themeName)
+        } else {
+            sharedQuickEngine.themeManager.setActiveTheme(isDark ? "dark" : "light")
+        }
         sharedQuickEngine.setDocument(code, language: language)
         let nsAttr = sharedQuickEngine.highlightedAttributedString(fontSize: fontSize)
         sharedQuickEngine.clearCache()
@@ -942,10 +1644,209 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
 
 import SwiftUI
 
-/// Interactive NSTextView supporting Cmd+Click (Go to Definition), Option+Click (Quick Help Hover), and F12.
+/// Interactive NSTextView supporting Cmd+Click (Go to Definition), Option+Click (Quick Help Hover), F12,
+/// and hardware-accelerated multiplayer remote carets + selection highlights.
 final class IDEInteractiveTextView: NSTextView {
     var onGoToDefinitionAtCharIndex: ((Int) -> Void)?
     var onQuickHelpAtCharIndex: ((Int, NSPoint) -> Void)?
+    var collaborationFileURL: URL?
+    private var isObservingCollabPresence = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            if !isObservingCollabPresence {
+                isObservingCollabPresence = true
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleRemoteCollabPresenceChanged(_:)),
+                    name: CollaborationService.remotePresenceDidChangeNotification,
+                    object: nil
+                )
+            }
+            needsDisplay = true
+        } else if isObservingCollabPresence {
+            isObservingCollabPresence = false
+            NotificationCenter.default.removeObserver(
+                self,
+                name: CollaborationService.remotePresenceDidChangeNotification,
+                object: nil
+            )
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleRemoteCollabPresenceChanged(_ notification: Notification) {
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawRemoteCollaboratorCarets(in: dirtyRect)
+    }
+
+    private func drawRemoteCollaboratorCarets(in dirtyRect: NSRect) {
+        guard let fileURL = collaborationFileURL else { return }
+        let peers = CollaborationService.shared.remoteCollaborators(inFilePath: fileURL.path)
+        guard !peers.isEmpty,
+              let lm = layoutManager,
+              let tc = textContainer else { return }
+
+        let nsText = self.string as NSString
+        let totalLen = nsText.length
+        let origin = textContainerOrigin
+
+        // Build 0-based line start UTF-16 offsets once per draw pass when collaborators are present
+        var lineStarts: [Int] = [0]
+        if totalLen > 0 {
+            var searchIdx = 0
+            while searchIdx < totalLen {
+                let nlRange = nsText.range(
+                    of: "\n",
+                    options: .literal,
+                    range: NSRange(location: searchIdx, length: totalLen - searchIdx)
+                )
+                if nlRange.location == NSNotFound { break }
+                lineStarts.append(nlRange.location + 1)
+                searchIdx = nlRange.location + 1
+            }
+        }
+
+        func utf16Offset(line: Int, column: Int) -> Int {
+            guard !lineStarts.isEmpty else { return 0 }
+            let clampedLineIdx = max(0, min(lineStarts.count - 1, line - 1))
+            let lineStart = lineStarts[clampedLineIdx]
+            let lineEnd: Int
+            if clampedLineIdx + 1 < lineStarts.count {
+                lineEnd = max(lineStart, lineStarts[clampedLineIdx + 1] - 1)
+            } else {
+                lineEnd = totalLen
+            }
+            return max(lineStart, min(lineEnd, lineStart + max(0, column - 1)))
+        }
+
+        let defaultLineHeight: CGFloat = max(16, (self.font?.pointSize ?? 13) * 1.4)
+        var usedFlagSlotsOnLine: [Int: Int] = [:]
+
+        for peer in peers {
+            guard let cursor = peer.cursorPosition else { continue }
+            let peerColor = CollaborationColorHelper.nsColor(fromHex: peer.color)
+            let startIdx = utf16Offset(line: cursor.line, column: cursor.column)
+
+            // 1. Draw translucent selection range if teammate selected code
+            if let endL = cursor.endLine, let endC = cursor.endColumn {
+                let endIdx = utf16Offset(line: endL, column: endC)
+                let lo = min(startIdx, endIdx)
+                let hi = max(startIdx, endIdx)
+                if hi > lo, lo < totalLen {
+                    let safeRange = NSRange(location: lo, length: min(hi - lo, totalLen - lo))
+                    let glyphRange = lm.glyphRange(forCharacterRange: safeRange, actualCharacterRange: nil)
+                    if glyphRange.length > 0 {
+                        peerColor.withAlphaComponent(0.22).setFill()
+                        peerColor.withAlphaComponent(0.45).setStroke()
+                        lm.enumerateEnclosingRects(
+                            forGlyphRange: glyphRange,
+                            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                            in: tc
+                        ) { rect, _ in
+                            let r = rect.offsetBy(dx: origin.x, dy: origin.y)
+                            if r.intersects(dirtyRect) {
+                                let path = NSBezierPath(roundedRect: r, xRadius: 2.5, yRadius: 2.5)
+                                path.fill()
+                                path.lineWidth = 0.8
+                                path.stroke()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Compute exact caret rectangle
+            let caretRect: NSRect
+            if totalLen == 0 || lm.numberOfGlyphs == 0 {
+                caretRect = NSRect(x: origin.x, y: origin.y, width: 2.2, height: defaultLineHeight)
+            } else if startIdx < totalLen {
+                let glyphIdx = min(lm.glyphIndexForCharacter(at: startIdx), max(0, lm.numberOfGlyphs - 1))
+                let frag = lm.lineFragmentRect(forGlyphAt: glyphIdx, effectiveRange: nil, withoutAdditionalLayout: true)
+                let loc = lm.location(forGlyphAt: glyphIdx)
+                let h = frag.height > 1 ? frag.height : defaultLineHeight
+                caretRect = NSRect(x: origin.x + frag.minX + loc.x, y: origin.y + frag.minY, width: 2.2, height: h)
+            } else {
+                let lastCharIdx = totalLen - 1
+                let lastGlyphIdx = min(lm.glyphIndexForCharacter(at: lastCharIdx), max(0, lm.numberOfGlyphs - 1))
+                let frag = lm.lineFragmentRect(forGlyphAt: lastGlyphIdx, effectiveRange: nil, withoutAdditionalLayout: true)
+                let h = frag.height > 1 ? frag.height : defaultLineHeight
+                if nsText.character(at: lastCharIdx) == 10 {
+                    caretRect = NSRect(x: origin.x, y: origin.y + frag.maxY, width: 2.2, height: h)
+                } else {
+                    let endRect = lm.boundingRect(forGlyphRange: NSRange(location: lastGlyphIdx, length: 1), in: tc)
+                    caretRect = NSRect(x: origin.x + endRect.maxX, y: origin.y + frag.minY, width: 2.2, height: h)
+                }
+            }
+
+            let isAITeammate = peer.userId == CollaborationService.aiTeammateUserId || peer.role == "AI Agent"
+
+            // Active typing / AI teammate subtle line highlight strip
+            if cursor.isTyping == true || isAITeammate {
+                let lineStrip = NSRect(x: 0, y: caretRect.minY, width: bounds.width, height: caretRect.height)
+                if lineStrip.intersects(dirtyRect) {
+                    peerColor.withAlphaComponent(isAITeammate ? 0.13 : 0.08).setFill()
+                    lineStrip.fill()
+                }
+            }
+
+            // Draw crisp 2.2pt colored caret bar
+            let caretPath = NSBezierPath(roundedRect: caretRect, xRadius: 1.1, yRadius: 1.1)
+            peerColor.setFill()
+            caretPath.fill()
+
+            // 3. Draw floating collaborator name flag right above/below caret
+            let slot = usedFlagSlotsOnLine[cursor.line, default: 0]
+            usedFlagSlotsOnLine[cursor.line] = slot + 1
+            let labelText: String
+            if isAITeammate {
+                if peer.isAIActive, let status = peer.aiStatusText, !status.isEmpty {
+                    let shortStatus = status.count > 34 ? String(status.prefix(34)) + "…" : status
+                    labelText = "✦ \(peer.displayName) · \(shortStatus)"
+                } else if cursor.isTyping == true {
+                    labelText = "✦ \(peer.displayName) · กำลังแก้ Ln \(cursor.line)"
+                } else {
+                    labelText = "✦ \(peer.displayName) · Ln \(cursor.line)"
+                }
+            } else {
+                labelText = cursor.isTyping == true
+                    ? "\(peer.displayName) · กำลังแก้"
+                    : peer.displayName
+            }
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 9.5, weight: .semibold),
+                .foregroundColor: NSColor.white
+            ]
+            let textSize = (labelText as NSString).size(withAttributes: attrs)
+            let pillW = ceil(textSize.width) + 10
+            let pillH: CGFloat = 15
+            let rawX = caretRect.minX + CGFloat(slot) * (pillW + 4)
+            let clampedX = max(2, min(max(2, bounds.width - pillW - 4), rawX))
+            let flagY = caretRect.minY >= (pillH + 2)
+                ? (caretRect.minY - pillH + 1)
+                : (caretRect.maxY - 1)
+            let pillRect = NSRect(x: clampedX, y: flagY, width: pillW, height: pillH)
+            if pillRect.insetBy(dx: -4, dy: -4).intersects(dirtyRect) {
+                let pillPath = NSBezierPath(roundedRect: pillRect, xRadius: 4, yRadius: 4)
+                peerColor.withAlphaComponent(0.95).setFill()
+                pillPath.fill()
+                (labelText as NSString).draw(
+                    at: NSPoint(x: pillRect.minX + 5, y: pillRect.minY + (pillH - textSize.height) * 0.5),
+                    withAttributes: attrs
+                )
+            }
+        }
+    }
+
+    private var isHandlingMouseDown = false
 
     override func mouseDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -961,7 +1862,50 @@ final class IDEInteractiveTextView: NSTextView {
             onQuickHelpAtCharIndex?(charIdx, point)
             return
         }
+        isHandlingMouseDown = true
+        defer { isHandlingMouseDown = false }
         super.mouseDown(with: event)
+        if let noIntrinsic = enclosingScrollView as? NoIntrinsicScrollView,
+           noIntrinsic.forwardsScrollToEnclosingView,
+           noIntrinsic.contentView.bounds.origin != .zero {
+            noIntrinsic.contentView.scroll(to: .zero)
+            noIntrinsic.reflectScrolledClipView(noIntrinsic.contentView)
+        }
+    }
+
+    override func autoscroll(with event: NSEvent) -> Bool {
+        if let noIntrinsic = enclosingScrollView as? NoIntrinsicScrollView,
+           noIntrinsic.forwardsScrollToEnclosingView {
+            if noIntrinsic.contentView.bounds.origin != .zero {
+                noIntrinsic.contentView.scroll(to: .zero)
+                noIntrinsic.reflectScrolledClipView(noIntrinsic.contentView)
+            }
+            return noIntrinsic.superview?.autoscroll(with: event) ?? false
+        }
+        return super.autoscroll(with: event)
+    }
+
+    override func scrollToVisible(_ rect: NSRect) -> Bool {
+        if let noIntrinsic = enclosingScrollView as? NoIntrinsicScrollView,
+           noIntrinsic.forwardsScrollToEnclosingView {
+            if noIntrinsic.contentView.bounds.origin != .zero {
+                noIntrinsic.contentView.scroll(to: .zero)
+                noIntrinsic.reflectScrolledClipView(noIntrinsic.contentView)
+            }
+            // Clicking a cell that is already under the user's cursor must NEVER jump any scroll view
+            if isHandlingMouseDown {
+                return false
+            }
+            // For keyboard navigation / typing near viewport edges, forward only the compact caret rect
+            // to the enclosing Notebook ScrollView instead of scrolling inside the cell.
+            if let outerHost = noIntrinsic.superview {
+                let paddedCaret = rect.insetBy(dx: 0, dy: -6)
+                let rectInOuter = convert(paddedCaret, to: outerHost)
+                return outerHost.scrollToVisible(rectInOuter)
+            }
+            return false
+        }
+        return super.scrollToVisible(rect)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -979,6 +1923,9 @@ final class IDEInteractiveTextView: NSTextView {
 // the AppKit layout recursion loop (_FlexFrameLayout) that causes EXC_BREAKPOINT.
 class NoIntrinsicScrollView: NSScrollView {
     private(set) var lineNumberGutter: EditorLineNumberGutterView?
+    /// When true (`isScrollEnabled == false` in Notebook / Playground cells), all wheel and pinch
+    /// events pass straight through to the outer Notebook `ScrollView` and internal clip origin stays locked at `.zero`.
+    var forwardsScrollToEnclosingView: Bool = false
 
     // Returning noIntrinsicMetric prevents the scroll view from bubbling the
     // text view's content size up to SwiftUI, which is what triggered the
@@ -987,6 +1934,26 @@ class NoIntrinsicScrollView: NSScrollView {
     // recurses back into SwiftUI layout.
     override var intrinsicContentSize: NSSize {
         return NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if forwardsScrollToEnclosingView {
+            if contentView.bounds.origin != .zero {
+                contentView.scroll(to: .zero)
+                reflectScrolledClipView(contentView)
+            }
+            nextResponder?.scrollWheel(with: event)
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
+    override func magnify(with event: NSEvent) {
+        if forwardsScrollToEnclosingView {
+            nextResponder?.magnify(with: event)
+            return
+        }
+        super.magnify(with: event)
     }
 
     // The deferred configureTextGeometry() can run before SwiftUI has given
@@ -1000,6 +1967,10 @@ class NoIntrinsicScrollView: NSScrollView {
     // container while horizontally resizable.
     override func layout() {
         super.layout()
+        if forwardsScrollToEnclosingView && contentView.bounds.origin != .zero {
+            contentView.scroll(to: .zero)
+            reflectScrolledClipView(contentView)
+        }
         if let gutter = lineNumberGutter {
             gutter.frame = NSRect(
                 x: 0,
@@ -1095,20 +2066,83 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     /// Per-editor reused scroll views, keyed by editorID. Main-actor only
     /// (SyntaxHighlightedCodeView is always used from SwiftUI/main).
     @MainActor private static var viewCache: [String: NSScrollView] = [:]
+    @MainActor private static var viewCacheOrder: [String] = []
+    private static let maxCachedEditorViews = 2
+    /// Dedicated warm pool for lightweight Notebook / Playground cell editors (`cell-*`, `pgcell-*`)
+    /// so hovering or clicking across multi-cell sheets never evicts or recreates `NSScrollView`s.
+    @MainActor private static var cellViewCache: [String: NSScrollView] = [:]
+    @MainActor private static var cellViewCacheOrder: [String] = []
+    private static let maxCachedCellViews = 36
+
+    private static func isCellEditorID(_ id: String) -> Bool {
+        id.hasPrefix("cell-") || id.hasPrefix("pgcell-")
+    }
+
+    /// Enforces a strict LRU cap on cached NSScrollViews, releasing unmounted TextKit & IOSurface buffers.
+    @MainActor
+    private static func trimViewCache(keeping protectedID: String? = nil) {
+        viewCacheOrder.removeAll { viewCache[$0] == nil }
+        if viewCache.count > maxCachedEditorViews {
+            for key in viewCacheOrder where key != protectedID {
+                guard let sv = viewCache[key] else { continue }
+                if sv.window == nil && sv.superview == nil {
+                    if let tv = sv.documentView as? NSTextView {
+                        tv.delegate = nil
+                        tv.textStorage?.delegate = nil
+                        tv.string = ""
+                    }
+                    viewCache.removeValue(forKey: key)
+                }
+                if viewCache.count <= maxCachedEditorViews { break }
+            }
+            viewCacheOrder.removeAll { viewCache[$0] == nil }
+        }
+
+        cellViewCacheOrder.removeAll { cellViewCache[$0] == nil }
+        if cellViewCache.count > maxCachedCellViews {
+            for key in cellViewCacheOrder where key != protectedID {
+                guard let sv = cellViewCache[key] else { continue }
+                if sv.window == nil && sv.superview == nil {
+                    if let tv = sv.documentView as? NSTextView {
+                        tv.delegate = nil
+                        tv.textStorage?.delegate = nil
+                        tv.string = ""
+                    }
+                    cellViewCache.removeValue(forKey: key)
+                }
+                if cellViewCache.count <= maxCachedCellViews { break }
+            }
+            cellViewCacheOrder.removeAll { cellViewCache[$0] == nil }
+        }
+    }
 
     /// Purges cached NSScrollViews that are no longer mounted in any active window,
     /// freeing tens of megabytes of TextKit glyph and layout backing memory.
     @MainActor
     public static func purgeNonVisibleViewCache() {
-        let keys = Array(viewCache.keys)
-        for key in keys {
+        SyntaxHighlightingEngine.clearPrebuiltDocuments()
+        for key in Array(viewCache.keys) {
             if let sv = viewCache[key], sv.window == nil {
                 if let tv = sv.documentView as? NSTextView {
+                    tv.delegate = nil
+                    tv.textStorage?.delegate = nil
                     tv.string = ""
                 }
                 viewCache.removeValue(forKey: key)
             }
         }
+        viewCacheOrder.removeAll { viewCache[$0] == nil }
+        for key in Array(cellViewCache.keys) {
+            if let sv = cellViewCache[key], sv.window == nil {
+                if let tv = sv.documentView as? NSTextView {
+                    tv.delegate = nil
+                    tv.textStorage?.delegate = nil
+                    tv.string = ""
+                }
+                cellViewCache.removeValue(forKey: key)
+            }
+        }
+        cellViewCacheOrder.removeAll { cellViewCache[$0] == nil }
     }
 
     public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true, isTransparent: Bool = false, isEditable: Bool = true, enableHighlighting: Bool = true, showLineNumbers: Bool = false, editorID: String? = nil) {
@@ -1146,9 +2180,14 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // in an active superview/window. Handing the same NSView instance to
         // two live AppKitPlatformViewHosts simultaneously corrupts AppKit's view
         // hierarchy and causes two Coordinators to fight over the same textView.
-        if let id = editorID, let cached = Self.viewCache[id],
+        if let id = editorID,
+           let cached = (Self.isCellEditorID(id) ? Self.cellViewCache[id] : Self.viewCache[id]),
            cached.superview == nil, cached.window == nil,
            let tv = cached.documentView as? NSTextView {
+            (cached as? NoIntrinsicScrollView)?.forwardsScrollToEnclosingView = !self.isScrollEnabled
+            cached.hasVerticalScroller = self.isScrollEnabled
+            cached.hasHorizontalScroller = self.isScrollEnabled
+            (tv as? IDEInteractiveTextView)?.collaborationFileURL = self.fileURL
             let engine = SyntaxHighlightingEngine()
             context.coordinator.engine = engine
             context.coordinator.textView = tv
@@ -1156,19 +2195,24 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             tv.textStorage?.delegate = context.coordinator
             CrashReporter.shared.breadcrumb("SHCV.makeNSView REUSE id=\(id) tsLen=\(tv.textStorage?.length ?? -1)")
             context.coordinator.applyContent(self, to: tv, scrollView: cached, force: true)
+            context.coordinator.scheduleSemanticOverlay(afterNanoseconds: 1_200_000_000, retriesLeft: 3)
             return cached
         }
 
-        // Custom ScrollView to prevent intrinsic size bubbling
-        let scrollView = NoIntrinsicScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        // Custom ScrollView to prevent intrinsic size bubbling.
+        // Give a realistic initial 960x680 viewport for scrollable file editors (or compact 640x96 for non-scrolling cells)
+        // so TextKit 1 NEVER initializes `NSTextContainer` at width=1pt.
+        let initialSeedHeight: CGFloat = isScrollEnabled ? 680 : 96
+        let scrollView = NoIntrinsicScrollView(frame: NSRect(x: 0, y: 0, width: isScrollEnabled ? 960 : 640, height: initialSeedHeight))
+        scrollView.forwardsScrollToEnclosingView = !isScrollEnabled
+        scrollView.hasVerticalScroller = isScrollEnabled
+        scrollView.hasHorizontalScroller = isScrollEnabled
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         
         let contentSize = scrollView.contentSize
-        let initialWidth = max(1, contentSize.width)
-        let initialHeight = max(1, contentSize.height)
+        let initialWidth = max(isScrollEnabled ? 640 : 320, contentSize.width)
+        let initialHeight = max(isScrollEnabled ? 480 : 64, contentSize.height)
 
         // Use AppKit's OWN construction (explicit TextKit 1) instead of a
         // hand-assembled NSTextStorage/NSLayoutManager/NSTextContainer.
@@ -1179,6 +2223,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // geometry or colour. `NSTextView(usingTextLayoutManager: false)` builds
         // a fully-wired, render-correct TextKit 1 view (macOS 13+).
         let textView = IDEInteractiveTextView(usingTextLayoutManager: false)
+        textView.collaborationFileURL = self.fileURL
         textView.layoutManager?.allowsNonContiguousLayout = true
         textView.frame = NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight)
         textView.minSize = NSSize(width: 0, height: 0)
@@ -1326,25 +2371,62 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // is never blank waiting on an async tick. SwiftUI also calls
         // updateNSView right after this, which is a cheap no-op if unchanged.
         context.coordinator.applyContent(self, to: textView, scrollView: scrollView, force: true)
+        context.coordinator.scheduleSemanticOverlay(afterNanoseconds: 1_200_000_000, retriesLeft: 3)
 
-        // Cache so subsequent SwiftUI identity churn reuses THIS view.
-        if let id = editorID {
-            Self.viewCache[id] = scrollView
-            // Keep at most 2 cached editor scrollViews (primary + split); immediately release unmounted TextKit buffers.
-            if Self.viewCache.count > 2 {
-                for key in Self.viewCache.keys where key != id {
-                    if let evicted = Self.viewCache[key], evicted.window == nil {
-                        if let tv = evicted.documentView as? NSTextView {
-                            tv.string = ""
-                        }
-                        Self.viewCache.removeValue(forKey: key)
-                    }
-                    if Self.viewCache.count <= 2 { break }
-                }
+        // Cache so subsequent SwiftUI identity churn reuses THIS view (only for small/medium files <= 96 KB
+        // so multi-hundred-KB files like 11k-line kernel sources release their TextKit & IOSurface memory on tab switch).
+        if let id = editorID, self.text.utf8.count <= 96 * 1024 {
+            if Self.isCellEditorID(id) {
+                Self.cellViewCache[id] = scrollView
+                Self.cellViewCacheOrder.removeAll { $0 == id }
+                Self.cellViewCacheOrder.append(id)
+            } else {
+                Self.viewCache[id] = scrollView
+                Self.viewCacheOrder.removeAll { $0 == id }
+                Self.viewCacheOrder.append(id)
             }
+            Self.trimViewCache(keeping: id)
         }
 
         return scrollView
+    }
+
+    public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.isInvalidated = true
+        coordinator.highlightTimer?.invalidate()
+        coordinator.highlightTimer = nil
+        coordinator.lspChangeTask?.cancel()
+        coordinator.lspChangeTask = nil
+        coordinator.semanticTask?.cancel()
+        coordinator.semanticTask = nil
+        coordinator.autocompleteTask?.cancel()
+        coordinator.autocompleteTask = nil
+        coordinator.bindingSyncTask?.cancel()
+        coordinator.bindingSyncTask = nil
+        coordinator.collabEditSyncTask?.cancel()
+        coordinator.collabEditSyncTask = nil
+        coordinator.scrollHighlightWork?.cancel()
+        coordinator.scrollHighlightWork = nil
+        coordinator.engine?.cancelHighlighting()
+        NotificationCenter.default.removeObserver(coordinator)
+        coordinator.observedClipView = nil
+        coordinator.lastText = ""
+
+        // Enforce strict LRU max=2 AFTER SwiftUI unmounts dismantled views so rapid 8-tab bursts
+        // never retain 8 NSScrollViews + IOSurface tile backing buffers simultaneously.
+        Self.trimViewCache()
+
+        let isCached = Self.viewCache.values.contains(where: { $0 === nsView })
+            || Self.cellViewCache.values.contains(where: { $0 === nsView })
+        if !isCached {
+            coordinator.engine?.clearCache()
+            coordinator.engine = nil
+            if let tv = nsView.documentView as? NSTextView {
+                tv.delegate = nil
+                tv.textStorage?.delegate = nil
+                tv.string = ""
+            }
+        }
     }
 
 
@@ -1368,8 +2450,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var parent: SyntaxHighlightedCodeView
         var highlightTimer: Timer?
         var lspChangeTask: Task<Void, Never>?
+        var semanticTask: Task<Void, Never>?
         var autocompleteTask: Task<Void, Never>?
         var bindingSyncTask: Task<Void, Never>?
+        var collabEditSyncTask: Task<Void, Never>?
+        var scrollHighlightWork: DispatchWorkItem?
+        weak var observedClipView: NSClipView?
         var isUpdating = false
         var isInsertingCompletion = false
         var isInvalidated = false // Prevents async callbacks after teardown
@@ -1425,33 +2511,88 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         @objc private func handleJumpToLineNotification(_ notification: Notification) {
             guard let fileURL = parent.fileURL,
-                  parent.appState.currentFile?.path == fileURL.path,
                   let userInfo = notification.userInfo,
                   let line = userInfo["line"] as? Int,
                   let tv = textView else {
+                return
+            }
+            let editorStdPath = fileURL.standardizedFileURL.path
+            let currentStdPath = parent.appState.currentFile.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path }
+            let targetStdPath = (userInfo["fileURL"] as? URL)?.standardizedFileURL.path
+            guard currentStdPath == editorStdPath || targetStdPath == editorStdPath else {
                 return
             }
             
             let text = tv.string
             let nsText = text as NSString
             let lines = text.components(separatedBy: "\n")
+            guard !lines.isEmpty else { return }
             
-            // line is 1-indexed in xcodebuild
-            let targetLine = max(0, line - 1)
-            guard targetLine < lines.count else { return }
+            // line is 1-indexed
+            let targetLine = max(0, min(lines.count - 1, line - 1))
             
             var charIndex = 0
             for i in 0..<targetLine {
-                charIndex += lines[i].count + 1 // +1 for the newline character
+                charIndex += (lines[i] as NSString).length + 1 // +1 for the newline character
             }
             
             if let col = userInfo["column"] as? Int {
-                charIndex += max(0, col - 1)
+                let lineLen = (lines[targetLine] as NSString).length
+                charIndex += max(0, min(lineLen, col - 1))
             }
             
             let finalIndex = min(nsText.length, charIndex)
-            tv.setSelectedRange(NSRange(location: finalIndex, length: 0))
+            let scrollOnly = (userInfo["scrollOnly"] as? Bool) == true
+            if !scrollOnly {
+                tv.setSelectedRange(NSRange(location: finalIndex, length: 0))
+            }
             tv.scrollRangeToVisible(NSRange(location: finalIndex, length: 0))
+            tv.needsDisplay = true
+        }
+
+        func attachScrollHighlightObserverIfNeeded(_ scrollView: NSScrollView) {
+            let clip = scrollView.contentView
+            guard observedClipView !== clip else { return }
+            if let old = observedClipView {
+                NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: old)
+            }
+            clip.postsBoundsChangedNotifications = true
+            observedClipView = clip
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleClipBoundsDidChange(_:)),
+                name: NSView.boundsDidChangeNotification,
+                object: clip
+            )
+        }
+
+        @objc private func handleClipBoundsDidChange(_ notification: Notification) {
+            guard !isInvalidated, parent.enableHighlighting else { return }
+            scrollHighlightWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.isInvalidated, self.parent.enableHighlighting,
+                          let engine = self.engine,
+                          let tv = self.textView,
+                          let ts = tv.textStorage, ts.length > 0,
+                          let lm = tv.layoutManager,
+                          let tc = tv.textContainer,
+                          let clip = self.observedClipView else { return }
+                    let visRect = clip.bounds
+                    guard visRect.height > 0 else { return }
+                    let glyphRange = lm.glyphRange(forBoundingRectWithoutAdditionalLayout: visRect, in: tc)
+                    guard glyphRange.length > 0 else { return }
+                    let charRange = lm.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+                    engine.highlightViewportOnScroll(
+                        visibleCharRange: charRange,
+                        to: ts,
+                        fontSize: self.parent.fontSize,
+                        font: tv.font
+                    )
+                }
+            }
+            scrollHighlightWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.008, execute: work)
         }
 
         /// Single, synchronous code path that configures geometry/theme/font
@@ -1463,6 +2604,23 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                           force: Bool) {
             guard let engine = engine else { return }
             self.parent = p
+            if let noIntrinsic = scrollView as? NoIntrinsicScrollView {
+                let shouldForward = !p.isScrollEnabled
+                if noIntrinsic.forwardsScrollToEnclosingView != shouldForward {
+                    noIntrinsic.forwardsScrollToEnclosingView = shouldForward
+                    scrollView.hasVerticalScroller = p.isScrollEnabled
+                    scrollView.hasHorizontalScroller = p.isScrollEnabled
+                    if shouldForward && scrollView.contentView.bounds.origin != .zero {
+                        scrollView.contentView.scroll(to: .zero)
+                        scrollView.reflectScrolledClipView(scrollView.contentView)
+                    }
+                }
+            }
+            if let ideTV = textView as? IDEInteractiveTextView, ideTV.collaborationFileURL != p.fileURL {
+                ideTV.collaborationFileURL = p.fileURL
+                ideTV.needsDisplay = true
+            }
+            attachScrollHighlightObserverIfNeeded(scrollView)
 
             let langChanged = lastLanguage != p.language
             let themeNameChanged = lastThemeName != p.themeName
@@ -1488,7 +2646,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
             configureTextGeometry(for: textView, in: scrollView)
 
-            let normalizedText = p.text.contains("\r") ? p.text.replacingOccurrences(of: "\r\n", with: "\n") : p.text
+            // Raw UTF-8 byte scan (`0x0D`) avoids O(N) Extended Grapheme Cluster breaking in `-Onone`.
+            let normalizedText = p.text.utf8.contains(0x0D) ? p.text.replacingOccurrences(of: "\r\n", with: "\n") : p.text
             let textChanged = lastText != normalizedText && textView.string != normalizedText
 
             if !force && !textChanged && !visualConfigChanged {
@@ -1506,15 +2665,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             lastEnableHighlighting = p.enableHighlighting
             lastShowLineNumbers = p.showLineNumbers
 
+            let lowerTheme = p.themeName?.lowercased() ?? ""
+            let activeThemeID: String
+            if !lowerTheme.isEmpty && lowerTheme != "system", let tn = p.themeName {
+                activeThemeID = tn
+            } else {
+                activeThemeID = p.isDark ? "dark" : "light"
+            }
+
             // Theme + colours
             if force || themeNameChanged || darkChanged || transparentChanged {
-                let lowerTheme = p.themeName?.lowercased() ?? ""
-                let activeThemeID: String
-                if !lowerTheme.isEmpty && lowerTheme != "system", let tn = p.themeName {
-                    activeThemeID = tn
-                } else {
-                    activeThemeID = p.isDark ? "dark" : "light"
-                }
                 engine.themeManager.setActiveTheme(activeThemeID)
 
                 let effectiveTransparent = p.isTransparent
@@ -1572,6 +2732,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // Content replacement (only when external binding differs from NSTextView buffer)
             let didReplaceBuffer = (textView.string != normalizedText)
             var appliedIncrementalPatch = false
+            var consumedPrebuilt: SyntaxHighlightingEngine.PrebuiltEditorDocument? = nil
             if didReplaceBuffer {
                 let existingNS = textView.string as NSString
                 let newNS = normalizedText as NSString
@@ -1618,25 +2779,58 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                         engine.processEdit(range: patch.newRange, changeInLength: delta, newContent: normalizedText)
                     }
                     appliedIncrementalPatch = true
+                    (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.refreshContentIndex()
                 } else {
                     isUpdating = true
                     let r = NSRange(location: 0, length: newLen)
                     if r.length > 0 {
-                        let attr = NSMutableAttributedString(string: normalizedText)
-                        attr.addAttributes([.foregroundColor: fgColor, .font: customFont, .ligature: 0], range: r)
-                        textView.textStorage?.setAttributedString(attr)
+                        if let prebuilt = SyntaxHighlightingEngine.consumePrebuiltDocument(
+                            path: p.fileURL?.standardizedFileURL.path,
+                            normalizedText: normalizedText,
+                            language: p.language,
+                            fontSize: p.fontSize,
+                            activeThemeID: activeThemeID,
+                            fontName: p.fontName,
+                            fontWeight: p.fontWeight,
+                            enableHighlighting: p.enableHighlighting
+                        ) {
+                            consumedPrebuilt = prebuilt
+                            textView.textStorage?.setAttributedString(prebuilt.attributedString)
+                        } else {
+                            let attr = NSAttributedString(
+                                string: normalizedText,
+                                attributes: [.foregroundColor: fgColor, .font: customFont, .ligature: 0]
+                            )
+                            textView.textStorage?.setAttributedString(attr)
+                        }
                     } else {
                         textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
                     }
                     isUpdating = false
+
+                    if let starts = consumedPrebuilt?.lineStarts {
+                        (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.adoptPrecomputedLineStarts(starts)
+                    } else if !p.enableHighlighting {
+                        let starts = SyntaxHighlightingEngine.computeUTF16LineStartsFast(normalizedText)
+                        (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.adoptPrecomputedLineStarts(starts)
+                    }
                 }
-                (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.refreshContentIndex()
             }
 
             if force || didReplaceBuffer || langChanged || themeNameChanged || darkChanged || fontChanged || highlightingChanged {
                 if p.enableHighlighting {
                     if !appliedIncrementalPatch {
-                        engine.setDocument(textView.string, language: p.language)
+                        engine.setDocument(
+                            normalizedText,
+                            language: p.language,
+                            precomputedLineStarts: consumedPrebuilt?.lineStarts
+                        )
+                        if consumedPrebuilt == nil, didReplaceBuffer, let starts = engine.currentLineOffsets {
+                            (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.adoptPrecomputedLineStarts(starts)
+                        }
+                        if let precoloredEnd = consumedPrebuilt?.precoloredUTF16End, precoloredEnd > 0 {
+                            engine.recordPrebuiltHighlightedRange(NSRange(location: 0, length: precoloredEnd))
+                        }
                     }
                 } else {
                     engine.cancelHighlighting()
@@ -1655,9 +2849,19 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                         return lm.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
                     }()
 
-                    engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font, visibleCharRange: visCharRange) { [weak textView, weak scrollView] in
-                        if let tv = textView, let tc = tv.textContainer, let sv = scrollView {
-                            tv.layoutManager?.ensureLayout(forBoundingRect: sv.contentView.bounds, in: tc)
+                    let skipInitialApply = (consumedPrebuilt?.precoloredUTF16End ?? 0) > 0 && !appliedIncrementalPatch
+                    engine.applyHighlightingAsync(
+                        to: ts,
+                        fontSize: p.fontSize,
+                        font: textView.font,
+                        visibleCharRange: visCharRange,
+                        skipMainActorApplyIfFullDocument: skipInitialApply
+                    ) { [weak textView, weak scrollView] in
+                        if !skipInitialApply, let tv = textView, let tc = tv.textContainer, let sv = scrollView {
+                            let bounds = sv.contentView.bounds
+                            if sv.window != nil && bounds.width >= 32 && bounds.height >= 16 {
+                                tv.layoutManager?.ensureLayout(forBoundingRect: bounds, in: tc)
+                            }
                             tv.needsDisplay = true
                         }
                         scrollView?.contentView.needsDisplay = true
@@ -1666,7 +2870,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 }
             }
 
-            if let tc = textView.textContainer {
+            if let tc = textView.textContainer,
+               scrollView.window != nil,
+               scrollView.contentView.bounds.width >= 32,
+               scrollView.contentView.bounds.height >= 16 {
                 textView.layoutManager?.ensureLayout(forBoundingRect: scrollView.contentView.bounds, in: tc)
             }
             textView.needsDisplay = true
@@ -1676,18 +2883,22 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
         func configureTextGeometry(for textView: NSTextView, in scrollView: NSScrollView) {
             let contentSize = scrollView.contentSize
-            let targetWidth = max(1, contentSize.width)
-            let targetHeight = max(1, contentSize.height)
+            // Never collapse an unmounted or transient 0-width NSScrollView down to width=1pt!
+            // Wrapping 380k characters at width=1pt creates 380k 1-char CoreText line fragments on MainActor.
+            let fallbackWidth: CGFloat = parent.isScrollEnabled ? 960 : 640
+            let fallbackHeight: CGFloat = parent.isScrollEnabled ? 680 : 64
+            let targetWidth = contentSize.width >= 64 ? contentSize.width : max(textView.frame.width, fallbackWidth)
+            let targetHeight = contentSize.height >= 24 ? contentSize.height : max(textView.frame.height, fallbackHeight)
 
             textView.isVerticallyResizable = true
             textView.isHorizontallyResizable = false
             textView.autoresizingMask = [.width]
-            textView.minSize = NSSize(width: 0, height: targetHeight)
+            textView.minSize = NSSize(width: 0, height: parent.isScrollEnabled ? targetHeight : 24)
             textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                       height: CGFloat.greatestFiniteMagnitude)
 
             let newWidth = targetWidth
-            let newHeight = max(textView.frame.height, targetHeight)
+            let newHeight = parent.isScrollEnabled ? max(textView.frame.height, targetHeight) : targetHeight
             if abs(textView.frame.width - newWidth) > 0.5 ||
                 abs(textView.frame.height - newHeight) > 0.5 {
                 textView.setFrameSize(NSSize(width: newWidth, height: newHeight))
@@ -1749,6 +2960,37 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             return (oldRange: oldRange, newRange: newRange, replacement: replacement)
         }
 
+        /// Requests LSP semantic tokens (debounced) and overlays them on the lexical colors, like VS Code.
+        func scheduleSemanticOverlay(afterNanoseconds delay: UInt64, retriesLeft: Int = 0) {
+            guard parent.enableHighlighting, parent.fileURL != nil,
+                  (UserDefaults.standard.object(forKey: "semanticHighlightingEnabled") as? Bool) ?? true,
+                  LanguageServer.serverFor(language: parent.language) != nil else { return }
+            semanticTask?.cancel()
+            semanticTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled, let self, !self.isInvalidated,
+                      let url = self.parent.fileURL,
+                      let tv = self.textView, let ts = tv.textStorage,
+                      ts.length > 0, ts.length < 400_000, !tv.hasMarkedText(),
+                      let engine = self.engine else { return }
+                let language = self.parent.language
+                let uri = url.standardizedFileURL.absoluteString
+                let text = ts.string
+                await LSPManager.shared.documentChanged(uri: uri, language: language, content: text)
+                let fetched = await LSPManager.shared.getSemanticTokens(uri: uri, language: language)
+                guard !Task.isCancelled, !self.isInvalidated else { return }
+                guard let tokens = fetched else {
+                    // Server may still be starting/indexing — retry a couple of times.
+                    if retriesLeft > 0 {
+                        self.scheduleSemanticOverlay(afterNanoseconds: 4_000_000_000, retriesLeft: retriesLeft - 1)
+                    }
+                    return
+                }
+                guard ts.string == text else { return }
+                await engine.applySemanticTokens(tokens, to: ts, text: text)
+            }
+        }
+
         deinit {
             NotificationCenter.default.removeObserver(self)
             isInvalidated = true
@@ -1756,6 +2998,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             lspChangeTask?.cancel()
             autocompleteTask?.cancel()
             bindingSyncTask?.cancel()
+            semanticTask?.cancel()
             engine?.cancelHighlighting()
             engine = nil
         }
@@ -1789,6 +3032,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                         try? await Task.sleep(nanoseconds: 250_000_000)
                         guard !Task.isCancelled else { return }
                         await LSPManager.shared.documentChanged(uri: url.standardizedFileURL.absoluteString, language: language, content: fullString)
+                        await MainActor.run { [weak self] in
+                            self?.scheduleSemanticOverlay(afterNanoseconds: 350_000_000)
+                        }
                     }
                 }
                 
@@ -1966,6 +3212,49 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             }
         }
         
+        private static func computeOneBasedLineAndColumn(utf16Offset: Int, in nsText: NSString) -> (line: Int, column: Int) {
+            let safeOffset = max(0, min(utf16Offset, nsText.length))
+            guard safeOffset > 0 else { return (1, 1) }
+            var line = 1
+            var lastLineStart = 0
+            var searchIdx = 0
+            while searchIdx < safeOffset {
+                let nl = nsText.range(
+                    of: "\n",
+                    options: .literal,
+                    range: NSRange(location: searchIdx, length: safeOffset - searchIdx)
+                )
+                if nl.location == NSNotFound { break }
+                line += 1
+                lastLineStart = nl.location + 1
+                searchIdx = nl.location + 1
+            }
+            return (line, max(1, safeOffset - lastLineStart + 1))
+        }
+
+        private func syncCollaborationSelection(in textView: NSTextView, isTyping: Bool) {
+            guard CollaborationService.shared.currentSession != nil,
+                  let fileURL = parent.fileURL else { return }
+            let sel = textView.selectedRange()
+            let nsText = textView.string as NSString
+            let startPos = Self.computeOneBasedLineAndColumn(utf16Offset: sel.location, in: nsText)
+            var endLine: Int? = nil
+            var endCol: Int? = nil
+            if sel.length > 0 {
+                let endPos = Self.computeOneBasedLineAndColumn(utf16Offset: sel.location + sel.length, in: nsText)
+                endLine = endPos.line
+                endCol = endPos.column
+            }
+            CollaborationService.shared.updateLocalEditorSelection(
+                filePath: fileURL.path,
+                line: startPos.line,
+                column: startPos.column,
+                endLine: endLine,
+                endColumn: endCol,
+                isTyping: isTyping
+            )
+        }
+
         public func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             guard !textView.hasMarkedText() else { return }
@@ -1976,34 +3265,58 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // already has this exact text and skips redundant full-document re-application.
             self.lastText = newText
             
-            // Debounce SwiftUI `@Binding var text` propagation (90ms) so typing at 60-120 WPM
-            // doesn't force SwiftUI to re-evaluate the parent view hierarchy on every single keystroke.
+            // Stream live multiplayer caret + typing buffer over WebSocket (110ms debounce for buffer)
+            if CollaborationService.shared.currentSession != nil, let fileURL = parent.fileURL {
+                syncCollaborationSelection(in: textView, isTyping: true)
+                let path = fileURL.path
+                collabEditSyncTask?.cancel()
+                collabEditSyncTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 110_000_000)
+                    guard let self = self, !Task.isCancelled, !self.isInvalidated else { return }
+                    CollaborationService.shared.notifyLocalFileEdited(path: path, content: newText)
+                }
+            }
+
+            // Debounce SwiftUI `@Binding var text` propagation (90ms normal, 320ms on multi-MB plain-text files)
+            // so typing at 60-120 WPM doesn't force SwiftUI to re-evaluate the parent view hierarchy on every keystroke.
+            let isLargePlainDoc = !parent.enableHighlighting || (textView.textStorage?.length ?? 0) > 512_000
+            let syncDelayNs: UInt64 = isLargePlainDoc ? 320_000_000 : 90_000_000
             bindingSyncTask?.cancel()
             bindingSyncTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 90_000_000)
+                try? await Task.sleep(nanoseconds: syncDelayNs)
                 guard let self = self, !Task.isCancelled, !self.isInvalidated else { return }
                 if self.parent.text != newText {
                     self.parent.text = newText
                 }
             }
 
-            // Trigger fast incremental highlight (50ms debounce)
-            triggerDebouncedHighlight(for: textView)
+            // Trigger fast incremental highlight (50ms debounce) when syntax highlighting is enabled
+            if parent.enableHighlighting {
+                triggerDebouncedHighlight(for: textView)
+            }
         }
         
         public func textDidEndEditing(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             bindingSyncTask?.cancel()
+            collabEditSyncTask?.cancel()
             let finalString = textView.string
             self.lastText = finalString
             if parent.text != finalString {
                 parent.text = finalString
             }
+            if CollaborationService.shared.currentSession != nil, let fileURL = parent.fileURL {
+                CollaborationService.shared.notifyLocalFileEdited(path: fileURL.path, content: finalString)
+                syncCollaborationSelection(in: textView, isTyping: false)
+            }
         }
         
         public func textViewDidChangeSelection(_ notification: Notification) {
-            guard let textView = notification.object as? NSTextView,
-                  let range = textView.selectedRanges.first?.rangeValue,
+            guard let textView = notification.object as? NSTextView else { return }
+            if CollaborationService.shared.currentSession != nil, !isUpdating {
+                syncCollaborationSelection(in: textView, isTyping: false)
+            }
+            guard let range = textView.selectedRanges.first?.rangeValue,
                   range.length == 0 else {
                 if parent.appState.showingCompletions {
                     parent.appState.dismissCompletions()

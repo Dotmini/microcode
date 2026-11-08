@@ -51,6 +51,7 @@ final class AgentTranscriptStore {
         hasher.combine(message.content.count)
         hasher.combine(String(message.content.suffix(256)))
         hasher.combine(message.toolResults?.count ?? 0)
+        hasher.combine(message.attachments)
         return hasher.finalize()
     }
 

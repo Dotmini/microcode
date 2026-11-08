@@ -409,6 +409,25 @@ final class EditorLineNumberGutterView: NSView {
         needsDisplay = true
     }
 
+    /// Adopts a precomputed UTF-16 line-start table directly in O(1), skipping a redundant
+    /// full-document character scan on `@MainActor` when opening multi-hundred-KB source files.
+    func adoptPrecomputedLineStarts(_ starts: [Int]) {
+        pendingIndexRebuild?.cancel()
+        pendingIndexRebuild = nil
+        if starts.isEmpty {
+            lineStarts = [0]
+            lineIndexIsComplete = true
+        } else if starts.count <= maximumIndexedLines {
+            lineStarts = starts
+            lineIndexIsComplete = true
+        } else {
+            lineStarts = Array(starts.prefix(maximumIndexedLines))
+            lineIndexIsComplete = false
+        }
+        scheduleGitDiffRefresh(delay: 0.25)
+        needsDisplay = true
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         // Allow clicking in the left 22pt strip (or anywhere in the 58pt gutter)
         // to toggle breakpoints without interfering with text selection in the editor.

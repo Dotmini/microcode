@@ -290,14 +290,17 @@ public struct AgentConnectionsView: View {
                 .background(Color.primary.opacity(0.08))
             
             // Footer
-            HStack {
-                Button("Use the full setup guide") {
-                    if let url = URL(string: "https://docs.microcode.dev/agents") {
-                        NSWorkspace.shared.open(url)
+            HStack(spacing: 14) {
+                Button {
+                    presentationMode.wrappedValue.dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        NotificationCenter.default.post(name: NSNotification.Name("MicroCode.OpenAgentEcosystem"), object: "rules")
                     }
+                } label: {
+                    Label("Rules, MCP & Advanced Paths…", systemImage: "slider.horizontal.3")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
                 }
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
                 .buttonStyle(.plain)
                 
                 Spacer()
@@ -494,21 +497,21 @@ public struct AgentConnectionsView: View {
             
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("Route CLI Harnesses via 9Router (localhost:20128)")
+                    Text("Route CLI Harnesses via Built-in Subscription Gateway (127.0.0.1:20128)")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundColor(.primary)
-                    Text("3-TIER SMART PROXY")
+                    Text(LocalSubscriptionGatewayService.shared.isRunning ? "LIVE • 3-TIER POOL" : "3-TIER SMART PROXY")
                         .font(.system(size: 8.5, weight: .bold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
-                        .background(Color.primary.opacity(0.12))
-                        .foregroundColor(.primary)
+                        .background((LocalSubscriptionGatewayService.shared.isRunning ? Color.green : Color.primary).opacity(0.14))
+                        .foregroundColor(LocalSubscriptionGatewayService.shared.isRunning ? .green : .primary)
                         .clipShape(Capsule())
                         .overlay(
-                            Capsule().stroke(Color.primary.opacity(0.25), lineWidth: 0.8)
+                            Capsule().stroke((LocalSubscriptionGatewayService.shared.isRunning ? Color.green : Color.primary).opacity(0.3), lineWidth: 0.8)
                         )
                 }
-                Text("Injects OPENAI_BASE_URL & ANTHROPIC_BASE_URL=http://127.0.0.1:20128 into Claude Code, Codex, OpenCode, Cursor, Goose, Cline & Aider for automatic Tier 1 → Tier 2 → Tier 3 fallback.")
+                Text("Embedded inside MicroCode (no external install needed) — injects OPENAI_BASE_URL & ANTHROPIC_BASE_URL=http://127.0.0.1:20128 into Claude Code, Codex, OpenCode, Goose, Cline & Aider for zero-downtime Subscription Pool rotation.")
                     .font(.system(size: 10.5))
                     .foregroundColor(.secondary)
                     .lineLimit(2)
@@ -516,7 +519,15 @@ public struct AgentConnectionsView: View {
             
             Spacer()
             
-            Toggle("", isOn: $use9RouterForHarnesses)
+            Toggle("", isOn: Binding(
+                get: { use9RouterForHarnesses },
+                set: { newVal in
+                    use9RouterForHarnesses = newVal
+                    if newVal {
+                        LocalSubscriptionGatewayService.shared.startIfNeeded()
+                    }
+                }
+            ))
                 .toggleStyle(.switch)
                 .labelsHidden()
         }

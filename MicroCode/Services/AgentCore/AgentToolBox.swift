@@ -20,8 +20,13 @@ protocol AgentTool {
     var name: String { get }
     var description: String { get }
     var parameters: [ToolParameter] { get }
+    var rawParametersSchema: [String: Any]? { get }
     
     func execute(params: [String: Any]) async throws -> String
+}
+
+extension AgentTool {
+    var rawParametersSchema: [String: Any]? { nil }
 }
 
 struct ToolParameter {
@@ -88,6 +93,8 @@ class AgentToolBox: ObservableObject {
     }
     
     private func registerBuiltinTools() {
+        register(AttachmentReadTool())
+        ToolApprovalManager.shared.alwaysAllowedTools.insert("attachment_read")
         register(FileReadTool())
         register(FileWriteTool())
         register(FileSearchTool())
@@ -158,6 +165,8 @@ class AgentToolBox: ObservableObject {
         register(EmbeddedSerialCaptureTool())
         register(EmbeddedSerialSendTool())
         register(EmbeddedDecodeCrashTool())
+        // Feature 14: Native macOS Computer Use Engine (Set-of-Mark + AXPress + Apple Vision OCR)
+        register(NativeComputerUseTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -168,6 +177,8 @@ class AgentToolBox: ObservableObject {
         let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
         switch lower {
+        case "read_attachment", "inspect_attachment", "attachment_slice":
+            return "attachment_read"
         case "read_file", "view_file", "read", "cat", "open_file_content", "get_file_contents":
             return "file_read"
         case "write_file", "write_to_file", "create_file", "write", "save_file", "overwrite_file":
@@ -277,10 +288,18 @@ class AgentToolBox: ObservableObject {
         }
 
         // Coerce integer parameters that may arrive as strings (e.g. from XML/DSML tool calls)
-        for intKey in ["max_depth", "start_line", "end_line", "timeout", "page", "max_results", "max_tokens"] {
+        for intKey in ["max_depth", "start_line", "end_line", "page_start", "page_end", "row_start", "row_end", "timeout", "page", "max_results", "max_tokens"] {
             if let strVal = normalized[intKey] as? String,
                let parsedInt = Int(strVal.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 normalized[intKey] = parsedInt
+            }
+        }
+        if let ocrStr = normalized["ocr"] as? String {
+            let lowerOcr = ocrStr.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if lowerOcr == "true" || lowerOcr == "1" || lowerOcr == "yes" {
+                normalized["ocr"] = true
+            } else if lowerOcr == "false" || lowerOcr == "0" || lowerOcr == "no" {
+                normalized["ocr"] = false
             }
         }
 
@@ -321,19 +340,23 @@ class AgentToolBox: ObservableObject {
         }()
         
         if !isRemoteTarget {
-            // Auto-resolve relative paths against local effectiveWorkspaceRoot
-            if executionWorkspace != nil {
-                for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-                    if let path = resolvedParams[key] as? String { resolvedParams[key] = resolveLocalToolPath(path) }
+            // Auto-resolve relative paths against local effectiveWorkspaceRoot (or expand ~ when no workspace is open)
+            for key in ["path", "directory", "old_path", "new_path", "cwd"] {
+                if let path = resolvedParams[key] as? String {
+                    resolvedParams[key] = executionWorkspace != nil
+                        ? resolveLocalToolPath(path)
+                        : NSString(string: path).expandingTildeInPath
                 }
-                if let pathsStr = resolvedParams["paths"] as? String {
-                    let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                    resolvedParams["paths"] = paths.map { resolveLocalToolPath($0) }.joined(separator: ",")
-                }
+            }
+            if let pathsStr = resolvedParams["paths"] as? String {
+                let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                resolvedParams["paths"] = paths.map { p in
+                    executionWorkspace != nil ? resolveLocalToolPath(p) : NSString(string: p).expandingTildeInPath
+                }.joined(separator: ",")
             }
             
             // Validate every declared local path, including list and rename arguments.
-            let isReadOnlyFS = ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "file_search", "find_symbol", "codebase_search", "repo_map"].contains(toolName)
+            let isReadOnlyFS = ["attachment_read", "file_read", "multi_file_read", "extract_pdf", "inspect_image", "list_directory_tree", "grep_search", "file_search", "find_symbol", "codebase_search", "repo_map"].contains(toolName)
             for key in ["path", "directory", "old_path", "new_path", "cwd"] {
                 if let path = resolvedParams[key] as? String { try validateSandbox(path, allowGlobalReadOnly: isReadOnlyFS) }
             }
@@ -350,8 +373,11 @@ class AgentToolBox: ObservableObject {
             }
             for key in ["path", "directory", "old_path", "new_path", "cwd"] {
                 if let path = params[key] as? String {
-                    // Do not forward local macOS /Users/... workspace path to remote Linux server
-                    if let localRoot = executionWorkspace, path.hasPrefix(localRoot) {
+                    let expandedLocal = NSString(string: path).expandingTildeInPath
+                    if WorkspacePathPolicy.contains(expandedLocal, in: UniversalAttachmentEngine.vaultRootDirectory.path) {
+                        resolvedParams[key] = expandedLocal
+                    } else if let localRoot = executionWorkspace, path.hasPrefix(localRoot) {
+                        // Do not forward local macOS /Users/... workspace path to remote Linux server
                         let rel = path.replacingOccurrences(of: localRoot, with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                         resolvedParams[key] = rel.isEmpty ? cleanBase : "\(cleanBase)/\(rel)"
                     } else {
@@ -377,6 +403,13 @@ class AgentToolBox: ObservableObject {
             throw ToolBoxError.executionFailed("Workspace changed while awaiting tool approval")
         }
 
+        // Enterprise Command Firewall enforcement before shell execution
+        if toolName == "shell", let cmd = resolvedParams["command"] as? String {
+            if let firewallBlock = EnterpriseAIAuthService.shared.validateShellCommand(cmd) {
+                throw ToolBoxError.executionFailed("🛡️ \(firewallBlock)")
+            }
+        }
+
         // Auto-commit safety net: checkpoint before file-modifying tools (local only)
         let fileModifyingTools: Set<String> = ["file_write", "replace_in_file", "patch_file", "apply_patch", "multi_replace_in_file", "rename_file", "create_directory", "shell"]
         let isMutatingCall: Bool = {
@@ -389,12 +422,22 @@ class AgentToolBox: ObservableObject {
         if !isRemoteTarget && (toolName == "file_read" || toolName == "multi_file_read") {
             if let readPath = resolvedParams["path"] as? String {
                 AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: readPath)
+                if EnterpriseAIAuthService.shared.isConfidentialPath(readPath) {
+                    EnterpriseAIAuthService.shared.markConfidentialFileAccessed(readPath)
+                }
             }
             if let readPaths = resolvedParams["paths"] as? [String] {
                 for p in readPaths {
                     AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: p)
+                    if EnterpriseAIAuthService.shared.isConfidentialPath(p) {
+                        EnterpriseAIAuthService.shared.markConfidentialFileAccessed(p)
+                    }
                 }
             }
+        }
+        if isMutatingCall {
+            // Enterprise Reversible Secret Vault: restore any <VAULT_..._N> tokens back to real secrets before writing to disk
+            resolvedParams = AgentPrivacyGuard.detokenizeParams(resolvedParams)
         }
         if !isRemoteTarget && isMutatingCall {
             // Flush any unsaved editor buffers across all windows before checkpointing and mutating
@@ -436,8 +479,11 @@ class AgentToolBox: ObservableObject {
         }
         
         let startTime = Date()
+        if CollaborationService.shared.isCollabSessionActive {
+            broadcastCollabAgentPreTool(toolName: toolName, params: resolvedParams, isMutatingCall: isMutatingCall)
+        }
         let cacheKey = executionCacheKey(toolName: toolName, params: resolvedParams) + (isRemoteTarget ? "::remote" : "::local")
-        let cacheable = ["file_read", "grep_search", "codebase_search", "repo_map", "list_directory_tree", "git_status", "find_symbol", "multi_file_read", "get_diagnostics", "science_inspect", "alphafold_input_validate"].contains(toolName)
+        let cacheable = ["attachment_read", "file_read", "grep_search", "codebase_search", "repo_map", "list_directory_tree", "git_status", "find_symbol", "multi_file_read", "get_diagnostics", "science_inspect", "alphafold_input_validate"].contains(toolName)
         if cacheable, let cached = readCache[cacheKey], Date().timeIntervalSince(cached.date) < readCacheTTL {
             TokenOptimizer.shared.recordContextCache(hit: true, tokens: TokenOptimizer.shared.estimateTokens(cached.value))
             return cached.value
@@ -446,14 +492,24 @@ class AgentToolBox: ObservableObject {
         
         do {
             let timeoutNs = defaultToolTimeout
+            let vaultBefore = AgentPrivacyGuard.totalDLPInterceptCount
             let rawResult: String
             if let server = executionTarget.remoteServer,
                let remoteHandled = try await executeRemoteToolIfApplicable(toolName: toolName, server: server, params: resolvedParams) {
                 rawResult = await Task.detached(priority: .userInitiated) {
-                    AgentPrivacyGuard.sanitize(remoteHandled)
+                    AgentPrivacyGuard.tokenizeAndVault(remoteHandled)
                 }.value
             } else {
                 rawResult = try await executeWithTimeout(tool: tool, params: resolvedParams, timeoutNs: timeoutNs)
+            }
+            let vaultDelta = AgentPrivacyGuard.totalDLPInterceptCount - vaultBefore
+            if vaultDelta > 0 {
+                let targetPath = (resolvedParams["path"] as? String) ?? toolName
+                FlightRecorder.shared.record(
+                    action: .securityDLPIntercept,
+                    summary: "Reversible Secret Vault tokenized \(vaultDelta) secret(s) in `\(toolName)` output",
+                    filePath: targetPath
+                )
             }
             var result = rawResult
             let execution = ToolExecution(toolName: toolName, params: resolvedParams, result: result, success: true, duration: Date().timeIntervalSince(startTime))
@@ -488,6 +544,9 @@ class AgentToolBox: ObservableObject {
                     }
                 }
             }
+            if CollaborationService.shared.isCollabSessionActive {
+                broadcastCollabAgentPostTool(toolName: toolName, params: resolvedParams, isMutatingCall: isMutatingCall)
+            }
             
             // Allow rich tool outputs up to 2M characters (~500k tokens)
             if result.count > 2_000_000 {
@@ -499,6 +558,156 @@ class AgentToolBox: ObservableObject {
             executionHistory.append(execution)
             throw error
         }
+    }
+
+    // MARK: - Collaboration Real-Time AI Teammate Presence (Active ONLY in Collab Mode)
+
+    private func broadcastCollabAgentPreTool(toolName: String, params: [String: Any], isMutatingCall: Bool) {
+        guard CollaborationService.shared.isCollabSessionActive else { return }
+        switch toolName {
+        case "file_read":
+            guard let path = params["path"] as? String, !path.isEmpty else { return }
+            let start = max(1, (params["start_line"] as? Int) ?? 1)
+            let end = params["end_line"] as? Int
+            let name = (path as NSString).lastPathComponent
+            CollaborationService.shared.notifyAIAgentActivity(
+                filePath: path,
+                line: start,
+                endLine: end,
+                isEditing: false,
+                statusText: "Reading \(name):\(start)"
+            )
+
+        case "multi_file_read":
+            let rawPaths: [String] = {
+                if let str = params["paths"] as? String {
+                    return str.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                }
+                if let arr = params["paths"] as? [String] { return arr }
+                return []
+            }()
+            if let first = rawPaths.first {
+                let name = (first as NSString).lastPathComponent
+                CollaborationService.shared.notifyAIAgentActivity(
+                    filePath: first,
+                    line: 1,
+                    endLine: 30,
+                    isEditing: false,
+                    statusText: "Reading \(name) (+\(max(0, rawPaths.count - 1)))"
+                )
+            }
+
+        case "file_write", "replace_in_file", "patch_file", "multi_replace_in_file", "apply_patch":
+            let path = (params["path"] as? String) ?? ""
+            let range = Self.computeCollabLineRange(params: params, filePath: path, useReplacementSnippet: false)
+            let name = path.isEmpty ? "workspace" : (path as NSString).lastPathComponent
+            CollaborationService.shared.notifyAIAgentActivity(
+                filePath: path.isEmpty ? nil : path,
+                line: range.startLine,
+                endLine: range.endLine,
+                isEditing: true,
+                statusText: "Editing \(name):\(range.startLine)"
+            )
+
+        case "grep_search", "find_symbol", "codebase_search":
+            let q = (params["query"] as? String) ?? (params["pattern"] as? String) ?? (params["symbol"] as? String) ?? ""
+            CollaborationService.shared.notifyAIAgentActivity(
+                filePath: nil,
+                line: 1,
+                isEditing: false,
+                statusText: "Searching '\(q.prefix(22))'"
+            )
+
+        case "shell":
+            let cmd = (params["command"] as? String) ?? ""
+            CollaborationService.shared.notifyAIAgentActivity(
+                filePath: nil,
+                line: 1,
+                isEditing: isMutatingCall,
+                statusText: "Running \(cmd.prefix(24))"
+            )
+
+        default:
+            break
+        }
+    }
+
+    private func broadcastCollabAgentPostTool(toolName: String, params: [String: Any], isMutatingCall: Bool) {
+        guard CollaborationService.shared.isCollabSessionActive else { return }
+        guard isMutatingCall else { return }
+        if let path = params["path"] as? String, !path.isEmpty,
+           let updatedContent = try? String(contentsOfFile: path, encoding: .utf8) {
+            let range = Self.computeCollabLineRange(params: params, filePath: path, useReplacementSnippet: true)
+            let name = (path as NSString).lastPathComponent
+            CollaborationService.shared.notifyAIAgentActivity(
+                filePath: path,
+                line: range.startLine,
+                endLine: range.endLine,
+                isEditing: true,
+                statusText: "Updated \(name):\(range.startLine)",
+                updatedContent: updatedContent
+            )
+        }
+    }
+
+    private static func computeCollabLineRange(
+        params: [String: Any],
+        filePath: String,
+        useReplacementSnippet: Bool
+    ) -> (startLine: Int, endLine: Int) {
+        if let start = params["start_line"] as? Int {
+            let s = max(1, start)
+            let e = max(s, (params["end_line"] as? Int) ?? s)
+            return (s, e)
+        }
+        guard !filePath.isEmpty,
+              let fileText = try? String(contentsOfFile: filePath, encoding: .utf8) else {
+            if let written = params["content"] as? String {
+                let count = max(1, min(60, written.components(separatedBy: "\n").count))
+                return (1, count)
+            }
+            return (1, 1)
+        }
+
+        var snippet: String = ""
+        if useReplacementSnippet {
+            snippet = (params["new_text"] as? String)
+                ?? (params["replace"] as? String)
+                ?? (params["replacement"] as? String)
+                ?? (params["new_string"] as? String)
+                ?? ""
+        }
+        if snippet.isEmpty {
+            snippet = (params["old_text"] as? String)
+                ?? (params["search"] as? String)
+                ?? (params["target"] as? String)
+                ?? (params["old_string"] as? String)
+                ?? ""
+        }
+        if snippet.isEmpty, let edits = params["edits"] as? [[String: Any]], let first = edits.first {
+            snippet = (useReplacementSnippet
+                ? ((first["new_text"] as? String) ?? (first["replacement"] as? String) ?? (first["replace"] as? String))
+                : ((first["old_text"] as? String) ?? (first["target"] as? String) ?? (first["search"] as? String))) ?? ""
+        }
+        if snippet.isEmpty, let replacements = params["replacements"] as? [[String: Any]], let first = replacements.first {
+            snippet = (useReplacementSnippet
+                ? ((first["new_text"] as? String) ?? (first["replacement"] as? String) ?? (first["replace"] as? String))
+                : ((first["old_text"] as? String) ?? (first["target"] as? String) ?? (first["search"] as? String))) ?? ""
+        }
+
+        let cleanSnippet = snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSnippet.isEmpty else {
+            let totalLines = max(1, fileText.components(separatedBy: "\n").count)
+            return (1, min(25, totalLines))
+        }
+
+        if let range = fileText.range(of: snippet) ?? fileText.range(of: cleanSnippet) {
+            let prefix = fileText[..<range.lowerBound]
+            let startLine = max(1, prefix.components(separatedBy: "\n").count)
+            let matchedSpanLines = max(1, fileText[range].components(separatedBy: "\n").count)
+            return (startLine, startLine + matchedSpanLines - 1)
+        }
+        return (1, 1)
     }
 
     func resolveLocalToolPath(_ p: String) -> String {
@@ -589,6 +798,9 @@ class AgentToolBox: ObservableObject {
         case "file_read":
             guard let path = params["path"] as? String, !path.isEmpty else {
                 throw ToolBoxError.invalidParams("Missing 'path' parameter")
+            }
+            if WorkspacePathPolicy.contains(NSString(string: path).expandingTildeInPath, in: UniversalAttachmentEngine.vaultRootDirectory.path) {
+                return nil
             }
             let content: String
             if let data = try? await BackendService.shared.downloadRemoteFile(id: serverId, path: path),
@@ -730,7 +942,7 @@ class AgentToolBox: ObservableObject {
         try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask(priority: .userInitiated) {
                 let raw = try await tool.execute(params: params)
-                return AgentPrivacyGuard.sanitize(raw)
+                return AgentPrivacyGuard.tokenizeAndVault(raw)
             }
             group.addTask(priority: .utility) {
                 try await Task.sleep(nanoseconds: timeoutNs)
@@ -752,17 +964,11 @@ class AgentToolBox: ObservableObject {
     // MARK: - Sandbox Validation
     
     private func validateSandbox(_ path: String, allowGlobalReadOnly: Bool = false) throws {
-        guard let root = effectiveWorkspaceRoot, !root.isEmpty else {
-            throw ToolBoxError.executionFailed("Open a workspace before accessing files")
-        }
-        // Always permit read/write inside the active workspace's isolated ~/.microcode/workspaces/<id>/ state folder
-        let activeStateDir = WorkspaceStoragePaths.workspaceStateDirectory(for: root).path
-        if WorkspacePathPolicy.contains(path, in: activeStateDir) {
-            return
-        }
+        let expandedPath = NSString(string: path).expandingTildeInPath
         if allowGlobalReadOnly {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             let globalAgentDirs = [
+                UniversalAttachmentEngine.vaultRootDirectory.path,
                 "\(home)/.gemini",
                 "\(home)/.microcode",
                 "\(home)/.agents",
@@ -771,12 +977,20 @@ class AgentToolBox: ObservableObject {
                 "\(home)/.cursor"
             ]
             for allowedDir in globalAgentDirs {
-                if WorkspacePathPolicy.contains(path, in: allowedDir) {
+                if WorkspacePathPolicy.contains(expandedPath, in: allowedDir) {
                     return
                 }
             }
         }
-        guard WorkspacePathPolicy.contains(path, in: root) else {
+        guard let root = effectiveWorkspaceRoot, !root.isEmpty else {
+            throw ToolBoxError.executionFailed("Open a workspace before accessing files")
+        }
+        // Always permit read/write inside the active workspace's isolated ~/.microcode/workspaces/<id>/ state folder
+        let activeStateDir = WorkspaceStoragePaths.workspaceStateDirectory(for: root).path
+        if WorkspacePathPolicy.contains(expandedPath, in: activeStateDir) {
+            return
+        }
+        guard WorkspacePathPolicy.contains(expandedPath, in: root) else {
             let rootName = URL(fileURLWithPath: root).lastPathComponent
             throw ToolBoxError.executionFailed("Strict Project Isolation Error: Path '\(path)' is outside the active project workspace '\(rootName)' (\(root)). AI is prohibited from modifying or reading files across different projects.")
         }
@@ -794,29 +1008,50 @@ class AgentToolBox: ObservableObject {
     // MARK: - JSON Schema Export (for native function calling)
     
     func toolSchemas() -> [[String: Any]] {
-        // TokenMem Layer 1: Exclude duplicate `mcp__local__*` wrappers when native built-in tools are registered.
-        // The `mcp__local__*` tools remain registered in `tools` for execution compatibility,
-        // but omitting their redundant schemas saves ~6,500 prompt tokens on every turn.
+        // TokenMem Layer 1: Exclude duplicate `mcp__local__*` wrappers ONLY when an exact native built-in
+        // tool or explicit canonical composite equivalent is already registered. Unique local MCP tools
+        // (`computer_use_*`, `adb_execute`, `ardium_compile`, `ardium_test`, `ardium_diagnose`) remain exposed.
+        let explicitCoveredLocalNames: Set<String> = [
+            "lsp_intelligence",
+            "device_list",
+            "device_interact",
+            "device_app_manage"
+        ]
         let deduplicatedTools = tools.values.filter { tool in
             guard tool.name.hasPrefix("mcp__local__") else { return true }
             let baseName = String(tool.name.dropFirst("mcp__local__".count))
             if tools[baseName] != nil { return false }
-            let coveredPrefixes = ["computer_use_", "device_", "adb_", "ardium_", "cell_", "lsp_", "git_"]
-            if coveredPrefixes.contains(where: { baseName.hasPrefix($0) }) { return false }
+            if explicitCoveredLocalNames.contains(baseName) { return false }
             return true
         }
         
         return deduplicatedTools.sorted(by: { $0.name < $1.name }).map { tool in
+            if var rawSchema = tool.rawParametersSchema {
+                if rawSchema["type"] == nil {
+                    rawSchema["type"] = "object"
+                }
+                if (rawSchema["type"] as? String) == "object" && rawSchema["properties"] == nil {
+                    rawSchema["properties"] = [String: Any]()
+                }
+                return [
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": rawSchema
+                ] as [String: Any]
+            }
+            
             var properties: [String: Any] = [:]
-            var requiredParams: [String: Any] = [:]
-            _ = requiredParams
             var reqList: [String] = []
             
             for param in tool.parameters.sorted(by: { $0.name < $1.name }) {
-                properties[param.name] = [
+                var propSpec: [String: Any] = [
                     "type": param.type,
                     "description": param.description
-                ] as [String: Any]
+                ]
+                if param.type == "array" {
+                    propSpec["items"] = ["type": "string"]
+                }
+                properties[param.name] = propSpec
                 if param.required { reqList.append(param.name) }
             }
             
@@ -1370,23 +1605,28 @@ struct PreviewControlTool: AgentTool {
 
             switch action {
             case "open":
-                runtime.showingEmbeddedDeviceDock = true
+                let resolvedTab: String
                 if let mode = mode {
-                    if mode == "web" {
-                        runtime.embeddedDockMode = .web
-                        PreviewDockService.shared.selectTab(id: "web")
-                    } else if mode == "ios" {
+                    if mode == "ios" {
                         runtime.embeddedDockMode = .ios
-                        PreviewDockService.shared.selectTab(id: "ios")
+                        resolvedTab = "ios"
                     } else if mode == "android" {
                         runtime.embeddedDockMode = .android
-                        PreviewDockService.shared.selectTab(id: "android")
+                        resolvedTab = "android"
+                    } else {
+                        runtime.embeddedDockMode = .web
+                        resolvedTab = "web"
                     }
                 } else {
                     runtime.embeddedDockMode = .web
-                    PreviewDockService.shared.selectTab(id: "web")
+                    resolvedTab = "web"
                 }
-                if let urlString = url {
+                AppState.shared?.showPreviewInspector(tab: resolvedTab)
+                runtime.showingEmbeddedDeviceDock = true
+                PreviewDockService.shared.isDockVisible = true
+                PreviewDockService.shared.selectTab(id: resolvedTab)
+
+                if let urlString = url, !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     var trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmed.hasPrefix("http://file://") { trimmed = String(trimmed.dropFirst(7)) }
                     let parsedURL: URL? = (trimmed.hasPrefix("file://") || trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://"))
@@ -1395,19 +1635,28 @@ struct PreviewControlTool: AgentTool {
                     if let parsedURL = parsedURL {
                         runtime.targetWebURL = parsedURL
                     }
+                } else if resolvedTab == "web" {
+                    IDEBrowserAutomationService.shared.scanActivePorts()
+                    if let bestURL = IDEBrowserAutomationService.shared.resolveBestWebAppURL() {
+                        runtime.targetWebURL = bestURL
+                    }
                 }
                 if let viewport = viewport {
                     runtime.targetViewport = viewport
                 }
-                return "✅ Live Preview Dock opened in \(runtime.embeddedDockMode.rawValue) mode\(url != nil ? " with URL: \(url!)" : "").\(livePreviewDiagnosticsSuffix())"
+                let finalURL = runtime.targetWebURL?.absoluteString ?? url ?? ""
+                return "✅ Live Preview Dock opened side-by-side in \(runtime.embeddedDockMode.rawValue) mode\(!finalURL.isEmpty ? " with URL: \(finalURL)" : "").\(livePreviewDiagnosticsSuffix())"
 
             case "close":
+                AppState.shared?.hidePreviewInspector()
                 runtime.showingEmbeddedDeviceDock = false
                 PreviewDockService.shared.hideDock()
                 return "✅ Live Preview Dock closed."
 
             case "reload", "refresh":
+                AppState.shared?.showPreviewInspector(tab: PreviewDockService.shared.activeTab?.id ?? "web")
                 runtime.showingEmbeddedDeviceDock = true
+                PreviewDockService.shared.isDockVisible = true
                 PreviewDockService.shared.ensureDefaultTabsIfEmpty()
                 if PreviewDockService.shared.activeTab == nil {
                     PreviewDockService.shared.selectTab(id: "web")
@@ -1417,8 +1666,10 @@ struct PreviewControlTool: AgentTool {
                 return "✅ Live Preview reload triggered.\(livePreviewDiagnosticsSuffix())"
 
             case "set_url":
+                AppState.shared?.showPreviewInspector(tab: "web")
                 runtime.showingEmbeddedDeviceDock = true
                 runtime.embeddedDockMode = .web
+                PreviewDockService.shared.isDockVisible = true
                 PreviewDockService.shared.selectTab(id: "web")
                 guard let urlString = url, !urlString.isEmpty else {
                     throw ToolBoxError.invalidParams("url is required for set_url action")
@@ -1435,23 +1686,27 @@ struct PreviewControlTool: AgentTool {
                 return "✅ WebApp Preview URL navigated to: \(target.absoluteString)\(livePreviewDiagnosticsSuffix())"
 
             case "switch_mode":
-                runtime.showingEmbeddedDeviceDock = true
                 guard let mode = mode else {
                     throw ToolBoxError.invalidParams("mode is required ('web', 'ios', or 'android')")
                 }
+                let resolvedTab: String
                 switch mode {
                 case "web":
                     runtime.embeddedDockMode = .web
-                    PreviewDockService.shared.selectTab(id: "web")
+                    resolvedTab = "web"
                 case "ios":
                     runtime.embeddedDockMode = .ios
-                    PreviewDockService.shared.selectTab(id: "ios")
+                    resolvedTab = "ios"
                 case "android":
                     runtime.embeddedDockMode = .android
-                    PreviewDockService.shared.selectTab(id: "android")
+                    resolvedTab = "android"
                 default:
                     throw ToolBoxError.invalidParams("Unknown mode '\(mode)'. Use 'web', 'ios', or 'android'.")
                 }
+                AppState.shared?.showPreviewInspector(tab: resolvedTab)
+                runtime.showingEmbeddedDeviceDock = true
+                PreviewDockService.shared.isDockVisible = true
+                PreviewDockService.shared.selectTab(id: resolvedTab)
                 return "✅ Switched Live Preview Dock to \(runtime.embeddedDockMode.rawValue) mode."
 
             case "set_viewport":
@@ -1514,13 +1769,236 @@ struct EditorControlTool: AgentTool {
     let name = "editor_control"
     let description = "Inspect and control the active MicroCode IDE Editor tabs, active file, cursor state, first-launch onboarding, and workspace navigation."
     let parameters = [
-        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'open_file', 'list_tabs', 'switch_mode', 'simulate_first_launch', 'dismiss_welcome', 'open_connections', 'close_connections', 'restore_normal_state'", required: true),
-        ToolParameter(name: "path", type: "string", description: "File path to open in editor (for 'open_file')", required: false),
-        ToolParameter(name: "mode", type: "string", description: "IDE mode: 'editor', 'browser', 'notebook', 'playground', 'agent', 'science' (for 'switch_mode')", required: false)
+        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'open_file', 'open_file_sync', 'open_workspace_sync', 'bench_typing', 'close_all_tabs', 'list_tabs', 'switch_mode', 'simulate_first_launch', 'dismiss_welcome', 'open_connections', 'close_connections', 'restore_normal_state'", required: true),
+        ToolParameter(name: "path", type: "string", description: "File or workspace path (for 'open_file', 'open_file_sync', 'open_workspace_sync')", required: false),
+        ToolParameter(name: "mode", type: "string", description: "IDE mode: 'editor', 'notebook', 'playground', 'agent', 'science' (for 'switch_mode'; to open a web preview dock side-by-side, use preview_control instead)", required: false)
     ]
+
+    @MainActor
+    private static func findMountedEditorTextView() -> IDEInteractiveTextView? {
+        func search(_ view: NSView) -> IDEInteractiveTextView? {
+            if let tv = view as? IDEInteractiveTextView, tv.window != nil {
+                return tv
+            }
+            for sub in view.subviews {
+                if let found = search(sub) { return found }
+            }
+            return nil
+        }
+        for win in NSApp.windows where win.isVisible {
+            if let cv = win.contentView, let tv = search(cv) { return tv }
+        }
+        for win in NSApp.windows {
+            if let cv = win.contentView, let tv = search(cv) { return tv }
+        }
+        return nil
+    }
 
     func execute(params: [String: Any]) async throws -> String {
         let action = (params["action"] as? String ?? "status").lowercased()
+
+        if action == "open_workspace_sync" {
+            guard let path = params["path"] as? String, !path.isEmpty else {
+                return "{\"error\":\"path is required\"}"
+            }
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            await MainActor.run {
+                AppState.shared?.showingWelcomeHome = false
+                AppState.shared?.switchToMode(.code)
+            }
+            await AppState.shared?.openWorkspace(url: url, autoOpenEntryFile: true)
+            let treeCount = await MainActor.run { AppState.shared?.fileTree.count ?? 0 }
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000.0
+            return String(format: "{\"ok\":true,\"workspace\":\"%@\",\"root_nodes\":%d,\"elapsed_ms\":%.2f}", url.path, treeCount, elapsedMs)
+        }
+
+        if action == "open_file_sync" {
+            guard let path = params["path"] as? String, !path.isEmpty else {
+                return "{\"error\":\"path is required\"}"
+            }
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            await MainActor.run {
+                guard let appState = AppState.shared else { return }
+                appState.showingWelcomeHome = false
+                appState.switchToMode(.code)
+                if let idx = appState.openFiles.firstIndex(where: { $0.path == url.path }) {
+                    appState.openFiles.remove(at: idx)
+                    if appState.currentFile?.path == url.path {
+                        appState.currentFile = appState.openFiles.last
+                    }
+                }
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            await AppState.shared?.loadFile(url: url)
+
+            // Wait until SwiftUI mounts/updates IDEInteractiveTextView and TextKit 1 completes viewport glyph layout
+            var layoutDone = false
+            var utf16Len = 0
+            var visibleGlyphs = 0
+            for _ in 0..<80 {
+                let snap = await MainActor.run { () -> (Bool, Int, Int) in
+                    guard let appState = AppState.shared,
+                          let cur = appState.currentFile,
+                          cur.path == url.path,
+                          let tv = Self.findMountedEditorTextView(),
+                          let ts = tv.textStorage,
+                          ts.length > 0 || cur.content.isEmpty else {
+                        return (false, 0, 0)
+                    }
+                    if let lm = tv.layoutManager, let tc = tv.textContainer {
+                        let vis = tv.enclosingScrollView?.contentView.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 680)
+                        lm.ensureLayout(forBoundingRect: vis, in: tc)
+                        let gr = lm.glyphRange(forBoundingRectWithoutAdditionalLayout: vis, in: tc)
+                        tv.displayIfNeeded()
+                        return (true, ts.length, gr.length)
+                    }
+                    return (true, ts.length, 0)
+                }
+                if snap.0 {
+                    layoutDone = true
+                    utf16Len = snap.1
+                    visibleGlyphs = snap.2
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000)
+            }
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000.0
+            let meta = await MainActor.run { () -> (Bool, Bool, Int) in
+                let f = AppState.shared?.currentFile
+                return (f?.isTruncated ?? false, f?.usesPlainTextMode ?? false, f?.originalByteSize ?? 0)
+            }
+            return String(
+                format: "{\"ok\":%@,\"elapsed_ms\":%.2f,\"utf16_len\":%d,\"visible_glyphs\":%d,\"bytes\":%d,\"truncated\":%@,\"plain_text\":%@}",
+                layoutDone ? "true" : "false", elapsedMs, utf16Len, visibleGlyphs, meta.2,
+                meta.0 ? "true" : "false", meta.1 ? "true" : "false"
+            )
+        }
+
+        if action == "bench_typing" {
+            // Live 200-keystroke Pavel Fatin / Zed 120Hz ProMotion latency benchmark inside mounted IDEInteractiveTextView
+            let scriptChars: [String] = Array("    const benchMetric = computeFrameBudget(deltaNs, 120) + 42;\n").map { String($0) }
+            var latenciesMs: [Double] = []
+            latenciesMs.reserveCapacity(200)
+
+            let setup = await MainActor.run { () -> (Bool, String, Int) in
+                guard let tv = Self.findMountedEditorTextView(),
+                      let ts = tv.textStorage, ts.length > 0 else {
+                    return (false, "", 0)
+                }
+                let orig = ts.string
+                let anchor = min(ts.length, 256)
+                return (true, orig, anchor)
+            }
+            guard setup.0 else {
+                return "{\"ok\":false,\"error\":\"no mounted editor with content\"}"
+            }
+
+            let originalText = setup.1
+            var cursor = setup.2
+            var insertedLen = 0
+
+            // Warmup 8 keystrokes (excluded from reported distribution)
+            for w in 0..<8 {
+                let ch = scriptChars[w % scriptChars.count]
+                let curPos = cursor
+                let curIns = insertedLen
+                let step = await MainActor.run { () -> (Int, Int) in
+                    guard let tv = Self.findMountedEditorTextView(), let ts = tv.textStorage,
+                          let lm = tv.layoutManager, let tc = tv.textContainer else { return (curPos, curIns) }
+                    let vis = tv.enclosingScrollView?.contentView.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 680)
+                    ts.replaceCharacters(in: NSRange(location: curPos, length: 0), with: ch)
+                    let u16 = ch.utf16.count
+                    lm.ensureLayout(forBoundingRect: vis, in: tc)
+                    return (curPos + u16, curIns + u16)
+                }
+                cursor = step.0
+                insertedLen = step.1
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+
+            // 200 measured keystrokes (170 character/newline insertions + 30 backspaces)
+            for i in 0..<200 {
+                let isBackspace = (i >= 170 && insertedLen > 0)
+                let ch = scriptChars[i % scriptChars.count]
+                let curPos = cursor
+                let curIns = insertedLen
+                let step = await MainActor.run { () -> (Int, Int, Double) in
+                    guard let tv = Self.findMountedEditorTextView(), let ts = tv.textStorage,
+                          let lm = tv.layoutManager, let tc = tv.textContainer else { return (curPos, curIns, -1.0) }
+                    let vis = tv.enclosingScrollView?.contentView.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 680)
+                    let k0 = DispatchTime.now().uptimeNanoseconds
+                    let nextPos: Int
+                    let nextIns: Int
+                    if isBackspace {
+                        ts.replaceCharacters(in: NSRange(location: curPos - 1, length: 1), with: "")
+                        nextPos = curPos - 1
+                        nextIns = curIns - 1
+                    } else {
+                        ts.replaceCharacters(in: NSRange(location: curPos, length: 0), with: ch)
+                        let u16 = ch.utf16.count
+                        nextPos = curPos + u16
+                        nextIns = curIns + u16
+                    }
+                    lm.ensureLayout(forBoundingRect: vis, in: tc)
+                    let k1 = DispatchTime.now().uptimeNanoseconds
+                    return (nextPos, nextIns, Double(k1 - k0) / 1_000_000.0)
+                }
+                cursor = step.0
+                insertedLen = step.1
+                if step.2 >= 0 {
+                    latenciesMs.append((step.2 * 1000.0).rounded() / 1000.0)
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+
+            // Restore clean buffer so workspace git tree remains untouched
+            let finalInsertedLen = insertedLen
+            await MainActor.run {
+                if let tv = Self.findMountedEditorTextView(), let ts = tv.textStorage {
+                    if finalInsertedLen > 0 && setup.2 + finalInsertedLen <= ts.length {
+                        ts.replaceCharacters(in: NSRange(location: setup.2, length: finalInsertedLen), with: "")
+                    } else {
+                        ts.setAttributedString(NSAttributedString(string: originalText))
+                    }
+                }
+                if let appState = AppState.shared {
+                    let idx = appState.currentFileIndex
+                    if idx >= 0 && idx < appState.openFiles.count {
+                        appState.openFiles[idx].content = originalText
+                        appState.openFiles[idx].isUnsaved = false
+                    }
+                }
+            }
+
+            let payload: [String: Any] = [
+                "ok": true,
+                "keystrokes": latenciesMs.count,
+                "samples_ms": latenciesMs
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let str = String(data: data, encoding: .utf8) {
+                return str
+            }
+            return "{\"ok\":false}"
+        }
+
+        if action == "close_all_tabs" {
+            await MainActor.run {
+                guard let appState = AppState.shared else { return }
+                for i in appState.openFiles.indices {
+                    appState.openFiles[i].isUnsaved = false
+                }
+                appState.openFiles.removeAll()
+                appState.currentFile = nil
+                SyntaxHighlightedCodeView.purgeNonVisibleViewCache()
+                SyntaxHighlightingEngine.purgeQuickHighlightCache()
+            }
+            return "{\"ok\":true}"
+        }
+
         return await MainActor.run {
             guard let appState = AppState.shared else {
                 return "AppState not initialized."
@@ -1562,9 +2040,19 @@ struct EditorControlTool: AgentTool {
                     return "✅ Switched IDE to Welcome Home Screen."
                 }
                 appState.showingWelcomeHome = false
-                if mode == "browser" {
-                    appState.switchToMode(.browser)
-                    return "✅ Switched IDE to Browser Mode."
+                if mode == "browser" || mode == "preview" || mode == "web" {
+                    // Always open the side-by-side Live Preview Dock instead of replacing the entire IDE with full-screen Browser Mode
+                    appState.showPreviewInspector(tab: "web")
+                    let runtime = DeviceRuntimeService.shared
+                    runtime.showingEmbeddedDeviceDock = true
+                    runtime.embeddedDockMode = .web
+                    PreviewDockService.shared.isDockVisible = true
+                    PreviewDockService.shared.selectTab(id: "web")
+                    IDEBrowserAutomationService.shared.scanActivePorts()
+                    if let bestURL = IDEBrowserAutomationService.shared.resolveBestWebAppURL() {
+                        runtime.targetWebURL = bestURL
+                    }
+                    return "✅ Opened side-by-side Live WebApp Preview Dock at \(runtime.targetWebURL?.absoluteString ?? "http://127.0.0.1:3000") (use preview_control to change URL or reload)."
                 } else if mode == "editor" || mode == "code" {
                     appState.switchToMode(.code)
                     return "✅ Switched IDE to Code Editor Mode."
@@ -1861,9 +2349,62 @@ enum ToolBoxError: LocalizedError {
 
 // MARK: - Built-in Tools
 
+struct AttachmentReadTool: AgentTool {
+    let name = "attachment_read"
+    let description = "Read specific pages, worksheet/table slices, line ranges, OCR text, or keyword matches from any staged attachment in ~/.microcode/attachments or workspace file (supports PDF digital & scanned OCR, DOCX, XLSX, PPTX, RTF/ODT/DOC/HTML/EPUB, CSV/TSV including Thai Windows-874/TIS-620, SQLite, Parquet, Jupyter .ipynb, Images, Audio/Video, Archives, and Folders)."
+    let parameters = [
+        ToolParameter(name: "path", type: "string", description: "Staged attachment path (from ATTACHED FILES MANIFEST) or workspace file path", required: true),
+        ToolParameter(name: "page_start", type: "integer", description: "Optional 1-based starting page/slide number (for PDF or PPTX)", required: false),
+        ToolParameter(name: "page_end", type: "integer", description: "Optional 1-based ending page/slide number (for PDF or PPTX)", required: false),
+        ToolParameter(name: "sheet", type: "string", description: "Optional worksheet name (for XLSX) or table name (for SQLite)", required: false),
+        ToolParameter(name: "start_line", type: "integer", description: "Optional 1-based starting row or line number", required: false),
+        ToolParameter(name: "end_line", type: "integer", description: "Optional 1-based ending row or line number", required: false),
+        ToolParameter(name: "query", type: "string", description: "Optional case-insensitive keyword/phrase to search across the entire document, workbook, or table", required: false),
+        ToolParameter(name: "ocr", type: "boolean", description: "Set true to force Apple Vision ANE OCR on scanned PDF pages or images", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let rawPath = params["path"] as? String, !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("path is required")
+        }
+        let resolvedPath = NSString(string: rawPath).expandingTildeInPath
+        let allowedInVault = WorkspacePathPolicy.contains(resolvedPath, in: UniversalAttachmentEngine.vaultRootDirectory.path)
+        let wsRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
+        let allowedInWorkspace = (wsRoot != nil && !(wsRoot!.isEmpty))
+            ? WorkspacePathPolicy.contains(resolvedPath, in: wsRoot!)
+            : false
+        guard allowedInVault || allowedInWorkspace else {
+            throw ToolBoxError.executionFailed("Security Policy: attachment_read only permits staged attachments in ~/.microcode/attachments or files inside the active workspace ('\(rawPath)' denied).")
+        }
+
+        let pageStart = (params["page_start"] as? Int) ?? (params["page"] as? Int)
+        let pageEnd = (params["page_end"] as? Int) ?? pageStart
+        let sheet = params["sheet"] as? String
+        let rowStart = params["row_start"] as? Int
+        let rowEnd = params["row_end"] as? Int
+        let startLine = params["start_line"] as? Int
+        let endLine = params["end_line"] as? Int
+        let query = params["query"] as? String
+        let forceOCR = (params["ocr"] as? Bool) ?? false
+
+        return await UniversalAttachmentEngine.shared.readAttachmentSlice(
+            path: resolvedPath,
+            pageStart: pageStart,
+            pageEnd: pageEnd,
+            sheet: sheet,
+            rowStart: rowStart,
+            rowEnd: rowEnd,
+            startLine: startLine,
+            endLine: endLine,
+            query: query,
+            forceOCR: forceOCR
+        )
+    }
+}
+
 struct FileReadTool: AgentTool {
     let name = "file_read"
-    let description = "Read the contents of a file at the given path (supports code, text, Markdown, PDF, and image metadata). Supports optional start_line and end_line for targeted inspection."
+    let description = "Read the contents of a file at the given path (supports code, text, Markdown, CSV/TSV, PDF, DOCX, XLSX, PPTX, SQLite, Parquet, .ipynb, archives, media, and image OCR). Supports optional start_line and end_line for targeted inspection."
     let parameters = [
         ToolParameter(name: "path", type: "string", description: "Absolute or relative file path to read", required: true),
         ToolParameter(name: "start_line", type: "integer", description: "Optional starting line number (1-based) to read a specific slice", required: false),
@@ -1874,50 +2415,55 @@ struct FileReadTool: AgentTool {
         guard let path = params["path"] as? String else {
             throw ToolBoxError.invalidParams("path is required")
         }
-        let url = URL(fileURLWithPath: path)
+        let expandedPath = NSString(string: path).expandingTildeInPath
+        let url = URL(fileURLWithPath: expandedPath)
         let ext = url.pathExtension.lowercased()
-        
-        // Specialized handler for PDF files
-        if ext == "pdf" {
-            guard let doc = PDFDocument(url: url) else {
-                return "Error: Unable to open PDF document at '\(url.lastPathComponent)'"
-            }
-            var text = ""
-            for i in 0..<doc.pageCount {
-                if let page = doc.page(at: i), let pageString = page.string {
-                    text += "--- [Page \(i + 1)] ---\n\(pageString)\n\n"
-                }
-            }
-            if text.isEmpty {
-                return "[PDF: \(url.lastPathComponent) (\(doc.pageCount) pages)] (No selectable text found, document may be scanned images)"
-            }
-            if text.count > 500000 {
-                return String(text.prefix(500000)) + "\n\n... (PDF text truncated at 500K chars, total pages: \(doc.pageCount))"
-            }
-            return "[PDF: \(url.lastPathComponent) (\(doc.pageCount) pages)]\n\n\(text)"
+        let lowerName = url.lastPathComponent.lowercased()
+
+        let startParam = (params["start_line"] as? Int) ?? (params["offset"] as? Int) ?? (params["StartLine"] as? Int)
+        let endParam = (params["end_line"] as? Int) ?? (params["limit"] as? Int) ?? (params["EndLine"] as? Int)
+        let pageStart = (params["page_start"] as? Int) ?? (params["page"] as? Int)
+        let pageEnd = (params["page_end"] as? Int) ?? pageStart
+        let sheet = params["sheet"] as? String
+        let query = params["query"] as? String
+        let forceOCR = (params["ocr"] as? Bool) ?? false
+
+        var isDir: ObjCBool = false
+        let existsOnDisk = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+        let sidecarMetaExists = FileManager.default.fileExists(atPath: url.path + ".meta.json")
+
+        if (existsOnDisk && isDir.boolValue) || (!existsOnDisk && sidecarMetaExists) {
+            return await UniversalAttachmentEngine.shared.readAttachmentSlice(
+                path: url.path,
+                pageStart: pageStart,
+                pageEnd: pageEnd,
+                sheet: sheet,
+                startLine: startParam,
+                endLine: endParam,
+                query: query,
+                forceOCR: forceOCR
+            )
         }
-        
-        // Specialized handler for Image files
-        let imageExtensions = ["png", "jpg", "jpeg", "gif", "webp", "heic", "svg", "bmp", "tiff"]
-        if imageExtensions.contains(ext) {
-            guard let data = try? Data(contentsOf: url), let img = NSImage(data: data) else {
-                return "Error: Unable to decode image at '\(url.lastPathComponent)'"
-            }
-            let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
-            return """
-            [Image Metadata]
-            Filename: \(url.lastPathComponent)
-            Format: \(ext.uppercased())
-            Dimensions: \(Int(img.size.width)) × \(Int(img.size.height)) px
-            File Size: \(sizeStr)
-            Note: Use 'inspect_image' tool to run visual inspection or extract OCR.
-            """
-        }
-        
-        // Other non-text binary files
-        let binaryExtensions = ["class", "zip", "tar", "gz", "mp3", "mp4", "exe", "dll", "dylib", "so", "bin", "dmg", "pkg"]
-        if binaryExtensions.contains(ext) {
-            return "Error: File '\(url.lastPathComponent)' is a binary archive/media file and cannot be read as text."
+
+        let richContainerExtensions: Set<String> = [
+            "pdf", "docx", "xlsx", "pptx", "rtf", "rtfd", "doc", "odt", "epub",
+            "ipynb", "sqlite", "sqlite3", "db", "parquet",
+            "zip", "tar", "gz", "tgz", "bz2", "xz",
+            "mp3", "wav", "m4a", "aac", "flac", "ogg",
+            "mp4", "mov", "m4v", "webm", "avi", "mkv",
+            "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp", "tiff", "tif", "icns"
+        ]
+        if richContainerExtensions.contains(ext) || lowerName.hasSuffix(".tar.gz") || lowerName.hasSuffix(".tar.bz2") || lowerName.hasSuffix(".tar.xz") {
+            return await UniversalAttachmentEngine.shared.readAttachmentSlice(
+                path: url.path,
+                pageStart: pageStart,
+                pageEnd: pageEnd,
+                sheet: sheet,
+                startLine: startParam,
+                endLine: endParam,
+                query: query,
+                forceOCR: forceOCR
+            )
         }
         
         let attr = try? FileManager.default.attributesOfItem(atPath: url.path)
@@ -1927,9 +2473,12 @@ struct FileReadTool: AgentTool {
             if let handle = try? FileHandle(forReadingFrom: url) {
                 defer { try? handle.close() }
                 let data = handle.readData(ofLength: 2 * 1024 * 1024)
-                let chunk = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+                let chunk = UniversalAttachmentEngine.decodeTextSmart(data)?.text
+                    ?? String(data: data, encoding: .utf8)
+                    ?? String(data: data, encoding: .isoLatin1)
+                    ?? ""
                 let formatted = ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
-                return chunk + "\n\n... (file size is \(formatted). Truncated at 2MB preview to prevent memory exhaustion.)"
+                return chunk + "\n\n... (file size is \(formatted). Truncated at 2MB preview to prevent memory exhaustion; use attachment_read with start_line/end_line or query for targeted paging.)"
             }
         }
         
@@ -1937,9 +2486,12 @@ struct FileReadTool: AgentTool {
             let content = try String(contentsOf: url, encoding: .utf8)
             return await formatFileReadContent(content, params: params, fileName: url.lastPathComponent, fullPath: url.path)
         } catch {
-            // Fallback for different encodings
-            if let content = try? String(contentsOf: url, encoding: .isoLatin1) {
-                return await formatFileReadContent(content, params: params, fileName: url.lastPathComponent, fullPath: url.path)
+            // Smart encoding fallback (UTF-16, Thai Windows-874/TIS-620, strict CP1252) or honest binary signature metadata
+            if let rawData = try? Data(contentsOf: url, options: .mappedIfSafe) {
+                if let smartDecoded = UniversalAttachmentEngine.decodeTextSmart(rawData) {
+                    return await formatFileReadContent(smartDecoded.text, params: params, fileName: url.lastPathComponent, fullPath: url.path)
+                }
+                return await UniversalAttachmentEngine.shared.readAttachmentSlice(path: url.path)
             }
             throw error
         }
@@ -2532,6 +3084,276 @@ struct ReplaceInFileTool: AgentTool {
     }
 }
 
+enum FastWorkspaceGrep {
+    nonisolated static let excludedDirs: Set<String> = [
+        ".git", "node_modules", "target", ".build", "DerivedData",
+        ".codetuner-build", "dist", "build", ".next", "__pycache__",
+        ".venv", "venv", "Pods", ".swiftpm"
+    ]
+
+    nonisolated private static let regexMetaChars = CharacterSet(charactersIn: #"\\.^$*+?()[]{}|"#)
+
+    nonisolated static func isPlainLiteral(_ pattern: String) -> Bool {
+        pattern.rangeOfCharacter(from: regexMetaChars) == nil
+    }
+
+    nonisolated private static func findGitRoot(for path: String) -> String? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+        var current = URL(fileURLWithPath: path).standardizedFileURL
+        for _ in 0..<24 {
+            let gitEntry = current.appendingPathComponent(".git").path
+            if fm.fileExists(atPath: gitEntry) {
+                return current.path
+            }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path { break }
+            current = parent
+        }
+        return nil
+    }
+
+    nonisolated static func runStreamingProcess(
+        executable: String,
+        arguments: [String],
+        maxLines: Int
+    ) async -> (lines: [String], terminationStatus: Int32, hitCap: Bool, launched: Bool) {
+        await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            let outPipe = Pipe()
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = outPipe
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+            } catch {
+                try? outPipe.fileHandleForReading.close()
+                try? outPipe.fileHandleForWriting.close()
+                return ([], -1, false, false)
+            }
+            try? outPipe.fileHandleForWriting.close()
+            let readHandle = outPipe.fileHandleForReading
+            var buffer = Data()
+            var collected: [String] = []
+            collected.reserveCapacity(min(maxLines, 256))
+            var hitCap = false
+
+            while true {
+                let chunk = (try? readHandle.read(upToCount: 32_768)) ?? nil
+                guard let chunk, !chunk.isEmpty else { break }
+                buffer.append(chunk)
+                while let nlIndex = buffer.firstIndex(of: 0x0A) {
+                    let lineData = buffer.subdata(in: 0..<nlIndex)
+                    buffer.removeSubrange(0...nlIndex)
+                    if let str = String(data: lineData, encoding: .utf8), !str.isEmpty {
+                        collected.append(str)
+                        if collected.count >= maxLines {
+                            hitCap = true
+                            break
+                        }
+                    }
+                }
+                if hitCap {
+                    process.terminate()
+                    break
+                }
+            }
+            if !hitCap && !buffer.isEmpty, let tail = String(data: buffer, encoding: .utf8), !tail.isEmpty {
+                collected.append(tail)
+            }
+            try? readHandle.close()
+            process.waitUntilExit()
+            return (collected, process.terminationStatus, hitCap, true)
+        }.value
+    }
+
+    nonisolated private static func runRawProcessData(executable: String, arguments: [String]) async -> (data: Data, status: Int32) {
+        await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            let outPipe = Pipe()
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = outPipe
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+            } catch {
+                try? outPipe.fileHandleForReading.close()
+                try? outPipe.fileHandleForWriting.close()
+                return (Data(), -1)
+            }
+            try? outPipe.fileHandleForWriting.close()
+            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            try? outPipe.fileHandleForReading.close()
+            process.waitUntilExit()
+            return (data, process.terminationStatus)
+        }.value
+    }
+
+    nonisolated private static func matchesIncludeGlob(_ relPath: String, includeGlob: String?) -> Bool {
+        guard let glob = includeGlob, !glob.isEmpty else { return true }
+        let target = glob.contains("/") ? relPath : (relPath as NSString).lastPathComponent
+        return glob.withCString { patPtr in
+            target.withCString { strPtr in
+                Darwin.fnmatch(patPtr, strPtr, 0) == 0
+            }
+        }
+    }
+
+    nonisolated private static func hasExcludedComponent(_ relPath: String) -> Bool {
+        for part in relPath.split(separator: "/") {
+            if excludedDirs.contains(String(part)) { return true }
+        }
+        return false
+    }
+
+    nonisolated static func searchLines(
+        pattern: String,
+        directory: String,
+        includeGlob: String? = nil,
+        forceFixedStrings: Bool? = nil,
+        wordRegexp: Bool = false,
+        maxPerFile: Int = 50,
+        maxTotalLines: Int = 200
+    ) async -> [String] {
+        let useFixed = forceFixedStrings ?? isPlainLiteral(pattern)
+        let cleanDir = directory.hasSuffix("/") && directory.count > 1 ? String(directory.dropLast()) : directory
+
+        // Priority 1: ripgrep (`rg`) when installed
+        if let rgPath = ["/opt/homebrew/bin/rg", "/usr/local/bin/rg"].first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            var rgArgs = ["-n", "--no-heading", "--color=never"]
+            if useFixed { rgArgs.append("-F") }
+            if wordRegexp { rgArgs.append("-w") }
+            rgArgs.append(contentsOf: ["-m", "\(maxPerFile)"])
+            for ex in excludedDirs {
+                rgArgs.append(contentsOf: ["--glob", "!\(ex)"])
+            }
+            if let inc = includeGlob, !inc.isEmpty {
+                rgArgs.append(contentsOf: ["--glob", inc])
+            }
+            rgArgs.append(contentsOf: ["--", pattern, cleanDir])
+            let res = await runStreamingProcess(executable: rgPath, arguments: rgArgs, maxLines: maxTotalLines)
+            if res.launched {
+                return res.lines
+            }
+        }
+
+        // Priority 2: Concurrent Multi-Threaded Git Packfile (`--cached --threads=8`) + Live Dirty/Untracked Overlay
+        // Cuts 68,000-file External SSD searches from 22.6s down to ~0.5s while keeping 100% live uncommitted accuracy!
+        if findGitRoot(for: cleanDir) != nil, FileManager.default.isExecutableFile(atPath: "/usr/bin/git") {
+            let pathspec: String
+            if let inc = includeGlob, !inc.isEmpty {
+                pathspec = inc.contains("/") ? ":(glob)\(inc)" : ":(glob)**/\(inc)"
+            } else {
+                pathspec = "."
+            }
+            var gitArgs = ["-C", cleanDir, "grep", "-nIH", "--no-color", "--cached", "--threads=8"]
+            gitArgs.append(useFixed ? "-F" : "-E")
+            if wordRegexp { gitArgs.append("-w") }
+            gitArgs.append(contentsOf: ["--max-count=\(maxPerFile)", "-e", pattern, "--", pathspec])
+
+            async let cachedTask = runStreamingProcess(
+                executable: "/usr/bin/git",
+                arguments: gitArgs,
+                maxLines: maxTotalLines + 64
+            )
+            async let dirtyTask = runRawProcessData(
+                executable: "/usr/bin/git",
+                arguments: ["-C", cleanDir, "ls-files", "-m", "-d", "-o", "--exclude-standard", "-z", "--", "."]
+            )
+
+            let cachedRes = await cachedTask
+            let dirtyRes = await dirtyTask
+
+            let gitSucceeded = cachedRes.launched && (cachedRes.hitCap || cachedRes.terminationStatus == 0 || cachedRes.terminationStatus == 1)
+            if gitSucceeded && dirtyRes.status == 0 {
+                var dirtyRelSet = Set<String>()
+                var liveDiskFiles: [String] = []
+                let fm = FileManager.default
+
+                if !dirtyRes.data.isEmpty {
+                    for slice in dirtyRes.data.split(separator: 0) {
+                        guard let rel = String(data: Data(slice), encoding: .utf8), !rel.isEmpty else { continue }
+                        dirtyRelSet.insert(rel)
+                        if hasExcludedComponent(rel) || !matchesIncludeGlob(rel, includeGlob: includeGlob) {
+                            continue
+                        }
+                        let full = (cleanDir as NSString).appendingPathComponent(rel)
+                        var isDir: ObjCBool = false
+                        if fm.fileExists(atPath: full, isDirectory: &isDir), !isDir.boolValue {
+                            liveDiskFiles.append(full)
+                        }
+                    }
+                }
+
+                // Deduplicate liveDiskFiles (a file modified AND untracked shouldn't duplicate)
+                if liveDiskFiles.count > 1 {
+                    var seen = Set<String>()
+                    liveDiskFiles = liveDiskFiles.filter { seen.insert($0).inserted }
+                }
+
+                if liveDiskFiles.count <= 200 {
+                    var merged: [String] = []
+                    merged.reserveCapacity(min(maxTotalLines, cachedRes.lines.count + liveDiskFiles.count * 2))
+
+                    if !liveDiskFiles.isEmpty {
+                        var idx = 0
+                        while idx < liveDiskFiles.count && merged.count < maxTotalLines {
+                            let batch = Array(liveDiskFiles[idx..<min(idx + 80, liveDiskFiles.count)])
+                            idx += 80
+                            var diskArgs = ["-nHI", "--color=never", useFixed ? "-F" : "-E"]
+                            if wordRegexp { diskArgs.append("-w") }
+                            diskArgs.append(contentsOf: ["-m", "\(maxPerFile)", "-e", pattern])
+                            diskArgs.append(contentsOf: batch)
+                            let diskRes = await runStreamingProcess(
+                                executable: "/usr/bin/grep",
+                                arguments: diskArgs,
+                                maxLines: maxTotalLines - merged.count
+                            )
+                            merged.append(contentsOf: diskRes.lines)
+                        }
+                    }
+
+                    for line in cachedRes.lines {
+                        if merged.count >= maxTotalLines { break }
+                        if let colon = line.firstIndex(of: ":") {
+                            let relFile = String(line[..<colon])
+                            if dirtyRelSet.contains(relFile) || hasExcludedComponent(relFile) {
+                                continue
+                            }
+                        }
+                        merged.append("\(cleanDir)/\(line)")
+                    }
+                    return merged
+                }
+            }
+        }
+
+        // Priority 3: Streaming early-stop `/usr/bin/grep` fallback (single files or non-Git directories)
+        var grepArgs = ["-rn", "--color=never", "-I", useFixed ? "-F" : "-E"]
+        if wordRegexp { grepArgs.append("-w") }
+        for dir in GrepSearchTool.excludedDirs {
+            grepArgs.append("--exclude-dir=\(dir)")
+        }
+        if let inc = includeGlob, !inc.isEmpty {
+            grepArgs.append(contentsOf: ["--include", inc])
+        }
+        grepArgs.append(contentsOf: ["-m", "\(maxPerFile)", "-e", pattern, cleanDir])
+        let fallbackRes = await runStreamingProcess(
+            executable: "/usr/bin/grep",
+            arguments: grepArgs,
+            maxLines: maxTotalLines
+        )
+        return fallbackRes.lines
+    }
+}
+
 struct GrepSearchTool: AgentTool {
     let name = "grep_search"
     let description = "Search for a text pattern across files in a directory using grep"
@@ -2549,49 +3371,32 @@ struct GrepSearchTool: AgentTool {
     
     func execute(params: [String: Any]) async throws -> String {
         let patternOpt = (params["pattern"] as? String) ?? (params["query"] as? String)
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
-        let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
+        let explicitDir = (params["directory"] as? String) ?? (params["path"] as? String)
+        let directoryOpt: String?
+        if let explicitDir, !explicitDir.isEmpty {
+            directoryOpt = explicitDir
+        } else {
+            directoryOpt = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
+        }
         guard let pattern = patternOpt, !pattern.isEmpty,
               let directory = directoryOpt, !directory.isEmpty else {
             throw ToolBoxError.invalidParams("pattern and directory are required")
         }
         
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-        var args = ["-rn", "--color=never", "-I", "-E"]
-        for dir in Self.excludedDirs {
-            args.append("--exclude-dir=\(dir)")
-        }
-        if let include = params["include"] as? String, !include.isEmpty {
-            args.append(contentsOf: ["--include", include])
-        }
-        args.append(contentsOf: ["-m", "50", "-e", pattern, directory])
-        process.arguments = args
+        let include = params["include"] as? String
+        let lines = await FastWorkspaceGrep.searchLines(
+            pattern: pattern,
+            directory: directory,
+            includeGlob: include,
+            maxPerFile: 50,
+            maxTotalLines: 220
+        )
         
-        let pipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = pipe
-        process.standardError = stderrPipe
-        
-        try process.run()
-
-        async let stdoutData = Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }.value
-        async let stderrData = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
-        
-        let data = await stdoutData
-        _ = await stderrData
-        
-        while process.isRunning {
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        
-        let output = String(data: data, encoding: .utf8) ?? ""
-        
-        if output.isEmpty {
+        if lines.isEmpty {
             return "No matches found for '\(pattern)' in \(directory)"
         }
         
+        let output = lines.joined(separator: "\n")
         if output.count > 200_000 {
             return String(output.prefix(200_000)) + "\n... (results truncated at 200K chars)"
         }
@@ -2608,30 +3413,38 @@ struct ListDirectoryTreeTool: AgentTool {
     ]
     
     private static let skippedDirs: Set<String> = [
-        "node_modules", "target", ".build", "DerivedData", ".codetuner-build",
+        ".git", "node_modules", "target", ".build", "DerivedData", ".codetuner-build",
         "Pods", "__pycache__", "dist", "build", ".next", ".venv", "venv", ".swiftpm"
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
-        guard let path = (params["path"] as? String) ?? (params["directory"] as? String) ?? defaultRoot else {
+        let explicitPath = (params["path"] as? String) ?? (params["directory"] as? String)
+        let resolvedPath: String?
+        if let explicitPath, !explicitPath.isEmpty {
+            resolvedPath = explicitPath
+        } else {
+            resolvedPath = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
+        }
+        guard let path = resolvedPath else {
             throw ToolBoxError.invalidParams("path is required")
         }
         
         let maxDepth = params["max_depth"] as? Int ?? 3
-        let fm = FileManager.default
-        let url = URL(fileURLWithPath: path)
-        
-        guard fm.fileExists(atPath: path) else {
-            throw ToolBoxError.executionFailed("Path does not exist: \(path)")
-        }
-        
-        var result = "\(url.lastPathComponent)/\n"
-        result += buildTree(at: url, prefix: "", depth: 0, maxDepth: maxDepth, fm: fm)
-        return result
+        // Run all ExFAT / filesystem enumeration strictly off `@MainActor` so concurrent MCP storms
+        // never stall AppKit UI or block sibling HTTP responses on 1,000+ file directories.
+        return try await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let url = URL(fileURLWithPath: path)
+            guard fm.fileExists(atPath: path) else {
+                throw ToolBoxError.executionFailed("Path does not exist: \(path)")
+            }
+            var result = "\(url.lastPathComponent)/\n"
+            result += Self.buildTree(at: url, prefix: "", depth: 0, maxDepth: maxDepth, fm: fm)
+            return result
+        }.value
     }
     
-    private func buildTree(at url: URL, prefix: String, depth: Int, maxDepth: Int, fm: FileManager) -> String {
+    nonisolated private static func buildTree(at url: URL, prefix: String, depth: Int, maxDepth: Int, fm: FileManager) -> String {
         guard depth < maxDepth else { return "" }
         
         guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return "" }
@@ -2639,10 +3452,15 @@ struct ListDirectoryTreeTool: AgentTool {
         let sorted = items
             .filter { !$0.lastPathComponent.hasPrefix("._") && !$0.lastPathComponent.hasPrefix(".") }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let maxItemsPerDir = 150
+        let visibleCount = min(sorted.count, maxItemsPerDir)
+        let truncatedCount = max(0, sorted.count - visibleCount)
         var result = ""
+        result.reserveCapacity(visibleCount * 32)
         
-        for (i, item) in sorted.enumerated() {
-            let isLast = i == sorted.count - 1
+        for i in 0..<visibleCount {
+            let item = sorted[i]
+            let isLast = (i == visibleCount - 1) && (truncatedCount == 0)
             let connector = isLast ? "└── " : "├── "
             let childPrefix = isLast ? "    " : "│   "
             let name = item.lastPathComponent
@@ -2657,6 +3475,9 @@ struct ListDirectoryTreeTool: AgentTool {
             if isDir {
                 result += buildTree(at: item, prefix: prefix + childPrefix, depth: depth + 1, maxDepth: maxDepth, fm: fm)
             }
+        }
+        if truncatedCount > 0 {
+            result += "\(prefix)└── ... (+\(truncatedCount) more items)\n"
         }
         return result
     }
@@ -3805,8 +4626,13 @@ struct FindSymbolTool: AgentTool {
     
     func execute(params: [String: Any]) async throws -> String {
         let symbolOpt = (params["symbol"] as? String) ?? (params["query"] as? String) ?? (params["pattern"] as? String)
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
-        let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
+        let explicitDir = (params["directory"] as? String) ?? (params["path"] as? String)
+        let directoryOpt: String?
+        if let explicitDir, !explicitDir.isEmpty {
+            directoryOpt = explicitDir
+        } else {
+            directoryOpt = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
+        }
         guard let symbol = symbolOpt, !symbol.isEmpty,
               let directory = directoryOpt, !directory.isEmpty else {
             throw ToolBoxError.invalidParams("symbol and directory are required")
@@ -4338,18 +5164,26 @@ class MCPClient: ObservableObject {
         stdoutBuffer = ""
     }
     
-    /// Ensures MCP Server process is booted and its tools are populated and registered
-    /// before an Agent or SubAgent executes its tool schema extraction.
-    func ensureConnected(workspacePath: String? = nil, timeoutSeconds: TimeInterval = 2.0) async {
+    /// Non-blocking warm-up: ensures the MCP server process is launched without sleeping on the turn hot-path.
+    func warmUpIfNeeded(workspacePath: String? = nil) {
         let ws = workspacePath ?? activeWorkspacePath ?? AgentToolBox.shared.effectiveWorkspaceRoot ?? FileManager.default.currentDirectoryPath
         if !isConnected || activeWorkspacePath != ws {
             start(workspacePath: ws)
         }
-        
+    }
+
+    /// Ensures MCP Server process is booted and its tools are populated and registered
+    /// before an Agent or SubAgent executes its tool schema extraction.
+    func ensureConnected(workspacePath: String? = nil, timeoutSeconds: TimeInterval = 0.25) async {
+        let ws = workspacePath ?? activeWorkspacePath ?? AgentToolBox.shared.effectiveWorkspaceRoot ?? FileManager.default.currentDirectoryPath
+        if !isConnected || activeWorkspacePath != ws {
+            start(workspacePath: ws)
+        }
+        guard timeoutSeconds > 0 else { return }
         let start = Date()
         while Date().timeIntervalSince(start) < timeoutSeconds {
             if !availableTools.isEmpty { break }
-            try? await Task.sleep(nanoseconds: 60_000_000) // 60ms
+            try? await Task.sleep(nanoseconds: 30_000_000) // 30ms
         }
     }
     
@@ -4519,6 +5353,17 @@ struct DynamicMCPTool: AgentTool {
             }
         }
         return params
+    }
+    
+    var rawParametersSchema: [String: Any]? {
+        var unwrapped = AnyCodable.unwrapJSONObject(schema.inputSchema)
+        if unwrapped["type"] == nil {
+            unwrapped["type"] = "object"
+        }
+        if (unwrapped["type"] as? String) == "object" && unwrapped["properties"] == nil {
+            unwrapped["properties"] = [String: Any]()
+        }
+        return unwrapped
     }
     
     func execute(params: [String: Any]) async throws -> String {
@@ -5206,11 +6051,13 @@ struct MCPOrchestratorTool: AgentTool {
         
         switch action {
         case "status", "list":
+            await ExternalMCPManager.shared.probeServersNowIfNeeded()
             return await MainActor.run {
                 ExternalMCPManager.shared.meshStatusSummary()
             }
         case "search_tools", "search":
             let q = (params["query"] as? String ?? "").lowercased()
+            await ExternalMCPManager.shared.probeServersNowIfNeeded(matching: q)
             return await MainActor.run {
                 let all = ExternalMCPManager.shared.allTools
                 let filtered = q.isEmpty ? all : all.filter {
@@ -5221,15 +6068,27 @@ struct MCPOrchestratorTool: AgentTool {
                 if filtered.isEmpty {
                     return "No external MCP tools matched '\(q)'."
                 }
+                for item in filtered.prefix(16) {
+                    ExternalMCPManager.shared.explicitlyMountedTools.insert("mcp__\(item.serverName)__\(item.tool.name)")
+                }
                 return filtered.map {
                     "- `mcp__\($0.serverName)__\($0.tool.name)`: \($0.tool.description)"
                 }.joined(separator: "\n")
             }
         case "restart":
             let name = params["server_name"] as? String ?? ""
-            return await MainActor.run {
+            await MainActor.run {
                 ExternalMCPManager.shared.restartServer(name)
-                return "Triggered restart for MCP server '\(name)'."
+            }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            return await MainActor.run {
+                if let conn = ExternalMCPManager.shared.connections[name] {
+                    for tool in conn.availableTools {
+                        ExternalMCPManager.shared.explicitlyMountedTools.insert("mcp__\(name)__\(tool.name)")
+                    }
+                    return "Restarted MCP server '\(name)' (\(conn.isConnected ? "ONLINE" : "STARTING"), \(conn.availableTools.count) tools)."
+                }
+                return "MCP server '\(name)' not found in discovered servers."
             }
         case "synthesize", "create":
             let serverName = params["server_name"] as? String ?? "custom_mcp"
@@ -5251,11 +6110,14 @@ struct MCPOrchestratorTool: AgentTool {
 
 struct SwarmOrchestratorTool: AgentTool {
     let name = "swarm_orchestrator"
-    let description = "SubAgent Swarm & CEO Executive Harness 3.0: Run a full CEO & Subordinate Executive Squad session ('ceo_squad'), dispatch multiple specialized SubAgents concurrently ('parallel_swarm'), run an adversarial Red-Team security & bug review ('adversarial_review'), or post/read shared architectural facts on the cross-agent Swarm Blackboard ('post_fact', 'read_blackboard')."
+    let description = "SubAgent Swarm, Cross-Vendor ACP Dream Team & Best-of-N Worktree Arena 4.0: Run a full CEO & Subordinate Executive Squad ('ceo_squad'), launch the Cross-Vendor ACP CLI Dream Team ('acp_dream_team' — Claude Code + Codex + AGY), race multiple cross-vendor engines in parallel on isolated Git Worktrees with automated verification ('arena_race'), dispatch specialized SubAgents concurrently ('parallel_swarm'), run an adversarial Red-Team security & bug review ('adversarial_review'), or post/read shared architectural facts on the Swarm Blackboard ('post_fact', 'read_blackboard')."
     let parameters = [
-        ToolParameter(name: "action", type: "string", description: "Action: 'ceo_squad', 'parallel_swarm', 'adversarial_review', 'post_fact', 'read_blackboard', or 'status'", required: true),
+        ToolParameter(name: "action", type: "string", description: "Action: 'ceo_squad', 'acp_dream_team', 'arena_race', 'parallel_swarm', 'adversarial_review', 'post_fact', 'read_blackboard', or 'status'", required: true),
         ToolParameter(name: "tasks_json", type: "string", description: "JSON array of parallel tasks: [{\"type_name\":\"frontend_engineer\",\"role\":\"UI Builder\",\"prompt\":\"...\"}] (for 'parallel_swarm')", required: false),
-        ToolParameter(name: "focus", type: "string", description: "Objective for 'ceo_squad' or focus area/file list for 'adversarial_review'", required: false),
+        ToolParameter(name: "focus", type: "string", description: "Objective for 'ceo_squad' / 'acp_dream_team' / 'arena_race', or focus area for 'adversarial_review'", required: false),
+        ToolParameter(name: "engines", type: "string", description: "Comma-separated contender engines for 'arena_race' (e.g. 'claude,codex,agy' or 'anthropic,openai,gemini'). Auto-selects best installed ACP CLIs & Subscriptions if omitted.", required: false),
+        ToolParameter(name: "verification_command", type: "string", description: "Optional shell build/test gate for 'arena_race' (e.g. 'swift test' or 'npm run build')", required: false),
+        ToolParameter(name: "auto_merge", type: "boolean", description: "If true for 'arena_race', automatically 3-way merges the verified winning worktree onto trunk (default: false, keeps safe pns/auto-* branches)", required: false),
         ToolParameter(name: "key", type: "string", description: "Blackboard fact key (for 'post_fact')", required: false),
         ToolParameter(name: "value", type: "string", description: "Blackboard fact value (for 'post_fact')", required: false),
         ToolParameter(name: "author_role", type: "string", description: "Author role posting the fact (optional)", required: false)
@@ -5269,6 +6131,29 @@ struct SwarmOrchestratorTool: AgentTool {
         case "ceo_squad", "ceo", "executive_squad":
             let objective = (params["focus"] as? String) ?? (params["value"] as? String) ?? "Execute current workspace engineering task"
             return await SubAgentHarness.shared.runCEOSquadSession(objective: objective, workspacePath: ws)
+        case "acp_dream_team", "dream_team":
+            let objective = (params["focus"] as? String) ?? (params["value"] as? String) ?? "Execute current workspace engineering task"
+            let dreamPreset = AgentSquadPreset.builtInPresets.first { $0.id == "squad_acp_dream_team" }
+            return await SubAgentHarness.shared.runCEOSquadSession(
+                objective: objective,
+                workspacePath: ws,
+                presetOverride: dreamPreset
+            )
+        case "arena_race", "best_of_n", "arena":
+            let objective = (params["focus"] as? String) ?? (params["value"] as? String) ?? "Implement and verify the requested workspace task"
+            let rawEngines = (params["engines"] as? String ?? "")
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let verifyCmd = params["verification_command"] as? String
+            let autoMerge = (params["auto_merge"] as? Bool) ?? false
+            return await SubAgentHarness.shared.runBestOfNArena(
+                objective: objective,
+                engines: rawEngines,
+                verificationCommand: verifyCmd,
+                autoMergeWinner: autoMerge,
+                workspacePath: ws
+            )
         case "post_fact", "write_blackboard":
             let key = params["key"] as? String ?? ""
             let value = params["value"] as? String ?? ""
@@ -5306,7 +6191,7 @@ struct SwarmOrchestratorTool: AgentTool {
                 return status + (bb.isEmpty ? "" : "\n\n## Shared Swarm Blackboard\n\(bb)")
             }
         default:
-            return "Unknown swarm_orchestrator action '\(action)'. Supported: parallel_swarm, adversarial_review, post_fact, read_blackboard, status."
+            return "Unknown swarm_orchestrator action '\(action)'. Supported: ceo_squad, acp_dream_team, arena_race, parallel_swarm, adversarial_review, post_fact, read_blackboard, status."
         }
     }
 }

@@ -242,6 +242,7 @@ struct PaperContentView: View {
                 }
             }
         }
+        .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
     
@@ -372,6 +373,7 @@ struct RichMessageRow: View, Equatable {
     static func == (lhs: RichMessageRow, rhs: RichMessageRow) -> Bool {
         return lhs.message.id == rhs.message.id &&
                lhs.message.content == rhs.message.content &&
+               lhs.message.attachments == rhs.message.attachments &&
                lhs.message.toolResults.count == rhs.message.toolResults.count &&
                lhs.message.pendingChanges == rhs.message.pendingChanges &&
                lhs.message.role == rhs.message.role &&
@@ -379,28 +381,48 @@ struct RichMessageRow: View, Equatable {
     }
     
     private var isUser: Bool { message.role == .user }
+
+    private var resolvedUserPayload: (cleanText: String, attachments: [SentAttachmentItem]) {
+        if !message.attachments.isEmpty {
+            return (AgentService.cleanUserPromptText(message.content), message.attachments)
+        }
+        if message.content.hasPrefix("📎 ") {
+            return AgentService.extractLegacyBubbleAttachments(
+                from: message.content,
+                historyContext: message.attachmentHistoryContext
+            )
+        }
+        return (AgentService.cleanUserPromptText(message.content), [])
+    }
     
     var body: some View {
         if isUser {
-            // AGY-style editorial prompt card: clean full-width rounded container
-            // with hover-only action toolbar so the canvas stays minimal.
+            // Apple HIG / standard conversational layout: User always anchored on the RIGHT (.trailing),
+            // Assistant always anchored on the LEFT (.leading).
+            let payload = resolvedUserPayload
+            let hasVisibleText = !payload.cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
-                VStack(alignment: .leading, spacing: 4) {
-                    if isEditing {
-                        userInlineEditCard
-                    } else {
-                        userBubbleText
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contextMenu {
-                                userMessageContextMenu
+                HStack(spacing: 0) {
+                    Spacer(minLength: 88)
+                    VStack(alignment: .trailing, spacing: 6) {
+                        if isEditing {
+                            userInlineEditCard
+                        } else {
+                            if !payload.attachments.isEmpty {
+                                SentUserAttachmentsView(items: payload.attachments)
                             }
-                        userActionToolbar
-                            .opacity((isHoveringMessage || isCopied) ? 0.92 : 0)
-                            .allowsHitTesting(isHoveringMessage || isCopied)
+                            if hasVisibleText || payload.attachments.isEmpty {
+                                userBubbleText(for: payload.cleanText)
+                            }
+                            userActionToolbar
+                                .opacity((isHoveringMessage || isCopied) ? 0.92 : 0)
+                                .allowsHitTesting(isHoveringMessage || isCopied)
+                        }
                     }
                 }
-                .frame(maxWidth: 880, alignment: .leading)
+                .frame(maxWidth: 880, alignment: .trailing)
+                .contextMenu { userMessageContextMenu }
                 .onHover { hovering in
                     if isHoveringMessage != hovering {
                         isHoveringMessage = hovering
@@ -424,9 +446,7 @@ struct RichMessageRow: View, Equatable {
                         onRejectChange: onRejectChange
                     )
                     .equatable()
-                    .contextMenu {
-                        assistantMessageContextMenu
-                    }
+                    .textSelection(.enabled)
                     if !isStreaming && (!message.content.isEmpty || !message.toolResults.isEmpty) {
                         assistantActionToolbar
                             .opacity((isHoveringMessage || isCopied) ? 0.92 : 0)
@@ -446,10 +466,10 @@ struct RichMessageRow: View, Equatable {
         }
     }
 
-    private var isLongUserMessage: Bool {
-        guard message.content.count > 750 else {
+    private func isLongUserText(_ text: String) -> Bool {
+        guard text.count > 750 else {
             var newlineCount = 0
-            for ch in message.content where ch == "\n" {
+            for ch in text where ch == "\n" {
                 newlineCount += 1
                 if newlineCount > 14 { return true }
             }
@@ -458,28 +478,31 @@ struct RichMessageRow: View, Equatable {
         return true
     }
 
-    private var collapsedUserPreviewText: String {
-        let lines = message.content.split(separator: "\n", omittingEmptySubsequences: false)
+    private func collapsedUserPreview(for text: String) -> String {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         if lines.count > 14 {
             let joined = lines.prefix(12).joined(separator: "\n")
             return (joined.count > 750 ? String(joined.prefix(750)) : joined) + "\n…"
         }
-        if message.content.count > 750 {
-            return String(message.content.prefix(750)) + "…"
+        if text.count > 750 {
+            return String(text.prefix(750)) + "…"
         }
-        return message.content
+        return text
     }
 
-    private var userBubbleText: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(isLongUserMessage && !isUserMessageExpanded ? collapsedUserPreviewText : message.content)
-                .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
-                .foregroundColor(.primary.opacity(0.92))
+    private func userBubbleText(for text: String) -> some View {
+        let isLong = isLongUserText(text)
+        let isDark = appState.appTheme.isDark
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(isLong && !isUserMessageExpanded ? collapsedUserPreview(for: text) : text)
+                .font(MarkdownTextView.resolvedFont(name: appState.agentFontName, size: appState.agentFontSize))
+                .foregroundColor(.primary.opacity(0.95))
                 .multilineTextAlignment(.leading)
-                .lineLimit(isLongUserMessage && !isUserMessageExpanded ? 14 : nil)
+                .lineLimit(isLong && !isUserMessageExpanded ? 14 : nil)
                 .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
             
-            if isLongUserMessage {
+            if isLong {
                 Divider()
                     .opacity(0.25)
                 Button(action: {
@@ -490,9 +513,8 @@ struct RichMessageRow: View, Equatable {
                     HStack(spacing: 5) {
                         Image(systemName: isUserMessageExpanded ? "chevron.up" : "chevron.down")
                             .font(.system(size: 9.5, weight: .bold))
-                        Text(isUserMessageExpanded ? "ย่อข้อความ (Collapse)" : "แสดงข้อความทั้งหมด (\(message.content.count.formatted()) ตัวอักษร)")
+                        Text(isUserMessageExpanded ? "ย่อข้อความ (Collapse)" : "แสดงข้อความทั้งหมด (\(text.count.formatted()) ตัวอักษร)")
                             .font(.system(size: 11, weight: .semibold))
-                        Spacer(minLength: 0)
                     }
                     .foregroundColor(.accentColor)
                     .padding(.top, 2)
@@ -502,14 +524,16 @@ struct RichMessageRow: View, Equatable {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(isDark ? 0.095 : 0.065))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(isDark ? 0.14 : 0.10), lineWidth: 0.8)
+        )
+        .frame(maxWidth: 620, alignment: .trailing)
     }
     
     private var userInlineEditCard: some View {
@@ -598,52 +622,50 @@ struct RichMessageRow: View, Equatable {
     }
     
     private var userActionToolbar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                messageActionButton(
-                    icon: "arrow.uturn.backward",
-                    label: "ย้อนกลับ",
-                    tooltip: "Restore Checkpoint — ย้อนกลับข้อความและการแก้ไขไฟล์มาที่จุดนี้ (Revert to this checkpoint)"
-                ) {
-                    onRevert?()
-                }
-                
-                messageActionButton(
-                    icon: "pencil",
-                    label: "แก้ไข",
-                    tooltip: "แก้ไขข้อความและส่งใหม่ (Edit & Resend)"
-                ) {
-                    editedText = AgentService.cleanUserPromptText(message.content)
-                    isEditing = true
-                }
-                
-                messageActionButton(
-                    icon: "bookmark",
-                    label: "บันทึกกฎ",
-                    tooltip: "บันทึกคำสั่งนี้เป็นกฎของโปรเจกต์ใน .microcode/rules.md (Save as Project Rule)"
-                ) {
-                    let clean = AgentService.cleanUserPromptText(message.content)
-                    let ws = AgentService.shared.currentWorkspace ?? appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
-                    ProjectMemoryService.shared.appendLearnedRule(clean, workspace: ws)
-                }
-                
-                messageActionButton(
-                    icon: isCopied ? "checkmark" : "doc.on.doc",
-                    label: isCopied ? "คัดลอกแล้ว" : "คัดลอก",
-                    tooltip: "คัดลอกข้อความ (Copy message)",
-                    tint: isCopied ? .primary : nil
-                ) {
-                    copyTextToClipboard(AgentService.cleanUserPromptText(message.content))
-                }
-                
-                messageActionButton(
-                    icon: "trash",
-                    label: "ลบ",
-                    tooltip: "ลบข้อความนี้ (Delete message)",
-                    isDestructive: true
-                ) {
-                    onDelete?(false)
-                }
+        HStack(spacing: 4) {
+            messageActionButton(
+                icon: "arrow.uturn.backward",
+                label: "ย้อนกลับ",
+                tooltip: "Restore Checkpoint — ย้อนกลับข้อความและการแก้ไขไฟล์มาที่จุดนี้ (Revert to this checkpoint)"
+            ) {
+                onRevert?()
+            }
+            
+            messageActionButton(
+                icon: "pencil",
+                label: "แก้ไข",
+                tooltip: "แก้ไขข้อความและส่งใหม่ (Edit & Resend)"
+            ) {
+                editedText = AgentService.cleanUserPromptText(message.content)
+                isEditing = true
+            }
+            
+            messageActionButton(
+                icon: "bookmark",
+                label: "บันทึกกฎ",
+                tooltip: "บันทึกคำสั่งนี้เป็นกฎของโปรเจกต์ใน .microcode/rules.md (Save as Project Rule)"
+            ) {
+                let clean = AgentService.cleanUserPromptText(message.content)
+                let ws = AgentService.shared.currentWorkspace ?? appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
+                ProjectMemoryService.shared.appendLearnedRule(clean, workspace: ws)
+            }
+            
+            messageActionButton(
+                icon: isCopied ? "checkmark" : "doc.on.doc",
+                label: isCopied ? "คัดลอกแล้ว" : "คัดลอก",
+                tooltip: "คัดลอกข้อความ (Copy message)",
+                tint: isCopied ? .primary : nil
+            ) {
+                copyTextToClipboard(AgentService.cleanUserPromptText(message.content))
+            }
+            
+            messageActionButton(
+                icon: "trash",
+                label: "ลบ",
+                tooltip: "ลบข้อความนี้ (Delete message)",
+                isDestructive: true
+            ) {
+                onDelete?(false)
             }
         }
         .opacity(0.85)
@@ -809,6 +831,229 @@ struct RichMessageRow: View, Equatable {
     }
 }
 
+// MARK: - Visual Sent Attachments View (Right-Aligned Image Thumbnails & File Cards)
+
+struct SentUserAttachmentsView: View {
+    let items: [SentAttachmentItem]
+    @EnvironmentObject var appState: AppState
+
+    private var imageItems: [SentAttachmentItem] {
+        items.filter { $0.category == .image && $0.loadThumbnailImage() != nil }
+    }
+
+    private var cardItems: [SentAttachmentItem] {
+        items.filter { !($0.category == .image && $0.loadThumbnailImage() != nil) }
+    }
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            if !imageItems.isEmpty {
+                if imageItems.count == 1, let single = imageItems.first, let nsImg = single.loadThumbnailImage() {
+                    singleImagePreview(item: single, image: nsImg)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(imageItems) { item in
+                                if let nsImg = item.loadThumbnailImage() {
+                                    multiImageTile(item: item, image: nsImg)
+                                }
+                            }
+                        }
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(maxWidth: 620, alignment: .trailing)
+                }
+            }
+
+            if !cardItems.isEmpty {
+                VStack(alignment: .trailing, spacing: 5) {
+                    ForEach(cardItems) { item in
+                        documentAttachmentCard(item: item)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: 620, alignment: .trailing)
+    }
+
+    private func singleImagePreview(item: SentAttachmentItem, image: NSImage) -> some View {
+        let isDark = appState.appTheme.isDark
+        let aspect = max(0.45, min(2.4, image.size.width / max(1, image.size.height)))
+        let targetHeight: CGFloat = 164
+        let targetWidth = min(280, max(110, targetHeight * aspect))
+
+        return Button {
+            openAttachment(item)
+        } label: {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: targetWidth, height: targetHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(isDark ? 0.16 : 0.12), lineWidth: 0.8)
+                )
+                .shadow(color: Color.black.opacity(isDark ? 0.28 : 0.08), radius: 5, x: 0, y: 2)
+        }
+        .buttonStyle(.plain)
+        .help(item.name)
+        .contextMenu {
+            attachmentContextMenu(for: item)
+        }
+    }
+
+    private func multiImageTile(item: SentAttachmentItem, image: NSImage) -> some View {
+        let isDark = appState.appTheme.isDark
+        return Button {
+            openAttachment(item)
+        } label: {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 118, height: 92)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.primary.opacity(isDark ? 0.16 : 0.12), lineWidth: 0.8)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(item.name)
+        .contextMenu {
+            attachmentContextMenu(for: item)
+        }
+    }
+
+    private func documentAttachmentCard(item: SentAttachmentItem) -> some View {
+        let isDark = appState.appTheme.isDark
+        let meta = iconAndTint(for: item)
+        return Button {
+            openAttachment(item)
+        } label: {
+            HStack(spacing: 9) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(meta.tint.opacity(isDark ? 0.18 : 0.13))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: meta.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(meta.tint)
+                }
+
+                VStack(alignment: .leading, spacing: 1.5) {
+                    Text(item.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary.opacity(0.92))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if !item.badge.isEmpty {
+                        Text(item.badge)
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Color.primary.opacity(isDark ? 0.08 : 0.055))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(Color.primary.opacity(isDark ? 0.14 : 0.09), lineWidth: 0.8)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(item.name)
+        .contextMenu {
+            attachmentContextMenu(for: item)
+        }
+    }
+
+    @ViewBuilder
+    private func attachmentContextMenu(for item: SentAttachmentItem) -> some View {
+        if let path = item.filePath, FileManager.default.fileExists(atPath: path) {
+            Button {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            } label: {
+                Label("เปิดไฟล์ (Open)", systemImage: "arrow.up.right.square")
+            }
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            } label: {
+                Label("แสดงใน Finder (Reveal in Finder)", systemImage: "folder")
+            }
+        }
+    }
+
+    private func openAttachment(_ item: SentAttachmentItem) {
+        guard let path = item.filePath, FileManager.default.fileExists(atPath: path) else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    private func iconAndTint(for item: SentAttachmentItem) -> (icon: String, tint: Color) {
+        switch item.category {
+        case .pdf:
+            return ("doc.richtext.fill", Color(red: 0.94, green: 0.33, blue: 0.31))
+        case .image:
+            return ("photo.fill", Color(red: 0.28, green: 0.65, blue: 0.98))
+        case .spreadsheet:
+            return ("tablecells.fill", Color(red: 0.22, green: 0.78, blue: 0.48))
+        case .wordDoc, .richDocument:
+            return ("doc.text.fill", Color(red: 0.32, green: 0.58, blue: 0.96))
+        case .presentation:
+            return ("rectangle.on.rectangle.angled", Color(red: 0.96, green: 0.58, blue: 0.22))
+        case .notebook:
+            return ("book.closed.fill", Color(red: 0.95, green: 0.52, blue: 0.18))
+        case .database, .dataFile:
+            return ("cylinder.split.1x2.fill", Color(red: 0.65, green: 0.48, blue: 0.96))
+        case .audio:
+            return ("waveform", Color(red: 0.95, green: 0.44, blue: 0.62))
+        case .video:
+            return ("film.fill", Color(red: 0.68, green: 0.42, blue: 0.96))
+        case .archive:
+            return ("archivebox.fill", Color(red: 0.88, green: 0.68, blue: 0.24))
+        case .folder:
+            return ("folder.fill", Color(red: 0.35, green: 0.68, blue: 0.98))
+        case .codeOrText:
+            return ("chevron.left.forwardslash.chevron.right", Color(red: 0.30, green: 0.74, blue: 0.96))
+        case .binary:
+            return ("doc.fill", .secondary)
+        }
+    }
+}
+
+// MARK: - Continuous TimelineView 3-Dot Wave Indicator (Never freezes inside .equatable() rows)
+
+struct AIStreamingThreeDotsView: View {
+    var dotSize: CGFloat = 6
+    var spacing: CGFloat = 5
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: spacing) {
+                ForEach(0..<3, id: \.self) { index in
+                    let phase = t * 4.6 - Double(index) * 0.72
+                    let wave = (sin(phase) + 1.0) * 0.5 // 0.0 ... 1.0
+                    let scale = 0.72 + (0.36 * wave)
+                    let opacity = 0.25 + (0.75 * wave)
+                    let yOffset = -2.2 * max(0.0, sin(phase))
+                    Circle()
+                        .fill(Color.accentColor.opacity(opacity))
+                        .frame(width: dotSize, height: dotSize)
+                        .scaleEffect(scale)
+                        .offset(y: yOffset)
+                }
+            }
+            .frame(height: dotSize + 6)
+        }
+    }
+}
+
 // MARK: - Equatable AI Cell Content Host (Isolates Hover State from Markdown/Tool Tree)
 
 private struct AICellContentHost: View, Equatable {
@@ -857,16 +1102,32 @@ private struct AICellContentHost: View, Equatable {
                 aiBlockView(block, isLatestStreaming: isLatestStreaming)
             }
             
-            // Immediate active progress indicator while agent is connecting/thinking and no content yet
-            if blocks.isEmpty && message.toolResults.isEmpty && isLatestStreaming {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(AgentService.shared.currentToolExecution ?? "Agent is preparing response...")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundColor(.secondary)
+            // Minimal pre-first-token indicator with real TimelineView wave animation
+            let waitingForVisibleTokens: Bool = {
+                guard isLatestStreaming && message.toolResults.isEmpty else { return false }
+                if blocks.isEmpty { return true }
+                let hasNonThought = blocks.contains {
+                    if case .thought = $0 { return false }
+                    return true
                 }
-                .padding(.vertical, 6)
+                if !hasNonThought, case .thought(_, let dur) = blocks.last, dur != nil {
+                    return true
+                }
+                return false
+            }()
+            if waitingForVisibleTokens {
+                if let activeTool = AgentService.shared.currentToolExecution, !activeTool.isEmpty {
+                    HStack(spacing: 8) {
+                        AIStreamingThreeDotsView()
+                        Text(activeTool)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                } else {
+                    AIStreamingThreeDotsView()
+                        .padding(.vertical, 6)
+                }
             }
             
             // CEO & Specialist Squad Live Boardroom + SubAgent activity cluster (shown on the latest assistant message only)

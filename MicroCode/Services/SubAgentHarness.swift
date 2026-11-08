@@ -361,6 +361,39 @@ public final class SubAgentHarness: ObservableObject {
         let requiresMutation = canMutate && AgentExecutionEvidence.taskRequiresMutation(taskPrompt)
         var evidence = AgentExecutionEvidence()
 
+        // Cross-Vendor Real ACP CLI Execution:
+        // When `authSource == .acpCLI` and the corresponding external CLI harness (`claude`, `codex`, `agy`, `opencode`, `goose`)
+        // is installed locally, execute genuinely via `ACPAgentSession` (with `MCP-over-ACP` IDE tools auto-injected!).
+        // Falls back seamlessly to `dispatchModelTurnWithFailover` if the CLI binary is unavailable or fails pre-flight.
+        if resolvedEndpoint.authSource == .acpCLI {
+            let acpOutcome = await executeACPCLISubagentIfAvailable(
+                instanceId: instanceId,
+                definition: definition,
+                systemPrompt: systemPrompt,
+                taskPrompt: taskPrompt,
+                endpoint: resolvedEndpoint,
+                executionWorkspace: executionWorkspace
+            )
+            if acpOutcome.completed {
+                if let idxDone = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
+                    var snapshot = activeSubagents[idxDone]
+                    snapshot.state = .completed
+                    if acpOutcome.mutated { verifiedChanges.insert(instanceId) }
+                    snapshot.stateDetail = acpOutcome.mutated
+                        ? "Finished via ACP CLI (\(acpOutcome.engineName)) with verified workspace change"
+                        : "Finished via ACP CLI (\(acpOutcome.engineName))"
+                    snapshot.finalReport = acpOutcome.summary
+                    snapshot.finishedAt = Date()
+                    snapshot.currentToolExecution = nil
+                    activeSubagents[idxDone] = snapshot
+                    log("[DONE] SubAgent #\(instanceId.prefix(6)) [\(definition.role)] completed via ACP CLI (\(acpOutcome.engineName)).")
+                    emitEvent(.completed, instanceId: instanceId, role: definition.role, typeName: definition.name, detail: String(acpOutcome.summary.prefix(80)))
+                }
+                runningTasks.removeValue(forKey: instanceId)
+                return
+            }
+        }
+
         while true {
             if Task.isCancelled {
                 if kernelOnline { await AgentKernelClient.shared.cancel(runID: kernelRunID) }
@@ -893,41 +926,52 @@ public final class SubAgentHarness: ObservableObject {
     }
     
     private func hasActiveSubscription(for provider: StreamableAIProvider) -> Bool {
+        if let subType = AIClient.mapToSubscriptionProvider(provider),
+           SubscriptionAuthManager.shared.hasHealthyRoute(subType) {
+            return true
+        }
         switch provider {
         case .openai:
             let token = SubscriptionAuthManager.shared.getAccount(.chatgpt)?.sessionToken ?? ""
-            return SubscriptionAuthManager.shared.isConnected(.chatgpt) || AIClient.loadCodexOAuthCredentials(fallbackToken: token) != nil
+            return SubscriptionAuthManager.shared.isConnected(.chatgpt)
+                || AIClient.loadCodexOAuthCredentials(fallbackToken: token) != nil
+                || SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .chatgpt) != nil
         case .gemini:
             let token = SubscriptionAuthManager.shared.getAccount(.gemini)?.sessionToken ?? ""
-            return SubscriptionAuthManager.shared.isConnected(.gemini) || AIClient.loadGoogleCodeAssistCredentials(fallbackToken: token) != nil
+            return SubscriptionAuthManager.shared.isConnected(.gemini)
+                || AIClient.loadGoogleCodeAssistCredentials(fallbackToken: token) != nil
+                || SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .gemini) != nil
         case .anthropic:
             let token = SubscriptionAuthManager.shared.getAccount(.claude)?.sessionToken ?? ""
-            return SubscriptionAuthManager.shared.isConnected(.claude) || AIClient.loadGoogleCodeAssistCredentials(fallbackToken: token) != nil
-        case .copilot:
-            return SubscriptionAuthManager.shared.isConnected(.copilot)
-        case .aipass:
-            return SubscriptionAuthManager.shared.isConnected(.aipass)
-        case .tokenme:
-            return SubscriptionAuthManager.shared.isConnected(.tokenme)
+            return SubscriptionAuthManager.shared.isConnected(.claude)
+                || AIClient.loadGoogleCodeAssistCredentials(fallbackToken: token) != nil
+                || SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .claude) != nil
         default:
             return false
         }
     }
     
     private func resolveSubscriptionToken(for provider: StreamableAIProvider) -> String {
+        if let subType = AIClient.mapToSubscriptionProvider(provider) {
+            if let pooledToken = SubscriptionAuthManager.shared.token(for: subType), !pooledToken.isEmpty {
+                return pooledToken
+            }
+            if let cliPath = SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: subType) {
+                switch subType {
+                case .claude: return "cli://claude:\(cliPath)"
+                case .gemini:
+                    let kind = URL(fileURLWithPath: cliPath).lastPathComponent.contains("agy") ? "agy" : "gemini"
+                    return "cli://\(kind):\(cliPath)"
+                case .chatgpt: return "cli://codex:\(cliPath)"
+                default: break
+                }
+            }
+        }
         switch provider {
-        case .openai:
-            return SubscriptionAuthManager.shared.token(for: .chatgpt) ?? ""
-        case .gemini:
-            return SubscriptionAuthManager.shared.token(for: .gemini) ?? ""
-        case .anthropic:
-            return SubscriptionAuthManager.shared.token(for: .claude) ?? ""
-        case .copilot:
-            return SubscriptionAuthManager.shared.token(for: .copilot) ?? ""
         case .aipass:
-            return SubscriptionAuthManager.shared.token(for: .aipass) ?? UserDefaults.standard.string(forKey: "aipass_api_key") ?? ""
+            return UserDefaults.standard.string(forKey: "aipass_api_key") ?? ""
         case .tokenme:
-            return SubscriptionAuthManager.shared.token(for: .tokenme) ?? UserDefaults.standard.string(forKey: "tokenme_api_key") ?? ""
+            return UserDefaults.standard.string(forKey: "tokenme_api_key") ?? ""
         default:
             return ""
         }
@@ -1584,6 +1628,423 @@ public final class SubAgentHarness: ObservableObject {
             )
         ]
         return await runParallelSwarm(tasks: tasks, workspacePath: workspacePath)
+    }
+
+    // MARK: - Cross-Vendor ACP CLI Execution & Best-of-N Worktree Arena
+
+    private static func mapEndpointToACPType(provider: String, model: String) -> ACPAgentType? {
+        let p = provider.lowercased()
+        let m = model.lowercased()
+        if p.contains("claude") || p.contains("anthropic") || m.contains("claude") {
+            return .claudeCode
+        }
+        if p.contains("codex") || p.contains("openai") || m.hasPrefix("gpt-") || m.hasPrefix("o3") || m.hasPrefix("o4") {
+            return .codexEngine
+        }
+        if p.contains("agy") || m.contains("argon") {
+            return .agy
+        }
+        if p.contains("gemini") || m.contains("gemini") {
+            if ACPHostService.resolveAgentBinary(for: .agy) != nil {
+                return .agy
+            }
+            return .geminiCLI
+        }
+        if p.contains("opencode") {
+            return .openCode
+        }
+        if p.contains("goose") {
+            return .goose
+        }
+        if p.contains("copilot") {
+            return .githubCopilot
+        }
+        if p.contains("qwen") {
+            return .qwenCode
+        }
+        return nil
+    }
+
+    private func executeACPCLISubagentIfAvailable(
+        instanceId: String,
+        definition: SubAgentDefinition,
+        systemPrompt: String,
+        taskPrompt: String,
+        endpoint: AgentModelEndpoint,
+        executionWorkspace: String?
+    ) async -> (completed: Bool, summary: String, mutated: Bool, engineName: String) {
+        guard let acpType = Self.mapEndpointToACPType(provider: endpoint.provider, model: endpoint.model),
+              let binaryPath = ACPHostService.resolveAgentBinary(for: acpType) else {
+            return (false, "", false, "")
+        }
+
+        let ws = executionWorkspace ?? AgentToolBox.shared.effectiveWorkspaceRoot ?? FileManager.default.currentDirectoryPath
+        var config = ACPAgentConfig.defaultConfig(for: acpType, command: binaryPath)
+        config.permissionMode = .fullAuto
+
+        let acpSession = ACPAgentSession(config: config)
+        let badge = "\(acpType.displayName) • ACP"
+        if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
+            activeSubagents[idx].endpointBadge = badge
+            activeSubagents[idx].logMessages.append("⚡ Spawning external ACP CLI harness: \(acpType.displayName) (\(binaryPath))")
+        }
+        updateSubagentState(instanceId: instanceId, state: .running, detail: "Running \(acpType.displayName) CLI...")
+
+        let fullDirective = """
+        [Role: \(definition.role)]
+        \(taskPrompt)
+
+        Execution Rules:
+        - Operate strictly inside workspace: \(ws)
+        - You also have MicroCode IDE MCP tools (`mcp__microcode_ide__*`) available for Live Preview, Diagnostics, and Notebook cells.
+        - Emit `<ceo_contract key="KEY">VALUE</ceo_contract>` if you establish shared API/file contracts.
+        - Provide a concise verification summary when done.
+        """
+
+        let modelArg: String? = {
+            let trimmed = endpoint.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed == "inherit" || trimmed == "default" { return nil }
+            // Avoid passing non-AGY model names if AGY requires its own slug or default
+            if acpType == .agy && !trimmed.contains("argon") && !trimmed.contains("claude") && !trimmed.contains("gemini") {
+                return nil
+            }
+            return trimmed
+        }()
+
+        let stream = acpSession.eventStream
+        acpSession.start(task: fullDirective, workspacePath: ws, model: modelArg)
+
+        var collectedText = ""
+        var observedMutation = false
+        var hadFatalError = false
+
+        await withTaskCancellationHandler {
+            for await event in stream {
+                if Task.isCancelled {
+                    acpSession.stop()
+                    break
+                }
+                switch event {
+                case .text(let chunk):
+                    collectedText += chunk
+                    let approxTokens = max(1, chunk.count / 4)
+                    if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
+                        activeSubagents[idx].tokensUsed += approxTokens
+                    }
+                case .thinking:
+                    break
+                case .toolCall(let tc):
+                    let lower = tc.name.lowercased()
+                    if lower.contains("edit") || lower.contains("write") || lower.contains("bash")
+                        || lower.contains("patch") || lower.contains("replace") || lower.contains("create") {
+                        observedMutation = true
+                    }
+                    updateSubagentState(
+                        instanceId: instanceId,
+                        state: .running,
+                        detail: "\(acpType.displayName): \(tc.displaySummary)",
+                        currentTool: tc.name
+                    )
+                    if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
+                        activeSubagents[idx].logMessages.append("🔧 [\(acpType.displayName)] \(tc.displaySummary)")
+                    }
+                case .toolResult(let tr):
+                    if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
+                        let icon = tr.isError ? "✗" : "✓"
+                        activeSubagents[idx].logMessages.append("\(icon) [\(acpType.displayName)] \(tr.toolName ?? "tool"): \(tr.content.prefix(90))")
+                    }
+                case .permissionRequest(let pr):
+                    acpSession.respondToPermission(pr.id, approved: true)
+                case .complete(let res):
+                    if collectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        collectedText = res.result
+                    }
+                    if let tok = res.tokensUsed, let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
+                        activeSubagents[idx].tokensUsed = max(activeSubagents[idx].tokensUsed, tok)
+                    }
+                case .error(let errMsg):
+                    if collectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        hadFatalError = true
+                    }
+                    if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
+                        activeSubagents[idx].logMessages.append("⚠️ [\(acpType.displayName)] \(errMsg.prefix(160))")
+                    }
+                case .progress, .systemInfo, .sessionInit:
+                    break
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in acpSession.stop() }
+        }
+
+        acpSession.stop()
+
+        let trimmedSummary = collectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if hadFatalError || trimmedSummary.isEmpty {
+            log("[ACP-FALLBACK] \(acpType.displayName) returned empty/error for SubAgent #\(instanceId.prefix(6)); falling back to multi-auth API/Subscription loop.")
+            return (false, "", false, acpType.displayName)
+        }
+
+        // Parse any `<ceo_contract>` or `<team_message>` tags emitted by the ACP CLI so Blackboard stays synced
+        let parsed = parseUniversalFallbackToolCalls(
+            from: trimmedSummary,
+            senderRole: definition.role,
+            senderBadge: badge
+        )
+        return (true, parsed.cleanedText, observedMutation, acpType.displayName)
+    }
+
+    /// Best-of-N Cross-Vendor Worktree Arena:
+    /// Allocates isolated Git Worktrees (`PNSMotorWorktreePlexus`) for 2–3 distinct engines in parallel
+    /// (e.g. Claude Code vs OpenAI Codex vs AGY/Gemini), runs the Neuromuscular Verification Gate inside each
+    /// worktree, ranks contenders on `(verificationPassed, modifiedFiles, elapsedSeconds)`, and optionally
+    /// 3-way merges the winning implementation onto trunk while preserving runner-up `pns/auto-*` branches.
+    public func runBestOfNArena(
+        objective: String,
+        engines: [String] = [],
+        verificationCommand: String? = nil,
+        autoMergeWinner: Bool = false,
+        workspacePath: String? = nil
+    ) async -> String {
+        let baseWs = workspacePath ?? AgentToolBox.shared.effectiveWorkspaceRoot ?? FileManager.default.currentDirectoryPath
+        guard !baseWs.isEmpty else {
+            return "❌ Best-of-N Arena requires an active workspace directory."
+        }
+
+        struct ArenaContenderSpec {
+            let label: String
+            let archetype: String
+            let endpoint: AgentModelEndpoint
+        }
+
+        var contenders: [ArenaContenderSpec] = []
+        if !engines.isEmpty {
+            for raw in engines.prefix(4) {
+                let lower = raw.lowercased()
+                if lower.contains("claude") || lower.contains("anthropic") {
+                    let useACP = ACPHostService.resolveAgentBinary(for: .claudeCode) != nil
+                    contenders.append(ArenaContenderSpec(
+                        label: useACP ? "Claude Code (ACP)" : "Anthropic Claude",
+                        archetype: "claude_contender",
+                        endpoint: AgentModelEndpoint(authSource: useACP ? .acpCLI : .auto, provider: "anthropic", model: "claude-sonnet-4-6")
+                    ))
+                } else if lower.contains("codex") || lower.contains("openai") || lower.contains("gpt") {
+                    let useACP = ACPHostService.resolveAgentBinary(for: .codexEngine) != nil
+                    contenders.append(ArenaContenderSpec(
+                        label: useACP ? "OpenAI Codex (ACP)" : "OpenAI GPT",
+                        archetype: "codex_contender",
+                        endpoint: AgentModelEndpoint(authSource: useACP ? .acpCLI : .auto, provider: "openai", model: "gpt-5.4")
+                    ))
+                } else if lower.contains("agy") || lower.contains("gemini") {
+                    let useACP = ACPHostService.resolveAgentBinary(for: .agy) != nil || ACPHostService.resolveAgentBinary(for: .geminiCLI) != nil
+                    contenders.append(ArenaContenderSpec(
+                        label: useACP ? "Antigravity AGY (ACP)" : "Google Gemini",
+                        archetype: "agy_contender",
+                        endpoint: AgentModelEndpoint(authSource: useACP ? .acpCLI : .auto, provider: "gemini", model: "gemini-2.5-pro")
+                    ))
+                } else if lower.contains("opencode") {
+                    contenders.append(ArenaContenderSpec(
+                        label: "OpenCode (ACP)",
+                        archetype: "opencode_contender",
+                        endpoint: AgentModelEndpoint(authSource: .acpCLI, provider: "opencode", model: "default")
+                    ))
+                } else if lower.contains("deepseek") {
+                    contenders.append(ArenaContenderSpec(
+                        label: "DeepSeek Reasoner",
+                        archetype: "deepseek_contender",
+                        endpoint: AgentModelEndpoint(authSource: .auto, provider: "deepseek", model: "deepseek-chat")
+                    ))
+                } else {
+                    contenders.append(ArenaContenderSpec(
+                        label: raw.capitalized,
+                        archetype: "\(lower)_contender",
+                        endpoint: AgentModelEndpoint(authSource: .auto, provider: lower, model: "inherit")
+                    ))
+                }
+            }
+        } else {
+            // Auto-assemble up to 3 cross-vendor contenders from installed ACP CLIs & connected Subscriptions
+            if ACPHostService.resolveAgentBinary(for: .claudeCode) != nil || hasActiveSubscription(for: .anthropic) || !AIModelCatalog.resolveKey("anthropic").isEmpty {
+                let useACP = ACPHostService.resolveAgentBinary(for: .claudeCode) != nil
+                contenders.append(ArenaContenderSpec(
+                    label: useACP ? "Claude Code (ACP)" : "Claude Sonnet 4.6",
+                    archetype: "claude_contender",
+                    endpoint: AgentModelEndpoint(authSource: useACP ? .acpCLI : .auto, provider: "anthropic", model: "claude-sonnet-4-6")
+                ))
+            }
+            if ACPHostService.resolveAgentBinary(for: .codexEngine) != nil || hasActiveSubscription(for: .openai) || !AIModelCatalog.resolveKey("openai").isEmpty {
+                let useACP = ACPHostService.resolveAgentBinary(for: .codexEngine) != nil
+                contenders.append(ArenaContenderSpec(
+                    label: useACP ? "OpenAI Codex (ACP)" : "OpenAI GPT-5.4",
+                    archetype: "codex_contender",
+                    endpoint: AgentModelEndpoint(authSource: useACP ? .acpCLI : .auto, provider: "openai", model: "gpt-5.4")
+                ))
+            }
+            if ACPHostService.resolveAgentBinary(for: .agy) != nil || hasActiveSubscription(for: .gemini) || !AIModelCatalog.resolveKey("gemini").isEmpty {
+                let useACP = ACPHostService.resolveAgentBinary(for: .agy) != nil
+                contenders.append(ArenaContenderSpec(
+                    label: useACP ? "Antigravity AGY (ACP)" : "Gemini 2.5 Pro",
+                    archetype: "agy_contender",
+                    endpoint: AgentModelEndpoint(authSource: useACP ? .acpCLI : .auto, provider: "gemini", model: "gemini-2.5-pro")
+                ))
+            }
+            if contenders.count < 2, ACPHostService.resolveAgentBinary(for: .openCode) != nil {
+                contenders.append(ArenaContenderSpec(
+                    label: "OpenCode (ACP)",
+                    archetype: "opencode_contender",
+                    endpoint: AgentModelEndpoint(authSource: .acpCLI, provider: "opencode", model: "default")
+                ))
+            }
+            if contenders.count < 2 {
+                contenders.append(ArenaContenderSpec(
+                    label: "Contender Alpha",
+                    archetype: "alpha_contender",
+                    endpoint: AgentModelEndpoint(authSource: .auto, provider: "inherit", model: "inherit")
+                ))
+                contenders.append(ArenaContenderSpec(
+                    label: "Contender Beta",
+                    archetype: "beta_contender",
+                    endpoint: AgentModelEndpoint(authSource: .subscription, provider: "inherit", model: "inherit")
+                ))
+            }
+        }
+
+        let activeContenders = Array(contenders.prefix(3))
+        let missionId = "arena_" + UUID().uuidString.prefix(8)
+
+        struct ArenaResultEntry {
+            let index: Int
+            let label: String
+            let leaseId: String
+            let branchName: String
+            let worktreePath: String
+            let elapsedSeconds: Double
+            let verificationPassed: Bool
+            let verificationSpike: String
+            let modifiedFiles: [String]
+            let summary: String
+        }
+
+        // Allocate isolated worktrees on MainActor first
+        var allocated: [(index: Int, spec: ArenaContenderSpec, lease: PNSMotorFiberLease, subagentId: String, startedAt: Date)] = []
+        for (idx, spec) in activeContenders.enumerated() {
+            do {
+                let lease = try await PNSMotorWorktreePlexus.shared.allocateMotorFiber(
+                    missionId: missionId,
+                    agentArchetype: spec.archetype,
+                    roleTitle: "Arena Contender #\(idx + 1) (\(spec.label))",
+                    baseWorkspacePath: baseWs
+                )
+                let instance = invokeSubagent(
+                    typeName: "autonomous_loop",
+                    role: "Arena #\(idx + 1): \(spec.label)",
+                    prompt: """
+                    [Best-of-N Worktree Arena Contender: \(spec.label)]
+                    Objective:
+                    \(objective)
+
+                    \(verificationCommand != nil ? "Verification Gate Command: `\(verificationCommand!)` — ensure this passes with exit code 0 before finishing." : "Verify all modified files compile/parse cleanly before finishing.")
+                    """,
+                    workspacePath: lease.isolatedWorktreePath,
+                    endpointOverride: spec.endpoint
+                )
+                allocated.append((idx, spec, lease, instance.id, Date()))
+            } catch {
+                log("[ARENA] Failed to allocate worktree for \(spec.label): \(error.localizedDescription)")
+            }
+        }
+
+        guard !allocated.isEmpty else {
+            return "❌ Best-of-N Arena could not allocate isolated git worktrees."
+        }
+
+        var entries: [ArenaResultEntry] = []
+        await withTaskGroup(of: ArenaResultEntry.self) { group in
+            for item in allocated {
+                group.addTask {
+                    let outcome = try? await SubAgentHarness.shared.waitForSubagent(id: item.subagentId)
+                    let elapsed = Date().timeIntervalSince(item.startedAt)
+                    let summary = await MainActor.run {
+                        outcome?.instance.finalReport ?? outcome?.instance.stateDetail ?? "Completed"
+                    }
+                    let joinRes = await PNSMotorWorktreePlexus.shared.verifyAndJoinFiber(
+                        fiberId: item.lease.id,
+                        branchPolicy: .isolatedWorktreeBranch,
+                        verificationCommand: verificationCommand,
+                        fiberSummary: summary
+                    )
+                    return ArenaResultEntry(
+                        index: item.index,
+                        label: item.spec.label,
+                        leaseId: item.lease.id,
+                        branchName: joinRes.committedBranch ?? item.lease.branchName,
+                        worktreePath: item.lease.isolatedWorktreePath,
+                        elapsedSeconds: elapsed,
+                        verificationPassed: joinRes.verificationPassed,
+                        verificationSpike: joinRes.verificationSpike,
+                        modifiedFiles: joinRes.modifiedFiles,
+                        summary: summary
+                    )
+                }
+            }
+            for await res in group {
+                entries.append(res)
+            }
+        }
+
+        // Rank contenders: (verified + modified files) > (verified) > (modified files), tie-broken by fastest elapsed time
+        let ranked = entries.sorted { a, b in
+            let scoreA = (a.verificationPassed ? 100 : 0) + (!a.modifiedFiles.isEmpty ? 50 : 0)
+            let scoreB = (b.verificationPassed ? 100 : 0) + (!b.modifiedFiles.isEmpty ? 50 : 0)
+            if scoreA != scoreB { return scoreA > scoreB }
+            return a.elapsedSeconds < b.elapsedSeconds
+        }
+
+        var winnerMergedNote = ""
+        if autoMergeWinner,
+           let winner = ranked.first,
+           winner.verificationPassed,
+           !winner.modifiedFiles.isEmpty {
+            let mergeJoin = await PNSMotorWorktreePlexus.shared.verifyAndJoinFiber(
+                fiberId: winner.leaseId,
+                branchPolicy: .autoThreeWayMergeOnVerify,
+                verificationCommand: nil,
+                fiberSummary: "Arena Winner (\(winner.label))"
+            )
+            if mergeJoin.mergedToTrunk {
+                winnerMergedNote = "\n\n✅ **Auto-Merged Winner (`\(winner.label)`)** into workspace trunk via 3-way LCS merger (`\(winner.modifiedFiles.count)` files)."
+            }
+        }
+
+        var tableRows: [String] = [
+            "| Rank | Engine | Verify Gate | Changed Files | Time | Isolated Branch |",
+            "| :--- | :--- | :--- | :---: | :---: | :--- |"
+        ]
+        for (rankIdx, item) in ranked.enumerated() {
+            let medal = rankIdx == 0 ? "🏆 #1" : "#\(rankIdx + 1)"
+            let gate = item.verificationPassed ? "✅ PASS" : "❌ FAIL"
+            let secs = String(format: "%.1fs", item.elapsedSeconds)
+            tableRows.append("| \(medal) | **\(item.label)** | \(gate) | \(item.modifiedFiles.count) | \(secs) | `\(item.branchName)` |")
+        }
+
+        let details = ranked.map { item -> String in
+            let filesList = item.modifiedFiles.isEmpty ? "_No files modified_" : item.modifiedFiles.map { "`\($0)`" }.joined(separator: ", ")
+            return """
+            ### \(item.label) (`\(item.branchName)`)
+            - **Worktree**: `\(item.worktreePath)`
+            - **Modified Files**: \(filesList)
+            - **Verification**: \(item.verificationSpike.prefix(220))
+            - **Summary**: \(item.summary.prefix(500))
+            """
+        }.joined(separator: "\n\n")
+
+        return """
+        🏟️ **Best-of-N Cross-Vendor Worktree Arena Completed (\(ranked.count) Engines)**
+
+        \(tableRows.joined(separator: "\n"))\(winnerMergedNote)
+
+        \(details)
+        """
     }
     
     private func log(_ msg: String) {

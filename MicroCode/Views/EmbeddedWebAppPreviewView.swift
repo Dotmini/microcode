@@ -229,9 +229,9 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
                     frameSize: CGSize(width: 706.0, height: 514.0),
                     screenSize: CGSize(width: 678.0, height: 466.0),
                     screenOffset: CGPoint(x: 14.0, y: 26.0),
-                    cornerRadius: 19.7,
+                    cornerRadius: 59.0,
                     isMacBook: false,
-                    cornerRadii: ScreenCornerRadii(topLeft: 2.7, topRight: 2.7, bottomRight: 19.7, bottomLeft: 19.7)
+                    cornerRadii: ScreenCornerRadii(topLeft: 8.0, topRight: 8.0, bottomRight: 59.0, bottomLeft: 59.0)
                 )
             }
             return DeviceFrameSpec(
@@ -239,9 +239,9 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
                 frameSize: CGSize(width: 514.0, height: 706.0),
                 screenSize: CGSize(width: 466.0, height: 678.0),
                 screenOffset: CGPoint(x: 26.0, y: 14.0),
-                cornerRadius: 19.7,
+                cornerRadius: 59.0,
                 isMacBook: false,
-                cornerRadii: ScreenCornerRadii(topLeft: 2.7, topRight: 19.7, bottomRight: 19.7, bottomLeft: 2.7)
+                cornerRadii: ScreenCornerRadii(topLeft: 8.0, topRight: 59.0, bottomRight: 59.0, bottomLeft: 8.0)
             )
 
         case .iphoneDuoInner:
@@ -253,7 +253,7 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
                     frameSize: CGSize(width: 703.0, height: 985.0),
                     screenSize: CGSize(width: 669.0, height: 951.0),
                     screenOffset: CGPoint(x: 17.0, y: 17.0),
-                    cornerRadius: 18.33,
+                    cornerRadius: 55.0,
                     isMacBook: false
                 )
             }
@@ -262,7 +262,7 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
                 frameSize: CGSize(width: 985.0, height: 703.0),
                 screenSize: CGSize(width: 951.0, height: 669.0),
                 screenOffset: CGPoint(x: 17.0, y: 17.0),
-                cornerRadius: 18.33,
+                cornerRadius: 55.0,
                 isMacBook: false
             )
             
@@ -361,8 +361,12 @@ struct EmbeddedWebAppPreviewView: View {
     @State private var isHoveringHandle: Bool = false
     @ObservedObject private var browserAutomation = IDEBrowserAutomationService.shared
     @ObservedObject private var universalBridge = UniversalAppPreviewBridge.shared
+    @ObservedObject private var portTunnels = DevPortTunnelService.shared
     @State private var inspectInstructionText: String = ""
     @State private var showPortRadarPopover: Bool = false
+    @State private var customTunnelPortText: String = "3000"
+    @State private var qrPreviewPort: Int? = nil
+    @State private var copiedTunnelPort: Int? = nil
     @State private var inspectPopupDragOffset: CGSize = .zero
     @State private var inspectPopupAccumulatedOffset: CGSize = .zero
     @FocusState private var isInspectInputFocused: Bool
@@ -694,11 +698,13 @@ struct EmbeddedWebAppPreviewView: View {
                             loadNavigatedURL()
                         }
 
-                    if let devPort = runtime.lastDetectedDevServerPort, !urlString.contains(":\(devPort)") {
+                    if let devPort = runtime.lastDetectedDevServerPort,
+                       !urlString.contains(":\(devPort)"),
+                       (currentURL?.port == nil || !browserAutomation.activePortProcesses.contains(where: { $0.port == currentURL?.port })) {
                         Button {
                             sanitizeAndSetURL("http://localhost:\(devPort)")
                         } label: {
-                            Text(":\(devPort)")
+                            Text(verbatim: ":\(devPort)")
                                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
@@ -707,6 +713,7 @@ struct EmbeddedWebAppPreviewView: View {
                                 .cornerRadius(3)
                         }
                         .buttonStyle(.plain)
+                        .fixedSize()
                         .help("Switch to detected local dev server on port \(devPort)")
                     }
 
@@ -755,25 +762,43 @@ struct EmbeddedWebAppPreviewView: View {
                 Button {
                     showPortRadarPopover.toggle()
                     if showPortRadarPopover {
+                        if let activePort = currentURL?.port, (1...65535).contains(activePort),
+                           (customTunnelPortText.isEmpty || customTunnelPortText == "3000") {
+                            customTunnelPortText = "\(activePort)"
+                        }
                         browserAutomation.scanActivePorts()
                     }
                 } label: {
-                    HStack(spacing: 2.5) {
+                    let hasActiveTunnels = portTunnels.activeTunnelCount > 0
+                    HStack(spacing: 3) {
                         Image(systemName: "antenna.radiowaves.left.and.right")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: 9, weight: hasActiveTunnels ? .semibold : .medium))
                         if !browserAutomation.activePortProcesses.isEmpty {
                             Text("\(browserAutomation.activePortProcesses.count)")
                                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         }
+                        if hasActiveTunnels {
+                            Circle()
+                                .fill(Color.green)
+                                .frame(width: 5.5, height: 5.5)
+                        }
                     }
                     .padding(.horizontal, 5)
                     .frame(height: 22)
-                    .background(showPortRadarPopover ? Color.primary.opacity(0.16) : Color.primary.opacity(0.06))
-                    .foregroundColor(showPortRadarPopover ? .primary : .secondary)
+                    .background(
+                        hasActiveTunnels
+                            ? Color.green.opacity(showPortRadarPopover ? 0.22 : 0.14)
+                            : (showPortRadarPopover ? Color.primary.opacity(0.16) : Color.primary.opacity(0.06))
+                    )
+                    .foregroundColor(
+                        hasActiveTunnels
+                            ? Color.green
+                            : (showPortRadarPopover ? .primary : .secondary)
+                    )
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
-                .help("Active Localhost Ports")
+                .help(portTunnels.activeTunnelCount > 0 ? "Active Localhost Ports (\(portTunnels.activeTunnelCount) HTTPS tunnel\(portTunnels.activeTunnelCount == 1 ? "" : "s") active)" : "Active Localhost Ports & HTTPS Tunnel")
                 .popover(isPresented: $showPortRadarPopover, arrowEdge: .bottom) {
                     portRadarPopoverContent
                 }
@@ -914,13 +939,37 @@ struct EmbeddedWebAppPreviewView: View {
 
     @ViewBuilder
     private var portRadarPopoverContent: some View {
+        let detectedPortSet = Set(browserAutomation.activePortProcesses.map(\.port))
+        let standaloneTunnelPorts = portTunnels.tunnels.keys
+            .filter { !detectedPortSet.contains($0) && portTunnels.tunnels[$0] != .stopped }
+            .sorted()
+        let parsedCustomPort: Int? = {
+            let trimmed = customTunnelPortText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let val = Int(trimmed), (1...65535).contains(val) else { return nil }
+            return val
+        }()
+
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 6) {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.primary)
+                    .foregroundColor(portTunnels.activeTunnelCount > 0 ? .green : .primary)
                 Text("Active Localhost Ports")
                     .font(.system(size: 11, weight: .bold))
+                if portTunnels.activeTunnelCount > 0 {
+                    HStack(spacing: 3) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 5, height: 5)
+                        Text("\(portTunnels.activeTunnelCount) live")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Color.green.opacity(0.15))
+                    .foregroundColor(.green)
+                    .cornerRadius(4)
+                }
                 Spacer()
                 Button {
                     browserAutomation.scanActivePorts()
@@ -930,6 +979,17 @@ struct EmbeddedWebAppPreviewView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Rescan listening TCP ports")
+
+                if portTunnels.activeTunnelCount > 0 {
+                    Button("Stop Tunnels") {
+                        portTunnels.stopAllTunnels()
+                        qrPreviewPort = nil
+                    }
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(.orange)
+                    .buttonStyle(.plain)
+                }
+
                 if !browserAutomation.activePortProcesses.isEmpty {
                     Button("Kill All") {
                         browserAutomation.killAllDevPortProcesses()
@@ -939,8 +999,57 @@ struct EmbeddedWebAppPreviewView: View {
                     .buttonStyle(.plain)
                 }
             }
+
+            // Quick Expose Port bar — expose any TCP port via public HTTPS immediately
+            HStack(spacing: 6) {
+                Image(systemName: "globe")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                Text("Quick Expose Port")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(.secondary)
+                TextField("Port", text: $customTunnelPortText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .frame(width: 58)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
+                    .onSubmit {
+                        if let port = parsedCustomPort {
+                            portTunnels.startTunnel(for: port)
+                        }
+                    }
+                Spacer(minLength: 2)
+                Button {
+                    if let port = parsedCustomPort {
+                        portTunnels.startTunnel(for: port)
+                    }
+                } label: {
+                    HStack(spacing: 3.5) {
+                        Image(systemName: "lock.shield")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Start HTTPS Tunnel")
+                            .font(.system(size: 9.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(parsedCustomPort != nil ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.05))
+                    .foregroundColor(parsedCustomPort != nil ? .accentColor : .secondary)
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .disabled(parsedCustomPort == nil)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.035))
+            .cornerRadius(5)
+
             Divider()
-            if browserAutomation.isScanningPorts {
+
+            if browserAutomation.isScanningPorts && browserAutomation.activePortProcesses.isEmpty && standaloneTunnelPorts.isEmpty {
                 HStack(spacing: 6) {
                     ProgressView().scaleEffect(0.5)
                     Text("Scanning listening TCP ports...")
@@ -948,7 +1057,7 @@ struct EmbeddedWebAppPreviewView: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(.vertical, 8)
-            } else if browserAutomation.activePortProcesses.isEmpty {
+            } else if browserAutomation.activePortProcesses.isEmpty && standaloneTunnelPorts.isEmpty {
                 Text("No active user localhost servers detected.")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
@@ -956,42 +1065,146 @@ struct EmbeddedWebAppPreviewView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 5) {
-                        ForEach(browserAutomation.activePortProcesses) { item in
-                            HStack(spacing: 8) {
-                                Text(":\(item.port)")
-                                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.primary)
-                                    .frame(width: 48, alignment: .leading)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(item.processName)
-                                        .font(.system(size: 10, weight: .medium))
-                                        .lineLimit(1)
-                                    Text("PID \(item.pid)")
-                                        .font(.system(size: 8.5, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                Button("Preview") {
-                                    sanitizeAndSetURL("http://localhost:\(item.port)")
-                                    showPortRadarPopover = false
-                                }
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.primary.opacity(0.12))
-                                .foregroundColor(.primary)
-                                .cornerRadius(4)
-                                .buttonStyle(.plain)
+                        if browserAutomation.isScanningPorts {
+                            HStack(spacing: 5) {
+                                ProgressView().scaleEffect(0.45)
+                                Text("Refreshing active ports…")
+                                    .font(.system(size: 9.5))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.bottom, 2)
+                        }
 
-                                Button {
-                                    browserAutomation.killPortProcess(item)
-                                } label: {
-                                    Image(systemName: "xmark.octagon.fill")
-                                        .font(.system(size: 11))
-                                        .foregroundColor(.secondary)
+                        ForEach(standaloneTunnelPorts, id: \.self) { port in
+                            let tunnelState = portTunnels.tunnels[port] ?? .stopped
+                            let isTunnelActive = isPortTunnelActive(tunnelState)
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Text(":\(port)")
+                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                        .frame(width: 50, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text("Custom Port Tunnel")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .lineLimit(1)
+                                        Text("127.0.0.1:\(port)")
+                                            .font(.system(size: 8.5, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Preview") {
+                                        sanitizeAndSetURL("http://localhost:\(port)")
+                                        showPortRadarPopover = false
+                                    }
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.primary.opacity(0.12))
+                                    .foregroundColor(.primary)
+                                    .cornerRadius(4)
+                                    .buttonStyle(.plain)
+
+                                    Button {
+                                        if isTunnelActive {
+                                            portTunnels.stopTunnel(for: port)
+                                            if qrPreviewPort == port { qrPreviewPort = nil }
+                                        } else {
+                                            portTunnels.startTunnel(for: port)
+                                        }
+                                    } label: {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "globe")
+                                                .font(.system(size: 9, weight: .semibold))
+                                            Text(isTunnelActive ? "Stop" : "Tunnel")
+                                                .font(.system(size: 9.5, weight: .semibold))
+                                        }
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(isTunnelActive ? Color.green.opacity(0.18) : Color.primary.opacity(0.10))
+                                        .foregroundColor(isTunnelActive ? .green : .primary)
+                                        .cornerRadius(4)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
-                                .help("Kill process \(item.processName) (PID \(item.pid)) on port \(item.port)")
+
+                                if tunnelState != .stopped {
+                                    portTunnelStatusStrip(for: port, state: tunnelState)
+                                }
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.04))
+                            .cornerRadius(5)
+                        }
+
+                        ForEach(browserAutomation.activePortProcesses) { item in
+                            let tunnelState = portTunnels.tunnels[item.port] ?? .stopped
+                            let isTunnelActive = isPortTunnelActive(tunnelState)
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Text(":\(item.port)")
+                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                        .frame(width: 50, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(item.processName)
+                                            .font(.system(size: 10, weight: .medium))
+                                            .lineLimit(1)
+                                        Text("PID \(item.pid)")
+                                            .font(.system(size: 8.5, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Preview") {
+                                        sanitizeAndSetURL("http://localhost:\(item.port)")
+                                        showPortRadarPopover = false
+                                    }
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.primary.opacity(0.12))
+                                    .foregroundColor(.primary)
+                                    .cornerRadius(4)
+                                    .buttonStyle(.plain)
+
+                                    Button {
+                                        if isTunnelActive {
+                                            portTunnels.stopTunnel(for: item.port)
+                                            if qrPreviewPort == item.port { qrPreviewPort = nil }
+                                        } else {
+                                            portTunnels.startTunnel(for: item.port)
+                                        }
+                                    } label: {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "globe")
+                                                .font(.system(size: 9, weight: .semibold))
+                                            Text(isTunnelActive ? "Stop" : "Tunnel")
+                                                .font(.system(size: 9.5, weight: .semibold))
+                                        }
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(isTunnelActive ? Color.green.opacity(0.18) : Color.primary.opacity(0.10))
+                                        .foregroundColor(isTunnelActive ? .green : .primary)
+                                        .cornerRadius(4)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(isTunnelActive ? "Stop public HTTPS tunnel on port \(item.port)" : "Expose port \(item.port) via zero-setup public HTTPS tunnel")
+
+                                    Button {
+                                        browserAutomation.killPortProcess(item)
+                                    } label: {
+                                        Image(systemName: "xmark.octagon.fill")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Kill process \(item.processName) (PID \(item.pid)) on port \(item.port)")
+                                }
+
+                                if tunnelState != .stopped {
+                                    portTunnelStatusStrip(for: item.port, state: tunnelState)
+                                }
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 4)
@@ -1000,11 +1213,178 @@ struct EmbeddedWebAppPreviewView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 200)
+                .frame(maxHeight: 280)
             }
         }
         .padding(10)
-        .frame(width: 290)
+        .frame(width: 360)
+    }
+
+    private func isPortTunnelActive(_ state: DevPortTunnelState) -> Bool {
+        switch state {
+        case .starting, .connected:
+            return true
+        case .stopped, .failed:
+            return false
+        }
+    }
+
+    @ViewBuilder
+    private func portTunnelStatusStrip(for port: Int, state: DevPortTunnelState) -> some View {
+        switch state {
+        case .stopped:
+            EmptyView()
+
+        case .starting(let message):
+            HStack(spacing: 6) {
+                ProgressView()
+                    .scaleEffect(0.45)
+                    .frame(width: 11, height: 11)
+                Text(message)
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.035))
+            .cornerRadius(4)
+
+        case .connected(let url, let provider):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 5.5, height: 5.5)
+                    Text(url)
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(.green)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .help("\(provider) — \(url)")
+                    Spacer(minLength: 4)
+
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(url, forType: .string)
+                        copiedTunnelPort = port
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            if copiedTunnelPort == port {
+                                copiedTunnelPort = nil
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 2.5) {
+                            Image(systemName: copiedTunnelPort == port ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 8.5, weight: .semibold))
+                            Text(copiedTunnelPort == port ? "Copied" : "Copy")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(copiedTunnelPort == port ? Color.green.opacity(0.18) : Color.primary.opacity(0.10))
+                        .foregroundColor(copiedTunnelPort == port ? .green : .primary)
+                        .cornerRadius(3.5)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button("Open") {
+                        if let parsed = URL(string: url) {
+                            NSWorkspace.shared.open(parsed)
+                        }
+                    }
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.10))
+                    .foregroundColor(.primary)
+                    .cornerRadius(3.5)
+                    .buttonStyle(.plain)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.14)) {
+                            qrPreviewPort = (qrPreviewPort == port) ? nil : port
+                        }
+                    } label: {
+                        HStack(spacing: 2.5) {
+                            Image(systemName: "qrcode")
+                                .font(.system(size: 8.5, weight: .semibold))
+                            Text("QR")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(qrPreviewPort == port ? Color.accentColor.opacity(0.20) : Color.primary.opacity(0.10))
+                        .foregroundColor(qrPreviewPort == port ? .accentColor : .primary)
+                        .cornerRadius(3.5)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if qrPreviewPort == port, let qrImage = portTunnels.qrCodeImage(for: url) {
+                    HStack(spacing: 10) {
+                        Image(nsImage: qrImage)
+                            .interpolation(.none)
+                            .resizable()
+                            .frame(width: 120, height: 120)
+                            .cornerRadius(6)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(provider)
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundColor(.primary)
+                            Text("Scan with iPhone or Android camera to open this HTTPS preview on any network.")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(6)
+                    .background(Color.primary.opacity(0.03))
+                    .cornerRadius(5)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .background(Color.green.opacity(0.06))
+            .cornerRadius(4)
+
+        case .failed(let errorMessage):
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.orange)
+                Text(errorMessage)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                Button("Retry") {
+                    portTunnels.startTunnel(for: port)
+                }
+                .font(.system(size: 9, weight: .semibold))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.10))
+                .cornerRadius(3.5)
+                .buttonStyle(.plain)
+
+                Button {
+                    portTunnels.stopTunnel(for: port)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(Color.orange.opacity(0.08))
+            .cornerRadius(4)
+        }
     }
 
     @ViewBuilder
@@ -1111,9 +1491,9 @@ struct EmbeddedWebAppPreviewView: View {
     @ViewBuilder
     private func previewViewportLayer(availW: CGFloat, availH: CGFloat) -> some View {
         if showDeviceBezel, let spec = selectedViewport.frameSpec(isLandscape: isLandscape) {
-                        // MARK: Authentic Hardware Bezel Mode
-                        let maxW = max(60, availW - 16)
-                        let maxH = max(60, availH - 16)
+                        // MARK: Authentic Hardware Bezel Mode (Direct Scaled Geometry — 100% AppKit WKWebView Frame Alignment)
+                        let maxW = max(60, availW - 6)
+                        let maxH = max(60, availH - 6)
                         let fitScale = min(maxW / spec.frameSize.width, maxH / spec.frameSize.height)
                         let fitWidthScale = maxW / spec.frameSize.width
                         let activeScale: CGFloat = {
@@ -1123,24 +1503,96 @@ struct EmbeddedWebAppPreviewView: View {
                             case .actual: return 1.0
                             }
                         }()
+                        let scaledFrameW = spec.frameSize.width * activeScale
+                        let scaledFrameH = spec.frameSize.height * activeScale
+                        let scaledScreenW = spec.screenSize.width * activeScale
+                        let scaledScreenH = spec.screenSize.height * activeScale
+                        let scaledOffsetX = spec.screenOffset.x * activeScale
+                        let scaledOffsetY = spec.screenOffset.y * activeScale
+                        let scaledCornerRadius = spec.cornerRadius * activeScale
+                        let scaledCornerRadii = spec.cornerRadii.map {
+                            ScreenCornerRadii(
+                                topLeft: $0.topLeft * activeScale,
+                                topRight: $0.topRight * activeScale,
+                                bottomRight: $0.bottomRight * activeScale,
+                                bottomLeft: $0.bottomLeft * activeScale
+                            )
+                        }
                         
+                        let topSafeAreaUnscaled: CGFloat = {
+                            if spec.isMacBook { return 0 }
+                            switch selectedViewport {
+                            case .iphone:
+                                return isLandscape ? 0 : 48
+                            case .iphoneDuoOuter:
+                                return isLandscape ? 0 : 30
+                            case .iphoneDuoInner:
+                                return 26
+                            case .tablet:
+                                return 22
+                            default:
+                                return 0
+                            }
+                        }()
+                        let scaledTopSafe = topSafeAreaUnscaled * activeScale
+                        let webSurfaceH = max(40, scaledScreenH - scaledTopSafe)
+                        let webCornerRadii: ScreenCornerRadii = {
+                            if scaledTopSafe > 0 {
+                                if let cr = scaledCornerRadii {
+                                    return ScreenCornerRadii(topLeft: 0, topRight: 0, bottomRight: cr.bottomRight, bottomLeft: cr.bottomLeft)
+                                }
+                                return ScreenCornerRadii(topLeft: 0, topRight: 0, bottomRight: scaledCornerRadius, bottomLeft: scaledCornerRadius)
+                            }
+                            if let cr = scaledCornerRadii { return cr }
+                            return ScreenCornerRadii(topLeft: scaledCornerRadius, topRight: scaledCornerRadius, bottomRight: scaledCornerRadius, bottomLeft: scaledCornerRadius)
+                        }()
+
                         let deviceView = ZStack {
-                            // 1. Screen backdrop
-                            Color.white
-                                .frame(width: spec.screenSize.width, height: spec.screenSize.height)
-                                .clipShape(ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook, cornerRadii: spec.cornerRadii))
-                                .position(
-                                    x: spec.screenOffset.x + spec.screenSize.width / 2,
-                                    y: spec.screenOffset.y + spec.screenSize.height / 2
-                                )
-                            
-                            // 2. Interactive WebBrowserView or Universal Native GUI Surface
-                            previewSurfaceContent(width: spec.screenSize.width, height: spec.screenSize.height)
-                            .frame(width: spec.screenSize.width, height: spec.screenSize.height)
-                            .clipShape(ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook, cornerRadii: spec.cornerRadii))
+                            // 1. Screen backdrop + Native Device Status Bar Safe Area (prevents Dynamic Island & 55pt/59pt top corners from overlapping web app header)
+                            ZStack(alignment: .top) {
+                                Color.white
+                                if scaledTopSafe > 0 {
+                                    HStack(spacing: 0) {
+                                        Text(verbatim: "9:41")
+                                            .font(.system(size: max(8, 13 * activeScale), weight: .semibold))
+                                            .foregroundColor(.black.opacity(0.86))
+                                        Spacer(minLength: 4)
+                                        HStack(spacing: max(2, 4.5 * activeScale)) {
+                                            Image(systemName: "cellularbars")
+                                            Image(systemName: "wifi")
+                                            Image(systemName: "battery.100")
+                                        }
+                                        .font(.system(size: max(7, 11.5 * activeScale), weight: .semibold))
+                                        .foregroundColor(.black.opacity(0.86))
+                                    }
+                                    .padding(.leading, (selectedViewport == .iphoneDuoOuter ? 18 : 28) * activeScale)
+                                    .padding(.trailing, (selectedViewport == .iphoneDuoOuter ? 32 : 28) * activeScale)
+                                    .padding(.top, (selectedViewport == .iphone ? 14 : 6) * activeScale)
+                                    .frame(width: scaledScreenW, height: scaledTopSafe, alignment: .top)
+                                    .background(Color.white)
+                                }
+                            }
+                            .frame(width: scaledScreenW, height: scaledScreenH)
+                            .clipShape(ScreenClipShape(cornerRadius: scaledCornerRadius, isMacBook: spec.isMacBook, cornerRadii: scaledCornerRadii))
                             .position(
-                                x: spec.screenOffset.x + spec.screenSize.width / 2,
-                                y: spec.screenOffset.y + spec.screenSize.height / 2
+                                x: scaledOffsetX + scaledScreenW / 2,
+                                y: scaledOffsetY + scaledScreenH / 2
+                            )
+                            
+                            // 2. Interactive WebBrowserView or Universal Native GUI Surface (positioned below Status Bar / Dynamic Island so web content never overlaps)
+                            previewSurfaceContent(
+                                width: scaledScreenW,
+                                height: webSurfaceH,
+                                pageZoom: activeScale,
+                                cornerRadius: scaledCornerRadius,
+                                isMacBook: spec.isMacBook,
+                                cornerRadii: webCornerRadii
+                            )
+                            .frame(width: scaledScreenW, height: webSurfaceH)
+                            .clipShape(ScreenClipShape(cornerRadius: scaledCornerRadius, isMacBook: spec.isMacBook, cornerRadii: webCornerRadii))
+                            .position(
+                                x: scaledOffsetX + scaledScreenW / 2,
+                                y: scaledOffsetY + scaledTopSafe + webSurfaceH / 2
                             )
                             
                             // 3. Authentic Hardware Bezel Overlay
@@ -1150,12 +1602,12 @@ struct EmbeddedWebAppPreviewView: View {
                                         .resizable()
                                         .interpolation(.high)
                                         .aspectRatio(contentMode: .fit)
-                                        .frame(width: spec.frameSize.height, height: spec.frameSize.width)
+                                        .frame(width: scaledFrameH, height: scaledFrameW)
                                         .rotationEffect(.degrees(-90))
-                                        .frame(width: spec.frameSize.width, height: spec.frameSize.height)
+                                        .frame(width: scaledFrameW, height: scaledFrameH)
                                         .position(
-                                            x: spec.frameSize.width / 2,
-                                            y: spec.frameSize.height / 2
+                                            x: scaledFrameW / 2,
+                                            y: scaledFrameH / 2
                                         )
                                         .allowsHitTesting(false)
                                 } else {
@@ -1163,38 +1615,35 @@ struct EmbeddedWebAppPreviewView: View {
                                         .resizable()
                                         .interpolation(.high)
                                         .aspectRatio(contentMode: .fit)
-                                        .frame(width: spec.frameSize.width, height: spec.frameSize.height)
+                                        .frame(width: scaledFrameW, height: scaledFrameH)
                                         .position(
-                                            x: spec.frameSize.width / 2,
-                                            y: spec.frameSize.height / 2
+                                            x: scaledFrameW / 2,
+                                            y: scaledFrameH / 2
                                         )
                                         .allowsHitTesting(false)
                                 }
                             } else {
-                                ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook, cornerRadii: spec.cornerRadii)
-                                    .stroke(Color.primary.opacity(0.2), lineWidth: 4)
-                                    .frame(width: spec.screenSize.width, height: spec.screenSize.height)
+                                ScreenClipShape(cornerRadius: scaledCornerRadius, isMacBook: spec.isMacBook, cornerRadii: scaledCornerRadii)
+                                    .stroke(Color.primary.opacity(0.2), lineWidth: 4 * activeScale)
+                                    .frame(width: scaledScreenW, height: scaledScreenH)
                                     .position(
-                                        x: spec.screenOffset.x + spec.screenSize.width / 2,
-                                        y: spec.screenOffset.y + spec.screenSize.height / 2
+                                        x: scaledOffsetX + scaledScreenW / 2,
+                                        y: scaledOffsetY + scaledScreenH / 2
                                     )
                                     .allowsHitTesting(false)
                             }
                         }
-                        .frame(width: spec.frameSize.width, height: spec.frameSize.height)
-                        .shadow(color: Color.black.opacity(0.28), radius: 20, x: 0, y: 10)
+                        .frame(width: scaledFrameW, height: scaledFrameH)
+                        .shadow(color: Color.black.opacity(0.28), radius: 14, x: 0, y: 6)
                         
                         if zoomMode == .fitWidth || zoomMode == .actual {
                             ScrollView([.horizontal, .vertical]) {
                                 deviceView
-                                    .scaleEffect(activeScale)
-                                    .frame(width: spec.frameSize.width * activeScale, height: spec.frameSize.height * activeScale)
-                                    .padding(.vertical, 16)
+                                    .padding(.vertical, 6)
                             }
                             .frame(width: availW, height: availH)
                         } else {
                             deviceView
-                                .scaleEffect(activeScale)
                                 .frame(width: availW, height: availH)
                         }
                     } else if let activeW = effectiveActiveWidth() {
@@ -1789,7 +2238,14 @@ struct EmbeddedWebAppPreviewView: View {
     }
 
     @ViewBuilder
-    private func previewSurfaceContent(width: CGFloat, height: CGFloat) -> some View {
+    private func previewSurfaceContent(
+        width: CGFloat,
+        height: CGFloat,
+        pageZoom: CGFloat = 1.0,
+        cornerRadius: CGFloat = 0,
+        isMacBook: Bool = false,
+        cornerRadii: ScreenCornerRadii? = nil
+    ) -> some View {
         if universalBridge.isUsingNativeCanvas, let nativeImg = universalBridge.renderedNativeImage {
             GeometryReader { canvasGeo in
                 let w = max(1, canvasGeo.size.width)
@@ -1884,7 +2340,11 @@ struct EmbeddedWebAppPreviewView: View {
                 canGoForward: $canGoForward,
                 refreshTrigger: $refreshTrigger,
                 goBackTrigger: $goBackTrigger,
-                goForwardTrigger: $goForwardTrigger
+                goForwardTrigger: $goForwardTrigger,
+                pageZoom: pageZoom,
+                cornerRadius: cornerRadius,
+                isMacBook: isMacBook,
+                cornerRadii: cornerRadii
             )
         }
     }

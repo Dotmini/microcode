@@ -152,7 +152,10 @@ struct EmbeddedDeviceDockView: View {
                             tabScrollProxy.scrollTo(dockService.activeTabId, anchor: .center)
                         }
                     }
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    .clipped()
                 }
+                .layoutPriority(-1)
                 
                 Spacer(minLength: 4)
 
@@ -316,26 +319,16 @@ struct EmbeddedDeviceDockView: View {
                     }
 
                     if deviceRuntime.embeddedDockMode == .android || dockService.activeTab?.kind == .android {
-                        // Hardware Skin Switcher (Samsung Note 20 Ultra / Google Pixel 9 Pro)
+                        // Detected Android Device & AVD Picker (dynamically lists user's real AVDs & connected ADB phones)
                         Menu {
-                            ForEach(AndroidDeviceSkin.allCases) { skin in
-                                Button {
-                                    deviceRuntime.selectedAndroidSkin = skin
-                                } label: {
-                                    HStack {
-                                        Text(skin.rawValue)
-                                        if deviceRuntime.selectedAndroidSkin == skin {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
+                            AndroidDeviceSelectorMenuContent(autoStartIfActive: true)
                         } label: {
                             HStack(spacing: 3) {
                                 Image(systemName: "candybarphone")
                                     .font(.system(size: 10))
-                                Text(deviceRuntime.selectedAndroidSkin.shortName)
+                                Text(deviceRuntime.selectedAndroidToolbarTitle)
                                     .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 7, weight: .bold))
                                     .foregroundColor(.secondary)
@@ -346,7 +339,8 @@ struct EmbeddedDeviceDockView: View {
                             .cornerRadius(5)
                         }
                         .menuStyle(.borderlessButton)
-                        .help("Select Android Hardware Frame & Skin")
+                        .fixedSize()
+                        .help("เลือกรุ่น Android Emulator / อุปกรณ์ Android ที่ตรวจพบในเครื่อง")
 
                         Button { deviceRuntime.sendEmbeddedAndroidKey("4") } label: { Image(systemName: "chevron.left").font(.system(size: 11)) }
                             .buttonStyle(.plain).help("Android Back")
@@ -377,53 +371,65 @@ struct EmbeddedDeviceDockView: View {
                 }
 
                 if showsCloseButton {
-                    Divider()
-                        .frame(height: 14)
-                        .padding(.horizontal, 2)
+                    HStack(spacing: 5) {
+                        Divider()
+                            .frame(height: 14)
+                            .padding(.trailing, 1)
 
-                    // Expand / Restore Split Pane Width Button (matching Antigravity top-right controls)
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            dockService.isExpandedWidth.toggle()
+                        // Expand / Restore Split Pane Width Button (matching Antigravity top-right controls)
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                dockService.isExpandedWidth.toggle()
+                            }
+                        } label: {
+                            Image(systemName: dockService.isExpandedWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(dockService.isExpandedWidth ? .accentColor : .primary.opacity(0.8))
+                                .frame(width: 24, height: 22)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(dockService.isExpandedWidth ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.08))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .stroke(dockService.isExpandedWidth ? Color.accentColor.opacity(0.32) : Color.primary.opacity(0.12), lineWidth: 0.8)
+                                )
+                                .contentShape(Rectangle())
                         }
-                    } label: {
-                        Image(systemName: dockService.isExpandedWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(dockService.isExpandedWidth ? .accentColor : .secondary)
-                            .frame(width: 22, height: 22)
-                            .background(Color.primary.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(dockService.isExpandedWidth ? "Restore Split Width" : "Expand Preview Split Width")
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        .help(dockService.isExpandedWidth ? "Restore Split Width" : "Expand Preview Split Width")
 
-                    // Unmistakable Close Button [✕] at top-right of Preview Split Pane
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            appState.hidePreviewInspector()
-                            dockService.hideDock()
+                        // Unmistakable Close Button [✕] at top-right of Preview Split Pane
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                appState.hidePreviewInspector()
+                                dockService.hideDock()
+                            }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundColor(isHoveringCloseDock ? .white : .primary.opacity(0.85))
+                                .frame(width: 24, height: 22)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(isHoveringCloseDock ? Color.red.opacity(0.85) : Color.primary.opacity(0.10))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .stroke(isHoveringCloseDock ? Color.red.opacity(0.95) : Color.primary.opacity(0.14), lineWidth: 0.8)
+                                )
+                                .contentShape(Rectangle())
                         }
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10.5, weight: .bold))
-                            .foregroundColor(isHoveringCloseDock ? .white : .primary.opacity(0.85))
-                            .frame(width: 24, height: 22)
-                            .background(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(isHoveringCloseDock ? Color.red.opacity(0.85) : Color.primary.opacity(0.10))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .stroke(isHoveringCloseDock ? Color.red.opacity(0.95) : Color.primary.opacity(0.14), lineWidth: 0.8)
-                            )
-                            .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        .onHover { hovering in
+                            isHoveringCloseDock = hovering
+                        }
+                        .help("Close Preview Pane (⌘I)")
                     }
-                    .buttonStyle(.plain)
-                    .onHover { hovering in
-                        isHoveringCloseDock = hovering
-                    }
-                    .help("Close Preview Pane (⌘I)")
+                    .padding(.leading, 4)
+                    .fixedSize()
                     .layoutPriority(10)
                 }
             }

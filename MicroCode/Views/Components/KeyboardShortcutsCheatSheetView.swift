@@ -109,7 +109,10 @@ struct KeyboardShortcutsCheatSheetView: View {
                 withAnimation { app.aiChatVisible.toggle() }
             },
             ShortcutItem(title: "Inline AI Edit / Quick Refactor", category: .ai, keys: ["⌘", "K"], description: "Invoke floating inline AI code modification") { $0.showRefactorDialog() },
-            ShortcutItem(title: "AI Code Analysis", category: .ai, keys: ["⌘", "⌥", "A"], description: "Deep architectural diagnostic scan") { $0.showingCodeAnalysis = true },
+            ShortcutItem(title: "Code Analysis", category: .ai, keys: ["⌘", "⌥", "A"], description: "Open static code analysis panel") {
+                $0.selectedConsoleTab = 3
+                $0.consoleVisible = true
+            },
             ShortcutItem(title: "Sub-Agent Monitor", category: .ai, keys: ["⌘", "⇧", "A"], description: "Inspect active background sub-agents") { $0.showingSubAgentMonitor = true },
 
             // MARK: - Git & Tools

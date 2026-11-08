@@ -12,13 +12,12 @@ use chrono::{DateTime, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::fs;
 use tokio::sync::RwLock as TokioRwLock;
 
-// Streaming Event Definition
 // Streaming Event Definition
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
@@ -45,14 +44,102 @@ pub enum AgentStreamEvent {
 }
 
 // ==========================================
-// Global Agent State
+// Global Agent State & Harness Hygiene Trackers
 // ==========================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileReadStamp {
+    pub size: u64,
+    pub modified_nanos: u128,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionTokenAudit {
+    pub session_id: String,
+    pub total_tool_calls: usize,
+    pub total_tool_output_tokens: usize,
+    pub unique_tool_outputs: usize,
+    pub repeat_read_count: usize,
+    pub repeat_read_tokens_wasted: usize,
+    pub micro_compactions: usize,
+    pub micro_compacted_tokens_saved: usize,
+    pub first_call_guidances_injected: usize,
+    pub stale_write_blocks: usize,
+    pub security_findings_flagged: usize,
+    pub design_findings_flagged: usize,
+    pub window_clamps_applied: usize,
+    pub tool_output_hashes: HashMap<String, usize>,
+}
+
+impl SessionTokenAudit {
+    /// Prompt cache stability ratio (0.0 to 1.0): measures how clean the context
+    /// remains against repeat reads and turn-by-turn churn.
+    pub fn cache_efficiency_score(&self) -> f64 {
+        if self.total_tool_output_tokens == 0 {
+            return 1.0;
+        }
+        let waste = self.repeat_read_tokens_wasted.min(self.total_tool_output_tokens);
+        1.0 - (waste as f64 / self.total_tool_output_tokens as f64)
+    }
+}
 
 static AGENT_SESSIONS: Lazy<Arc<StdRwLock<HashMap<String, AgentSession>>>> =
     Lazy::new(|| Arc::new(StdRwLock::new(HashMap::new())));
 
 static FILE_OPERATION_LOG: Lazy<Arc<StdRwLock<Vec<FileOperation>>>> =
     Lazy::new(|| Arc::new(StdRwLock::new(Vec::new())));
+
+/// Tracks which tools have already received their First-Call Guidance in each session.
+static GUIDED_TOOLS_BY_SESSION: Lazy<Arc<StdRwLock<HashMap<String, HashSet<String>>>>> =
+    Lazy::new(|| Arc::new(StdRwLock::new(HashMap::new())));
+
+/// Tracks file `(size, mtime, sha256)` stamps per `(session_id, canonical_path)` for the Stale-File Write Guard.
+static SESSION_FILE_STAMPS: Lazy<Arc<StdRwLock<HashMap<(String, PathBuf), FileReadStamp>>>> =
+    Lazy::new(|| Arc::new(StdRwLock::new(HashMap::new())));
+
+/// Tracks `(session_id, read_key) -> sha256` for SHA-256 Repeat-Read Deduplication.
+static SESSION_READ_HASHES: Lazy<Arc<StdRwLock<HashMap<(String, String), String>>>> =
+    Lazy::new(|| Arc::new(StdRwLock::new(HashMap::new())));
+
+/// Tracks ordered list of relative file paths modified per session for the Session Edit Receipt.
+static SESSION_EDITED_FILES: Lazy<Arc<StdRwLock<HashMap<String, Vec<String>>>>> =
+    Lazy::new(|| Arc::new(StdRwLock::new(HashMap::new())));
+
+/// Tracks per-session token waste, repeat reads, micro-compactions, and guard interventions.
+static SESSION_TOKEN_AUDIT: Lazy<Arc<StdRwLock<HashMap<String, SessionTokenAudit>>>> =
+    Lazy::new(|| Arc::new(StdRwLock::new(HashMap::new())));
+
+/// Compute lowercase hex SHA-256 digest of `data`.
+pub fn compute_sha256_hex(data: &[u8]) -> String {
+    let digest = openssl::sha::sha256(data);
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{:02x}", b);
+    }
+    hex
+}
+
+pub fn get_session_token_audit(session_id: &str) -> SessionTokenAudit {
+    let audits = SESSION_TOKEN_AUDIT.read().unwrap();
+    audits.get(session_id).cloned().unwrap_or_else(|| SessionTokenAudit {
+        session_id: session_id.to_string(),
+        ..Default::default()
+    })
+}
+
+fn update_token_audit<F: FnOnce(&mut SessionTokenAudit)>(session_id: &str, f: F) {
+    if let Ok(mut audits) = SESSION_TOKEN_AUDIT.write() {
+        let entry = audits
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionTokenAudit {
+                session_id: session_id.to_string(),
+                ..Default::default()
+            });
+        f(entry);
+    }
+}
 
 /// Global safety policy engine (default: deny destructive tools, allow all others).
 /// Can be reconfigured at runtime via API.
@@ -107,13 +194,164 @@ const MAX_INDEXABLE_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub const DEFAULT_MAX_BUDGET_TOKENS: usize = 1_000_000; // 1,000,000 tokens ceiling
 pub const DEFAULT_MAX_BUDGET_USD: f64 = 10.0; // $10.00 USD ceiling
 
-/// Estimate token count for a text snippet (~3.8 to 4 characters per token on average)
+/// Multilingual-aware token estimator:
+/// - ASCII characters average ~4 characters per token
+/// - Non-ASCII characters (Thai, CJK, symbols) average ~1.8-2 characters per token
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    let chars = text.chars().count();
-    (chars + 3) / 4
+    let mut ascii_chars = 0usize;
+    let mut non_ascii_chars = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii_chars += 1;
+        } else {
+            non_ascii_chars += 1;
+        }
+    }
+    let ascii_tokens = (ascii_chars + 3) / 4;
+    let non_ascii_tokens = (non_ascii_chars + 1) / 2;
+    ascii_tokens + non_ascii_tokens
+}
+
+/// Return the effective context window size (in tokens) for a model.
+pub fn model_context_window(model: &str) -> usize {
+    let m = model.to_ascii_lowercase();
+    if m.contains("gemini-1.5") || m.contains("gemini-2.5") || m.contains("gemini-2.0") || m.contains("gemini-3") {
+        200_000
+    } else if m.contains("claude") {
+        200_000
+    } else if m.contains("gpt-4.1") || m.contains("gpt-4o") || m.contains("o1") || m.contains("o3") {
+        128_000
+    } else if m.contains("deepseek") || m.contains("qwen") {
+        64_000
+    } else if m.contains("ollama") || m.contains("local") || m.contains("omni") {
+        32_768
+    } else {
+        128_000
+    }
+}
+
+/// Dynamically clamp `max_tokens` each turn so `prompt_tokens + max_tokens` never overflows
+/// the model's context window (preventing HTTP 400 errors near context limits).
+pub fn clamp_max_tokens_to_window(
+    session_id: &str,
+    model: &str,
+    prompt_tokens: usize,
+    requested_max_tokens: Option<u32>,
+) -> u32 {
+    let window = model_context_window(model);
+    let safety_margin = 1_024usize;
+    let default_max = requested_max_tokens.unwrap_or(8_192) as usize;
+    let available = window.saturating_sub(prompt_tokens.saturating_add(safety_margin));
+    let clamped = available.min(default_max).clamp(256, 32_768) as u32;
+    if (clamped as usize) < default_max {
+        update_token_audit(session_id, |audit| {
+            audit.window_clamps_applied += 1;
+        });
+    }
+    clamped
+}
+
+/// Batch Micro-Compaction at 60% context fill:
+/// Keeps turn records untouched on normal turns to preserve the prefix prompt cache,
+/// and compacts all older re-obtainable tool outputs (outside the last 3 turns) in a single
+/// batch once estimated context reaches 60% of the working budget.
+pub fn micro_compact_turn_records(
+    session_id: &str,
+    turn_records: &mut [String],
+    base_prompt_tokens: usize,
+    working_window_tokens: usize,
+) -> usize {
+    if turn_records.len() <= 3 {
+        return 0;
+    }
+    let turns_tokens: usize = turn_records.iter().map(|r| estimate_tokens(r)).sum();
+    let total_tokens = base_prompt_tokens + turns_tokens;
+    let threshold = (working_window_tokens * 60) / 100;
+    if total_tokens < threshold {
+        return 0;
+    }
+
+    let older_end = turn_records.len().saturating_sub(3);
+    let mut total_saved_tokens = 0usize;
+
+    for rec in &mut turn_records[..older_end] {
+        if rec.contains("[Micro-compacted tool output") || rec.len() <= 800 {
+            continue;
+        }
+        let before_tokens = estimate_tokens(rec);
+        let mut compacted = String::new();
+        let mut in_tool_body = false;
+        let mut current_tool_header = String::new();
+        let mut body_chars = 0usize;
+        let mut body_preview = String::new();
+
+        for line in rec.lines() {
+            if line.starts_with("[Tool ") && line.ends_with("]:") {
+                if in_tool_body && body_chars > 400 {
+                    compacted.push_str(&format!(
+                        "{}\n[Micro-compacted tool output ({} chars) — preview: {}]\n",
+                        current_tool_header,
+                        body_chars,
+                        body_preview.trim()
+                    ));
+                } else if in_tool_body {
+                    compacted.push_str(&current_tool_header);
+                    compacted.push('\n');
+                    compacted.push_str(&body_preview);
+                    compacted.push('\n');
+                }
+                in_tool_body = true;
+                current_tool_header = line.to_string();
+                body_chars = 0;
+                body_preview.clear();
+            } else if in_tool_body {
+                body_chars += line.len() + 1;
+                if body_preview.len() < 180 {
+                    if !body_preview.is_empty() {
+                        body_preview.push_str(" | ");
+                    }
+                    body_preview.push_str(line.trim());
+                }
+            } else {
+                compacted.push_str(line);
+                compacted.push('\n');
+            }
+        }
+
+        if in_tool_body {
+            if body_chars > 400 {
+                compacted.push_str(&format!(
+                    "{}\n[Micro-compacted tool output ({} chars) — preview: {}]\n",
+                    current_tool_header,
+                    body_chars,
+                    body_preview.trim()
+                ));
+            } else {
+                compacted.push_str(&current_tool_header);
+                compacted.push('\n');
+                compacted.push_str(&body_preview);
+                compacted.push('\n');
+            }
+        }
+
+        let after_tokens = estimate_tokens(&compacted);
+        if after_tokens < before_tokens {
+            total_saved_tokens += before_tokens - after_tokens;
+            *rec = compacted;
+        }
+    }
+
+    if total_saved_tokens > 0 {
+        update_token_audit(session_id, |audit| {
+            audit.micro_compactions += 1;
+            audit.micro_compacted_tokens_saved += total_saved_tokens;
+        });
+    }
+
+    total_saved_tokens
 }
 
 /// Estimate USD cost for tokens based on provider and model
@@ -879,104 +1117,160 @@ pub fn get_available_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "read_file".to_string(),
-            description: "Read the contents of a file at the specified path".to_string(),
+            description: "Read file contents (supports optional start_line/end_line slice).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file to read"}
+                    "path": {"type": "string", "description": "Relative or workspace file path"},
+                    "start_line": {"type": "integer", "description": "1-based start line (optional)"},
+                    "end_line": {"type": "integer", "description": "1-based inclusive end line (optional)"}
                 },
                 "required": ["path"]
             }),
         },
         ToolDefinition {
             name: "write_file".to_string(),
-            description: "Create or overwrite a file with the specified content".to_string(),
+            description: "Create a new file or overwrite an existing file (guarded against stale external edits).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path where the file should be created/updated"},
-                    "content": {"type": "string", "description": "Content to write to the file"}
+                    "path": {"type": "string", "description": "Target file path"},
+                    "content": {"type": "string", "description": "Full file content"}
                 },
                 "required": ["path", "content"]
             }),
         },
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Make targeted edits to a file by replacing specific content".to_string(),
+            description: "Replace a targeted block in a file (guarded against stale external edits).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file to edit"},
-                    "search": {"type": "string", "description": "Exact text to search for"},
-                    "replace": {"type": "string", "description": "Text to replace with"}
+                    "path": {"type": "string", "description": "Target file path"},
+                    "search": {"type": "string", "description": "Exact block to replace"},
+                    "replace": {"type": "string", "description": "Replacement block"},
+                    "allow_multiple": {"type": "boolean", "description": "Replace all occurrences if true"}
                 },
                 "required": ["path", "search", "replace"]
             }),
         },
         ToolDefinition {
-            name: "delete_file".to_string(),
-            description: "Delete a file at the specified path".to_string(),
+            name: "batch_edit".to_string(),
+            description: "Apply atomic search/replace edits across one or more files with rollback on error.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file to delete"}
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "search": {"type": "string"},
+                                "replace": {"type": "string"},
+                                "allow_multiple": {"type": "boolean"}
+                            },
+                            "required": ["path", "search", "replace"]
+                        }
+                    }
+                },
+                "required": ["edits"]
+            }),
+        },
+        ToolDefinition {
+            name: "delete_file".to_string(),
+            description: "Delete a file in the workspace.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to delete"}
                 },
                 "required": ["path"]
             }),
         },
         ToolDefinition {
             name: "list_directory".to_string(),
-            description: "List all files and directories in the specified path".to_string(),
+            description: "List files and directories at path.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the directory to list"},
-                    "recursive": {"type": "boolean", "description": "Whether to list recursively"}
+                    "path": {"type": "string", "description": "Directory path"},
+                    "recursive": {"type": "boolean", "description": "Recurse up to depth 5"}
                 },
                 "required": ["path"]
             }),
         },
         ToolDefinition {
-            name: "search_code".to_string(),
-            description: "Search for text patterns across files in the workspace".to_string(),
+            name: "repo_map".to_string(),
+            description: "Build a Tree-sitter reference-ranked map of workspace files and symbols.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query (supports regex)"},
-                    "file_pattern": {"type": "string", "description": "Optional glob pattern to filter files"}
+                    "max_tokens": {"type": "integer", "description": "Token budget (default 1000)"}
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "search_code".to_string(),
+            description: "Regex/text search across workspace files via ripgrep.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Regex or literal pattern"},
+                    "file_pattern": {"type": "string", "description": "Optional glob filter (e.g. '*.rs')"}
                 },
                 "required": ["query"]
             }),
         },
         ToolDefinition {
-            name: "create_task".to_string(),
-            description: "Create a task and optionally add it to todo.md".to_string(),
+            name: "design_check".to_string(),
+            description: "Run static UI anti-slop linter on Web (CSS/HTML/TSX/Svelte) or SwiftUI (.swift) files.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string", "description": "Task title"},
-                    "description": {"type": "string", "description": "Task description"},
+                    "path": {"type": "string", "description": "File or directory to lint (defaults to '.')"}
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "security_audit".to_string(),
+            description: "Scan file or directory for CWE security vulnerabilities (injection, traversal, secrets, weak crypto).".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File or directory to scan (defaults to '.')"}
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "create_task".to_string(),
+            description: "Record a task item and optionally append to todo.md.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
                     "priority": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
-                    "add_to_todo": {"type": "boolean", "description": "Whether to add to todo.md"}
+                    "add_to_todo": {"type": "boolean"}
                 },
                 "required": ["title"]
             }),
         },
         ToolDefinition {
             name: "run_command".to_string(),
-            description: "Execute a shell command in the workspace (sandboxed)".to_string(),
+            description: "Run a sandboxed shell command in the workspace.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Command to execute"},
-                    "working_dir": {"type": "string", "description": "Working directory (optional)"}
+                    "command": {"type": "string"},
+                    "working_dir": {"type": "string"}
                 },
                 "required": ["command"]
             }),
         },
         ToolDefinition {
             name: "git_status".to_string(),
-            description: "Get the current git status of the workspace".to_string(),
+            description: "Get git branch, staged, modified, and untracked files.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -984,42 +1278,42 @@ pub fn get_available_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "git_commit".to_string(),
-            description: "Create a git commit with the specified message".to_string(),
+            description: "Stage files and create a git commit.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "message": {"type": "string", "description": "Commit message"},
-                    "files": {"type": "array", "items": {"type": "string"}, "description": "Files to stage (empty for all)"}
+                    "message": {"type": "string"},
+                    "files": {"type": "array", "items": {"type": "string"}}
                 },
                 "required": ["message"]
             }),
         },
         ToolDefinition {
             name: "search_rag".to_string(),
-            description: "Perform a semantic (meaning-based) search across the entire codebase to find relevant code or logic".to_string(),
+            description: "Semantic vector search across indexed code chunks.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Natural language query to search for"},
-                    "limit": {"type": "integer", "description": "Max number of results (default 5)"}
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"}
                 },
                 "required": ["query"]
             }),
         },
         ToolDefinition {
             name: "create_plan".to_string(),
-            description: "Propose a multi-step execution plan for complex tasks. This MUST be called first for multi-file changes.".to_string(),
+            description: "Create a structured multi-step execution plan before multi-file changes.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "description": {"type": "string", "description": "High-level goal of the plan"},
+                    "description": {"type": "string"},
                     "steps": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "description": {"type": "string", "description": "What this step does"},
-                                "tool": {"type": "string", "description": "The tool to be used for this step (e.g., search_rag, edit_file)"}
+                                "description": {"type": "string"},
+                                "tool": {"type": "string"}
                             },
                             "required": ["description", "tool"]
                         }
@@ -1030,30 +1324,77 @@ pub fn get_available_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "execute_command".to_string(),
-            description: "Execute a terminal command for building, testing, or linting code. Returns stdout and stderr even if the command fails, allowing for self-correction.".to_string(),
+            description: "Run build, test, or lint command and return stdout/stderr for verification.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The shell command to execute"},
-                    "description": {"type": "string", "description": "Short explanation of what this command verifies"}
+                    "command": {"type": "string"},
+                    "description": {"type": "string"}
                 },
                 "required": ["command"]
             }),
         },
         ToolDefinition {
             name: "create_project".to_string(),
-            description: "Scaffold a new project structure (Rust, Swift, Node.js, Python, Web, etc.)".to_string(),
+            description: "Scaffold a new project (rust, swift, node, python, web).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Project name"},
-                    "type": {"type": "string", "enum": ["rust", "swift", "node", "python", "web"], "description": "Project type"},
-                    "path": {"type": "string", "description": "Target path (relative to workspace). Defaults to project name."}
+                    "name": {"type": "string"},
+                    "type": {"type": "string", "enum": ["rust", "swift", "node", "python", "web"]},
+                    "path": {"type": "string"}
                 },
                 "required": ["name", "type"]
             }),
         },
     ]
+}
+
+/// First-Call Tool Guidance: rich operational judgment kept out of the system prompt
+/// and injected only the first time a session invokes each tool.
+pub fn tool_first_call_guidance(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "read_file" => Some(
+            "Prefer `start_line`/`end_line` for large files. Avoid re-reading unchanged files already in context; SHA-256 repeat-read deduplication is active.",
+        ),
+        "write_file" => Some(
+            "Use `write_file` for new files or intentional full rewrites. Existing files are protected by the Stale-File Write Guard: if modified externally since your last read, call `read_file` first.",
+        ),
+        "edit_file" | "batch_edit" => Some(
+            "Include 2-3 unchanged context lines in `search` so target blocks match uniquely. Use `batch_edit` when updating multiple files atomically. Check the appended Session Edit Receipt instead of running `git status`.",
+        ),
+        "search_code" | "search_rag" => Some(
+            "Narrow `search_code` with `file_pattern` (e.g. `*.rs`, `*.swift`) to reduce noise, or use `repo_map` first to locate high-centrality modules.",
+        ),
+        "repo_map" => Some(
+            "Files are ranked by cross-file AST symbol references (`refs * 10 + symbols`). Start exploration from top-ranked hub files.",
+        ),
+        "run_command" | "execute_command" => Some(
+            "Prefer targeted verification commands (`cargo check`, `cargo test <name>`, `swift test`) over broad rebuilds. Inspect the first compiler error before retrying.",
+        ),
+        "design_check" => Some(
+            "Fix flagged AI-slop patterns: replace gradient text, neon purple glows, and bounce springs with clean typographic hierarchy, tinted neutral surfaces, and `tabular-nums` / `.monospacedDigit()`.",
+        ),
+        "security_audit" => Some(
+            "Remediate all CWE findings: parameterize SQL queries (CWE-89), avoid shell string interpolation (CWE-78), canonicalize paths (CWE-22), and remove hardcoded secrets (CWE-798).",
+        ),
+        _ => None,
+    }
+}
+
+/// Returns `Some(guidance)` only on the first call to `tool_name` within `session_id`.
+pub fn take_first_call_guidance(session_id: &str, tool_name: &str) -> Option<&'static str> {
+    let guidance = tool_first_call_guidance(tool_name)?;
+    let mut map = GUIDED_TOOLS_BY_SESSION.write().unwrap();
+    let seen = map.entry(session_id.to_string()).or_default();
+    if seen.insert(tool_name.to_string()) {
+        update_token_audit(session_id, |audit| {
+            audit.first_call_guidances_injected += 1;
+        });
+        Some(guidance)
+    } else {
+        None
+    }
 }
 
 // ==========================================
@@ -1425,12 +1766,16 @@ pub async fn execute_tool_with_mode(
     let workspace = &session.workspace_path;
 
     let result = match tool_name {
-        "read_file" => tool_read_file(workspace, arguments).await,
+        "read_file" => tool_read_file(session_id, workspace, arguments).await,
         "write_file" => tool_write_file(session_id, workspace, arguments).await,
         "edit_file" => tool_edit_file(session_id, workspace, arguments).await,
+        "batch_edit" => tool_batch_edit(session_id, workspace, arguments).await,
         "delete_file" => tool_delete_file(session_id, workspace, arguments).await,
         "list_directory" => tool_list_directory(workspace, arguments).await,
+        "repo_map" => tool_repo_map(workspace, arguments).await,
         "search_code" => tool_search_code(workspace, arguments).await,
+        "design_check" => tool_design_check(session_id, workspace, arguments).await,
+        "security_audit" => tool_security_audit(session_id, workspace, arguments).await,
         "create_task" => tool_create_task(session_id, workspace, arguments).await,
         "run_command" => tool_run_command(workspace, arguments).await,
         "git_status" => tool_git_status(workspace).await,
@@ -1450,26 +1795,381 @@ pub async fn execute_tool_with_mode(
     let tool_call_id = uuid::Uuid::new_v4().to_string();
 
     match result {
-        Ok(output) => Ok(ToolResult {
-            tool_call_id,
-            success: true,
-            output,
-            error: None,
-        }),
-        Err(e) => Ok(ToolResult {
-            tool_call_id,
-            success: false,
-            output: String::new(),
-            error: Some(e.to_string()),
-        }),
+        Ok(mut output) => {
+            let out_hash = compute_sha256_hex(output.as_bytes());
+            let out_tokens = estimate_tokens(&output);
+            update_token_audit(session_id, |audit| {
+                audit.total_tool_calls += 1;
+                audit.total_tool_output_tokens += out_tokens;
+                let count = audit.tool_output_hashes.entry(out_hash).or_insert(0);
+                if *count == 0 {
+                    audit.unique_tool_outputs += 1;
+                }
+                *count += 1;
+            });
+
+            if let Some(guidance) = take_first_call_guidance(session_id, tool_name) {
+                output.push_str(&format!(
+                    "\n\n💡 [Tool Guidance — {}]: {}",
+                    tool_name, guidance
+                ));
+            }
+
+            Ok(ToolResult {
+                tool_call_id,
+                success: true,
+                output,
+                error: None,
+            })
+        }
+        Err(e) => {
+            update_token_audit(session_id, |audit| {
+                audit.total_tool_calls += 1;
+            });
+            Ok(ToolResult {
+                tool_call_id,
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            })
+        }
     }
+}
+
+// ==========================================
+// Stale-Write Guard, Session Receipts & Guards
+// ==========================================
+
+fn read_disk_stamp(path: &Path, content_bytes: &[u8]) -> FileReadStamp {
+    let meta = std::fs::metadata(path).ok();
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(content_bytes.len() as u64);
+    let modified_nanos = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    FileReadStamp {
+        size,
+        modified_nanos,
+        sha256: compute_sha256_hex(content_bytes),
+    }
+}
+
+pub fn record_file_stamp(session_id: &str, path: &Path, content_bytes: &[u8]) {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let stamp = read_disk_stamp(&canonical, content_bytes);
+    if let Ok(mut stamps) = SESSION_FILE_STAMPS.write() {
+        stamps.insert((session_id.to_string(), canonical), stamp);
+    }
+}
+
+/// Checks if `path` has been modified externally on disk since the session last read or wrote it.
+pub fn verify_not_stale_on_disk(session_id: &str, path: &Path, display_path: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let recorded = {
+        let stamps = SESSION_FILE_STAMPS.read().unwrap();
+        stamps.get(&(session_id.to_string(), canonical.clone())).cloned()
+    };
+
+    if let Some(prev) = recorded {
+        if let Ok(current_bytes) = std::fs::read(&canonical) {
+            let current_sha = compute_sha256_hex(&current_bytes);
+            if current_sha != prev.sha256 {
+                update_token_audit(session_id, |audit| {
+                    audit.stale_write_blocks += 1;
+                });
+                return Err(AppError::ValidationError(format!(
+                    "Stale-file write guard: '{}' was modified externally since your last read/write in this session. Call read_file first to inspect the latest changes before overwriting.",
+                    display_path
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn record_session_file_edit(session_id: &str, path_str: &str) -> String {
+    let mut files_map = SESSION_EDITED_FILES.write().unwrap();
+    let list = files_map.entry(session_id.to_string()).or_default();
+    let normalized = path_str.trim_start_matches("./").to_string();
+    if !list.contains(&normalized) {
+        list.push(normalized);
+    }
+    let count = list.len();
+    let joined = list.join(", ");
+    let mut receipt = format!(
+        "\n[Session Edit Receipt: {} file(s) touched in session: {}]",
+        count, joined
+    );
+    if count >= 2 {
+        receipt.push_str(
+            "\n[Cross-File Review Note: Multiple files modified in this session — verify cross-file imports, type signatures, and callers.]",
+        );
+    }
+    receipt
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesignFinding {
+    pub rule_id: String,
+    pub severity: String,
+    pub file_path: String,
+    pub line: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityFinding {
+    pub cwe_id: String,
+    pub severity: String,
+    pub file_path: String,
+    pub line: usize,
+    pub message: String,
+}
+
+fn is_ui_source_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("html" | "css" | "scss" | "svelte" | "vue" | "jsx" | "tsx" | "swift")
+    )
+}
+
+/// Static UI Anti-Slop Linter (supports Web CSS/HTML/TSX/Svelte and Native SwiftUI `.swift`).
+pub fn lint_ui_design(path: &Path, content: &str) -> Vec<DesignFinding> {
+    let mut findings = Vec::new();
+    if !is_ui_source_file(path) {
+        return findings;
+    }
+    let file_path = path.to_string_lossy().to_string();
+    let lower_full = content.to_ascii_lowercase();
+
+    // 1. Purple-to-Blue AI Cliché Palette check
+    let mut purple_hits = 0usize;
+    let mut first_purple_line = 1usize;
+    for (idx, line) in content.lines().enumerate() {
+        let l = line.to_ascii_lowercase();
+        let mut line_hits = 0usize;
+        for token in ["#6366f1", "#8b5cf6", "#a855f7", "#7c3aed"] {
+            if l.contains(token) {
+                line_hits += 1;
+            }
+        }
+        if l.contains("lineargradient") && l.contains("purple") && l.contains("blue") {
+            line_hits += 2;
+        }
+        if line_hits > 0 {
+            if purple_hits == 0 {
+                first_purple_line = idx + 1;
+            }
+            purple_hits += line_hits;
+        }
+    }
+    if purple_hits >= 2 {
+        findings.push(DesignFinding {
+            rule_id: "purple-blue-ai-palette".to_string(),
+            severity: "warning".to_string(),
+            file_path: file_path.clone(),
+            line: first_purple_line,
+            message: "Overused AI-default indigo/violet gradient palette (#6366f1/#8b5cf6/#a855f7). Prefer intentional brand or neutral surface tokens.".to_string(),
+        });
+    }
+
+    for (idx, raw_line) in content.lines().enumerate() {
+        let line_num = idx + 1;
+        let l = raw_line.to_ascii_lowercase();
+
+        // 2. Gradient text (`background-clip: text` + `text-fill-color: transparent`)
+        if l.contains("background-clip: text")
+            || l.contains("-webkit-background-clip: text")
+            || l.contains("-webkit-text-fill-color: transparent")
+        {
+            findings.push(DesignFinding {
+                rule_id: "ai-gradient-text".to_string(),
+                severity: "warning".to_string(),
+                file_path: file_path.clone(),
+                line: line_num,
+                message: "Gradient-clipped text is a common AI UI slop pattern that reduces legibility. Use solid high-contrast typography.".to_string(),
+            });
+        }
+
+        // 3. Exaggerated bounce spring easing
+        if l.contains("cubic-bezier(0.34, 1.56")
+            || l.contains("cubic-bezier(0.68, -0.55")
+            || (l.contains("dampingfraction: 0.4") && l.contains("spring"))
+        {
+            findings.push(DesignFinding {
+                rule_id: "bounce-spring-overuse".to_string(),
+                severity: "info".to_string(),
+                file_path: file_path.clone(),
+                line: line_num,
+                message: "Overshooting bounce easing feels synthetic on standard controls. Prefer critically damped easing (`cubic-bezier(0.22, 1, 0.36, 1)` or `.snappy`).".to_string(),
+            });
+        }
+
+        // 4. Generic AI marketing copy
+        for phrase in [
+            "revolutionize your",
+            "unleash the power of",
+            "supercharge your workflow",
+            "seamless ai integration",
+            "next-generation ai-powered",
+        ] {
+            if l.contains(phrase) {
+                findings.push(DesignFinding {
+                    rule_id: "generic-ai-copy".to_string(),
+                    severity: "warning".to_string(),
+                    file_path: file_path.clone(),
+                    line: line_num,
+                    message: format!(
+                        "Generic AI filler copy detected ('{}'). State concrete product capabilities instead.",
+                        phrase
+                    ),
+                });
+                break;
+            }
+        }
+
+        // 5. Side-tab accent stripe on rounded card
+        if (l.contains("border-left: 3px solid") || l.contains("border-left: 4px solid"))
+            && lower_full.contains("border-radius")
+        {
+            findings.push(DesignFinding {
+                rule_id: "side-tab-accent-stripe".to_string(),
+                severity: "info".to_string(),
+                file_path: file_path.clone(),
+                line: line_num,
+                message: "Thick `border-left` accent stripe on rounded cards is a repetitive AI card trope. Consider a subtle status dot or badge.".to_string(),
+            });
+        }
+    }
+
+    findings
+}
+
+/// Built-in CWEval Security Scanner for source code files.
+pub fn scan_code_security(path: &Path, content: &str) -> Vec<SecurityFinding> {
+    let mut findings = Vec::new();
+    let file_path = path.to_string_lossy().to_string();
+
+    for (idx, raw_line) in content.lines().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with('*') {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+
+        // CWE-89: SQL Injection via string formatting/interpolation
+        let has_sql_verb = lower.contains("select ")
+            && lower.contains(" from ")
+            || (lower.contains("insert into ") && lower.contains("values"))
+            || (lower.contains("update ") && lower.contains(" set "))
+            || (lower.contains("delete from ") && lower.contains(" where "));
+        let has_interpolation = (trimmed.contains("format!(") && trimmed.contains("{}"))
+            || (trimmed.starts_with("f\"") || trimmed.contains("= f\"") || trimmed.contains("(f\""))
+            || (trimmed.contains('`') && trimmed.contains("${"));
+        if has_sql_verb && has_interpolation {
+            findings.push(SecurityFinding {
+                cwe_id: "CWE-89".to_string(),
+                severity: "high".to_string(),
+                file_path: file_path.clone(),
+                line: line_num,
+                message: "Potential SQL Injection: SQL query constructed via string interpolation. Use parameterized queries (`?` or `$1`).".to_string(),
+            });
+        }
+
+        // CWE-78: OS Command Injection
+        if (lower.contains("shell=true") && (trimmed.contains("f\"") || trimmed.contains(".format(") || trimmed.contains('+')))
+            || (lower.contains("os.system(") && (trimmed.contains("f\"") || trimmed.contains('+')))
+            || (lower.contains("child_process.exec(") && trimmed.contains("${"))
+        {
+            findings.push(SecurityFinding {
+                cwe_id: "CWE-78".to_string(),
+                severity: "high".to_string(),
+                file_path: file_path.clone(),
+                line: line_num,
+                message: "Potential OS Command Injection: shell execution with interpolated input. Pass argument arrays without shell invocation.".to_string(),
+            });
+        }
+
+        // CWE-798: Hardcoded API Keys / Secrets
+        for prefix in ["sk-proj-", "sk-ant-api", "ghp_", "akia"] {
+            if lower.contains(prefix) && !lower.contains("example") && !lower.contains("placeholder") && !lower.contains("prefix") {
+                findings.push(SecurityFinding {
+                    cwe_id: "CWE-798".to_string(),
+                    severity: "high".to_string(),
+                    file_path: file_path.clone(),
+                    line: line_num,
+                    message: "Potential hardcoded credential or API token detected. Load secrets from environment variables or Keychain.".to_string(),
+                });
+                break;
+            }
+        }
+
+        // CWE-79 / CWE-95 / CWE-502: XSS, eval, or unsafe deserialization
+        if trimmed.contains("dangerouslySetInnerHTML")
+            || trimmed.contains(".innerHTML =")
+            || trimmed.contains("pickle.loads(")
+            || (trimmed.contains("yaml.load(") && !trimmed.contains("Loader") && !trimmed.contains("safe_load"))
+        {
+            findings.push(SecurityFinding {
+                cwe_id: "CWE-79/502".to_string(),
+                severity: "medium".to_string(),
+                file_path: file_path.clone(),
+                line: line_num,
+                message: "Unsafe DOM injection or untrusted deserialization detected. Sanitize HTML or use safe loaders.".to_string(),
+            });
+        }
+    }
+
+    findings
+}
+
+fn run_post_write_guards(session_id: &str, path: &Path, content: &str) -> String {
+    let mut notes = String::new();
+    let sec_findings = scan_code_security(path, content);
+    if !sec_findings.is_empty() {
+        update_token_audit(session_id, |audit| {
+            audit.security_findings_flagged += sec_findings.len();
+        });
+        notes.push_str(&format!(
+            "\n⚠️ [Security Guard — {} CWE finding(s)]:",
+            sec_findings.len()
+        ));
+        for f in sec_findings.iter().take(5) {
+            notes.push_str(&format!("\n  - L{} [{}] {}", f.line, f.cwe_id, f.message));
+        }
+    }
+
+    let design_findings = lint_ui_design(path, content);
+    if !design_findings.is_empty() {
+        update_token_audit(session_id, |audit| {
+            audit.design_findings_flagged += design_findings.len();
+        });
+        notes.push_str(&format!(
+            "\n🎨 [Design Check — {} UI anti-slop finding(s)]:",
+            design_findings.len()
+        ));
+        for f in design_findings.iter().take(5) {
+            notes.push_str(&format!("\n  - L{} [{}] {}", f.line, f.rule_id, f.message));
+        }
+    }
+
+    notes
 }
 
 // ==========================================
 // Individual Tool Implementations
 // ==========================================
 
-async fn tool_read_file(workspace: &Path, args: &serde_json::Value) -> Result<String> {
+async fn tool_read_file(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
     let path_str = args["path"]
         .as_str()
         .ok_or_else(|| AppError::ValidationError("path is required".to_string()))?;
@@ -1493,34 +2193,63 @@ async fn tool_read_file(workspace: &Path, args: &serde_json::Value) -> Result<St
         .await
         .map_err(|e| AppError::IOError(format!("Failed to read file: {}", e)))?;
 
+    // Record full-file stamp so write_file / edit_file can detect external edits
+    record_file_stamp(session_id, &full_path, content.as_bytes());
+
     let start_line = args.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize);
     let end_line = args.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
 
-    if start_line.is_some() || end_line.is_some() {
+    let rendered = if start_line.is_some() || end_line.is_some() {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         if total == 0 {
-            return Ok(String::new());
+            String::new()
+        } else {
+            let s = start_line.unwrap_or(1).max(1).min(total);
+            let e = end_line.unwrap_or(total).max(s).min(total);
+            let slice = &lines[(s - 1)..e];
+            let numbered: Vec<String> = slice
+                .iter()
+                .enumerate()
+                .map(|(idx, line)| format!("{}: {}", s + idx, line))
+                .collect();
+            format!(
+                "[File: {} | Lines {}-{} of {}]\n{}",
+                path_str,
+                s,
+                e,
+                total,
+                numbered.join("\n")
+            )
         }
-        let s = start_line.unwrap_or(1).max(1).min(total);
-        let e = end_line.unwrap_or(total).max(s).min(total);
-        let slice = &lines[(s - 1)..e];
-        let numbered: Vec<String> = slice
-            .iter()
-            .enumerate()
-            .map(|(idx, line)| format!("{}: {}", s + idx, line))
-            .collect();
+    } else {
+        content
+    };
+
+    // SHA-256 Repeat-Read Deduplication check
+    let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+    let read_key = format!("{}:{:?}:{:?}", canonical.display(), start_line, end_line);
+    let content_sha = compute_sha256_hex(rendered.as_bytes());
+    let is_repeat = {
+        let mut hashes = SESSION_READ_HASHES.write().unwrap();
+        let prev = hashes.insert((session_id.to_string(), read_key), content_sha.clone());
+        prev.as_deref() == Some(content_sha.as_str())
+    };
+
+    if is_repeat {
+        let wasted_tokens = estimate_tokens(&rendered);
+        update_token_audit(session_id, |audit| {
+            audit.repeat_read_count += 1;
+            audit.repeat_read_tokens_wasted += wasted_tokens;
+        });
         return Ok(format!(
-            "[File: {} | Lines {}-{} of {}]\n{}",
-            path_str,
-            s,
-            e,
-            total,
-            numbered.join("\n")
+            "[Repeat-Read Notice: sha256={} unchanged since earlier read in this session — avoid redundant reads]\n{}",
+            &content_sha[..12],
+            rendered
         ));
     }
 
-    Ok(content)
+    Ok(rendered)
 }
 
 async fn tool_write_file(
@@ -1537,6 +2266,7 @@ async fn tool_write_file(
 
     let full_path = resolve_path(workspace, path_str);
     validate_path_in_workspace(workspace, &full_path)?;
+    verify_not_stale_on_disk(session_id, &full_path, path_str)?;
 
     // Store old content for undo
     let old_content = fs::read_to_string(&full_path).await.ok();
@@ -1553,6 +2283,8 @@ async fn tool_write_file(
         .await
         .map_err(|e| AppError::IOError(format!("Failed to write file: {}", e)))?;
 
+    record_file_stamp(session_id, &full_path, content.as_bytes());
+
     // Log operation for undo
     log_file_operation(
         session_id,
@@ -1562,10 +2294,15 @@ async fn tool_write_file(
         Some(content.to_string()),
     );
 
+    let receipt = record_session_file_edit(session_id, path_str);
+    let guard_notes = run_post_write_guards(session_id, &full_path, content);
+
     Ok(format!(
-        "Successfully wrote {} bytes to {}",
+        "Successfully wrote {} bytes to {}{}{}",
         content.len(),
-        path_str
+        path_str,
+        receipt,
+        guard_notes
     ))
 }
 
@@ -1688,6 +2425,7 @@ async fn tool_edit_file(
 
     let full_path = resolve_path(workspace, path_str);
     validate_path_in_workspace(workspace, &full_path)?;
+    verify_not_stale_on_disk(session_id, &full_path, path_str)?;
 
     let old_content = fs::read_to_string(&full_path)
         .await
@@ -1701,15 +2439,227 @@ async fn tool_edit_file(
         .await
         .map_err(|e| AppError::IOError(format!("Failed to write file: {}", e)))?;
 
+    record_file_stamp(session_id, &full_path, new_content.as_bytes());
+
     log_file_operation(
         session_id,
         OperationType::ModifyFile,
         &full_path,
         Some(old_content),
-        Some(new_content),
+        Some(new_content.clone()),
     );
 
-    Ok(format!("Successfully edited {}", path_str))
+    let receipt = record_session_file_edit(session_id, path_str);
+    let guard_notes = run_post_write_guards(session_id, &full_path, &new_content);
+
+    Ok(format!("Successfully edited {}{}{}", path_str, receipt, guard_notes))
+}
+
+async fn tool_batch_edit(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let edits = args["edits"]
+        .as_array()
+        .ok_or_else(|| AppError::ValidationError("edits array is required".to_string()))?;
+    if edits.is_empty() {
+        return Err(AppError::ValidationError("edits array cannot be empty".to_string()));
+    }
+
+    // Stage all edits in memory first so we can apply atomically without partial state on failure
+    let mut staged_contents: HashMap<PathBuf, (String, String, String)> = HashMap::new(); // full_path -> (display_path, original, current)
+    let mut ordered_paths: Vec<PathBuf> = Vec::new();
+
+    for (idx, item) in edits.iter().enumerate() {
+        let path_str = item["path"].as_str().ok_or_else(|| {
+            AppError::ValidationError(format!("edits[{}].path is required", idx))
+        })?;
+        let search = item["search"].as_str().ok_or_else(|| {
+            AppError::ValidationError(format!("edits[{}].search is required", idx))
+        })?;
+        let replace = item["replace"].as_str().ok_or_else(|| {
+            AppError::ValidationError(format!("edits[{}].replace is required", idx))
+        })?;
+        let allow_multiple = item.get("allow_multiple").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let full_path = resolve_path(workspace, path_str);
+        validate_path_in_workspace(workspace, &full_path)?;
+        verify_not_stale_on_disk(session_id, &full_path, path_str)?;
+
+        if !staged_contents.contains_key(&full_path) {
+            let disk_text = fs::read_to_string(&full_path).await.map_err(|e| {
+                AppError::IOError(format!("Failed to read '{}': {}", path_str, e))
+            })?;
+            ordered_paths.push(full_path.clone());
+            staged_contents.insert(
+                full_path.clone(),
+                (path_str.to_string(), disk_text.clone(), disk_text),
+            );
+        }
+
+        let entry = staged_contents.get_mut(&full_path).unwrap();
+        let updated = smart_replace_in_content(&entry.2, search, replace, allow_multiple)
+            .map_err(|err| {
+                AppError::ValidationError(format!(
+                    "Atomic batch_edit aborted at edits[{}] ({}): {}",
+                    idx, path_str, err
+                ))
+            })?;
+        entry.2 = updated;
+    }
+
+    // Commit all staged file updates
+    let mut touched_display = Vec::new();
+    let mut guard_notes = String::new();
+    let mut last_receipt = String::new();
+
+    for full_path in &ordered_paths {
+        if let Some((display_path, old_content, new_content)) = staged_contents.remove(full_path) {
+            fs::write(full_path, &new_content)
+                .await
+                .map_err(|e| AppError::IOError(format!("Failed to write '{}': {}", display_path, e)))?;
+            record_file_stamp(session_id, full_path, new_content.as_bytes());
+            log_file_operation(
+                session_id,
+                OperationType::ModifyFile,
+                full_path,
+                Some(old_content),
+                Some(new_content.clone()),
+            );
+            last_receipt = record_session_file_edit(session_id, &display_path);
+            guard_notes.push_str(&run_post_write_guards(session_id, full_path, &new_content));
+            touched_display.push(display_path);
+        }
+    }
+
+    Ok(format!(
+        "Successfully applied {} edit(s) across {} file(s): {}{}{}",
+        edits.len(),
+        touched_display.len(),
+        touched_display.join(", "),
+        last_receipt,
+        guard_notes
+    ))
+}
+
+async fn tool_repo_map(workspace: &Path, args: &serde_json::Value) -> Result<String> {
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(crate::indexer::DEFAULT_REPO_MAP_TOKENS);
+    let ws = workspace.to_path_buf();
+    let report = tokio::task::spawn_blocking(move || {
+        let mut indexer = crate::indexer::Indexer::new();
+        indexer.build_repo_map(&ws, max_tokens)
+    })
+    .await
+    .map_err(|e| AppError::InternalError(format!("RepoMap task join error: {}", e)))??;
+
+    Ok(report.formatted)
+}
+
+async fn tool_design_check(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let target = resolve_path(workspace, path_str);
+    validate_path_in_workspace(workspace, &target)?;
+
+    let mut all_findings = Vec::new();
+    if target.is_file() {
+        if let Ok(content) = fs::read_to_string(&target).await {
+            all_findings.extend(lint_ui_design(&target, &content));
+        }
+    } else {
+        for entry in walkdir::WalkDir::new(&target)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if p.is_file() && is_ui_source_file(p) {
+                if let Ok(content) = std::fs::read_to_string(p) {
+                    all_findings.extend(lint_ui_design(p, &content));
+                }
+            }
+        }
+    }
+
+    if all_findings.is_empty() {
+        return Ok(format!("Design check passed for '{}': 0 UI anti-slop findings.", path_str));
+    }
+
+    update_token_audit(session_id, |audit| {
+        audit.design_findings_flagged += all_findings.len();
+    });
+
+    let mut out = format!(
+        "Design check found {} UI anti-slop issue(s) in '{}':\n",
+        all_findings.len(),
+        path_str
+    );
+    for f in all_findings.iter().take(40) {
+        out.push_str(&format!(
+            "- {}:{} [{}] ({}) {}\n",
+            f.file_path, f.line, f.rule_id, f.severity, f.message
+        ));
+    }
+    Ok(out)
+}
+
+async fn tool_security_audit(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let target = resolve_path(workspace, path_str);
+    validate_path_in_workspace(workspace, &target)?;
+
+    let mut all_findings = Vec::new();
+    if target.is_file() {
+        if let Ok(content) = fs::read_to_string(&target).await {
+            all_findings.extend(scan_code_security(&target, &content));
+        }
+    } else {
+        for entry in walkdir::WalkDir::new(&target)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if p.is_file() && is_indexable_source(p) {
+                if let Ok(content) = std::fs::read_to_string(p) {
+                    all_findings.extend(scan_code_security(p, &content));
+                }
+            }
+        }
+    }
+
+    if all_findings.is_empty() {
+        return Ok(format!("Security audit passed for '{}': 0 CWE findings.", path_str));
+    }
+
+    update_token_audit(session_id, |audit| {
+        audit.security_findings_flagged += all_findings.len();
+    });
+
+    let mut out = format!(
+        "Security audit found {} CWE issue(s) in '{}':\n",
+        all_findings.len(),
+        path_str
+    );
+    for f in all_findings.iter().take(40) {
+        out.push_str(&format!(
+            "- {}:{} [{}] ({}) {}\n",
+            f.file_path, f.line, f.cwe_id, f.severity, f.message
+        ));
+    }
+    Ok(out)
 }
 
 async fn tool_delete_file(
@@ -1738,7 +2688,8 @@ async fn tool_delete_file(
         None,
     );
 
-    Ok(format!("Successfully deleted {}", path_str))
+    let receipt = record_session_file_edit(session_id, path_str);
+    Ok(format!("Successfully deleted {}{}", path_str, receipt))
 }
 
 async fn tool_list_directory(workspace: &Path, args: &serde_json::Value) -> Result<String> {
@@ -2759,6 +3710,12 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         loop_count += 1;
 
         let prompt_tokens = estimate_tokens(&current_prompt);
+        actual_config.max_tokens = clamp_max_tokens_to_window(
+            &request.session_id,
+            &actual_config.model,
+            prompt_tokens,
+            Some(ai_config.max_tokens as u32),
+        ) as usize;
 
         // Call AI
         let ai_response: String = provider.generate(&current_prompt, &actual_config).await?;
@@ -2873,6 +3830,14 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
             &turn_tool_calls,
             &turn_tool_results,
         ));
+        let base_prompt_tokens = estimate_tokens(&base_prompt);
+        let window_tokens = model_context_window(&actual_config.model);
+        let _ = micro_compact_turn_records(
+            &request.session_id,
+            &mut turn_records,
+            base_prompt_tokens,
+            window_tokens,
+        );
         current_prompt = build_agent_turn_prompt(&base_prompt, &turn_records, loop_warning);
     }
 
@@ -3076,6 +4041,14 @@ INSTRUCTIONS:
         while loop_count < max_loops {
             loop_count += 1;
 
+            let prompt_tokens = estimate_tokens(&current_prompt);
+            actual_config.max_tokens = clamp_max_tokens_to_window(
+                &request.session_id,
+                &actual_config.model,
+                prompt_tokens,
+                Some(ai_config.max_tokens as u32),
+            ) as usize;
+
             let mut turn_full_content = String::new();
             match provider
                 .generate_stream(&current_prompt, &actual_config)
@@ -3248,6 +4221,14 @@ INSTRUCTIONS:
             };
 
             turn_records.push(turn_record);
+            let base_prompt_tokens = estimate_tokens(&base_prompt);
+            let window_tokens = model_context_window(&actual_config.model);
+            let _ = micro_compact_turn_records(
+                &request.session_id,
+                &mut turn_records,
+                base_prompt_tokens,
+                window_tokens,
+            );
             current_prompt = build_agent_turn_prompt(&base_prompt, &turn_records, loop_warning);
         }
 
@@ -3391,6 +4372,14 @@ pub fn run_agent_loop_stream(
 
             let mut turn_content = String::new();
             let mut turn_tool_calls: Vec<ToolCall> = Vec::new();
+
+            let prompt_tokens = estimate_tokens(&current_turn_prompt);
+            config.max_tokens = clamp_max_tokens_to_window(
+                &session_id,
+                &config.model,
+                prompt_tokens,
+                None,
+            ) as usize;
 
             // Stream Generation
             match provider.generate_stream(&current_turn_prompt, &config).await {
@@ -3553,6 +4542,14 @@ pub fn run_agent_loop_stream(
                 &turn_tool_calls,
                 &turn_tool_results,
             ));
+            let base_prompt_tokens = estimate_tokens(&base_prompt);
+            let window_tokens = model_context_window(&config.model);
+            let _ = micro_compact_turn_records(
+                &session_id,
+                &mut turn_records,
+                base_prompt_tokens,
+                window_tokens,
+            );
             current_turn_prompt = build_agent_turn_prompt(&base_prompt, &turn_records, loop_warning);
 
             // Save this turn to session
@@ -3976,6 +4973,189 @@ Let me know once written."##;
         assert!(prompt.contains("=== Turn 2 ==="));
         assert!(prompt.contains("error[E0425]"));
         assert!(prompt.contains("Avoid repeating tool"));
+    }
+
+    #[test]
+    fn first_call_tool_guidance_injects_once_per_session() {
+        let session_id = format!("test_guid_{}", uuid::Uuid::new_v4());
+        let g1 = take_first_call_guidance(&session_id, "read_file");
+        assert!(g1.is_some());
+        assert!(g1.unwrap().contains("SHA-256 repeat-read deduplication"));
+
+        // Second call in the same session should return None
+        let g2 = take_first_call_guidance(&session_id, "read_file");
+        assert!(g2.is_none());
+
+        // Different tool in the same session should still return guidance once
+        let g3 = take_first_call_guidance(&session_id, "edit_file");
+        assert!(g3.is_some());
+
+        let audit = get_session_token_audit(&session_id);
+        assert_eq!(audit.first_call_guidances_injected, 2);
+    }
+
+    #[test]
+    fn thai_and_multilingual_token_estimation_and_window_clamping() {
+        let session_id = format!("test_clamp_{}", uuid::Uuid::new_v4());
+        let thai_text = "สวัสดีครับ ทดสอบการคำนวณโทเคนภาษาไทยสำหรับระบบเอเจนต์";
+        let ascii_text = "hello world token estimation test for agent";
+        // Thai characters should be weighted more densely (~1 token per 2 chars)
+        assert!(estimate_tokens(thai_text) > thai_text.chars().count() / 3);
+        assert!(estimate_tokens(ascii_text) <= (ascii_text.chars().count() + 3) / 4);
+
+        // When prompt is near the 64k window of deepseek, max_tokens should clamp down safely
+        let clamped = clamp_max_tokens_to_window(&session_id, "deepseek-chat", 61_500, Some(8_192));
+        assert!(clamped <= 1_476 && clamped >= 256);
+        let audit = get_session_token_audit(&session_id);
+        assert_eq!(audit.window_clamps_applied, 1);
+    }
+
+    #[test]
+    fn batch_micro_compaction_triggers_at_60_percent_and_preserves_recent_turns() {
+        let session_id = format!("test_mc_{}", uuid::Uuid::new_v4());
+        let big_output = "fn line_of_code() { println!(\"hello\"); }\n".repeat(40);
+        let mut turns = vec![
+            format_turn_record(
+                1,
+                "Old turn 1",
+                &[ToolCall {
+                    id: "1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }],
+                &[ToolResult {
+                    tool_call_id: "1".to_string(),
+                    success: true,
+                    output: big_output.clone(),
+                    error: None,
+                }],
+            ),
+            format_turn_record(2, "Turn 2", &[], &[]),
+            format_turn_record(3, "Turn 3", &[], &[]),
+            format_turn_record(
+                4,
+                "Recent turn 4",
+                &[ToolCall {
+                    id: "4".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "b.rs"}),
+                }],
+                &[ToolResult {
+                    tool_call_id: "4".to_string(),
+                    success: true,
+                    output: big_output.clone(),
+                    error: None,
+                }],
+            ),
+        ];
+
+        // Below 60% of 100k window -> 0 tokens compacted
+        let saved_below = micro_compact_turn_records(&session_id, &mut turns, 1_000, 100_000);
+        assert_eq!(saved_below, 0);
+
+        // Above 60% of 2k window -> Turn 1 is micro-compacted while Recent Turn 4 is preserved intact
+        let saved_above = micro_compact_turn_records(&session_id, &mut turns, 1_200, 2_000);
+        assert!(saved_above > 0);
+        assert!(turns[0].contains("[Micro-compacted tool output"));
+        assert!(!turns[3].contains("[Micro-compacted tool output"));
+    }
+
+    #[tokio::test]
+    async fn stale_file_write_guard_and_repeat_read_dedup_and_session_receipt() {
+        let temp_dir = std::env::temp_dir().join(format!("mc_guard_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let session_id = create_session(&temp_dir.to_string_lossy()).unwrap();
+
+        let file_path = temp_dir.join("lib.rs");
+        std::fs::write(&file_path, "pub fn v1() -> i32 { 1 }\n").unwrap();
+
+        // 1. First read records file stamp
+        let r1 = tool_read_file(
+            &session_id,
+            &temp_dir,
+            &serde_json::json!({"path": "lib.rs"}),
+        )
+        .await
+        .unwrap();
+        assert!(r1.contains("pub fn v1()"));
+        assert!(!r1.contains("[Repeat-Read Notice"));
+
+        // 2. Second identical read triggers SHA-256 Repeat-Read Notice
+        let r2 = tool_read_file(
+            &session_id,
+            &temp_dir,
+            &serde_json::json!({"path": "lib.rs"}),
+        )
+        .await
+        .unwrap();
+        assert!(r2.contains("[Repeat-Read Notice:"));
+
+        // 3. Simulate external edit in the IDE editor without agent knowing
+        std::fs::write(&file_path, "pub fn v2_user_edited() -> i32 { 2 }\n").unwrap();
+
+        // 4. Agent attempting edit_file or write_file on stale file must be blocked!
+        let stale_err = tool_write_file(
+            &session_id,
+            &temp_dir,
+            &serde_json::json!({"path": "lib.rs", "content": "pub fn clobber() {}\n"}),
+        )
+        .await;
+        assert!(stale_err.is_err());
+        assert!(stale_err
+            .unwrap_err()
+            .to_string()
+            .contains("Stale-file write guard"));
+
+        // 5. Re-reading refreshes the stamp and allows write + emits Session Edit Receipt
+        let _ = tool_read_file(
+            &session_id,
+            &temp_dir,
+            &serde_json::json!({"path": "lib.rs"}),
+        )
+        .await
+        .unwrap();
+        let ok_write = tool_write_file(
+            &session_id,
+            &temp_dir,
+            &serde_json::json!({"path": "lib.rs", "content": "pub fn v3_clean() -> i32 { 3 }\n"}),
+        )
+        .await
+        .unwrap();
+        assert!(ok_write.contains("[Session Edit Receipt: 1 file(s) touched in session: lib.rs]"));
+
+        let audit = get_session_token_audit(&session_id);
+        assert_eq!(audit.repeat_read_count, 1);
+        assert_eq!(audit.stale_write_blocks, 1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn design_check_and_security_audit_detect_slop_and_cwe() {
+        let ui_code = r#"
+.hero-title {
+    background: linear-gradient(90deg, #6366f1, #8b5cf6, #a855f7);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* Supercharge your workflow with next-generation AI-powered tools */
+"#;
+        let design_issues = lint_ui_design(Path::new("src/App.css"), ui_code);
+        assert!(design_issues.iter().any(|d| d.rule_id == "purple-blue-ai-palette"));
+        assert!(design_issues.iter().any(|d| d.rule_id == "ai-gradient-text"));
+        assert!(design_issues.iter().any(|d| d.rule_id == "bounce-spring-overuse"));
+        assert!(design_issues.iter().any(|d| d.rule_id == "generic-ai-copy"));
+
+        let vuln_code = r#"
+fn query_user(db: &Db, name: &str) {
+    let sql = format!("SELECT * FROM users WHERE username = '{}'", name);
+    let api_key = "sk-proj-1234567890abcdef1234567890abcdef";
+}
+"#;
+        let sec_issues = scan_code_security(Path::new("src/db.rs"), vuln_code);
+        assert!(sec_issues.iter().any(|s| s.cwe_id == "CWE-89"));
+        assert!(sec_issues.iter().any(|s| s.cwe_id == "CWE-798"));
     }
 }
 

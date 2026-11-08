@@ -117,30 +117,43 @@ final class BillingService: ObservableObject, @unchecked Sendable {
         let tier: String
     }
     
-    /// Fetches the user's token balance and subscription tier from the Stripe Backend
+    /// Fetches the user's live subscription quota and tier from the canonical Dotmini Cloud endpoint
     func fetchBalance() async throws {
         guard let token = await currentToken() else { throw URLError(.userAuthenticationRequired) }
         
         await MainActor.run { self.isLoading = true }
         defer { Task { @MainActor [weak self] in self?.isLoading = false } }
         
-        guard let url = URL(string: "\(backendBaseURL)/balance") else { throw URLError(.badURL) }
-        var request = URLRequest(url: url)
+        guard let url = URL(string: "https://microcode.dotmini.net/api/subscription/status") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url, timeoutInterval: 8)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
-        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw URLError(.badServerResponse)
         }
         
-        let decoder = JSONDecoder()
-        let result = try decoder.decode(BalanceResponse.self, from: data)
+        let remaining = (json["tokensRemaining"] as? Int)
+            ?? (json["tokensRemaining"] as? NSNumber)?.intValue
+            ?? (json["ai_quota"] as? Int)
+            ?? 0
+        let plan = ((json["plan"] as? String) ?? "free").lowercased()
+        let tier: BillingTier
+        if plan.contains("enterprise") || plan.contains("admin") || plan.contains("bundle") || plan.contains("advanced") {
+            tier = .enterprise
+        } else if plan.contains("pro") || plan.contains("lite") {
+            tier = .pro
+        } else {
+            tier = .free
+        }
         
         await MainActor.run {
-            self.tokenBalance = result.tokens
-            self.currentTier = result.tier == "pro" ? .pro : .free
+            self.tokenBalance = remaining
+            self.currentTier = tier
         }
     }
     

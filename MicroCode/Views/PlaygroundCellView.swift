@@ -56,7 +56,7 @@ struct PlaygroundCellView: View {
             
             // Main Cell Content
             VStack(alignment: .leading, spacing: 0) {
-                // Header (Badges + Tools)
+                // Header (Badges + Tools — fixed height, zero layout shift on hover)
                 HStack {
                     HStack(spacing: 8) {
                         Image(systemName: "circle.fill")
@@ -70,41 +70,40 @@ struct PlaygroundCellView: View {
                     
                     Spacer()
                     
-                    if isHovering {
-                        HStack(spacing: 8) {
-                            // Color Picker Menu
-                            Menu {
-                                ForEach(CellColorTheme.allCases) { theme in
-                                    Button(action: { cell.colorTheme = theme }) {
-                                        Label(theme.rawValue, systemImage: theme == cell.colorTheme ? "checkmark" : "circle.fill")
-                                            .foregroundColor(theme.iconColor)
-                                    }
+                    HStack(spacing: 8) {
+                        // Color Picker Menu
+                        Menu {
+                            ForEach(CellColorTheme.allCases) { theme in
+                                Button(action: { cell.colorTheme = theme }) {
+                                    Label(theme.rawValue, systemImage: theme == cell.colorTheme ? "checkmark" : "circle.fill")
+                                        .foregroundColor(theme.iconColor)
                                 }
-                            } label: {
-                                Image(systemName: "paintpalette")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary)
                             }
-                            .menuStyle(.borderlessButton)
-                            .frame(width: 20)
-                            
-                            Button(action: onDelete) {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary)
-                            }
-                            .buttonStyle(.plain)
+                        } label: {
+                            Image(systemName: "paintpalette")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
                         }
-                        .transition(.opacity)
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        
+                        Button(action: onDelete) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
+                    .opacity(isHovering ? 1 : 0)
+                    .allowsHitTesting(isHovering)
                 }
                 .padding(.horizontal, 8)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+                .frame(height: 26)
                 
                 // Code Editor
                 let lineCount = max(1, cell.code.components(separatedBy: "\n").count)
-                let calculatedHeight = CGFloat(lineCount) * 20 + 24
+                let rowHeight = max(18, ceil(appState.playgroundFontSize * 1.42))
+                let calculatedHeight = CGFloat(lineCount) * rowHeight + 24
                 
                 SyntaxHighlightedCodeView(
                     text: $cell.code,
@@ -118,7 +117,7 @@ struct PlaygroundCellView: View {
                     showLineNumbers: appState.showLineNumbers,
                     editorID: "pgcell-\(cell.id.uuidString)"
                 )
-                .frame(height: max(60, min(calculatedHeight, 600)))
+                .frame(height: max(84, calculatedHeight))
                 .background(Color(NSColor.textBackgroundColor).opacity(0.1)) // Subtle inner bg for code area
                 .cornerRadius(4)
                 .padding(.horizontal, 4)

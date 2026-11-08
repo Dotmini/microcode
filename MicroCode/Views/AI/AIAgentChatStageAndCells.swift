@@ -469,12 +469,13 @@ struct AgentCellRow: View {
         .cornerRadius(10)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(borderColor, lineWidth: isFocused ? 1.5 : 1)
+                .strokeBorder(borderColor, lineWidth: 1)
         )
         .padding(.horizontal, 12)
         .contentShape(Rectangle())
         .onTapGesture(perform: onFocus)
         .onHover { isHovering = $0 }
+        .transaction { $0.animation = nil }
     }
 
     private var cellHeader: some View {
@@ -554,7 +555,7 @@ struct AgentCellRow: View {
                 .fixedSize()
                 .help(cell.isRunning ? "Stop Execution" : "Run Cell")
 
-                if isHovering || isFocused {
+                HStack(spacing: 4) {
                     Button(action: onInsertBelow) {
                         Image(systemName: "plus")
                             .font(.system(size: 10))
@@ -573,10 +574,12 @@ struct AgentCellRow: View {
                     .buttonStyle(.plain)
                     .help("Delete Cell")
                 }
+                .opacity(isHovering || isFocused ? 1 : 0)
+                .allowsHitTesting(isHovering || isFocused)
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .frame(height: 28)
         .background(headerBg)
     }
 
@@ -742,7 +745,7 @@ struct MessageContentParser {
         options: [.caseInsensitive]
     )
     private static let latexRegex: NSRegularExpression? = try? NSRegularExpression(
-        pattern: "\\$\\$([\\s\\S]*?)\\$\\$|\\\\\\[([\\s\\S]*?)\\\\\\]",
+        pattern: "\\$\\$([\\s\\S]*?)\\$\\$|\\\\\\[([\\s\\S]*?)\\\\\\]|\\\\begin\\{(equation\\*?|align\\*?|aligned|gather\\*?|multline\\*?|math|displaymath)\\}([\\s\\S]*?)\\\\end\\{\\3\\}",
         options: []
     )
     private static let codeRegex: NSRegularExpression? = try? NSRegularExpression(
@@ -985,6 +988,10 @@ struct MessageContentParser {
                         latexContent = nsContent.substring(with: match.range(at: 1))
                     } else if match.numberOfRanges > 2, match.range(at: 2).location != NSNotFound {
                         latexContent = nsContent.substring(with: match.range(at: 2))
+                    } else if match.numberOfRanges > 4, match.range(at: 4).location != NSNotFound {
+                        let envName = match.range(at: 3).location != NSNotFound ? nsContent.substring(with: match.range(at: 3)) : "aligned"
+                        let inner = nsContent.substring(with: match.range(at: 4))
+                        latexContent = "\\begin{\(envName)}\(inner)\\end{\(envName)}"
                     }
                     blocks.append(.latex(latexContent.trimmingCharacters(in: .whitespacesAndNewlines), true))
                     lastEnd = match.range.location + match.range.length
@@ -1490,16 +1497,19 @@ struct AgentChatStage: View, Equatable {
                                             onDelete: { revertFiles in onDeleteMessage?(message.id, revertFiles) }
                                         )
                                         .equatable()
+                                        .frame(width: max(0, stageGeo.size.width))
+                                        .clipped()
                                         .id(message.id)
                                     }
                                     
-                                    if messages.isEmpty && isLoading {
+                                    if messages.isEmpty && isLoading,
+                                       let activeTool = currentToolExecution, !activeTool.isEmpty {
                                         HStack(spacing: 0) {
                                             Spacer(minLength: 0)
                                             HStack(spacing: 10) {
                                                 ProgressView()
                                                     .controlSize(.small)
-                                                Text(currentToolExecution ?? "Agent is executing task...")
+                                                Text(activeTool)
                                                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                                                     .foregroundColor(.secondary)
                                                 Spacer()
@@ -1518,22 +1528,31 @@ struct AgentChatStage: View, Equatable {
                                     ForEach(queuedMessages) { queued in
                                         HStack(spacing: 0) {
                                             Spacer(minLength: 0)
-                                            VStack(alignment: .trailing, spacing: 4) {
-                                                HStack(spacing: 0) {
-                                                    Spacer(minLength: 24)
-                                                    Text(queued.text.count > 500 ? String(queued.text.prefix(500)) + "…" : queued.text)
-                                                        .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
-                                                        .foregroundColor(.primary.opacity(0.9))
-                                                        .multilineTextAlignment(.leading)
-                                                        .lineLimit(6)
-                                                        .padding(12)
-                                                        .background(Color.orange.opacity(0.14))
-                                                        .overlay(
-                                                            RoundedRectangle(cornerRadius: 8)
-                                                                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
-                                                        )
-                                                        .cornerRadius(8)
-                                                        .frame(maxWidth: 600, alignment: .trailing)
+                                            VStack(alignment: .trailing, spacing: 6) {
+                                                if !queued.attachments.isEmpty {
+                                                    SentUserAttachmentsView(
+                                                        items: queued.attachments.map { SentAttachmentItem.from($0) }
+                                                    )
+                                                    .environmentObject(appState)
+                                                }
+                                                let trimmedQueued = queued.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                if !trimmedQueued.isEmpty || queued.attachments.isEmpty {
+                                                    HStack(spacing: 0) {
+                                                        Spacer(minLength: 88)
+                                                        Text(queued.text.count > 500 ? String(queued.text.prefix(500)) + "…" : queued.text)
+                                                            .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
+                                                            .foregroundColor(.primary.opacity(0.9))
+                                                            .multilineTextAlignment(.leading)
+                                                            .lineLimit(6)
+                                                            .padding(12)
+                                                            .background(Color.orange.opacity(0.14))
+                                                            .overlay(
+                                                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                                                    .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                                                            )
+                                                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                                            .frame(maxWidth: 620, alignment: .trailing)
+                                                    }
                                                 }
                                                 HStack(spacing: 8) {
                                                     HStack(spacing: 4) {
@@ -1587,6 +1606,7 @@ struct AgentChatStage: View, Equatable {
                                         )
                                 }
                             }
+                            .textSelection(.enabled)
                             .frame(width: max(0, stageGeo.size.width))
                         }
                         

@@ -29,7 +29,7 @@ class AIAutocompleteService: ObservableObject {
     private var suggestionCache: [Int: String] = [:]
     
     // Config
-    private let debounceNanoseconds: UInt64 = 350_000_000
+    private let debounceNanoseconds: UInt64 = 180_000_000
     private let maxPrefixLength = 1500
     private let maxSuffixLength = 500
     
@@ -73,19 +73,33 @@ class AIAutocompleteService: ObservableObject {
                 self.isRequesting = true
                 defer { self.isRequesting = false }
                 
-                // Get active endpoint from LocalLLMService
-                let endpoint = LocalLLMService.shared.activeEndpoint
-                let model = LocalLLMService.shared.activeModel
-                
-                // Call highly optimized Rust FFI Core
-                let rawCompletion = try await fetchGhostText(
-                    endpoint: endpoint,
-                    model: model,
-                    prefix: truncatedPrefix,
-                    suffix: truncatedSuffix
-                )
-                
-                guard !Task.isCancelled else { return }
+                // Tier 1: Hardware-Accelerated Local LLM (when a real local LLM node is connected)
+                var rawCompletion: String?
+                if LocalLLMService.shared.activeServer != nil {
+                    let endpoint = LocalLLMService.shared.activeEndpoint
+                    let model = LocalLLMService.shared.activeModel
+                    if let localOut = try? await fetchGhostText(
+                        endpoint: endpoint,
+                        model: model,
+                        prefix: truncatedPrefix,
+                        suffix: truncatedSuffix
+                    ), !localOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        rawCompletion = localOut
+                        ACPGhostTextBridge.shared.activeProvider = "Local LLM (\(model))"
+                    }
+                }
+
+                // Tier 2: Ultra-Fast Subscription & BYOK FIM Bridge (Cerebras → Groq → Copilot → Codestral → AiPass/Gemini → DeepSeek)
+                if rawCompletion == nil, !Task.isCancelled {
+                    rawCompletion = await ACPGhostTextBridge.shared.getCompletion(
+                        prefix: truncatedPrefix,
+                        suffix: truncatedSuffix,
+                        language: fileExtension,
+                        filePath: "editor.\(fileExtension)"
+                    )
+                }
+
+                guard let rawCompletion, !Task.isCancelled else { return }
                 
                 let cleaned = Self.sanitizeCompletion(
                     rawCompletion,

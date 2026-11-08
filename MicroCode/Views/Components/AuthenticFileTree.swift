@@ -82,6 +82,8 @@ struct AuthenticFileTree: NSViewRepresentable {
         // the native behavior while respecting our explicit theme background.
         outlineView.style = .plain
         outlineView.allowsMultipleSelection = true
+        outlineView.setDraggingSourceOperationMask(.copy, forLocal: true)
+        outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
         
         // Click and Double-click actions
         outlineView.target = context.coordinator
@@ -126,11 +128,18 @@ struct AuthenticFileTree: NSViewRepresentable {
         var targetFolderId: String?
         var expandedItemIds = Set<String>()
         var isRestoringExpansion = false
+        private var lastCollabCursorSignature: String = ""
         
         init(_ parent: AuthenticFileTree) {
             self.parent = parent
             super.init()
             NotificationCenter.default.addObserver(self, selector: #selector(onIconThemeChanged), name: NSNotification.Name("MicroCodeIconThemeChanged"), object: nil)
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onRemoteCollabPresenceChanged),
+                name: CollaborationService.remotePresenceDidChangeNotification,
+                object: nil
+            )
         }
         
         deinit {
@@ -140,6 +149,34 @@ struct AuthenticFileTree: NSViewRepresentable {
         @objc func onIconThemeChanged() {
             DispatchQueue.main.async { [weak self] in
                 self?.outlineView?.reloadData()
+            }
+        }
+
+        @objc func onRemoteCollabPresenceChanged() {
+            MainActor.assumeIsolated {
+                guard let ov = self.outlineView else { return }
+                let collab = CollaborationService.shared
+                let sig: String
+                if collab.currentSession == nil {
+                    sig = ""
+                } else {
+                    sig = collab.remoteOnlineParticipants().map {
+                        "\($0.userId):\($0.color):\($0.cursorPosition?.filePath ?? ""):\($0.cursorPosition?.line ?? 0):\($0.cursorPosition?.isTyping == true)"
+                    }.joined(separator: "|")
+                }
+                guard sig != self.lastCollabCursorSignature else { return }
+                self.lastCollabCursorSignature = sig
+
+                let visibleRange = ov.rows(in: ov.visibleRect)
+                guard visibleRange.length > 0 else { return }
+                let upper = min(ov.numberOfRows, visibleRange.location + visibleRange.length)
+                for row in visibleRange.location..<upper {
+                    guard let wrapper = ov.item(atRow: row) as? FileNodeWrapper,
+                          let cell = ov.view(atColumn: 0, row: row, makeIfNecessary: false) as? FileTreeCollabCellView else {
+                        continue
+                    }
+                    self.configureCollabBadge(on: cell, for: wrapper.node)
+                }
             }
         }
         
@@ -470,45 +507,100 @@ struct AuthenticFileTree: NSViewRepresentable {
             guard let wrapper = item as? FileNodeWrapper else { return false }
             return wrapper.node.isDirectory
         }
+
+        func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+            guard let wrapper = item as? FileNodeWrapper else { return nil }
+            return NSURL(fileURLWithPath: wrapper.node.path)
+        }
         
         // MARK: - Delegate (View)
         
+        @MainActor
+        fileprivate func configureCollabBadge(on cell: FileTreeCollabCellView, for node: FileNode) {
+            let collab = CollaborationService.shared
+            guard collab.currentSession != nil else {
+                cell.collabBadgeField.stringValue = ""
+                cell.collabBadgeField.isHidden = true
+                return
+            }
+            if node.isDirectory {
+                let peers = collab.remoteCollaborators(underDirectoryPath: node.path)
+                if let lead = peers.first {
+                    let extra = peers.count > 1 ? " +\(peers.count - 1)" : ""
+                    cell.collabBadgeField.stringValue = "● \(lead.displayName.prefix(8))\(extra)"
+                    cell.collabBadgeField.textColor = CollaborationColorHelper.nsColor(fromHex: lead.color)
+                    cell.collabBadgeField.isHidden = false
+                } else {
+                    cell.collabBadgeField.stringValue = ""
+                    cell.collabBadgeField.isHidden = true
+                }
+            } else {
+                let peers = collab.remoteCollaborators(inFilePath: node.path)
+                if let lead = peers.first {
+                    let ln = lead.cursorPosition?.line ?? 1
+                    let icon = lead.cursorPosition?.isTyping == true ? "✎" : "●"
+                    cell.collabBadgeField.stringValue = "\(icon) \(lead.displayName.prefix(8)):\(ln)"
+                    cell.collabBadgeField.textColor = CollaborationColorHelper.nsColor(fromHex: lead.color)
+                    cell.collabBadgeField.isHidden = false
+                } else {
+                    cell.collabBadgeField.stringValue = ""
+                    cell.collabBadgeField.isHidden = true
+                }
+            }
+        }
+
         func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
             guard let wrapper = item as? FileNodeWrapper else { return nil }
             
             let cellIdentifier = NSUserInterfaceItemIdentifier("FileCell")
-            var view = outlineView.makeView(withIdentifier: cellIdentifier, owner: self) as? NSTableCellView
+            var view = outlineView.makeView(withIdentifier: cellIdentifier, owner: self) as? FileTreeCollabCellView
             
             if view == nil {
-                view = NSTableCellView()
-                view?.identifier = cellIdentifier
+                let newCell = FileTreeCollabCellView()
+                newCell.identifier = cellIdentifier
                 
                 // Icon
                 let imageView = NSImageView()
                 imageView.translatesAutoresizingMaskIntoConstraints = false
                 imageView.imageScaling = .scaleProportionallyDown
-                view?.addSubview(imageView)
-                view?.imageView = imageView
+                newCell.addSubview(imageView)
+                newCell.imageView = imageView
                 
                 // Text
                 let textField = NSTextField()
                 textField.translatesAutoresizingMaskIntoConstraints = false
                 textField.isBordered = false
                 textField.drawsBackground = false
+                textField.isEditable = false
                 textField.lineBreakMode = .byTruncatingTail
-                view?.addSubview(textField)
-                view?.textField = textField
+                textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                newCell.addSubview(textField)
+                newCell.textField = textField
+
+                // Collaborator live badge
+                let badge = newCell.collabBadgeField
+                badge.translatesAutoresizingMaskIntoConstraints = false
+                badge.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .semibold)
+                badge.alignment = .right
+                badge.isHidden = true
+                badge.setContentHuggingPriority(.required, for: .horizontal)
+                badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+                newCell.addSubview(badge)
                 
                 NSLayoutConstraint.activate([
-                    imageView.leadingAnchor.constraint(equalTo: view!.leadingAnchor, constant: 2),
-                    imageView.centerYAnchor.constraint(equalTo: view!.centerYAnchor),
+                    imageView.leadingAnchor.constraint(equalTo: newCell.leadingAnchor, constant: 2),
+                    imageView.centerYAnchor.constraint(equalTo: newCell.centerYAnchor),
                     imageView.widthAnchor.constraint(equalToConstant: 16),
                     imageView.heightAnchor.constraint(equalToConstant: 16),
                     
                     textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 4),
-                    textField.trailingAnchor.constraint(equalTo: view!.trailingAnchor, constant: -2),
-                    textField.centerYAnchor.constraint(equalTo: view!.centerYAnchor)
+                    textField.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -4),
+                    textField.centerYAnchor.constraint(equalTo: newCell.centerYAnchor),
+
+                    badge.trailingAnchor.constraint(equalTo: newCell.trailingAnchor, constant: -4),
+                    badge.centerYAnchor.constraint(equalTo: newCell.centerYAnchor)
                 ])
+                view = newCell
             }
             
             // Configure
@@ -522,6 +614,11 @@ struct AuthenticFileTree: NSViewRepresentable {
                 view?.imageView?.contentTintColor = iconColor(for: wrapper.node.name, isDirectory: wrapper.node.isDirectory)
             }
             view?.textField?.stringValue = wrapper.node.name
+            if let cell = view {
+                MainActor.assumeIsolated {
+                    self.configureCollabBadge(on: cell, for: wrapper.node)
+                }
+            }
             
             return view
         }
@@ -605,4 +702,8 @@ struct AuthenticFileTree: NSViewRepresentable {
             }
         }
     }
+}
+
+private final class FileTreeCollabCellView: NSTableCellView {
+    let collabBadgeField = NSTextField(labelWithString: "")
 }

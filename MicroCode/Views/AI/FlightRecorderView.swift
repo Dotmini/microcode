@@ -88,6 +88,15 @@ struct FlightRecorderView: View {
                 .controlSize(.mini)
                 
                 Menu {
+                    Button("Save Compliance Attestation Report (.md)…") {
+                        _ = recorder.saveComplianceReportWithPanel()
+                    }
+                    Button("Copy Compliance Attestation (SOC2 / PDPA)") {
+                        let md = recorder.exportComplianceAttestationMarkdown()
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(md, forType: .string)
+                    }
+                    Divider()
                     Button("Export JSON (SOC2)") {
                         let json = recorder.exportJSON()
                         NSPasteboard.general.clearContents()
@@ -172,6 +181,10 @@ struct FlightRecorderView: View {
                     Section("Commands") {
                         Button("command.execute") { filterAction = .commandExecute }
                     }
+                    Section("Enterprise Security") {
+                        Button("security.dlp_intercept") { filterAction = .securityDLPIntercept }
+                        Button("security.firewall_block") { filterAction = .securityFirewallBlock }
+                    }
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "line.3.horizontal.decrease")
@@ -186,7 +199,9 @@ struct FlightRecorderView: View {
                 Spacer()
                 
                 // Stats
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    statBadge(label: "Vault", count: AgentPrivacyGuard.vaultedSecretCount, color: .green)
+                    statBadge(label: "Blocked", count: EnterpriseAIAuthService.shared.blockedCommandsCount, color: .red)
                     statBadge(label: "Files", count: recorder.totalFileChanges, color: .blue)
                     statBadge(label: "Tools", count: recorder.totalToolCalls, color: .orange)
                     statBadge(label: "Cmds", count: recorder.totalCommands, color: .purple)
@@ -357,6 +372,7 @@ private struct AuditEventRow: View {
     
     private var actionColor: Color {
         let action = entry.action.rawValue
+        if action.hasPrefix("security.") { return .mint }
         if action.hasPrefix("file.") { return .blue }
         if action.hasPrefix("agent.") { return .orange }
         if action.hasPrefix("change.") { return .green }

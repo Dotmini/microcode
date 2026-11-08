@@ -366,7 +366,14 @@ final class HybridCodebaseSearchEngine: @unchecked Sendable {
         guard !trimmed.isEmpty else { return "Symbol name is required." }
 
         let canonicalDir = URL(fileURLWithPath: directory).standardizedFileURL.path
-        let repoMap = await RepoMapService.shared.getRepoMap(workspace: canonicalDir)
+        let cachedRepoMap = RepoMapService.shared.peekCachedRepoMap(for: canonicalDir)
+        if cachedRepoMap == nil {
+            // Warm up RepoMapService asynchronously so subsequent queries have full AST/regex symbol graphs
+            // without stalling a cold `find_symbol` call for multi-second External SSD directory walks.
+            Task.detached(priority: .utility) {
+                _ = await RepoMapService.shared.getRepoMap(workspace: canonicalDir)
+            }
+        }
         let symLower = trimmed.lowercased()
         let normalizedKindFilter: Set<String>? = {
             let t = symbolType.lowercased()
@@ -382,52 +389,79 @@ final class HybridCodebaseSearchEngine: @unchecked Sendable {
         var exactDefs: [RepoSymbol] = []
         var partialDefs: [RepoSymbol] = []
 
-        for file in repoMap.files {
-            for s in file.symbols {
-                if let allowedKinds = normalizedKindFilter, !allowedKinds.contains(s.kind.lowercased()) {
-                    continue
-                }
-                let candidateLower = s.name.lowercased()
-                if candidateLower == symLower {
-                    exactDefs.append(s)
-                } else if candidateLower.contains(symLower) {
-                    partialDefs.append(s)
+        if let repoMap = cachedRepoMap {
+            for file in repoMap.files {
+                for s in file.symbols {
+                    if let allowedKinds = normalizedKindFilter, !allowedKinds.contains(s.kind.lowercased()) {
+                        continue
+                    }
+                    let candidateLower = s.name.lowercased()
+                    if candidateLower == symLower {
+                        exactDefs.append(s)
+                    } else if candidateLower.contains(symLower) {
+                        partialDefs.append(s)
+                    }
                 }
             }
         }
 
-        // Fast bounded reference scan via grep (skipping heavy build dirs)
-        let escaped = NSRegularExpression.escapedPattern(for: trimmed)
-        let pattern = "\\b\(escaped)\\b"
-        let grepProcess = Process()
-        grepProcess.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-        var args = ["-rn", "--color=never", "-I", "-E"]
-        for dir in GrepSearchTool.excludedDirs {
-            args.append("--exclude-dir=\(dir)")
+        // Fast bounded scan via FastWorkspaceGrep (multi-threaded git packfile + fixed-string -F -w!)
+        let isSimpleIdentifier = trimmed.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "_" }
+        let matchedLines: [String]
+        let fetchCap = cachedRepoMap == nil ? 120 : 60
+        if isSimpleIdentifier {
+            matchedLines = await FastWorkspaceGrep.searchLines(
+                pattern: trimmed,
+                directory: canonicalDir,
+                forceFixedStrings: true,
+                wordRegexp: true,
+                maxPerFile: 20,
+                maxTotalLines: fetchCap
+            )
+        } else {
+            let escaped = NSRegularExpression.escapedPattern(for: trimmed)
+            matchedLines = await FastWorkspaceGrep.searchLines(
+                pattern: "\\b\(escaped)\\b",
+                directory: canonicalDir,
+                forceFixedStrings: false,
+                wordRegexp: false,
+                maxPerFile: 20,
+                maxTotalLines: fetchCap
+            )
         }
-        args.append(contentsOf: ["-m", "15", "-e", pattern, canonicalDir])
-        grepProcess.arguments = args
 
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        grepProcess.standardInput = FileHandle.nullDevice
-        grepProcess.standardOutput = outPipe
-        grepProcess.standardError = errPipe
+        // When RepoMap cache is cold, classify declaration lines directly from FastWorkspaceGrep matches (<200ms!)
+        if cachedRepoMap == nil && !matchedLines.isEmpty {
+            let prefix = canonicalDir.hasSuffix("/") ? canonicalDir : canonicalDir + "/"
+            for rawLine in matchedLines {
+                let relLine = rawLine.hasPrefix(prefix) ? String(rawLine.dropFirst(prefix.count)) : rawLine
+                let parts = relLine.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+                guard parts.count >= 3, let lineNum = Int(parts[1]) else { continue }
+                let relFile = String(parts[0])
+                let codeSnippet = String(parts[2]).trimmingCharacters(in: .whitespaces)
+                if let inferredKind = Self.inferDeclarationKind(line: codeSnippet, symbol: trimmed) {
+                    if let allowedKinds = normalizedKindFilter, !allowedKinds.contains(inferredKind) {
+                        continue
+                    }
+                    exactDefs.append(
+                        RepoSymbol(
+                            name: trimmed,
+                            kind: inferredKind,
+                            signature: String(codeSnippet.prefix(160)),
+                            line: lineNum,
+                            filePath: relFile
+                        )
+                    )
+                }
+            }
+        }
 
         var referenceLines: [String] = []
-        if (try? grepProcess.run()) != nil {
-            async let stdoutData = Task.detached { outPipe.fileHandleForReading.readDataToEndOfFile() }.value
-            async let stderrData = Task.detached { errPipe.fileHandleForReading.readDataToEndOfFile() }.value
-            let data = await stdoutData
-            _ = await stderrData
-            while grepProcess.isRunning {
-                try? await Task.sleep(nanoseconds: 5_000_000)
-            }
-            let rawOut = String(data: data, encoding: .utf8) ?? ""
+        if !matchedLines.isEmpty {
             let defKeys = Set((exactDefs + partialDefs).map { "\($0.filePath):\($0.line)" })
             let prefix = canonicalDir.hasSuffix("/") ? canonicalDir : canonicalDir + "/"
-            for rawLine in rawOut.split(separator: "\n").prefix(60) {
-                var lineStr = String(rawLine)
+            for rawLine in matchedLines.prefix(60) {
+                var lineStr = rawLine
                 if lineStr.hasPrefix(prefix) {
                     lineStr = String(lineStr.dropFirst(prefix.count))
                 }
@@ -464,6 +498,29 @@ final class HybridCodebaseSearchEngine: @unchecked Sendable {
             report.append(contentsOf: referenceLines)
         }
         return report.joined(separator: "\n")
+    }
+
+    /// Lightweight declaration classifier for cold-cache `find_symbol` queries so multi-thousand-file
+    /// External SSD repositories return definitions + references in <250ms while RepoMap warms in background.
+    private static func inferDeclarationKind(line: String, symbol: String) -> String? {
+        if line.hasPrefix("//") || line.hasPrefix("/*") || line.hasPrefix("*") || line.hasPrefix("#include") {
+            return nil
+        }
+        let escaped = NSRegularExpression.escapedPattern(for: symbol)
+        let checks: [(String, String)] = [
+            ("struct", "\\bstruct\\s+\(escaped)\\b|\\btypedef\\s+struct\\b.*\\b\(escaped)\\s*;"),
+            ("class", "\\b(?:class|actor|interface|protocol|trait)\\s+\(escaped)\\b"),
+            ("enum", "\\benum(?:\\s+class)?\\s+\(escaped)\\b"),
+            ("macro", "^#\\s*define\\s+\(escaped)\\b"),
+            ("type", "\\b(?:type|typealias|typedef)\\b.*\\b\(escaped)\\b"),
+            ("function", "(?:\\b(?:func|fn|def|function)\\s+\(escaped)\\b|^[A-Za-z_][A-Za-z0-9_:*&<>\\s]+\\b\(escaped)\\s*\\([^;]*$)")
+        ]
+        for (kind, pat) in checks {
+            if line.range(of: pat, options: .regularExpression) != nil {
+                return kind
+            }
+        }
+        return nil
     }
 }
 

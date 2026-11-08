@@ -346,6 +346,14 @@ async fn main() -> Result<()> {
             "/api/agent/rules/:session_id",
             get(handlers::agent_get_active_rules),
         )
+        .route(
+            "/api/agent/token-audit/:session_id",
+            get(handlers::agent_get_token_audit),
+        )
+        .route(
+            "/api/agent/repo-map",
+            post(handlers::agent_build_repo_map),
+        )
         // Scenario Automation routes
         .route("/api/scenario/execute", post(handlers::scenario_execute))
         .route(
@@ -1322,6 +1330,53 @@ mod handlers {
                 }))
                 .into_response()
             }
+        }
+    }
+
+    /// Return token waste, repeat-read deduplication, micro-compaction, and guard metrics for a session.
+    pub async fn agent_get_token_audit(
+        Path(session_id): Path<String>,
+    ) -> impl IntoResponse {
+        let audit = crate::agent::get_session_token_audit(&session_id);
+        let cache_efficiency_score = audit.cache_efficiency_score();
+        Json(json!({
+            "audit": audit,
+            "cache_efficiency_score": cache_efficiency_score,
+        }))
+    }
+
+    /// Build a Tree-sitter reference-ranked Repository Map for a workspace or session.
+    pub async fn agent_build_repo_map(
+        Json(req): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let max_tokens = req["max_tokens"]
+            .as_u64()
+            .map(|v| v as usize)
+            .unwrap_or(crate::indexer::DEFAULT_REPO_MAP_TOKENS);
+        let workspace = req["workspace_path"]
+            .as_str()
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                req["session_id"]
+                    .as_str()
+                    .and_then(|sid| crate::agent::get_session(sid).map(|s| s.workspace_path))
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+        let res = tokio::task::spawn_blocking(move || {
+            let mut indexer = crate::indexer::Indexer::new();
+            indexer.build_repo_map(&workspace, max_tokens)
+        })
+        .await;
+
+        match res {
+            Ok(Ok(report)) => Json(json!({
+                "success": true,
+                "report": report,
+            }))
+            .into_response(),
+            Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e.to_string() }))).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e.to_string() }))).into_response(),
         }
     }
 

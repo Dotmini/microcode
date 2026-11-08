@@ -902,11 +902,54 @@ struct CollaborationView: View {
         HStack(alignment: .top, spacing: 14) {
             // Left: Active Participants
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
+                HStack(spacing: 8) {
                     Text("PARTICIPANTS (\(collab.participants.count))")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundColor(.secondary)
                     Spacer()
+                    Button {
+                        collab.setAITeammateEnabled(!collab.isAITeammateEnabled)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text(collab.isAITeammateEnabled ? "AI Teammate: ON" : "AI Teammate: OFF")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundColor(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97) : .secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.14) : Color.primary.opacity(0.05))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("เปิด/ปิด AI Agent เป็นเพื่อนร่วมทีมแบบ Real-Time ในโหมด Collab")
+
+                    if collab.isAITeammateEnabled {
+                        let isFollowingAI = collab.followingUserId == CollaborationService.aiTeammateUserId
+                        Button {
+                            collab.toggleFollow(userId: CollaborationService.aiTeammateUserId)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: isFollowingAI ? "eye.fill" : "eye")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                Text(isFollowingAI ? "Following AI" : "Follow AI")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundColor(isFollowingAI ? .white : Color(red: 0.66, green: 0.33, blue: 0.97))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(isFollowingAI ? Color(red: 0.66, green: 0.33, blue: 0.97) : Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .help("ติดตามดูไฟล์และบรรทัดที่ AI Agent กำลังอ่าน/แก้ไขแบบ Real-Time")
+                    }
+
                     if collab.followingUserId != nil {
                         Button("Stop Following") {
                             collab.followingUserId = nil
@@ -999,11 +1042,11 @@ struct CollaborationView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                 Spacer()
-                Text("\(filteredSharedFiles.count) files")
+                Text("\(collab.sharedDirectories.count) folders · \(filteredSharedFiles.count) files")
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundColor(.secondary)
                 Button {
-                    collab.indexLocalWorkspaceFiles()
+                    collab.indexLocalWorkspaceFiles(forceDiskScan: true)
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 10.5))
@@ -1026,8 +1069,8 @@ struct CollaborationView: View {
                     .foregroundColor(.secondary)
                     .padding(.vertical, 12)
             } else {
-                LazyVStack(spacing: 6) {
-                    ForEach(filteredSharedFiles.prefix(80)) { file in
+                LazyVStack(spacing: 5) {
+                    ForEach(filteredSharedFiles.prefix(300)) { file in
                         sharedFileRow(file)
                     }
                 }
@@ -1044,20 +1087,31 @@ struct CollaborationView: View {
     
     private var filteredSharedFiles: [SharedWorkspaceFile] {
         let q = fileFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return collab.sharedFiles }
-        return collab.sharedFiles.filter {
+        let base = collab.sharedFiles.sorted { $0.relativePath < $1.relativePath }
+        guard !q.isEmpty else { return base }
+        return base.filter {
             $0.relativePath.lowercased().contains(q) || $0.name.lowercased().contains(q)
         }
     }
     
     private func sharedFileRow(_ file: SharedWorkspaceFile) -> some View {
-        HStack(spacing: 10) {
+        let folderDir = (file.relativePath as NSString).deletingLastPathComponent
+        let depth = folderDir.isEmpty ? 0 : folderDir.split(separator: "/").count
+        let peerColor = CollaborationColorHelper.swiftUIColor(fromHex: file.activeEditorColor ?? "#3B82F6")
+        return HStack(spacing: 10) {
             ProgrammingLanguageIconView(fileName: file.name, size: 15)
+                .padding(.leading, CGFloat(min(depth, 5) * 10))
             
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
+                    if !folderDir.isEmpty {
+                        Text(folderDir + "/")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                     Text(file.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.primary)
                         .lineLimit(1)
                     if file.isOpenOnHost {
@@ -1072,7 +1126,7 @@ struct CollaborationView: View {
                 }
                 Text(file.relativePath)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary.opacity(0.8))
                     .lineLimit(1)
             }
             
@@ -1081,15 +1135,15 @@ struct CollaborationView: View {
             if let editor = file.activeEditorName, !editor.isEmpty {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(Color.primary.opacity(0.6))
-                        .frame(width: 5.5, height: 5.5)
+                        .fill(peerColor)
+                        .frame(width: 6, height: 6)
                     Text(editor)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(peerColor)
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.05))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(peerColor.opacity(0.14))
                 .cornerRadius(4)
             }
             
@@ -1156,7 +1210,31 @@ struct CollaborationView: View {
                 }
                 
                 HStack(spacing: 8) {
-                    TextField("Message collaborators…", text: $chatInput)
+                    Button {
+                        if !chatInput.lowercased().hasPrefix("@ai ") {
+                            chatInput = "@ai " + chatInput
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 10, weight: .bold))
+                            Text("@ai")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        }
+                        .foregroundColor(Color(red: 0.66, green: 0.33, blue: 0.97))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.35), lineWidth: 1)
+                        )
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("สั่งงาน AI Agent ร่วมกับทีมใน Session Chat (@ai ...)")
+
+                    TextField("Message collaborators or type @ai to command AI Agent…", text: $chatInput)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12))
                         .padding(.horizontal, 9)
@@ -1276,18 +1354,26 @@ struct ParticipantRow: View {
     var onToggleFollow: (() -> Void)? = nil
     
     var body: some View {
+        let peerColor = CollaborationColorHelper.swiftUIColor(fromHex: participant.color)
+        let isAITeammate = participant.userId == CollaborationService.aiTeammateUserId || participant.role == "AI Agent"
         HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.primary.opacity(0.07))
+                    .fill(peerColor.opacity(isAITeammate ? 0.24 : 0.20))
                     .frame(width: 28, height: 28)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            .stroke(peerColor.opacity(0.65), lineWidth: 1.2)
                     )
-                Text(participant.displayName.prefix(1).uppercased())
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.primary.opacity(0.88))
+                if isAITeammate {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(peerColor)
+                } else {
+                    Text(participant.displayName.prefix(1).uppercased())
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(peerColor)
+                }
             }
             
             VStack(alignment: .leading, spacing: 2) {
@@ -1299,31 +1385,31 @@ struct ParticipantRow: View {
                     
                     Text(participant.role.uppercased())
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(isAITeammate ? peerColor : .secondary)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Color.primary.opacity(0.06))
+                        .background(isAITeammate ? peerColor.opacity(0.14) : Color.primary.opacity(0.06))
                         .cornerRadius(3)
                 }
                 
-                if let cursor = participant.cursorPosition, !cursor.filePath.isEmpty {
-                    HStack(spacing: 5) {
+                HStack(spacing: 5) {
+                    if let cursor = participant.cursorPosition, !cursor.filePath.isEmpty {
                         ProgrammingLanguageIconView(fileName: (cursor.filePath as NSString).lastPathComponent, size: 11)
-                        Text("\((cursor.filePath as NSString).lastPathComponent) · Ln \(cursor.line)")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
+                    } else {
+                        Circle()
+                            .fill(peerColor.opacity(0.8))
+                            .frame(width: 5, height: 5)
                     }
-                } else {
-                    Text("Viewing workspace")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(.secondary)
+                    Text(participant.liveActivitySummary)
+                        .font(.system(size: 10.5, weight: participant.cursorPosition?.isTyping == true ? .semibold : .regular, design: .monospaced))
+                        .foregroundColor(participant.cursorPosition?.isTyping == true ? peerColor : .secondary)
+                        .lineLimit(1)
                 }
                 
                 if participant.isAIActive, let aiText = participant.aiStatusText, !aiText.isEmpty {
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(Color.primary.opacity(0.65))
+                            .fill(peerColor)
                             .frame(width: 5, height: 5)
                         Text("AI Agent: \(aiText)")
                             .font(.system(size: 10, design: .monospaced))
@@ -1335,17 +1421,38 @@ struct ParticipantRow: View {
             
             Spacer()
             
+            if !isSelf, participant.cursorPosition != nil {
+                Button {
+                    Task {
+                        await CollaborationService.shared.jumpToParticipant(participant)
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 9))
+                        Text("Jump")
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .foregroundColor(peerColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(peerColor.opacity(0.12))
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+            }
+
             if !isSelf, let onToggleFollow {
                 Button(action: onToggleFollow) {
                     Text(isFollowing ? "Following" : "Follow")
                         .font(.system(size: 10.5, weight: .medium))
-                        .foregroundColor(.primary)
+                        .foregroundColor(isFollowing ? peerColor : .primary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(isFollowing ? Color.primary.opacity(0.12) : Color.primary.opacity(0.05))
+                        .background(isFollowing ? peerColor.opacity(0.16) : Color.primary.opacity(0.05))
                         .overlay(
                             RoundedRectangle(cornerRadius: 5)
-                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                                .stroke(isFollowing ? peerColor.opacity(0.5) : Color.primary.opacity(0.12), lineWidth: 1)
                         )
                         .cornerRadius(5)
                 }
@@ -1353,15 +1460,426 @@ struct ParticipantRow: View {
             }
             
             Circle()
-                .fill(participant.isOnline ? Color.primary.opacity(0.75) : Color.secondary.opacity(0.35))
-                .frame(width: 6, height: 6)
+                .fill(participant.isOnline ? Color.green : Color.secondary.opacity(0.35))
+                .frame(width: 6.5, height: 6.5)
         }
         .padding(10)
         .background(Color.primary.opacity(0.025))
         .cornerRadius(6)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(peerColor.opacity(isFollowing ? 0.45 : 0.14), lineWidth: 1)
         )
+    }
+}
+
+// MARK: - Live Multiplayer Header Presence Bar
+
+struct HeaderCollaborationPresenceBar: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject private var collab = CollaborationService.shared
+    @State private var copiedFeedback = false
+
+    var body: some View {
+        if let session = collab.currentSession {
+            let online = collab.onlineParticipants()
+            let remotes = collab.remoteOnlineParticipants()
+            HStack(spacing: 6) {
+                Button {
+                    appState.showingCollaborationView = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+
+                        // Stacked colorful participant avatars
+                        HStack(spacing: -5) {
+                            ForEach(Array(online.prefix(4))) { peer in
+                                let c = CollaborationColorHelper.swiftUIColor(fromHex: peer.color)
+                                let isAI = peer.userId == CollaborationService.aiTeammateUserId || peer.role == "AI Agent"
+                                ZStack {
+                                    Circle()
+                                        .fill(c)
+                                        .frame(width: 18, height: 18)
+                                    if isAI {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(.white)
+                                    } else {
+                                        Text(peer.displayName.prefix(1).uppercased())
+                                            .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                                            .foregroundColor(.white)
+                                    }
+                                }
+                                .overlay(
+                                    Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.4)
+                                )
+                                .help("\(peer.displayName) — \(peer.liveActivitySummary)")
+                            }
+                        }
+
+                        Text(session.shareCode)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(.primary.opacity(0.9))
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if collab.isAITeammateEnabled {
+                    let isFollowingAI = collab.followingUserId == CollaborationService.aiTeammateUserId
+                    Divider()
+                        .frame(height: 12)
+                        .opacity(0.35)
+                    Button {
+                        collab.toggleFollow(userId: CollaborationService.aiTeammateUserId)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: isFollowingAI ? "eye.fill" : "sparkles")
+                                .font(.system(size: 9, weight: .bold))
+                            Text(isFollowingAI ? "Following AI" : "Follow AI")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundColor(isFollowingAI ? .white : Color(red: 0.66, green: 0.33, blue: 0.97))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(isFollowingAI ? Color(red: 0.66, green: 0.33, blue: 0.97) : Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.15))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help(isFollowingAI ? "คลิกเพื่อหยุด Follow AI Agent" : "คลิกเพื่อ Follow ดูไฟล์และบรรทัดที่ AI Agent กำลังทำแบบ Real-Time")
+                }
+
+                if let activePeer = remotes.first {
+                    let peerColor = CollaborationColorHelper.swiftUIColor(fromHex: activePeer.color)
+                    Divider()
+                        .frame(height: 12)
+                        .opacity(0.35)
+
+                    Button {
+                        Task {
+                            await collab.jumpToParticipant(activePeer)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(peerColor)
+                                .frame(width: 5.5, height: 5.5)
+                            Text("\(activePeer.displayName): \(activePeer.liveActivitySummary)")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundColor(.primary.opacity(0.88))
+                                .lineLimit(1)
+                                .frame(maxWidth: 185, alignment: .leading)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("คลิกเพื่อกระโดดไปยังไฟล์และบรรทัดที่ \(activePeer.displayName) กำลังแก้")
+                }
+
+                Menu {
+                    Section("Live Session · Room \(session.shareCode)") {
+                        Button {
+                            collab.copyJoinTokenToClipboard()
+                            copiedFeedback = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedFeedback = false }
+                        } label: {
+                            Label(copiedFeedback ? "Copied Join Token!" : "Copy Join Token", systemImage: "doc.on.doc")
+                        }
+                        Button {
+                            collab.copyShareLinkToClipboard()
+                        } label: {
+                            Label("Copy Share Link / Web Portal", systemImage: "link")
+                        }
+                    }
+
+                    Section("Multiplayer Cursors") {
+                        Toggle(isOn: Binding(
+                            get: { collab.showLocalCursorTag },
+                            set: { collab.showLocalCursorTag = $0 }
+                        )) {
+                            Label("แสดงป้ายเมาส์ของฉัน (My Live Cursor)", systemImage: "cursorarrow.motionlines")
+                        }
+
+                        ForEach(remotes) { peer in
+                            Button {
+                                Task { await collab.jumpToParticipant(peer) }
+                            } label: {
+                                Label("Jump to \(peer.displayName) (\(peer.liveActivitySummary))", systemImage: "location.fill")
+                            }
+                            Button {
+                                collab.toggleFollow(userId: peer.userId)
+                            } label: {
+                                Label(
+                                    collab.followingUserId == peer.userId ? "Stop Following \(peer.displayName)" : "Follow \(peer.displayName)",
+                                    systemImage: collab.followingUserId == peer.userId ? "eye.slash" : "eye.fill"
+                                )
+                            }
+                        }
+                    }
+
+                    Divider()
+                    Button {
+                        appState.showingCollaborationView = true
+                    } label: {
+                        Label("Open Team Collaboration Panel…", systemImage: "person.2.fill")
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 14, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3.5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.green.opacity(0.10))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.green.opacity(0.32), lineWidth: 1)
+            )
+        }
+    }
+}
+
+// MARK: - Real-Time Workspace Multiplayer Mouse Overlay (Ours + Teammates)
+
+private struct CollaboratorPointerArrowShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX + 1, y: rect.minY + 1))
+        p.addLine(to: CGPoint(x: rect.minX + 1, y: rect.minY + 16.5))
+        p.addLine(to: CGPoint(x: rect.minX + 5.4, y: rect.minY + 12.6))
+        p.addLine(to: CGPoint(x: rect.minX + 8.6, y: rect.minY + 18.2))
+        p.addLine(to: CGPoint(x: rect.minX + 10.9, y: rect.minY + 17.0))
+        p.addLine(to: CGPoint(x: rect.minX + 7.7, y: rect.minY + 11.4))
+        p.addLine(to: CGPoint(x: rect.minX + 13.4, y: rect.minY + 11.1))
+        p.closeSubpath()
+        return p
+    }
+}
+
+private struct CollabMouseMonitorAnchorView: NSViewRepresentable {
+    let isEnabled: Bool
+    let onLocalMouseEvent: (_ normalizedX: Double, _ normalizedY: Double, _ localPoint: CGPoint, _ isInside: Bool, _ isPressing: Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onLocalMouseEvent: onLocalMouseEvent)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.hostView = view
+        context.coordinator.setEnabled(isEnabled)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.hostView = nsView
+        context.coordinator.onLocalMouseEvent = onLocalMouseEvent
+        context.coordinator.setEnabled(isEnabled)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.setEnabled(false)
+    }
+
+    final class Coordinator {
+        weak var hostView: NSView?
+        var onLocalMouseEvent: (_ normalizedX: Double, _ normalizedY: Double, _ localPoint: CGPoint, _ isInside: Bool, _ isPressing: Bool) -> Void
+        private var eventMonitor: Any?
+
+        init(onLocalMouseEvent: @escaping (_ normalizedX: Double, _ normalizedY: Double, _ localPoint: CGPoint, _ isInside: Bool, _ isPressing: Bool) -> Void) {
+            self.onLocalMouseEvent = onLocalMouseEvent
+        }
+
+        deinit {
+            if let monitor = eventMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+
+        func setEnabled(_ enabled: Bool) {
+            if enabled {
+                guard eventMonitor == nil else { return }
+                eventMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: [.mouseMoved, .leftMouseDragged, .leftMouseDown, .leftMouseUp]
+                ) { [weak self] event in
+                    guard let self,
+                          let view = self.hostView,
+                          let win = view.window,
+                          event.window === win else {
+                        return event
+                    }
+                    let bounds = view.bounds
+                    guard bounds.width > 1, bounds.height > 1 else { return event }
+                    let pt = view.convert(event.locationInWindow, from: nil)
+                    let flippedY = view.isFlipped ? pt.y : (bounds.height - pt.y)
+                    let inside = pt.x >= 0 && pt.x <= bounds.width && flippedY >= 0 && flippedY <= bounds.height
+                    let nx = max(0.0, min(1.0, Double(pt.x / bounds.width)))
+                    let ny = max(0.0, min(1.0, Double(flippedY / bounds.height)))
+                    let pressing = NSEvent.pressedMouseButtons != 0 || event.type == .leftMouseDown || event.type == .leftMouseDragged
+                    self.onLocalMouseEvent(nx, ny, CGPoint(x: pt.x, y: flippedY), inside, pressing)
+                    return event
+                }
+            } else if let monitor = eventMonitor {
+                NSEvent.removeMonitor(monitor)
+                eventMonitor = nil
+            }
+        }
+    }
+}
+
+struct CollaborationWorkspaceMouseOverlay: View {
+    let surface: String
+    @ObservedObject private var collab = CollaborationService.shared
+    @State private var localPointerPoint: CGPoint = .zero
+    @State private var isPointerInside: Bool = false
+    @State private var isPointerRecentlyActive: Bool = false
+    @State private var localIsPressing: Bool = false
+    @State private var idleFadeTask: Task<Void, Never>? = nil
+
+    var body: some View {
+        let sessionActive = (collab.currentSession != nil)
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                CollabMouseMonitorAnchorView(isEnabled: sessionActive) { nx, ny, pt, inside, pressing in
+                    localPointerPoint = pt
+                    isPointerInside = inside
+                    localIsPressing = pressing
+                    if inside {
+                        isPointerRecentlyActive = true
+                        collab.updateLocalMouse(
+                            normalizedX: nx,
+                            normalizedY: ny,
+                            surface: surface,
+                            isPressing: pressing
+                        )
+                        idleFadeTask?.cancel()
+                        idleFadeTask = Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 2_200_000_000)
+                            if !Task.isCancelled {
+                                isPointerRecentlyActive = false
+                            }
+                        }
+                    } else {
+                        isPointerRecentlyActive = false
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if sessionActive {
+                    let now = Date()
+                    let remotePeers = collab.remoteOnlineParticipants().filter { peer in
+                        guard let m = peer.mousePresence else { return false }
+                        return now.timeIntervalSince(m.updatedAt) < 18.0
+                    }
+
+                    // 1. Remote Collaborators' Smooth Live Cursors & Editing Badges
+                    ForEach(remotePeers) { peer in
+                        if let mouse = peer.mousePresence {
+                            let peerColor = CollaborationColorHelper.swiftUIColor(fromHex: peer.color)
+                            let targetX = CGFloat(mouse.normalizedX) * max(1, geo.size.width)
+                            let targetY = CGFloat(mouse.normalizedY) * max(1, geo.size.height)
+
+                            ZStack(alignment: .topLeading) {
+                                if mouse.isPressing {
+                                    Circle()
+                                        .stroke(peerColor.opacity(0.65), lineWidth: 2)
+                                        .frame(width: 24, height: 24)
+                                        .offset(x: -10, y: -10)
+                                }
+
+                                VStack(alignment: .leading, spacing: 1) {
+                                    CollaboratorPointerArrowShape()
+                                        .fill(peerColor)
+                                        .overlay(
+                                            CollaboratorPointerArrowShape()
+                                                .stroke(Color.white, lineWidth: 1.35)
+                                        )
+                                        .frame(width: 15, height: 19)
+                                        .shadow(color: Color.black.opacity(0.42), radius: 3, x: 0, y: 1.5)
+
+                                    HStack(spacing: 4) {
+                                        Text(peer.displayName)
+                                            .font(.system(size: 10.5, weight: .bold))
+                                            .foregroundColor(.white)
+                                        Text("· \(peer.liveActivitySummary)")
+                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                            .foregroundColor(.white.opacity(0.92))
+                                            .lineLimit(1)
+                                    }
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2.5)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(peerColor)
+                                    )
+                                    .overlay(
+                                        Capsule(style: .continuous)
+                                            .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
+                                    )
+                                    .shadow(color: Color.black.opacity(0.35), radius: 4, x: 0, y: 2)
+                                    .offset(x: 11, y: -2)
+                                }
+                            }
+                            .offset(x: targetX, y: targetY)
+                            .animation(.interactiveSpring(response: 0.085, dampingFraction: 0.86), value: mouse.normalizedX)
+                            .animation(.interactiveSpring(response: 0.085, dampingFraction: 0.86), value: mouse.normalizedY)
+                        }
+                    }
+
+                    // 2. Local Live Cursor Tag ("เมาส์ realtime ของเรา")
+                    if collab.showLocalCursorTag,
+                       isPointerInside,
+                       isPointerRecentlyActive,
+                       collab.localEditorCursor?.isTyping != true {
+                        let myColor = CollaborationColorHelper.swiftUIColor(fromHex: collab.localColor)
+                        let myCursorSummary: String = {
+                            if let cur = collab.localEditorCursor, !cur.filePath.isEmpty {
+                                return "\((cur.filePath as NSString).lastPathComponent):Ln \(cur.line)"
+                            }
+                            return surface == "agent" ? "Agent" : "Editor"
+                        }()
+                        let pillX = min(max(8, localPointerPoint.x + 15), max(8, geo.size.width - 175))
+                        let pillY = min(max(8, localPointerPoint.y + 16), max(8, geo.size.height - 28))
+
+                        HStack(spacing: 4.5) {
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 5, height: 5)
+                            Text("\(collab.localDisplayName) (You)")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.white)
+                            Text("· \(myCursorSummary)")
+                                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.9))
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(myColor.opacity(localIsPressing ? 0.98 : 0.88))
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.3), lineWidth: 0.8)
+                        )
+                        .shadow(color: Color.black.opacity(0.28), radius: 3, x: 0, y: 1.5)
+                        .offset(x: pillX, y: pillY)
+                    }
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 }

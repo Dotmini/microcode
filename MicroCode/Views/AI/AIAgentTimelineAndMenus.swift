@@ -150,6 +150,7 @@ struct AntigravityThoughtBlockView: View {
                                     .foregroundColor(.secondary.opacity(0.82))
                                     .lineSpacing(3)
                                     .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
                             }
                         }
                     }
@@ -270,24 +271,23 @@ struct AgentThinkingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                // Spinning active gear/ring indicator
+                // Low-overhead discrete step indicator (avoids 60/120Hz CoreAnimation backdrop recomposition on GPU)
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.accentColor)
                     .rotationEffect(.degrees(rotationAngle))
-                    .animation(.linear(duration: 1.2).repeatForever(autoreverses: false), value: rotationAngle)
+                    .frame(width: 14, height: 14)
                 
                 Text(elapsedSeconds > 0 ? "Agent Working • \(elapsedSeconds)s" : "Agent Working")
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundColor(.primary)
                 
-                // Pulsing live badge
+                // Live badge (updates at 1Hz with elapsed timer instead of 120Hz repeatForever)
                 HStack(spacing: 4) {
                     Circle()
                         .fill(Color.green)
                         .frame(width: 5, height: 5)
-                        .opacity(isPulsing ? 1.0 : 0.3)
-                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
+                        .opacity(isPulsing ? 1.0 : 0.45)
                     
                     Text("LIVE")
                         .font(.system(size: 8.5, weight: .bold))
@@ -339,13 +339,18 @@ struct AgentThinkingView: View {
         .padding(.vertical, 4)
         .onAppear {
             isPulsing = true
-            rotationAngle = 360
-            // Start timers ONLY when this view is actually on screen
+            // Single lightweight 1Hz + 0.5Hz discrete tick (0% idle GPU vs 60/120fps repeatForever)
             elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-                Task { @MainActor in elapsedSeconds += 1 }
+                Task { @MainActor in
+                    elapsedSeconds += 1
+                    isPulsing.toggle()
+                }
             }
-            dotAnimTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { _ in
-                Task { @MainActor in dotCount = (dotCount % 3) + 1 }
+            dotAnimTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+                Task { @MainActor in
+                    dotCount = (dotCount % 3) + 1
+                    rotationAngle = (rotationAngle + 45).truncatingRemainder(dividingBy: 360)
+                }
             }
         }
         .onDisappear {
@@ -412,10 +417,13 @@ struct ToolExecutionStepsView: View {
                     }
                     
                     if isStreaming {
-                        Text("Working…")
-                            .font(.system(size: 12.5, weight: .regular))
-                            .foregroundColor(.secondary.opacity(0.75))
-                            .padding(.top, 2)
+                        HStack(spacing: 7) {
+                            AIStreamingThreeDotsView(dotSize: 5, spacing: 4)
+                            Text("Working…")
+                                .font(.system(size: 12.5, weight: .regular))
+                                .foregroundColor(.secondary.opacity(0.75))
+                        }
+                        .padding(.top, 2)
                     }
                 }
                 .padding(.leading, 12)
@@ -1253,8 +1261,10 @@ struct ProjectWorkspaceSelectorMenu: View {
     private func selectProject(_ path: String) {
         guard !path.isEmpty else { return }
         let url = URL(fileURLWithPath: path)
+        let keepAgentSurface = (appState.editorMode == .aiAgent)
+        agent.setWorkspace(path)
         Task { @MainActor in
-            await appState.openWorkspace(url: url)
+            await appState.openWorkspace(url: url, autoOpenEntryFile: !keepAgentSurface)
             agent.setWorkspace(path)
         }
         isPresented = false
@@ -1597,29 +1607,46 @@ struct AttachmentChipView: View {
     
     var body: some View {
         HStack(spacing: 6) {
-            // Real Image thumbnail or category icon
-            if let image = file.nsImage {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 24, height: 24)
-                    .cornerRadius(4)
-                    .clipped()
+            // Real Image/Video-keyframe thumbnail or semantic category icon
+            if let image = file.nsImage, (file.semanticCategory == .image || file.semanticCategory == .video) {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 24, height: 24)
+                        .cornerRadius(4)
+                        .clipped()
+                    if file.semanticCategory == .video {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(.white)
+                            .shadow(radius: 1)
+                            .padding(1)
+                    }
+                }
             } else {
                 Image(systemName: iconName)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(iconColor)
             }
             
             VStack(alignment: .leading, spacing: 1) {
-                Text(file.name)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(file.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    if let warning = file.extractionWarning, !warning.isEmpty {
+                        Image(systemName: file.isPasswordProtected ? "lock.trianglebadge.exclamationmark.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(.orange)
+                            .help(warning)
+                    }
+                }
                 
                 Text(subtitle)
                     .font(.system(size: 9))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(file.isPasswordProtected ? .orange : .secondary)
                     .lineLimit(1)
             }
             
@@ -1640,33 +1667,76 @@ struct AttachmentChipView: View {
         .cornerRadius(6)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                .stroke(
+                    file.isPasswordProtected
+                        ? Color.orange.opacity(0.45)
+                        : Color.primary.opacity(0.12),
+                    lineWidth: 1
+                )
         )
+        .help(chipTooltip)
+    }
+    
+    private var chipTooltip: String {
+        var lines = [file.name, subtitle]
+        if let metrics = file.metricsSummary, !metrics.isEmpty {
+            lines.append("Extracted: \(metrics)")
+        }
+        if let warning = file.extractionWarning, !warning.isEmpty {
+            lines.append("Note: \(warning)")
+        }
+        return lines.joined(separator: "\n")
     }
     
     private var iconName: String {
-        switch file.type {
+        switch file.semanticCategory {
+        case .pdf: return file.isPasswordProtected ? "lock.doc.fill" : "doc.richtext.fill"
+        case .wordDoc: return "doc.text.fill"
+        case .spreadsheet: return "tablecells.fill"
+        case .presentation: return "rectangle.on.rectangle.angled"
+        case .richDocument: return "doc.richtext"
+        case .notebook: return "book.pages.fill"
+        case .database: return "cylinder.split.1x2.fill"
+        case .dataFile: return "curlybraces.square.fill"
+        case .codeOrText: return "doc.plaintext"
         case .image: return "photo"
-        case .pdf: return "doc.text.fill"
-        case .text: return "doc.plaintext"
+        case .audio: return "waveform"
+        case .video: return "film.fill"
+        case .archive: return "archivebox.fill"
+        case .folder: return "folder.fill"
+        case .binary: return "memorychip"
         }
     }
     
     private var iconColor: Color {
-        switch file.type {
+        switch file.semanticCategory {
+        case .pdf: return .red.opacity(0.88)
+        case .wordDoc: return .blue
+        case .spreadsheet: return .green
+        case .presentation: return .orange
+        case .richDocument: return .indigo
+        case .notebook: return .purple
+        case .database: return .teal
+        case .dataFile: return .mint
+        case .codeOrText: return .accentColor
         case .image: return .cyan
-        case .pdf: return .red.opacity(0.85)
-        case .text: return .accentColor
+        case .audio: return .pink
+        case .video: return .purple
+        case .archive, .folder: return .yellow.opacity(0.9)
+        case .binary: return .gray
         }
     }
     
     private var subtitle: String {
+        if let badge = file.subtitleBadge, !badge.isEmpty {
+            return badge
+        }
         switch file.type {
         case .image:
             return "Image • \(file.formattedSize)"
         case .pdf:
             let pages = file.pdfPageCount
-            return "PDF • \(pages > 0 ? "\(pages) p • " : "")\(file.formattedSize)"
+            return "PDF • \(pages > 0 ? "\(pages)p • " : "")\(file.formattedSize)"
         case .text:
             return "File • \(file.formattedSize)"
         }

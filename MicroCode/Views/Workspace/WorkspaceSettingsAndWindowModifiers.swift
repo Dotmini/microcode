@@ -10,12 +10,39 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+// MARK: - Settings Sheet Window Anchor
+
+private struct SettingsSheetWindowAnchor: NSViewRepresentable {
+    @Binding var sheetWindow: NSWindow?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { [weak view] in
+            if let win = view?.window, (win.isSheet || win.sheetParent != nil || win.className.contains("Sheet")) {
+                sheetWindow = win
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let win = nsView.window,
+           (win.isSheet || win.sheetParent != nil || win.className.contains("Sheet")),
+           sheetWindow !== win {
+            DispatchQueue.main.async {
+                sheetWindow = win
+            }
+        }
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
     @StateObject private var modelCatalog = AIModelCatalog.shared
+    @State private var hostSheetWindow: NSWindow? = nil
     
     // Local state for editing
     @State private var selectedProvider: String = ""
@@ -30,10 +57,10 @@ struct SettingsView: View {
     @State private var showConsole: Bool = true
     @State private var selectedTheme: AppTheme = .system
     @State private var playgroundFontName: String = "SF Mono"
-    @State private var playgroundFontSize: CGFloat = 16.0
+    @State private var playgroundFontSize: CGFloat = 13.0
     @State private var playgroundFontWeight: Int = 2
     @State private var cellFontName: String = "SF Mono"
-    @State private var cellFontSize: CGFloat = 16.0
+    @State private var cellFontSize: CGFloat = 13.0
     @State private var cellFontWeight: Int = 2
     @State private var agentMode: Bool = true
     @State private var agentAutoApproveTools: Bool = false
@@ -120,7 +147,10 @@ struct SettingsView: View {
                             .buttonStyle(.plain)
                             .keyboardShortcut(.cancelAction)
 
-                            Button(action: { saveAllSettings(); closeSettings() }) {
+                            Button(action: {
+                                saveAllSettings(deferThemeUntilDismissed: true)
+                                closeSettings()
+                            }) {
                                 Text("Save Changes")
                                     .font(.system(size: 11.5, weight: .semibold))
                                     .foregroundColor(.primary)
@@ -163,8 +193,12 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
         }
+        .background(SettingsSheetWindowAnchor(sheetWindow: $hostSheetWindow))
         .frame(minWidth: 880, idealWidth: 1000, maxWidth: 1240,
                minHeight: 600, idealHeight: 700, maxHeight: 920)
+        .onExitCommand {
+            closeSettings()
+        }
         .onAppear {
             selectedTab = appState.settingsSelectedTab
             loadCurrentSettings()
@@ -178,13 +212,40 @@ struct SettingsView: View {
             }
         }
         .onDisappear {
-            appState.showingSettingsDialog = false
+            if appState.showingSettingsDialog {
+                appState.showingSettingsDialog = false
+            }
         }
     }
     
     private func closeSettings() {
-        appState.showingSettingsDialog = false
+        let capturedSheet = hostSheetWindow
+        capturedSheet?.makeFirstResponder(nil)
+        if appState.showingSettingsDialog {
+            appState.showingSettingsDialog = false
+        }
         dismiss()
+        Self.ensureSheetDismissed(capturedSheet, appState: appState)
+    }
+
+    private static func ensureSheetDismissed(_ capturedSheet: NSWindow?, appState: AppState) {
+        for delay in [0.08, 0.25] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard !appState.showingSettingsDialog else { return }
+                let targetSheet: NSWindow? = capturedSheet ?? NSApplication.shared.windows.first(where: {
+                    ($0.isSheet || $0.sheetParent != nil) && $0.isVisible &&
+                    abs($0.frame.width - 1000) < 380 && abs($0.frame.height - 700) < 280
+                })
+                guard let sheetWin = targetSheet, sheetWin.isVisible else { return }
+                if let parent = sheetWin.sheetParent {
+                    parent.endSheet(sheetWin, returnCode: .cancel)
+                    sheetWin.orderOut(nil)
+                    parent.makeKeyAndOrderFront(nil)
+                } else if sheetWin.isSheet || sheetWin.className.contains("Sheet") {
+                    sheetWin.orderOut(nil)
+                }
+            }
+        }
     }
     
     // MARK: - Subscription Content
@@ -685,15 +746,21 @@ struct SettingsView: View {
         case "grok": return .purple
         case "qwen": return .indigo
         case "glm": return .red
+        case "custom": return .teal
         default: return .secondary
         }
     }
     
     @State private var providerKeys: [String: String] = [:]
+    @State private var providerBaseURLs: [String: String] = [:]
+    @State private var providerCustomModels: [String: String] = [:]
+    @State private var isTestingByokEndpoint: Bool = false
+    @State private var byokEndpointStatusMessage: String = ""
     @State private var showAPIKey: [String: Bool] = [:]
     @State private var aiKeyMode: String = "direct"  // "cloud" = Dotmini proxy, "direct" = user's own key, "subscription" = ChatGPT/Claude/Gemini/DeepSeek subscription, "local" = local LLM
     @State private var dotminiLicenseKey: String = ""
     @ObservedObject private var subscriptionAuth = SubscriptionAuthManager.shared
+    @ObservedObject private var supabaseAuth = SupabaseAuthService.shared
     
     private var aiSettingsContent: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -711,8 +778,11 @@ struct SettingsView: View {
                     // Mode Button: Cloud
                     Button {
                         aiKeyMode = "cloud"
-                        selectedProvider = "omni"
-                        if let first = modelCatalog.provider("omni")?.models.first {
+                        let cloudList = modelCatalog.dotminiCloudModels
+                        if let currentMatch = cloudList.first(where: { $0.id == selectedModel }) {
+                            selectedProvider = currentMatch.provider
+                        } else if let first = cloudList.first {
+                            selectedProvider = first.provider
                             selectedModel = first.id
                         }
                         hasChanges = true
@@ -831,13 +901,18 @@ struct SettingsView: View {
             // ── 2. Mode-Specific Configuration ──
             if aiKeyMode == "cloud" {
                 // Dotmini Cloud Dedicated Panel
+                let cloudModels = modelCatalog.dotminiCloudModels
+                let hasCloudSession = supabaseAuth.session != nil
+                let rawPlan = supabaseAuth.entitlement.plan.trimmingCharacters(in: .whitespacesAndNewlines)
+                let planUpper = rawPlan.isEmpty ? "FREE" : rawPlan.uppercased()
+                let isPaidPlan = ["lite", "pro", "advanced", "bundle_pro", "bundle", "enterprise", "admin"].contains(where: { rawPlan.lowercased().contains($0) })
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 10) {
                         AIProviderBrandIcon(provider: "omni", size: 18)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("Dotmini Cloud Models")
+                            Text("Dotmini Cloud Subscription")
                                 .font(.system(size: 13, weight: .semibold))
-                            Text("api.dotmini.net/v1")
+                            Text("microcode.dotmini.net/v1")
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.secondary)
                         }
@@ -848,9 +923,13 @@ struct SettingsView: View {
                         Button(modelCatalog.isRefreshing ? "Refreshing…" : "Refresh Catalog") {
                             Task {
                                 await modelCatalog.refreshIfNeeded(force: true)
-                                let normalized = modelCatalog.normalizedSelection(provider: "omni", model: selectedModel)
-                                selectedProvider = "omni"
-                                selectedModel = normalized.model
+                                await supabaseAuth.refreshEntitlement()
+                                if let match = modelCatalog.dotminiCloudModels.first(where: { $0.id == selectedModel }) {
+                                    selectedProvider = match.provider
+                                } else if let first = modelCatalog.dotminiCloudModels.first {
+                                    selectedProvider = first.provider
+                                    selectedModel = first.id
+                                }
                             }
                         }
                         .buttonStyle(.bordered)
@@ -867,43 +946,67 @@ struct SettingsView: View {
                             .frame(width: 110, alignment: .leading)
                         
                         Picker("", selection: $selectedModel) {
-                            if let omniProvider = modelCatalog.provider("omni") {
-                                ForEach(omniProvider.models, id: \.id) { m in
-                                    HStack {
-                                        Text(m.name)
-                                        if !m.badge.isEmpty {
-                                            Text("[\(m.badge)]")
-                                        }
-                                    }.tag(m.id)
-                                }
+                            ForEach(cloudModels, id: \.id) { m in
+                                HStack {
+                                    Text("\(m.name) (\(m.cloudTHBRateSummary))")
+                                    if !m.badge.isEmpty {
+                                        Text("[\(m.badge)]")
+                                    }
+                                }.tag(m.id)
                             }
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
-                        .onChange(of: selectedModel) { _ in
-                            selectedProvider = "omni"
+                        .onChange(of: selectedModel) { newID in
+                            if let matched = cloudModels.first(where: { $0.id == newID }) {
+                                selectedProvider = matched.provider
+                            } else {
+                                selectedProvider = StreamableAIProvider.detect(from: newID).rawValue
+                            }
                             hasChanges = true
                         }
                     }
                     
-                    HStack(spacing: 12) {
-                        Text("License / Token:")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .frame(width: 110, alignment: .leading)
-                        
-                        SecureField("Optional Dotmini Cloud License / Bearer Token", text: $dotminiLicenseKey)
-                            .textFieldStyle(.roundedBorder)
-                            .onChange(of: dotminiLicenseKey) { _ in
-                                hasChanges = true
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(hasCloudSession ? ((isPaidPlan || supabaseAuth.entitlement.totalAvailableTHB > 0) ? Color.green : Color.orange) : Color.secondary)
+                            .frame(width: 7, height: 7)
+                        if let activeSession = supabaseAuth.session {
+                            Text("\(activeSession.email) · Plan: \(planUpper)")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundColor(.primary)
+                            if supabaseAuth.entitlement.isLoaded {
+                                Text(String(format: "(Available: %@ · Plan: %@ + AI Top-Up: ฿%.2f)", supabaseAuth.entitlement.formattedAvailableCredit, supabaseAuth.entitlement.formattedPlanCreditSummary, supabaseAuth.entitlement.aiTopupBalanceTHB))
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
                             }
-                    }
-                    
-                    HStack(spacing: 6) {
-                        Circle().fill(Color.green).frame(width: 6, height: 6)
-                        Text(dotminiLicenseKey.isEmpty ? "Dotmini Cloud Active (Tier: Pro / Master Admin)" : "Dotmini Cloud Authenticated")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Top Up / Plans") {
+                                appState.settingsSelectedTab = 9
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            Button("Web Console") {
+                                NSWorkspace.shared.open(supabaseAuth.authenticatedPortalURL(path: "/dashboard"))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        } else if !dotminiLicenseKey.isEmpty || DotminiPlatformKeyService.shared.authorizationToken != nil {
+                            Text("Dotmini Cloud Platform Key Configured")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        } else {
+                            Text("Not signed in — sign in on microcode.dotmini.net (auto-syncs) or Account & License.")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Sign In") {
+                                appState.settingsSelectedTab = 9
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
                     }
                     .padding(.top, 2)
                 }
@@ -920,16 +1023,23 @@ struct SettingsView: View {
                         Image(systemName: "key")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.primary)
-                        Text("Bring Your Own Key (BYOK)")
+                        Text("Bring Your Own Key (BYOK) & Custom Base URL")
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
+                        Text("Isolated from Local/LAN LLM")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(.teal)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(Color.teal.opacity(0.12))
+                            .cornerRadius(4)
                     }
                     
-                    Text("Connect directly to official AI providers using your own API credentials.")
-                        .font(.system(size: 12))
+                    Text("Connect directly to official AI providers (OpenAI, Claude, Gemini, etc.) or any custom Base URL / remote Cloudflare Tunnel (`*.trycloudflare.com/v1`) without mixing with Local/LAN LLM.")
+                        .font(.system(size: 11.5))
                         .foregroundColor(.secondary)
                     
-                    HStack(spacing: 20) {
+                    HStack(spacing: 16) {
                         // Provider Picker
                         HStack(spacing: 8) {
                             Text("Active Provider:")
@@ -947,8 +1057,12 @@ struct SettingsView: View {
                             .frame(maxWidth: .infinity)
                             .onChange(of: selectedProvider) { newValue in
                                 hasChanges = true
-                                if let provider = aiProviders.first(where: { $0.id == newValue }),
-                                   let first = provider.models.first {
+                                byokEndpointStatusMessage = ""
+                                let customModel = (providerCustomModels[newValue] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !customModel.isEmpty {
+                                    selectedModel = customModel
+                                } else if let provider = aiProviders.first(where: { $0.id == newValue }),
+                                          let first = provider.models.first {
                                     selectedModel = first.id
                                 }
                             }
@@ -964,6 +1078,10 @@ struct SettingsView: View {
                             
                             Picker("", selection: $selectedModel) {
                                 if let provider = aiProviders.first(where: { $0.id == selectedProvider }) {
+                                    let customId = (providerCustomModels[selectedProvider] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if !customId.isEmpty && !provider.models.contains(where: { $0.id == customId }) {
+                                        Text("\(provider.name) : \(customId) [CUSTOM]").tag(customId)
+                                    }
                                     ForEach(provider.models, id: \.id) { m in
                                         HStack {
                                             Text("\(provider.name) : \(m.name)")
@@ -978,13 +1096,31 @@ struct SettingsView: View {
                             .pickerStyle(.menu)
                             .frame(maxWidth: .infinity)
                             .onChange(of: selectedModel) { _ in hasChanges = true }
+                            
+                            Button {
+                                testAndFetchByokModels(for: selectedProvider)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: isTestingByokEndpoint ? "arrow.triangle.2.circlepath" : "bolt.horizontal.circle")
+                                        .font(.system(size: 11))
+                                    Text(isTestingByokEndpoint ? "Fetching…" : "Fetch Models")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(isTestingByokEndpoint)
+                            .help("Query /v1/models (or /api/tags) from this provider's Base URL / Cloudflare Tunnel")
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     
+                    // ── Per-Provider Custom Base URL / Cloudflare Tunnel & Custom Model Override ──
+                    byokCustomEndpointBox(for: selectedProvider)
+                    
                     Divider().opacity(0.6)
                     
-                    Text("Provider API Keys")
+                    Text("Provider API Keys & Endpoints")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.secondary)
                     
@@ -1569,6 +1705,7 @@ struct SettingsView: View {
 
     @ObservedObject private var localLLM = LocalLLMService.shared
     @ObservedObject private var llmGateway = LocalLLMGatewayService.shared
+    @ObservedObject private var macLLMServer = MacLLMServer.shared
     
     @State private var showModelBrowser = false
     @State private var copiedGatewayQRLink = false
@@ -1579,6 +1716,9 @@ struct SettingsView: View {
     
     private var localLLMSettingsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // ── 0. macLLM Native Metal PagedAttention Kernel & Continuous Batching Engine ──
+            macLLMKernelCard
+            
             // ── 1. Local & LAN Servers (Auto-Discovery + Best Perf + 1-Field Smart Add/QR) ──
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
@@ -1666,6 +1806,37 @@ struct SettingsView: View {
                     .background(Color.primary.opacity(0.03))
                     .cornerRadius(8)
                 } else {
+                    let poolServers = localLLM.connectedServers
+                    let totalModels = poolServers.reduce(0) { $0 + $1.models.count }
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(poolServers.isEmpty ? Color.orange : Color.green)
+                            .frame(width: 7, height: 7)
+                        Text("Multi-Node Active Pool: \(poolServers.count) server(s) · \(totalModels) model(s) connected simultaneously")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.primary.opacity(0.88))
+                        Spacer()
+                        if localLLM.detectedServers.filter({ $0.isOnline && !$0.requiresAuthToUnlock }).count > 1 {
+                            Button {
+                                localLLM.enableAllServersInPool()
+                                localLLM.selectedModelId = "auto"
+                                selectedProvider = "local"
+                                selectedModel = "auto"
+                                hasChanges = true
+                            } label: {
+                                Label("Load-Balance All (\(poolServers.count))", systemImage: "bolt.horizontal.circle.fill")
+                                    .font(.system(size: 10.5, weight: .medium))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("Route concurrent Local LLM requests across all connected servers using Least-In-Flight + Best-Perf load balancing")
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.green.opacity(0.06))
+                    .cornerRadius(7)
+
                     VStack(spacing: 6) {
                         ForEach(Array(localLLM.detectedServers.enumerated()), id: \.element.id) { index, server in
                             localServerRow(server: server, index: index)
@@ -1673,26 +1844,31 @@ struct SettingsView: View {
                     }
                 }
                 
-                // Installed Models (compact, only when active server has models)
-                if let server = localLLM.activeServer, !server.models.isEmpty {
+                // Installed Models across ALL connected servers in the pool
+                let connectedPool = localLLM.connectedServers.filter { !$0.models.isEmpty }
+                if !connectedPool.isEmpty {
                     Divider().opacity(0.5)
-                    Text("Models on \(server.type.rawValue)")
+                    Text(connectedPool.count > 1
+                         ? "Active Models Across \(connectedPool.count) Connected Servers"
+                         : "Models on \(connectedPool[0].displayName)")
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundColor(.secondary)
                     
                     VStack(spacing: 3) {
-                        ForEach(server.models) { model in
-                            installedModelRow(model: model)
+                        ForEach(connectedPool) { srv in
+                            ForEach(srv.models) { model in
+                                installedModelRow(model: model, server: srv, multiServerMode: connectedPool.count > 1)
+                            }
                         }
                     }
                 }
                 
                 Divider().opacity(0.5)
                 
-                // Single Unified Add / Pair Bar (IP, Host:Port, Port, QR Link, Paste QR, or Drop QR Image)
+                // Single Unified Add / Pair Bar (IP, Host:Port, Port, comma-separated multi-endpoints, QR Link, Paste QR, or Drop QR Image)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
-                        TextField("Add IP, Host:Port, or QR Link (e.g. 192.168.1.50)", text: $localLLM.quickConnectInput)
+                        TextField("Add IP, Host:Port, or comma-separated list (e.g. 192.168.1.50:1234, 192.168.1.51:11434)", text: $localLLM.quickConnectInput)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 11.5, design: .monospaced))
                             .onChange(of: localLLM.quickConnectInput) { _ in
@@ -1782,14 +1958,8 @@ struct SettingsView: View {
             localLLMWorldwideQRGatewayCard
         }
         .task {
-            localLLM.scanLANEnabled = true
-            await localLLM.scanForServers()
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
-                if Task.isCancelled { break }
-                if !localLLM.isScanning && !localLLM.isBenchmarking {
-                    await localLLM.scanForServers()
-                }
+            if localLLM.detectedServers.isEmpty && !localLLM.isScanning {
+                await localLLM.scanForServers()
             }
         }
         .sheet(isPresented: $showModelBrowser) {
@@ -1805,6 +1975,143 @@ struct SettingsView: View {
         }
     }
     
+    // MARK: - macLLM (vLLM for macOS) Metal PagedAttention Kernel Card
+    
+    private var macLLMKernelCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "cpu.fill")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.primary.opacity(0.85))
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 7) {
+                        Text("macLLM Kernel")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundColor(.primary)
+                        
+                        Text("vLLM FOR MACOS")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(.primary.opacity(0.75))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(4)
+                        
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(macLLMServer.isRunning ? Color.primary.opacity(0.8) : Color.secondary.opacity(0.4))
+                                .frame(width: 5.5, height: 5.5)
+                            Text(macLLMServer.isRunning ? "127.0.0.1:\(String(macLLMServer.listeningPort))" : "Offline")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1.5)
+                        .background(Color.primary.opacity(0.04))
+                        .cornerRadius(4)
+                    }
+                    
+                    Text("\(macLLMServer.stats.gpuName) · \(String(macLLMServer.stats.unifiedMemoryGB)) GB Unified RAM · Metal PagedAttention (\(String(macLLMServer.stats.blockSizeTokens)) tok/block) · Continuous Batching")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                Button {
+                    Task {
+                        await macLLMServer.runFullBenchmark()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        if macLLMServer.isBenchmarkingKernel {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "bolt.fill").font(.system(size: 9.5))
+                        }
+                        Text("Kernel Bench")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(macLLMServer.isBenchmarkingKernel)
+                
+                Button("Clear KV") {
+                    macLLMServer.clearKVCache()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Clear Automatic Prefix Cache (APC) KV blocks")
+            }
+            
+            // Telemetry Pills Row
+            HStack(spacing: 8) {
+                macLLMMetricPill(
+                    title: "PAGED KV BLOCKS",
+                    value: "\(String(macLLMServer.stats.usedKVBlocks + macLLMServer.stats.cachedPrefixBlocks)) / \(String(macLLMServer.stats.totalKVBlocks))",
+                    subtitle: String(format: "%.1f%% pool", macLLMServer.stats.kvCacheUtilizationPercent)
+                )
+                macLLMMetricPill(
+                    title: "PREFIX CACHE HIT",
+                    value: String(format: "%.1f%%", macLLMServer.stats.prefixCacheHitRatePercent),
+                    subtitle: "\(String(macLLMServer.stats.cachedPrefixBlocks)) APC blocks"
+                )
+                macLLMMetricPill(
+                    title: "METAL KERNEL",
+                    value: String(format: "%.1f µs", macLLMServer.stats.pagedAttentionLatencyUs),
+                    subtitle: String(format: "%.1f GB/s", macLLMServer.stats.effectiveBandwidthGBps)
+                )
+                macLLMMetricPill(
+                    title: "BATCH SCHEDULER",
+                    value: "\(String(macLLMServer.stats.runningSequences)) run · \(String(macLLMServer.stats.waitingSequences)) wait",
+                    subtitle: "\(String(macLLMServer.stats.totalRequestsServed)) reqs served"
+                )
+            }
+            
+            Text(macLLMServer.statusBanner)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        .onAppear {
+            macLLMServer.startIfNeeded(preferredPort: 11436)
+        }
+    }
+    
+    private func macLLMMetricPill(title: String, value: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.035))
+        .cornerRadius(7)
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+    }
+
     // MARK: - Share via QR Code Card (Matches PhoneCompanionSettingsView)
     
     private var localLLMWorldwideQRGatewayCard: some View {
@@ -2077,6 +2384,8 @@ struct SettingsView: View {
     
     private func localServerRow(server: DetectedLLMServer, index: Int) -> some View {
         let isActive = localLLM.selectedServerIndex == index && !server.requiresAuthToUnlock
+        let isInPool = localLLM.isServerInActivePool(server) && server.isOnline && !server.requiresAuthToUnlock
+        let inFlight = localLLM.inFlightCount(forEndpoint: server.endpoint)
         let isTestingThis = localLLM.benchmarkingServerID == server.id
         let isRemovablePaired = localLLM.pairedRemoteEndpoints.contains { item in
             "\(item.scheme.lowercased())://\(item.host.lowercased()):\(item.port)" == server.deduplicationKey.lowercased()
@@ -2116,6 +2425,16 @@ struct SettingsView: View {
                         .padding(.vertical, 1)
                         .background(Color.primary.opacity(0.08))
                         .cornerRadius(4)
+                    }
+
+                    if inFlight > 0 {
+                        Text("⚡ \(inFlight) active")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(.green)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.green.opacity(0.14))
+                            .cornerRadius(4)
                     }
                     
                     if server.requiresAuthToUnlock {
@@ -2175,6 +2494,21 @@ struct SettingsView: View {
                     .disabled(localLLM.isBenchmarking)
                     .help("Measure tok/s speed")
                 }
+
+                Button {
+                    localLLM.toggleServerInPool(server)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: isInPool ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 10))
+                            .foregroundColor(isInPool ? .green : .secondary)
+                        Text(isInPool ? "Connected" : "Paused")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Keep this server connected simultaneously in the Multi-Node Active Pool")
                 
                 if !server.models.isEmpty && isActive {
                     Picker("", selection: Binding(
@@ -2193,15 +2527,11 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .controlSize(.small)
-                    .frame(width: 170)
+                    .frame(width: 155)
                 }
                 
-                if isActive {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundColor(.primary.opacity(0.8))
-                } else {
-                    Button("Use") {
+                if !isActive {
+                    Button("Primary") {
                         localLLM.selectServer(at: index)
                         selectedProvider = "local"
                         selectedModel = localLLM.activeModel
@@ -2226,20 +2556,33 @@ struct SettingsView: View {
             }
         }
         .padding(10)
-        .background(isActive ? Color.primary.opacity(0.06) : Color.primary.opacity(0.02))
+        .background((isActive || isInPool) ? Color.primary.opacity(0.05) : Color.primary.opacity(0.02))
         .cornerRadius(8)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isActive ? Color.primary.opacity(0.22) : Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(isActive ? Color.primary.opacity(0.22) : (isInPool ? Color.green.opacity(0.28) : Color.primary.opacity(0.06)), lineWidth: 1)
         )
     }
     
-    private func installedModelRow(model: LocalLLMModel) -> some View {
-        let isSelected = localLLM.selectedModelId == model.id
+    private func installedModelRow(model: LocalLLMModel, server: DetectedLLMServer, multiServerMode: Bool) -> some View {
+        let pinnedId = "\(server.endpoint)||\(model.id)"
+        let isSelected = (localLLM.selectedModelId == model.id && LocalLLMService.cachedEndpoint == server.endpoint)
+            || selectedModel == pinnedId
+            || (!multiServerMode && localLLM.selectedModelId == model.id)
         return HStack(spacing: 8) {
             Text(model.name)
                 .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
                 .lineLimit(1)
+
+            if multiServerMode {
+                Text("\(server.displayName) · \(server.hostPortLabel)")
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.primary.opacity(0.05))
+                    .cornerRadius(4)
+            }
             
             if model.isWarmLoaded {
                 Text("Loaded")
@@ -2269,10 +2612,9 @@ struct SettingsView: View {
                     .foregroundColor(.primary)
             } else {
                 Button("Select") {
-                    localLLM.selectedModelId = model.id
-                    LocalLLMService.cachedModel = model.id
+                    localLLM.selectModelAcrossServers(modelId: model.id, endpointHint: server.endpoint)
                     selectedProvider = "local"
-                    selectedModel = model.id
+                    selectedModel = multiServerMode ? pinnedId : model.id
                     hasChanges = true
                 }
                 .buttonStyle(.bordered)
@@ -2360,6 +2702,189 @@ struct SettingsView: View {
         return false
     }
     
+    private func byokCustomEndpointBox(for providerId: String) -> some View {
+        let providerName = aiProviders.first(where: { $0.id == providerId })?.name ?? providerId.uppercased()
+        let defaultEndpoint = aiProviders.first(where: { $0.id == providerId })?.endpoint ?? "https://api.openai.com/v1"
+        let baseURLBinding = Binding<String>(
+            get: { providerBaseURLs[providerId] ?? "" },
+            set: { newVal in
+                providerBaseURLs[providerId] = newVal
+                let trimmed = newVal.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    UserDefaults.standard.removeObject(forKey: "byok_base_url_\(providerId)")
+                    if providerId == "custom" {
+                        UserDefaults.standard.removeObject(forKey: "byok_custom_base_url")
+                    }
+                } else {
+                    UserDefaults.standard.set(trimmed, forKey: "byok_base_url_\(providerId)")
+                    if providerId == "custom" {
+                        UserDefaults.standard.set(trimmed, forKey: "byok_custom_base_url")
+                    }
+                }
+                hasChanges = true
+            }
+        )
+        let customModelBinding = Binding<String>(
+            get: { providerCustomModels[providerId] ?? "" },
+            set: { newVal in
+                providerCustomModels[providerId] = newVal
+                let trimmed = newVal.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    UserDefaults.standard.removeObject(forKey: "byok_custom_model_\(providerId)")
+                } else {
+                    UserDefaults.standard.set(trimmed, forKey: "byok_custom_model_\(providerId)")
+                }
+                hasChanges = true
+            }
+        )
+        let hasCustomURL = !(providerBaseURLs[providerId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "network")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(.teal)
+                Text("\(providerName) — Custom Base URL / Cloudflare Tunnel")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Spacer()
+                if hasCustomURL {
+                    Button("Reset to Official URL") {
+                        baseURLBinding.wrappedValue = ""
+                        byokEndpointStatusMessage = "Reset to official endpoint (\(defaultEndpoint))"
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.orange)
+                } else {
+                    Text("Default: \(defaultEndpoint)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            HStack(spacing: 8) {
+                Text("Base URL:")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 90, alignment: .leading)
+                
+                TextField(
+                    providerId == "custom"
+                        ? "https://your-tunnel.trycloudflare.com/v1 or https://custom-gateway.example.com/v1"
+                        : "Leave blank for official (\(defaultEndpoint)) or enter Custom / Cloudflare Tunnel URL",
+                    text: baseURLBinding
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                
+                Button("Test & Load") {
+                    testAndFetchByokModels(for: providerId)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isTestingByokEndpoint)
+            }
+            
+            HStack(spacing: 8) {
+                Text("Custom Model:")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 90, alignment: .leading)
+                
+                TextField("Optional exact Model ID (e.g. qwen2.5-coder:32b, gpt-4.1, claude-sonnet-4-6)", text: customModelBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .onSubmit {
+                        applyCustomByokModel(for: providerId)
+                    }
+                
+                Button("Use Model") {
+                    applyCustomByokModel(for: providerId)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled((providerCustomModels[providerId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            
+            if !byokEndpointStatusMessage.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: byokEndpointStatusMessage.contains("Failed") ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(byokEndpointStatusMessage.contains("Failed") ? .orange : .green)
+                    Text(byokEndpointStatusMessage)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.primary.opacity(0.03))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(hasCustomURL ? Color.teal.opacity(0.35) : Color.primary.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+    
+    private func applyCustomByokModel(for providerId: String) {
+        let trimmed = (providerCustomModels[providerId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        selectedProvider = providerId
+        selectedModel = trimmed
+        appState.aiProvider = providerId
+        appState.aiModel = trimmed
+        UserDefaults.standard.set(providerId, forKey: "aiProvider")
+        UserDefaults.standard.set(trimmed, forKey: "aiModel")
+        UserDefaults.standard.set(trimmed, forKey: "byok_custom_model_\(providerId)")
+        byokEndpointStatusMessage = "Active model set to '\(trimmed)'"
+        hasChanges = true
+    }
+    
+    private func testAndFetchByokModels(for providerId: String) {
+        // Persist current key and base URL before probing so AIModelCatalog sees them immediately
+        let trimmedKey = (providerKeys[providerId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedKey.isEmpty {
+            UserDefaults.standard.set(trimmedKey, forKey: "\(providerId)_api_key")
+            appState.apiKeys[providerId] = trimmedKey
+        }
+        let trimmedURL = (providerBaseURLs[providerId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedURL.isEmpty {
+            UserDefaults.standard.set(trimmedURL, forKey: "byok_base_url_\(providerId)")
+            if providerId == "custom" {
+                UserDefaults.standard.set(trimmedURL, forKey: "byok_custom_base_url")
+            }
+        } else {
+            UserDefaults.standard.removeObject(forKey: "byok_base_url_\(providerId)")
+        }
+        
+        isTestingByokEndpoint = true
+        byokEndpointStatusMessage = "Connecting to endpoint and querying models…"
+        Task {
+            await AIModelCatalog.shared.fetchLiveModelsForProvider(providerId)
+            await MainActor.run {
+                isTestingByokEndpoint = false
+                if let p = modelCatalog.provider(providerId), !p.models.isEmpty {
+                    let liveCount = p.models.filter { $0.badge == "LIVE" || $0.badge == "CUSTOM" }.count
+                    if let first = p.models.first {
+                        let customOverride = (providerCustomModels[providerId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        selectedModel = customOverride.isEmpty ? first.id : customOverride
+                    }
+                    let resolvedURL = StreamableAIProvider(rawValue: providerId)?.directBaseURL ?? p.endpoint
+                    if liveCount > 0 {
+                        byokEndpointStatusMessage = "Connected to \(resolvedURL) — loaded \(liveCount) live models."
+                    } else {
+                        byokEndpointStatusMessage = "Endpoint ready (\(resolvedURL)). Select a model or enter a Custom Model ID."
+                    }
+                } else {
+                    byokEndpointStatusMessage = "Failed to fetch models — verify URL or enter a Custom Model ID manually."
+                }
+            }
+        }
+    }
+
     private func aiProviderKeyCard(_ provider: AIProviderInfo) -> some View {
         let key = Binding<String>(
             get: { providerKeys[provider.id] ?? "" },
@@ -2367,7 +2892,10 @@ struct SettingsView: View {
         )
         let isVisible = showAPIKey[provider.id] ?? false
         let hasKey = !(providerKeys[provider.id] ?? "").isEmpty
+        let customURL = (providerBaseURLs[provider.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasCustomURL = !customURL.isEmpty
         let isDefault = selectedProvider == provider.id
+        let effectiveEndpoint = hasCustomURL ? customURL : provider.endpoint
         
         return HStack(spacing: 12) {
             // Col 1: Provider Info (Fixed 195pt) with authentic brand icon
@@ -2396,10 +2924,18 @@ struct SettingsView: View {
                                 .background(Color.primary.opacity(0.1))
                                 .cornerRadius(3)
                         }
+                        if hasCustomURL {
+                            Text("URL")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.teal)
+                                .padding(.horizontal, 4).padding(.vertical, 1.5)
+                                .background(Color.teal.opacity(0.14))
+                                .cornerRadius(3)
+                        }
                     }
-                    Text(provider.endpoint)
+                    Text(effectiveEndpoint)
                         .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(hasCustomURL ? .teal : .secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -2409,11 +2945,11 @@ struct SettingsView: View {
             // Col 2: Key Input Field (Flexible)
             HStack(spacing: 8) {
                 if isVisible {
-                    TextField("API Key...", text: key)
+                    TextField(provider.id == "custom" || hasCustomURL ? "API Key (optional for public tunnel)..." : "API Key...", text: key)
                         .textFieldStyle(.plain)
                         .font(.system(size: 11, design: .monospaced))
                 } else {
-                    SecureField("Paste API key here", text: key)
+                    SecureField(provider.id == "custom" || hasCustomURL ? "API Key (optional for Cloudflare Tunnel)" : "Paste API key here", text: key)
                         .textFieldStyle(.plain)
                         .font(.system(size: 11))
                 }
@@ -2447,10 +2983,15 @@ struct SettingsView: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundColor(.green)
                     }
-                } else if hasKey {
+                } else if hasKey || hasCustomURL || provider.id == "custom" {
                     Button {
                         selectedProvider = provider.id
-                        if let first = provider.models.first { selectedModel = first.id }
+                        let customModel = (providerCustomModels[provider.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !customModel.isEmpty {
+                            selectedModel = customModel
+                        } else if let first = provider.models.first {
+                            selectedModel = first.id
+                        }
                         hasChanges = true
                     } label: {
                         Text("Select")
@@ -2527,15 +3068,22 @@ struct SettingsView: View {
         agentCustomInstructions = appState.agentCustomInstructions
         agentMaxIterations = appState.agentMaxIterations
         
-        // Load ALL provider keys
+        // Load ALL provider keys, custom BYOK base URLs, and custom model IDs
         let providers = [
             "gemini", "openai", "anthropic", "deepseek",
             "openrouter", "groq", "mistral", "kimi", "perplexity", "perch", "tokenme", "typhoon",
             "cerebras", "together", "fireworks", "minimax", "nvidia",
-            "grok", "qwen", "glm"
+            "grok", "qwen", "glm", "custom"
         ]
         for p in providers {
             providerKeys[p] = appState.apiKeys[p] ?? UserDefaults.standard.string(forKey: "\(p)_api_key") ?? ""
+            providerBaseURLs[p] = UserDefaults.standard.string(forKey: "byok_base_url_\(p)") ?? ""
+            providerCustomModels[p] = UserDefaults.standard.string(forKey: "byok_custom_model_\(p)") ?? ""
+        }
+        if (providerBaseURLs["custom"] ?? "").isEmpty,
+           let legacyCustomURL = UserDefaults.standard.string(forKey: "byok_custom_base_url"),
+           !legacyCustomURL.isEmpty {
+            providerBaseURLs["custom"] = legacyCustomURL
         }
         let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
         if (providerKeys["openai"] ?? "").isEmpty && !legacyKey.isEmpty {
@@ -2548,33 +3096,45 @@ struct SettingsView: View {
         dotminiLicenseKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
     }
     
-    private func saveAllSettings() {
-        appState.aiProvider = selectedProvider
-        appState.aiModel = selectedModel
-        appState.fontSize = fontSize
-        appState.fontFamily = fontFamily
-        appState.showLineNumbers = showLineNumbers
-        appState.sidebarVisible = showSidebar
-        appState.consoleVisible = showConsole
-        appState.appTheme = selectedTheme
+    private func saveAllSettings(deferThemeUntilDismissed: Bool = false) {
+        if appState.aiProvider != selectedProvider { appState.aiProvider = selectedProvider }
+        if appState.aiModel != selectedModel { appState.aiModel = selectedModel }
+        if appState.fontSize != fontSize { appState.fontSize = fontSize }
+        if appState.fontFamily != fontFamily { appState.fontFamily = fontFamily }
+        if appState.showLineNumbers != showLineNumbers { appState.showLineNumbers = showLineNumbers }
+        if appState.sidebarVisible != showSidebar { appState.sidebarVisible = showSidebar }
+        if appState.consoleVisible != showConsole { appState.consoleVisible = showConsole }
+        if appState.appTheme != selectedTheme {
+            let targetTheme = selectedTheme
+            if deferThemeUntilDismissed {
+                let state = appState
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                    if state.appTheme != targetTheme {
+                        state.appTheme = targetTheme
+                    }
+                }
+            } else {
+                appState.appTheme = targetTheme
+            }
+        }
         
-        appState.playgroundFontName = playgroundFontName
-        appState.playgroundFontSize = playgroundFontSize
-        appState.playgroundFontWeight = playgroundFontWeight
+        if appState.playgroundFontName != playgroundFontName { appState.playgroundFontName = playgroundFontName }
+        if appState.playgroundFontSize != playgroundFontSize { appState.playgroundFontSize = playgroundFontSize }
+        if appState.playgroundFontWeight != playgroundFontWeight { appState.playgroundFontWeight = playgroundFontWeight }
         
-        appState.cellFontName = cellFontName
-        appState.cellFontSize = cellFontSize
-        appState.cellFontWeight = cellFontWeight
+        if appState.cellFontName != cellFontName { appState.cellFontName = cellFontName }
+        if appState.cellFontSize != cellFontSize { appState.cellFontSize = cellFontSize }
+        if appState.cellFontWeight != cellFontWeight { appState.cellFontWeight = cellFontWeight }
         
-        appState.agentFontName = agentFontName
-        appState.agentFontSize = agentFontSize
+        if appState.agentFontName != agentFontName { appState.agentFontName = agentFontName }
+        if appState.agentFontSize != agentFontSize { appState.agentFontSize = agentFontSize }
         
-        appState.agentMode = agentMode
-        appState.agentAutoApproveTools = agentAutoApproveTools
-        appState.agentCustomInstructions = agentCustomInstructions
-        appState.agentMaxIterations = agentMaxIterations
+        if appState.agentMode != agentMode { appState.agentMode = agentMode }
+        if appState.agentAutoApproveTools != agentAutoApproveTools { appState.agentAutoApproveTools = agentAutoApproveTools }
+        if appState.agentCustomInstructions != agentCustomInstructions { appState.agentCustomInstructions = agentCustomInstructions }
+        if appState.agentMaxIterations != agentMaxIterations { appState.agentMaxIterations = agentMaxIterations }
         
-        // Save ALL provider keys
+        // Save ALL provider keys without triggering redundant Keychain IPC for unchanged keys
         let defaults = UserDefaults.standard
         defaults.set(aiKeyMode, forKey: "aiKeyMode")
         defaults.set(dotminiLicenseKey, forKey: "dotminiLicenseKey")
@@ -2599,16 +3159,22 @@ struct SettingsView: View {
         for (provider, rawKey) in providerKeys {
             let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
             if !key.isEmpty {
-                appState.apiKeys[provider] = key
+                let existingKey = appState.apiKeys[provider]
+                if existingKey != key {
+                    appState.apiKeys[provider] = key
+                }
                 defaults.set(key, forKey: "\(provider)_api_key")
                 if apiKeyBackedSubs.contains(provider),
                    let subType = SubscriptionProviderType(rawValue: provider) {
-                    SubscriptionAuthManager.shared.saveAccount(
-                        provider: subType,
-                        emailOrUser: "\(subType.shortLabel) Direct Key",
-                        sessionToken: key,
-                        source: "Direct API Key"
-                    )
+                    let existingSubToken = SubscriptionAuthManager.shared.accounts[subType]?.sessionToken
+                    if existingKey != key || existingSubToken != key {
+                        SubscriptionAuthManager.shared.saveAccount(
+                            provider: subType,
+                            emailOrUser: "\(subType.shortLabel) Direct Key",
+                            sessionToken: key,
+                            source: "Direct API Key"
+                        )
+                    }
                 }
             } else if appState.apiKeys[provider] != nil {
                 appState.apiKeys.removeValue(forKey: provider)
@@ -2617,6 +3183,37 @@ struct SettingsView: View {
         }
         if let openai = providerKeys["openai"]?.trimmingCharacters(in: .whitespacesAndNewlines), !openai.isEmpty {
             defaults.set(openai, forKey: "apiKey")
+        }
+        
+        for (provider, rawURL) in providerBaseURLs {
+            let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                defaults.set(trimmed, forKey: "byok_base_url_\(provider)")
+                if provider == "custom" {
+                    defaults.set(trimmed, forKey: "byok_custom_base_url")
+                }
+            } else {
+                defaults.removeObject(forKey: "byok_base_url_\(provider)")
+                if provider == "custom" {
+                    defaults.removeObject(forKey: "byok_custom_base_url")
+                }
+            }
+        }
+        for (provider, rawCustomModel) in providerCustomModels {
+            let trimmed = rawCustomModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                defaults.set(trimmed, forKey: "byok_custom_model_\(provider)")
+            } else {
+                defaults.removeObject(forKey: "byok_custom_model_\(provider)")
+            }
+        }
+        if aiKeyMode == "direct",
+           let customActiveModel = providerCustomModels[selectedProvider]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !customActiveModel.isEmpty {
+            selectedModel = customActiveModel
+            if appState.aiModel != customActiveModel {
+                appState.aiModel = customActiveModel
+            }
         }
         
         defaults.set(selectedProvider, forKey: "aiProvider")
@@ -2643,8 +3240,6 @@ struct SettingsView: View {
         defaults.removeObject(forKey: "microRentToken")
         unsetenv("MICRORENT_TOKEN")
         unsetenv("USE_MICRORENT_PROXY")
-
-        defaults.synchronize()
     }
     
     private func envVarName(for provider: String) -> String {
@@ -3321,22 +3916,6 @@ struct PrimarySheetsModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .sheet(isPresented: $appState.showingRefactorProWindow) {
-                RefactorProWindow()
-                    .environmentObject(appState)
-            }
-            .sheet(isPresented: $appState.showingExpandCodeWindow) {
-                ExpandCodeWindow()
-                    .environmentObject(appState)
-            }
-            .sheet(isPresented: $appState.showingFormatCodeWindow) {
-                FormatCodeWindow()
-                    .environmentObject(appState)
-            }
-            .sheet(isPresented: $appState.showingDotnetProject) {
-                DotnetProjectView()
-                    .environmentObject(appState)
-            }
             .sheet(isPresented: $appState.showingAITrainer) {
                 AITrainerView()
             }
@@ -3358,17 +3937,8 @@ struct SecondarySheetsModifier: ViewModifier {
                 GitSettingsView()
                     .environmentObject(appState)
             }
-            .sheet(isPresented: $appState.showingCodeAnalysis) {
-                CodeAnalysisView()
-                    .environmentObject(appState)
-                    .frame(minWidth: 900, minHeight: 600)
-            }
             .sheet(isPresented: $appState.showingCommitDialog) {
                 CommitSheet()
-                    .environmentObject(appState)
-            }
-            .sheet(isPresented: $appState.showingSettingsDialog) {
-                SettingsView()
                     .environmentObject(appState)
             }
             .sheet(isPresented: $appState.showingSimulatorDialog) {

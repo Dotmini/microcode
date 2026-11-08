@@ -4,6 +4,7 @@
 //
 
 import AppKit
+import ImageIO
 import SwiftUI
 
 public enum DeviceFrameAssets {
@@ -16,6 +17,30 @@ public enum DeviceFrameAssets {
     private static var cachedIPhoneDuoInnerPortrait: NSImage?
     private static var cachedAndroidFrameImage: NSImage?
     private static var cachedAndroidMaskImage: NSImage?
+
+    /// Releases cached Android bezel/mask bitmaps when the embedded Android dock is closed.
+    public static func purgeCachedAndroidSkinImages() {
+        cachedAndroidFrameImage = nil
+        cachedAndroidMaskImage = nil
+    }
+
+    /// Loads and downsamples an image via ImageIO so large 1408x2965 SDK WebP skins consume ~3-4 MB instead of 16 MB each.
+    public static func loadDownsampledImage(at url: URL, maxPixelSize: Int = 1080) -> NSImage? {
+        let sourceOpts: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOpts as CFDictionary) else {
+            return NSImage(contentsOf: url)
+        }
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOpts as CFDictionary) {
+            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        }
+        return NSImage(contentsOf: url)
+    }
 
     private static func loadResourceImage(named name: String, fileExtension: String = "png") -> NSImage? {
         // 1. Try App Bundle Resources
@@ -153,7 +178,7 @@ public enum DeviceFrameAssets {
     }
 
     /// Official iPhone Duo Outer Cover Display bezel (`phone15.devicechrome` spec:
-    /// 514×706 pt outer, 466×678 pt screen @ (26, 14), asymmetric 2.7pt spine / 19.7pt right corners + Dynamic Island).
+    /// 514×706 pt outer, 466×678 pt screen @ (26, 14), asymmetric 8pt spine / 59pt right corners).
     public static func loadIPhoneDuoOuterBezel(isLandscape: Bool = false) -> NSImage {
         if !isLandscape, let cached = cachedIPhoneDuoOuterPortrait { return cached }
         if isLandscape, let cached = cachedIPhoneDuoOuterLandscape { return cached }
@@ -161,17 +186,26 @@ public enum DeviceFrameAssets {
         let portraitSize = NSSize(width: 514, height: 706)
         let portrait = NSImage(size: portraitSize, flipped: false) { bounds in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            let chromeCompositePath = "/Library/Developer/DeviceKit/Chrome/phone15.devicechrome/Contents/Resources/PhoneComposite.pdf"
+            let chromeDir = "/Library/Developer/DeviceKit/Chrome/phone15.devicechrome/Contents/Resources"
+            let chromeCompositePath = "\(chromeDir)/PhoneComposite.pdf"
             if let deviceKitComposite = NSImage(contentsOfFile: chromeCompositePath) {
+                // Draw official Apple hardware buttons behind the chassis composite per phone15/chrome.json
+                if let volBtn = NSImage(contentsOfFile: "\(chromeDir)/Vol BTN.pdf") {
+                    volBtn.draw(in: CGRect(x: 236, y: bounds.maxY - 16, width: 66, height: 16))
+                    volBtn.draw(in: CGRect(x: 316, y: bounds.maxY - 16, width: 66, height: 16))
+                }
+                if let pwrBtn = NSImage(contentsOfFile: "\(chromeDir)/X_Power BTN.pdf") {
+                    pwrBtn.draw(in: CGRect(x: bounds.maxX - 15, y: bounds.maxY - 202 - 113, width: 16, height: 113))
+                }
                 deviceKitComposite.draw(in: bounds)
             } else {
-                // Procedural Titanium Book-Fold Cover Chassis (exact phone15 geometry)
+                // Procedural fallback matching exact phone15 geometry (80pt right outer, 8pt left spine)
                 let outerPath = unevenRoundedCGPath(
                     in: bounds.insetBy(dx: 1.5, dy: 1.5),
-                    topLeft: 10,
-                    topRight: 34,
-                    bottomRight: 34,
-                    bottomLeft: 10
+                    topLeft: 14,
+                    topRight: 76,
+                    bottomRight: 76,
+                    bottomLeft: 14
                 )
                 ctx.saveGState()
                 ctx.addPath(outerPath)
@@ -179,7 +213,6 @@ public enum DeviceFrameAssets {
                 ctx.fillPath()
                 ctx.restoreGState()
 
-                // Left book-fold titanium hinge spine (26pt)
                 let spineRect = CGRect(x: 1.5, y: 8, width: 16, height: bounds.height - 16)
                 let spinePath = CGPath(roundedRect: spineRect, cornerWidth: 5, cornerHeight: 5, transform: nil)
                 ctx.saveGState()
@@ -188,7 +221,6 @@ public enum DeviceFrameAssets {
                 ctx.fillPath()
                 ctx.restoreGState()
 
-                // Outer metallic rim highlight
                 ctx.saveGState()
                 ctx.addPath(outerPath)
                 ctx.setStrokeColor(NSColor(calibratedWhite: 0.42, alpha: 0.85).cgColor)
@@ -197,53 +229,35 @@ public enum DeviceFrameAssets {
                 ctx.restoreGState()
             }
 
-            // Hardware Buttons (Top Volume Up/Down + Right Touch ID Power per phone15 chrome.json)
-            ctx.saveGState()
-            ctx.setFillColor(NSColor(calibratedWhite: 0.28, alpha: 0.95).cgColor)
-            ctx.fill(CGRect(x: 236, y: bounds.maxY - 2.5, width: 42, height: 2.5))
-            ctx.fill(CGRect(x: 316, y: bounds.maxY - 2.5, width: 42, height: 2.5))
-            ctx.fill(CGRect(x: bounds.maxX - 2.5, y: bounds.maxY - 252, width: 2.5, height: 56))
-            ctx.restoreGState()
-
             // Screen aperture cutout (x: 26, y: 14, width: 466, height: 678)
+            // Uses official Apple framebufferMask PDF (1C896A2B-F0D7-405C-8D0F-66E4B80AD044.pdf: UL=8, LL=8, UR=59, LR=59)
             let screenRect = CGRect(x: 26, y: 14, width: 466, height: 678)
-            let screenPath = unevenRoundedCGPath(
-                in: screenRect,
-                topLeft: 2.7,
-                topRight: 19.7,
-                bottomRight: 19.7,
-                bottomLeft: 2.7
-            )
-            ctx.saveGState()
-            ctx.setBlendMode(.clear)
-            ctx.addPath(screenPath)
-            ctx.fillPath()
-            ctx.restoreGState()
-
-            // Subtle inner glass edge stroke
-            ctx.saveGState()
-            ctx.addPath(screenPath)
-            ctx.setStrokeColor(NSColor(calibratedWhite: 0.30, alpha: 0.55).cgColor)
-            ctx.setLineWidth(1.0)
-            ctx.strokePath()
-            ctx.restoreGState()
-
-            // Dynamic Island (sensor_bar_class_04 centered on 466pt cover screen)
-            let islandW: CGFloat = 104
-            let islandH: CGFloat = 29
-            let islandX = screenRect.midX - islandW * 0.5
-            let islandY = screenRect.maxY - 11 - islandH
-            let islandRect = CGRect(x: islandX, y: islandY, width: islandW, height: islandH)
-            let islandPath = CGPath(roundedRect: islandRect, cornerWidth: islandH * 0.5, cornerHeight: islandH * 0.5, transform: nil)
-            ctx.saveGState()
-            ctx.addPath(islandPath)
-            ctx.setFillColor(NSColor.black.cgColor)
-            ctx.fillPath()
-            // Subtle front camera lens glint inside Dynamic Island
-            let lensRect = CGRect(x: islandRect.maxX - 22, y: islandRect.midY - 5.5, width: 11, height: 11)
-            ctx.setFillColor(NSColor(calibratedRed: 0.08, green: 0.11, blue: 0.20, alpha: 1.0).cgColor)
-            ctx.fillEllipse(in: lensRect)
-            ctx.restoreGState()
+            let maskPaths = [
+                "/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone Duo.simdevicetype/Contents/Resources/1C896A2B-F0D7-405C-8D0F-66E4B80AD044.pdf",
+                "/Library/Developer/DeviceKit/FramebufferMasks/1C896A2B-F0D7-405C-8D0F-66E4B80AD044.pdf"
+            ]
+            var punchedWithOfficialMask = false
+            for maskPath in maskPaths {
+                if let maskImg = NSImage(contentsOfFile: maskPath) {
+                    maskImg.draw(in: screenRect, from: .zero, operation: .destinationOut, fraction: 1.0)
+                    punchedWithOfficialMask = true
+                    break
+                }
+            }
+            if !punchedWithOfficialMask {
+                let screenPath = unevenRoundedCGPath(
+                    in: screenRect,
+                    topLeft: 8.0,
+                    topRight: 59.0,
+                    bottomRight: 59.0,
+                    bottomLeft: 8.0
+                )
+                ctx.saveGState()
+                ctx.setBlendMode(.clear)
+                ctx.addPath(screenPath)
+                ctx.fillPath()
+                ctx.restoreGState()
+            }
             return true
         }
         cachedIPhoneDuoOuterPortrait = portrait
@@ -265,103 +279,97 @@ public enum DeviceFrameAssets {
     }
 
     /// Official iPhone Duo Unfolded Inner Display bezel (`phone14.devicechrome` spec:
-    /// 985×703 pt unfolded book-open default [951×669 pt screen + 17pt symmetric bezel, 18.33pt corners],
+    /// 985×703 pt unfolded book-open default [951×669 pt screen + 17pt symmetric bezel, 55pt corners],
     /// or 703×985 pt when rotated to tall portrait).
     public static func loadIPhoneDuoInnerBezel(isRotatedPortrait: Bool = false) -> NSImage {
         if !isRotatedPortrait, let cached = cachedIPhoneDuoInnerUnfolded { return cached }
         if isRotatedPortrait, let cached = cachedIPhoneDuoInnerPortrait { return cached }
 
-        let targetSize = isRotatedPortrait ? NSSize(width: 703, height: 985) : NSSize(width: 985, height: 703)
+        let portraitSize = NSSize(width: 703, height: 985)
         let bezelInset: CGFloat = 17
-        let screenCornerRadius: CGFloat = 18.33
-        let outerCornerRadius: CGFloat = 33.0
+        let screenCornerRadius: CGFloat = 55.0
+        let outerCornerRadius: CGFloat = 72.0
 
-        let rendered = NSImage(size: targetSize, flipped: false) { bounds in
+        let portrait = NSImage(size: portraitSize, flipped: false) { bounds in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            let outerRect = bounds.insetBy(dx: 1.5, dy: 1.5)
-            let outerPath = CGPath(roundedRect: outerRect, cornerWidth: outerCornerRadius, cornerHeight: outerCornerRadius, transform: nil)
-
-            // Ultra-thin foldable titanium chassis
-            ctx.saveGState()
-            ctx.addPath(outerPath)
-            ctx.setFillColor(NSColor(calibratedWhite: 0.09, alpha: 1.0).cgColor)
-            ctx.fillPath()
-            ctx.setStrokeColor(NSColor(calibratedWhite: 0.38, alpha: 0.85).cgColor)
-            ctx.setLineWidth(2.0)
-            ctx.addPath(outerPath)
-            ctx.strokePath()
-            ctx.restoreGState()
-
-            // Hardware buttons per phone14 chrome.json (Volume on left, Touch ID Power on top)
-            ctx.saveGState()
-            ctx.setFillColor(NSColor(calibratedWhite: 0.28, alpha: 0.95).cgColor)
-            if isRotatedPortrait {
-                ctx.fill(CGRect(x: 0, y: bounds.maxY - 156, width: 2.5, height: 44))
-                ctx.fill(CGRect(x: 0, y: bounds.maxY - 230, width: 2.5, height: 44))
-                ctx.fill(CGRect(x: 196, y: bounds.maxY - 2.5, width: 52, height: 2.5))
+            let chromeDir = "/Library/Developer/DeviceKit/Chrome/phone14.devicechrome/Contents/Resources"
+            let chromeCompositePath = "\(chromeDir)/PhoneComposite.pdf"
+            if let deviceKitComposite = NSImage(contentsOfFile: chromeCompositePath) {
+                if let volBtn = NSImage(contentsOfFile: "\(chromeDir)/Vol BTN.pdf") {
+                    volBtn.draw(in: CGRect(x: 0, y: bounds.maxY - 114 - 63, width: 16, height: 63))
+                    volBtn.draw(in: CGRect(x: 0, y: bounds.maxY - 188 - 63, width: 16, height: 63))
+                }
+                if let pwrBtn = NSImage(contentsOfFile: "\(chromeDir)/X Power BTN.pdf") {
+                    pwrBtn.draw(in: CGRect(x: bounds.maxX - 196 - 107, y: bounds.maxY - 16, width: 107, height: 16))
+                }
+                deviceKitComposite.draw(in: bounds)
             } else {
-                ctx.fill(CGRect(x: 140, y: bounds.maxY - 2.5, width: 44, height: 2.5))
-                ctx.fill(CGRect(x: 204, y: bounds.maxY - 2.5, width: 44, height: 2.5))
-                ctx.fill(CGRect(x: bounds.maxX - 2.5, y: bounds.maxY - 180, width: 2.5, height: 52))
+                let outerRect = bounds.insetBy(dx: 1.5, dy: 1.5)
+                let outerPath = CGPath(roundedRect: outerRect, cornerWidth: outerCornerRadius, cornerHeight: outerCornerRadius, transform: nil)
+                ctx.saveGState()
+                ctx.addPath(outerPath)
+                ctx.setFillColor(NSColor(calibratedWhite: 0.09, alpha: 1.0).cgColor)
+                ctx.fillPath()
+                ctx.setStrokeColor(NSColor(calibratedWhite: 0.38, alpha: 0.85).cgColor)
+                ctx.setLineWidth(2.0)
+                ctx.addPath(outerPath)
+                ctx.strokePath()
+                ctx.restoreGState()
             }
-            ctx.restoreGState()
 
-            // Central foldable hinge cap accents on the 17pt bezel
-            ctx.saveGState()
-            ctx.setFillColor(NSColor(calibratedWhite: 0.26, alpha: 0.9).cgColor)
-            if isRotatedPortrait {
-                let midY = bounds.midY
-                ctx.fill(CGRect(x: 2, y: midY - 14, width: 4, height: 28))
-                ctx.fill(CGRect(x: bounds.maxX - 6, y: midY - 14, width: 4, height: 28))
-            } else {
-                let midX = bounds.midX
-                ctx.fill(CGRect(x: midX - 14, y: bounds.maxY - 6, width: 28, height: 4))
-                ctx.fill(CGRect(x: midX - 14, y: 2, width: 28, height: 4))
-            }
-            ctx.restoreGState()
-
-            // Screen aperture cutout (17pt symmetric inset, 18.33pt corner radius)
+            // Screen aperture cutout (x: 17, y: 17, width: 669, height: 951)
+            // Uses official Apple framebufferMask PDF (BF0DC480-5EE2-4EC1-B02B-C75E94759832.pdf: 55pt symmetric corners)
             let screenRect = bounds.insetBy(dx: bezelInset, dy: bezelInset)
-            let screenPath = CGPath(roundedRect: screenRect, cornerWidth: screenCornerRadius, cornerHeight: screenCornerRadius, transform: nil)
-            ctx.saveGState()
-            ctx.setBlendMode(.clear)
-            ctx.addPath(screenPath)
-            ctx.fillPath()
-            ctx.restoreGState()
-
-            // Subtle inner display polymer border + delicate optical center crease line
-            ctx.saveGState()
-            ctx.addPath(screenPath)
-            ctx.setStrokeColor(NSColor(calibratedWhite: 0.28, alpha: 0.55).cgColor)
-            ctx.setLineWidth(1.0)
-            ctx.strokePath()
-
-            ctx.setStrokeColor(NSColor(calibratedWhite: 1.0, alpha: 0.045).cgColor)
-            ctx.setLineWidth(1.0)
-            if isRotatedPortrait {
-                ctx.move(to: CGPoint(x: screenRect.minX + 6, y: screenRect.midY))
-                ctx.addLine(to: CGPoint(x: screenRect.maxX - 6, y: screenRect.midY))
+            let maskPath = "/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone Duo.simdevicetype/Contents/Resources/BF0DC480-5EE2-4EC1-B02B-C75E94759832.pdf"
+            if let maskImg = NSImage(contentsOfFile: maskPath) {
+                maskImg.draw(in: screenRect, from: .zero, operation: .destinationOut, fraction: 1.0)
             } else {
-                ctx.move(to: CGPoint(x: screenRect.midX, y: screenRect.minY + 6))
-                ctx.addLine(to: CGPoint(x: screenRect.midX, y: screenRect.maxY - 6))
+                let screenPath = CGPath(roundedRect: screenRect, cornerWidth: screenCornerRadius, cornerHeight: screenCornerRadius, transform: nil)
+                ctx.saveGState()
+                ctx.setBlendMode(.clear)
+                ctx.addPath(screenPath)
+                ctx.fillPath()
+                ctx.restoreGState()
             }
-            ctx.strokePath()
-            ctx.restoreGState()
             return true
         }
 
-        if isRotatedPortrait {
-            cachedIPhoneDuoInnerPortrait = rendered
-        } else {
-            cachedIPhoneDuoInnerUnfolded = rendered
+        cachedIPhoneDuoInnerPortrait = portrait
+        if isRotatedPortrait { return portrait }
+
+        // Default unfolded posture is 985×703 (rotated -90° from 703×985 portrait)
+        let unfoldedSize = NSSize(width: 985, height: 703)
+        let unfolded = NSImage(size: unfoldedSize, flipped: false) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.saveGState()
+            ctx.translateBy(x: 0, y: unfoldedSize.height)
+            ctx.rotate(by: -.pi / 2)
+            portrait.draw(in: CGRect(origin: .zero, size: portraitSize))
+            ctx.restoreGState()
+            return true
         }
-        return rendered
+        cachedIPhoneDuoInnerUnfolded = unfolded
+        return unfolded
     }
 
-    /// Loads the authentic Google Pixel hardware chassis frame (1408 x 2974).
+    /// Loads the authentic Google Pixel hardware chassis frame.
     /// Always guaranteed to return a real device frame, never leaving the emulator naked.
     public static func loadAndroidPixelProBezel() -> NSImage? {
         if let cached = cachedAndroidFrameImage { return cached }
+        // Prioritize user's installed Android SDK Pixel 10 Pro / Pixel Pro skins
+        let sdkSkins = [
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_10_pro/back.webp",
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_9_pro/back.webp",
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_8_pro/back.webp",
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_7_pro/back.webp"
+        ]
+        for path in sdkSkins {
+            if FileManager.default.fileExists(atPath: path),
+               let img = loadDownsampledImage(at: URL(fileURLWithPath: path)) {
+                cachedAndroidFrameImage = img
+                return img
+            }
+        }
         if let img = loadResourceImage(named: "android_pixel_frame", fileExtension: "png") {
             cachedAndroidFrameImage = img
             return img
@@ -370,25 +378,25 @@ public enum DeviceFrameAssets {
             cachedAndroidFrameImage = img
             return img
         }
-        // Fallback to local Android SDK skins directory
-        let sdkSkins = [
-            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_9_pro/back.webp",
-            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_8_pro/back.webp",
-            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_7_pro/back.webp"
-        ]
-        for path in sdkSkins {
-            if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
-                cachedAndroidFrameImage = img
-                return img
-            }
-        }
         return nil
     }
 
-    /// Loads the authentic Google Pixel front camera punch-hole cutout mask (1280 x 2856).
+    /// Loads the authentic Google Pixel front camera punch-hole cutout mask.
     public static func loadAndroidPixelProMask() -> NSImage? {
         if let cached = cachedAndroidMaskImage { return cached }
+        let sdkMasks = [
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_10_pro/mask.webp",
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_9_pro/mask.webp",
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_8_pro/mask.webp",
+            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_7_pro/mask.webp"
+        ]
+        for path in sdkMasks {
+            if FileManager.default.fileExists(atPath: path),
+               let img = loadDownsampledImage(at: URL(fileURLWithPath: path)) {
+                cachedAndroidMaskImage = img
+                return img
+            }
+        }
         if let img = loadResourceImage(named: "android_pixel_mask", fileExtension: "png") {
             cachedAndroidMaskImage = img
             return img
@@ -397,119 +405,104 @@ public enum DeviceFrameAssets {
             cachedAndroidMaskImage = img
             return img
         }
-        let sdkMasks = [
-            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_9_pro/mask.webp",
-            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_8_pro/mask.webp",
-            NSHomeDirectory() + "/Library/Android/sdk/skins/pixel_7_pro/mask.webp"
-        ]
-        for path in sdkMasks {
-            if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
-                cachedAndroidMaskImage = img
-                return img
-            }
-        }
         return nil
     }
 
-    private static var cachedSamsungFrameImage: NSImage?
-    private static var cachedSamsungMaskImage: NSImage?
+    /// Parses an Android SDK skin `layout` file (`parts.device.display` + `layouts.portrait`) into exact geometry.
+    public static func parseAndroidSkinLayout(at layoutURL: URL) -> AndroidSkinGeometry? {
+        guard let text = try? String(contentsOf: layoutURL, encoding: .utf8) else { return nil }
 
-    /// Loads the authentic official Samsung Galaxy Note 20 Ultra hardware frame (1794 x 3488).
-    public static func loadSamsungGalaxyNote20UltraBezel() -> NSImage? {
-        if let cached = cachedSamsungFrameImage { return cached }
-        if let img = loadResourceImage(named: "samsung_note20_ultra_frame", fileExtension: "png") {
-            cachedSamsungFrameImage = img
-            return img
+        var dispWidth: CGFloat?
+        var dispHeight: CGFloat?
+        var cornerRadius: CGFloat?
+        var outerWidth: CGFloat?
+        var outerHeight: CGFloat?
+        var dispX: CGFloat?
+        var dispY: CGFloat?
+
+        if let dispRange = text.range(of: "display\\s*\\{[^\\}]*\\}", options: .regularExpression) {
+            let block = String(text[dispRange])
+            dispWidth = Self.firstCGFloat(matching: "\\bwidth\\s+([0-9]+)", in: block)
+            dispHeight = Self.firstCGFloat(matching: "\\bheight\\s+([0-9]+)", in: block)
+            cornerRadius = Self.firstCGFloat(matching: "\\bcorner_radius\\s+([0-9]+)", in: block)
         }
-        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
-        let fallbackDirs = [
-            homePath + "/Library/Android/sdk/skins/Galaxy_Note20_Ultra/device_Port-Black-frame.png",
-            "/Applications/MicroCode.app/Contents/Resources/samsung_note20_ultra_frame.png",
-            homePath + "/Applications/MicroCode.app/Contents/Resources/samsung_note20_ultra_frame.png"
-        ]
-        for path in fallbackDirs {
-            if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
-                cachedSamsungFrameImage = img
-                return img
+
+        if let layoutsIdx = text.range(of: "layouts\\s*\\{", options: .regularExpression)?.lowerBound {
+            let tail = String(text[layoutsIdx...])
+            if let portIdx = tail.range(of: "portrait\\s*\\{", options: .regularExpression)?.upperBound {
+                let portBody = String(tail[portIdx...])
+                outerWidth = Self.firstCGFloat(matching: "\\bwidth\\s+([0-9]+)", in: portBody)
+                outerHeight = Self.firstCGFloat(matching: "\\bheight\\s+([0-9]+)", in: portBody)
+
+                let partPattern = "part[0-9]+\\s*\\{[^\\}]*name\\s+device[^\\}]*\\}"
+                if let devPartRange = portBody.range(of: partPattern, options: .regularExpression) {
+                    let devBlock = String(portBody[devPartRange])
+                    dispX = Self.firstCGFloat(matching: "\\bx\\s+([0-9]+)", in: devBlock)
+                    dispY = Self.firstCGFloat(matching: "\\by\\s+([0-9]+)", in: devBlock)
+                }
             }
         }
-        return nil
+
+        guard let w = dispWidth, let h = dispHeight, w > 0, h > 0 else { return nil }
+        let ow = outerWidth ?? (w + 128)
+        let oh = outerHeight ?? (h + 109)
+        let dx = dispX ?? ((ow - w) / 2.0)
+        let dy = dispY ?? ((oh - h) / 2.0)
+        let cr = cornerRadius ?? round(w * 0.077)
+        return AndroidSkinGeometry(
+            outerSize: CGSize(width: ow, height: oh),
+            displayRect: CGRect(x: dx, y: dy, width: w, height: h),
+            cornerRadius: cr
+        )
     }
 
-    /// Loads the authentic official Samsung Galaxy Note 20 Ultra front camera punch-hole cutout mask.
-    public static func loadSamsungGalaxyNote20UltraMask() -> NSImage? {
-        if let cached = cachedSamsungMaskImage { return cached }
-        if let img = loadResourceImage(named: "samsung_note20_ultra_mask", fileExtension: "png") {
-            cachedSamsungMaskImage = img
-            return img
-        }
-        let fallbackDirs = [
-            NSHomeDirectory() + "/Library/Android/sdk/skins/Galaxy_Note20_Ultra/fore_port.png",
-            NSHomeDirectory() + "/Downloads/Galaxy_Note20_Ultra/fore_port.png"
-        ]
-        for path in fallbackDirs {
-            if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
-                cachedSamsungMaskImage = img
-                return img
-            }
-        }
-        return nil
+    private static func firstCGFloat(matching pattern: String, in text: String) -> CGFloat? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text),
+              let val = Double(text[range]) else { return nil }
+        return CGFloat(val)
     }
 
-    public static func loadAndroidDeviceBezel(for skin: AndroidDeviceSkin) -> NSImage? {
-        switch skin {
-        case .galaxyNote20Ultra:
-            return loadSamsungGalaxyNote20UltraBezel() ?? loadAndroidPixelProBezel()
-        case .pixel9Pro:
-            return loadAndroidPixelProBezel()
-        }
+    public static func loadAndroidDeviceBezel(for skin: AndroidDeviceSkin = .pixelPro) -> NSImage? {
+        loadAndroidPixelProBezel()
     }
 
-    public static func loadAndroidDeviceMask(for skin: AndroidDeviceSkin) -> NSImage? {
-        switch skin {
-        case .galaxyNote20Ultra:
-            return loadSamsungGalaxyNote20UltraMask() ?? loadAndroidPixelProMask()
-        case .pixel9Pro:
-            return loadAndroidPixelProMask()
-        }
+    public static func loadAndroidDeviceMask(for skin: AndroidDeviceSkin = .pixelPro) -> NSImage? {
+        loadAndroidPixelProMask()
     }
 }
 
-/// Official Android hardware skin models supported in MicroCode live preview
+/// Exact hardware chassis & viewport geometry resolved from the user's Android AVD / SDK skin
+public struct AndroidSkinGeometry: Equatable {
+    public var outerSize: CGSize
+    public var displayRect: CGRect
+    public var cornerRadius: CGFloat
+
+    public init(outerSize: CGSize, displayRect: CGRect, cornerRadius: CGFloat) {
+        self.outerSize = outerSize
+        self.displayRect = displayRect
+        self.cornerRadius = cornerRadius
+    }
+
+    public static let pixelProDefault = AndroidSkinGeometry(
+        outerSize: CGSize(width: 1408, height: 2965),
+        displayRect: CGRect(x: 59, y: 60, width: 1280, height: 2856),
+        cornerRadius: 99
+    )
+}
+
+/// Default Android hardware skin fallback when no custom AVD skin layout is specified
 public enum AndroidDeviceSkin: String, CaseIterable, Identifiable {
-    case galaxyNote20Ultra = "Samsung Galaxy Note 20 Ultra"
-    case pixel9Pro = "Google Pixel 9 Pro"
+    case pixelPro = "Google Pixel Pro"
 
     public var id: String { rawValue }
 
-    public var shortName: String {
-        switch self {
-        case .galaxyNote20Ultra: return "Note 20 Ultra"
-        case .pixel9Pro: return "Pixel 9 Pro"
-        }
-    }
+    public var shortName: String { "Pixel Pro" }
 
-    public var outerSize: CGSize {
-        switch self {
-        case .galaxyNote20Ultra: return CGSize(width: 1794, height: 3488)
-        case .pixel9Pro: return CGSize(width: 1408, height: 2974)
-        }
-    }
+    public var outerSize: CGSize { AndroidSkinGeometry.pixelProDefault.outerSize }
 
-    public var displayRect: CGRect {
-        switch self {
-        case .galaxyNote20Ultra: return CGRect(x: 177, y: 190, width: 1440, height: 3088)
-        case .pixel9Pro: return CGRect(x: 60, y: 61, width: 1280, height: 2856)
-        }
-    }
+    public var displayRect: CGRect { AndroidSkinGeometry.pixelProDefault.displayRect }
 
-    public var cornerRadius: CGFloat {
-        switch self {
-        case .galaxyNote20Ultra: return 24
-        case .pixel9Pro: return 109
-        }
-    }
+    public var cornerRadius: CGFloat { AndroidSkinGeometry.pixelProDefault.cornerRadius }
 }

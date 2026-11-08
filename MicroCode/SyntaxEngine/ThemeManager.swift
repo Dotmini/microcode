@@ -112,31 +112,33 @@ public final class ThemeManager: @unchecked Sendable {
     /// Style cache for current theme
     private var styleCache: [SyntaxTokenType: TokenStyle] = [:]
     
-    public init() {
-        // Initialize with default dark theme (MicroCode Pro Dark)
+    /// Prebuilt immutable dictionary of all built-in themes so every `ThemeManager()` instantiation
+    /// is O(1) copy-on-write instead of rebuilding 34 `Theme` structs on `@MainActor`.
+    private static let builtInThemes: (defaultDark: Theme, cache: [String: Theme]) = {
         let defaultDark = ThemeManager.createDefaultDarkTheme()
-        self.activeTheme = defaultDark
-        self.themeCache["default-dark"] = defaultDark
-        self.themeCache["dark"] = defaultDark
-        self.themeCache["xcodeDark"] = defaultDark
-        
-        // Register all AppThemes (Single Source of Truth)
-        for themeCase in AppTheme.allCases {
-            // Skip system as it maps to current mode, but register actual themes
-            if themeCase != .system {
-                let theme = themeCase.toTheme()
-                self.themeCache[theme.name] = theme
-                
-                // Keep default aliases for compatibility
-                if themeCase == .dark || themeCase == .xcodeDark {
-                    self.themeCache["default-dark"] = defaultDark
-                    self.themeCache["dark"] = defaultDark
-                    self.themeCache["xcodeDark"] = defaultDark
-                }
-                if themeCase == .light { self.themeCache["default-light"] = theme }
+        var cache: [String: Theme] = [
+            "default-dark": defaultDark,
+            "dark": defaultDark,
+            "xcodeDark": defaultDark
+        ]
+        for themeCase in AppTheme.allCases where themeCase != .system {
+            let theme = themeCase.toTheme()
+            cache[theme.name] = theme
+            if themeCase == .dark || themeCase == .xcodeDark {
+                cache["default-dark"] = defaultDark
+                cache["dark"] = defaultDark
+                cache["xcodeDark"] = defaultDark
+            }
+            if themeCase == .light {
+                cache["default-light"] = theme
             }
         }
-        
+        return (defaultDark, cache)
+    }()
+
+    public init() {
+        self.activeTheme = Self.builtInThemes.defaultDark
+        self.themeCache = Self.builtInThemes.cache
         rebuildStyleCache()
     }
     
@@ -195,6 +197,106 @@ public final class ThemeManager: @unchecked Sendable {
     public func loadTheme(from url: URL) throws -> Theme {
         let data = try Data(contentsOf: url)
         return try loadTheme(from: data)
+    }
+    
+    /// Import a standard VS Code color theme (`colors` + `tokenColors` TextMate scopes) and register it
+    /// under `name` (defaults to the file name). Returns the registered theme.
+    @discardableResult
+    public func loadVSCodeTheme(from url: URL, name: String? = nil) throws -> Theme {
+        var text = try String(contentsOf: url, encoding: .utf8)
+        // VS Code themes are JSONC: strip full-line // comments and trailing commas.
+        text = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        text = text.replacingOccurrences(of: ",(\\s*[}\\]])", with: "$1", options: .regularExpression)
+        guard let data = text.data(using: .utf8),
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(domain: "ThemeManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid VS Code theme JSON"])
+        }
+        func hex(_ v: Any?) -> String? {
+            guard let s = v as? String, s.hasPrefix("#"), s.count >= 7 else { return nil }
+            return String(s.prefix(7))
+        }
+        let colors = root["colors"] as? [String: Any] ?? [:]
+        let isDark = (root["type"] as? String ?? "dark").lowercased() != "light"
+        let themeName = name ?? url.deletingPathExtension().lastPathComponent
+        let bg = hex(colors["editor.background"]) ?? (isDark ? "#1E1E1E" : "#FFFFFF")
+        let fg = hex(colors["editor.foreground"]) ?? (isDark ? "#D4D4D4" : "#000000")
+
+        // TextMate scope prefix -> our token keys (later/more-specific rules override earlier ones)
+        let scopeMap: [(String, [String])] = [
+            ("keyword", ["keyword", "keywordControl", "keywordDeclaration", "keywordModifier", "keywordOperator"]),
+            ("storage", ["keywordDeclaration", "keywordModifier"]),
+            ("keyword.operator", ["operator", "keywordOperator"]),
+            ("string", ["string"]),
+            ("string.regexp", ["regex"]),
+            ("constant.character.escape", ["escape"]),
+            ("constant.numeric", ["number"]),
+            ("constant", ["constant", "enumMember"]),
+            ("constant.language", ["boolean", "null"]),
+            ("comment", ["comment", "commentDoc", "commentBlock"]),
+            ("entity.name.function", ["function"]),
+            ("support.function", ["function"]),
+            ("entity.name.type", ["type"]),
+            ("entity.name.class", ["type"]),
+            ("support.class", ["type"]),
+            ("support.type", ["type"]),
+            ("variable", ["variable", "identifier"]),
+            ("variable.parameter", ["parameter"]),
+            ("variable.other.property", ["property"]),
+            ("variable.other.object.property", ["property"]),
+            ("support.variable.property", ["property"]),
+            ("punctuation", ["punctuation", "delimiter"]),
+            ("meta.preprocessor", ["preprocessor"]),
+            ("keyword.control.directive", ["preprocessor"]),
+            ("entity.name.tag", ["markup"]),
+            ("meta.decorator", ["annotation"]),
+            ("entity.name.function.decorator", ["annotation"]),
+            ("punctuation.definition.template-expression", ["stringInterpolation"])
+        ].sorted { $0.0.count < $1.0.count }
+
+        var tokenColors: [String: TokenStyleConfig] = [:]
+        for rule in (root["tokenColors"] as? [[String: Any]] ?? []) {
+            guard let settings = rule["settings"] as? [String: Any], let color = hex(settings["foreground"]) else { continue }
+            let fontStyle = settings["fontStyle"] as? String
+            var scopes: [String] = []
+            if let s = rule["scope"] as? String {
+                scopes = s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            } else if let a = rule["scope"] as? [String] {
+                scopes = a
+            }
+            for scope in scopes {
+                for (key, targets) in scopeMap where scope == key || scope.hasPrefix(key + ".") {
+                    for t in targets { tokenColors[t] = TokenStyleConfig(foreground: color, fontStyle: fontStyle) }
+                }
+            }
+        }
+        // Semantic token colors (e.g. "variable.readonly") refine constant/parameter/property when present.
+        if let sem = root["semanticTokenColors"] as? [String: Any] {
+            func semColor(_ v: Any?) -> String? { hex(v) ?? hex((v as? [String: Any])?["foreground"]) }
+            if let c = semColor(sem["variable.readonly"]) ?? semColor(sem["variable"]) { tokenColors["constant"] = TokenStyleConfig(foreground: c) }
+            if let c = semColor(sem["parameter"]) { tokenColors["parameter"] = TokenStyleConfig(foreground: c) }
+            if let c = semColor(sem["property"]) { tokenColors["property"] = TokenStyleConfig(foreground: c) }
+        }
+        tokenColors["identifier"] = tokenColors["identifier"] ?? TokenStyleConfig(foreground: fg)
+
+        let theme = Theme(
+            name: themeName,
+            displayName: themeName,
+            isDark: isDark,
+            editorBackground: bg,
+            editorForeground: fg,
+            editorSelection: hex(colors["editor.selectionBackground"]) ?? (isDark ? "#264F78" : "#ADD6FF"),
+            editorLineHighlight: hex(colors["editor.lineHighlightBackground"]) ?? (isDark ? "#2A2D2E" : "#F0F0F0"),
+            editorCursor: hex(colors["editorCursor.foreground"]) ?? fg,
+            editorGutter: bg,
+            editorGutterText: hex(colors["editorLineNumber.foreground"]) ?? (isDark ? "#858585" : "#237893"),
+            tokenColors: tokenColors
+        )
+        lock.lock()
+        themeCache[theme.name] = theme
+        lock.unlock()
+        return theme
     }
     
     /// Get all available theme names

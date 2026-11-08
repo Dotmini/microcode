@@ -345,26 +345,82 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                 }
             }
 
-            // 8. Scan MicroCode .microcode/agent.md and .microcode/rules/*.{md,mdc}
-            let microcodeURL = rootURL.appendingPathComponent(".microcode/agent.md")
-            if let content = try? String(contentsOf: microcodeURL, encoding: .utf8), !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // 8. Scan Unified MicroCode Rules across:
+            //    - Isolated Workspace State: ~/.microcode/workspaces/<id>/{agent.md, rules.md, rules/*.{md,mdc}}
+            //    - Repository Explicit Config: <workspace>/.microcode/{agent.md, rules.md, rules/*.{md,mdc}}
+            //    - Global User Config: ~/.microcode/{rules.md, rules/*.{md,mdc}}
+            let homeMC = WorkspaceStoragePaths.microcodeHomeDirectory
+            let isolatedStateDir = WorkspaceStoragePaths.workspaceStateDirectory(for: rootURL.path)
+            var seenMicrocodeRulePaths = Set<String>()
+
+            let directRuleFiles: [(url: URL, fileName: String, relPath: String, desc: String)] = [
+                (
+                    isolatedStateDir.appendingPathComponent("rules.md"),
+                    "rules.md",
+                    "~/.microcode/workspaces/\(isolatedStateDir.lastPathComponent)/rules.md",
+                    "Learned Workspace Rules (/learn)"
+                ),
+                (
+                    isolatedStateDir.appendingPathComponent("agent.md"),
+                    "agent.md",
+                    "~/.microcode/workspaces/\(isolatedStateDir.lastPathComponent)/agent.md",
+                    "MicroCode Workspace Agent Instructions (~/.microcode)"
+                ),
+                (
+                    rootURL.appendingPathComponent(".microcode/rules.md"),
+                    ".microcode/rules.md",
+                    ".microcode/rules.md",
+                    "Repository MicroCode Rules"
+                ),
+                (
+                    rootURL.appendingPathComponent(".microcode/agent.md"),
+                    ".microcode/agent.md",
+                    ".microcode/agent.md",
+                    "Repository MicroCode Agent Instructions"
+                ),
+                (
+                    homeMC.appendingPathComponent("rules.md"),
+                    "~/.microcode/rules.md",
+                    "~/.microcode/rules.md",
+                    "Global MicroCode User Rules"
+                )
+            ]
+
+            for item in directRuleFiles {
+                let stdPath = item.url.standardizedFileURL.path
+                guard !seenMicrocodeRulePaths.contains(stdPath),
+                      let content = try? String(contentsOf: item.url, encoding: .utf8) else { continue }
+                let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                seenMicrocodeRulePaths.insert(stdPath)
                 rules.append(PlatformRule(
                     source: .microcode,
-                    fileName: "agent.md",
-                    relativePath: ".microcode/agent.md",
-                    summaryDescription: "MicroCode Native Agent Instructions",
+                    fileName: item.fileName,
+                    relativePath: item.relPath,
+                    summaryDescription: item.desc,
                     globs: ["*"],
                     alwaysApply: true,
-                    content: content
+                    content: trimmed
                 ))
             }
-            let mcRulesDir = rootURL.appendingPathComponent(".microcode/rules")
-            if let enumerator = self.fileManager.enumerator(at: mcRulesDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
-                for case let fileURL as URL in enumerator {
-                    let ext = fileURL.pathExtension.lowercased()
-                    if ext == "mdc" || ext == "md" {
-                        if let parsed = self.parseMdcRule(fileURL: fileURL, rootURL: rootURL, sourceOverride: .microcode) {
-                            rules.append(parsed)
+
+            let ruleDirectories: [(dir: URL, baseRoot: URL)] = [
+                (isolatedStateDir.appendingPathComponent("rules"), isolatedStateDir),
+                (rootURL.appendingPathComponent(".microcode/rules"), rootURL),
+                (homeMC.appendingPathComponent("rules"), homeMC)
+            ]
+
+            for entry in ruleDirectories {
+                if let enumerator = self.fileManager.enumerator(at: entry.dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                    for case let fileURL as URL in enumerator {
+                        let stdPath = fileURL.standardizedFileURL.path
+                        guard !seenMicrocodeRulePaths.contains(stdPath) else { continue }
+                        let ext = fileURL.pathExtension.lowercased()
+                        if ext == "mdc" || ext == "md" {
+                            if let parsed = self.parseMdcRule(fileURL: fileURL, rootURL: entry.baseRoot, sourceOverride: .microcode) {
+                                seenMicrocodeRulePaths.insert(stdPath)
+                                rules.append(parsed)
+                            }
                         }
                     }
                 }

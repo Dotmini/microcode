@@ -135,11 +135,25 @@ struct MicroCodeApp: App {
 
     private static var configuredWindowNumbers = Set<Int>()
 
+    static func isPrimaryWorkspaceWindow(_ win: NSWindow) -> Bool {
+        guard !(win is NSPanel),
+              !win.isSheet,
+              win.sheetParent == nil,
+              win.styleMask.contains(.titled),
+              win.styleMask.contains(.closable),
+              !win.className.contains("Sheet"),
+              !win.className.contains("Popover"),
+              win.className != "NSStatusBarWindow" else {
+            return false
+        }
+        return true
+    }
+
     private func setupWindow() {
-        let isTransparent = appState.appTheme.isGlass
+        let allowsWindowVibrancy = appState.appTheme.isGlass || appState.appTheme.usesDarkGlassSidebar
         let targetAppearance = NSAppearance(named: appState.appTheme.colorScheme == .light ? .aqua : .darkAqua)
         let candidateWindows = NSApplication.shared.windows.filter { win in
-            !(win is NSPanel) && win.className != "NSStatusBarWindow"
+            Self.isPrimaryWorkspaceWindow(win)
         }
         for window in candidateWindows {
             let isFirstConfiguration = Self.configuredWindowNumbers.insert(window.windowNumber).inserted
@@ -150,17 +164,23 @@ struct MicroCodeApp: App {
             window.minSize = NSSize(width: 720, height: 480)
             // Keep false so splitters, canvases, and drag gestures resize panels instead of dragging the window
             window.isMovableByWindowBackground = false
+            window.acceptsMouseMovedEvents = true
             window.appearance = targetAppearance
 
-            // Dynamic transparency based on theme
-            window.backgroundColor = isTransparent ? .clear : appState.appTheme.workspaceBackground
-            window.isOpaque = !isTransparent
+            // Dynamic behind-window vibrancy support for Glass & Smoked Black Glass Sidebar:
+            // Keep `isOpaque = false` for `usesDarkGlassSidebar` so `NSVisualEffectView(.behindWindow)` samples the backdrop,
+            // while setting `window.backgroundColor` to solid `workspaceBackground` (instead of `.clear`) so subpixel seams never flash white!
+            window.backgroundColor = appState.appTheme.isGlass ? .clear : appState.appTheme.workspaceBackground
+            window.isOpaque = !allowsWindowVibrancy
             window.hasShadow = true
+            WindowTrafficLightsController.shared.register(window: window)
             if isFirstConfiguration {
                 if Self.configuredWindowNumbers.count == 1 {
                     window.center()
                 }
-                window.makeKeyAndOrderFront(nil)
+                if window.attachedSheet == nil {
+                    window.makeKeyAndOrderFront(nil)
+                }
             }
         }
     }
@@ -168,18 +188,21 @@ struct MicroCodeApp: App {
     private func performBackgroundStartup() async {
         // Stagger background warmup to allow cold-launch first frame to stay under 50MB RAM
         Task.detached(priority: .background) {
+            WorkspaceStoragePaths.hardenAndConsolidateMicrocodeStorage()
             try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s deferral
-            
-            _ = PreviewService.shared
-            _ = AuthService.shared
-            _ = AutoHealerService.shared
-            _ = LocalEcosystemDiscovery.shared
-            
-            // Background refresh of live models & local ecosystem engines
-            await AIModelCatalog.shared.refreshIfNeeded(force: false)
+
+            let isAgentActive = await MainActor.run {
+                AppState.shared?.editorMode == .aiAgent
+            }
+            if isAgentActive {
+                _ = AuthService.shared
+                _ = LocalEcosystemDiscovery.shared
+                await AIModelCatalog.shared.refreshIfNeeded(force: false)
+            }
             await MainActor.run {
-                // Start Local MCP & HTTP Daemon Bridge for Omni AI
+                // Start Local MCP & HTTP Daemon Bridge for Omni AI + Built-in Subscription Gateway (:20128)
                 MCPServer.shared.startLocalHttpBridge(port: 18888)
+                LocalSubscriptionGatewayService.shared.startIfNeeded()
                 TelemetryService.shared.start()
                 // Opt-in (`defaults write com.dotmini.microcode microcode.perfTelemetry -bool YES`): reports stores that publish
                 // faster than a 60 Hz view tree can show, i.e. the SwiftUI invalidation fan-out of large ObservableObjects.
@@ -258,6 +281,37 @@ struct MicroCodeApp: App {
                 Task { @MainActor in
                     await GoogleColabService.shared.connectToColab(endpoint: endpoint, token: token)
                     AppState.shared?.currentComputeTarget = .googleColab
+                }
+            }
+            return
+        }
+
+        // Team Collaboration Deep Link (e.g. microcode://collab?token=192.168.1.50:8472%23ABCD12 or ?action=host&mode=lan)
+        if (url.scheme?.lowercased() == "microcode" || url.scheme?.lowercased() == "codetuner"),
+           (url.host?.lowercased() == "collab" || url.host?.lowercased() == "team-collab") {
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: true)
+            let queryItems = components?.queryItems ?? []
+            let action = queryItems.first(where: { $0.name.lowercased() == "action" })?.value?.lowercased() ?? ""
+            let mode = queryItems.first(where: { $0.name.lowercased() == "mode" })?.value?.lowercased() ?? ""
+            let token = queryItems.first(where: {
+                let n = $0.name.lowercased()
+                return n == "token" || n == "code" || n == "url"
+            })?.value ?? ""
+            Task { @MainActor in
+                if action == "host" {
+                    if mode == "lan" {
+                        CollaborationService.shared.setTransportMode(.lan)
+                    } else if mode == "tunnel" || mode == "online" {
+                        CollaborationService.shared.setTransportMode(.online)
+                    }
+                    let wsName = AppState.shared?.workspaceFolder?.lastPathComponent ?? "Workspace"
+                    _ = try? await CollaborationService.shared.createSession(projectId: wsName)
+                } else if action == "leave" || action == "stop" {
+                    await CollaborationService.shared.leaveSession()
+                } else if !token.isEmpty {
+                    try? await CollaborationService.shared.joinSession(shareCode: token, mountWorkspace: true)
+                } else {
+                    AppState.shared?.showingCollaborationView = true
                 }
             }
             return
@@ -401,8 +455,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Request user notification permission softly for background AI completion alerts
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        // Defer user notification permission XPC until after cold-launch window is settled
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        }
 
         // Attach window delegate to primary workspace windows so closing the window (Cmd+W / red close button)
         // hides the window instead of destroying the view hierarchy or killing in-flight AI work.
@@ -428,6 +484,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     AgentService.shared.saveChats()
                     AgentService.shared.saveArx()
                     UserDefaults.standard.synchronize()
+                    PhoneCompanionService.shared.stopOnlineTunnel()
+                    LocalLLMGatewayService.shared.stopWorldwideTunnel()
+                    CollaborationService.shared.stopOnlineTunnel()
+                    DevPortTunnelService.shared.stopAllTunnels()
+                    for (_, client) in LSPManager.shared.activeClients {
+                        client.stop()
+                    }
                     DeviceRuntimeService.shared.shutdownAllRuntimes()
                 }
                 BackendService.shared.stopBackend()
@@ -456,6 +519,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.styleMask.insert(.resizable)
         window.minSize = NSSize(width: 720, height: 480)
         window.isMovableByWindowBackground = false
+        window.acceptsMouseMovedEvents = true
         if window.delegate !== self {
             window.delegate = self
         }
@@ -498,6 +562,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ReportLogManager.shared.log("App Terminating", type: .info)
         AgentService.shared.saveChats()
         AgentService.shared.saveArx()
+        PhoneCompanionService.shared.stopOnlineTunnel()
+        LocalLLMGatewayService.shared.stopWorldwideTunnel()
+        CollaborationService.shared.stopOnlineTunnel()
+        DevPortTunnelService.shared.stopAllTunnels()
+        for (_, client) in LSPManager.shared.activeClients {
+            client.stop()
+        }
         DevServerRegistry.shared.terminateAll()
         DeviceRuntimeService.shared.shutdownAllRuntimes()
         // Stop backend server
@@ -583,9 +654,18 @@ struct AppCommands: Commands {
         }
 
         CommandGroup(replacing: .newItem) {
-            Button("New File") { appState.createNewFile() }
+            Button(appState.editorMode == .aiAgent ? "New Conversation" : "New File") {
+                if appState.editorMode == .aiAgent {
+                    ImplementationPlanManager.shared.clearPlan()
+                    let ws = appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace
+                    _ = AgentService.shared.createNewChat(projectPath: ws)
+                } else {
+                    appState.createNewFile()
+                }
+            }
                 .keyboardShortcut("n", modifiers: .command)
             Button("New AI Conversation") {
+                ImplementationPlanManager.shared.clearPlan()
                 let ws = appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace
                 _ = AgentService.shared.createNewChat(projectPath: ws)
                 appState.switchToMode(.aiAgent)
@@ -595,6 +675,16 @@ struct AppCommands: Commands {
                 .keyboardShortcut("o", modifiers: .command)
             Button("Open Folder...") { appState.openFolder() }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+            Divider()
+            Button("Import .ARX Capsule…") {
+                ARXCapsuleService.shared.importCapsuleWithOpenPanel(appState: appState)
+            }
+            Button("Export .ARX Capsule…") {
+                ARXCapsuleService.shared.exportCapsuleWithSavePanel(
+                    chatId: AgentService.shared.activeChatId,
+                    workspacePath: appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace
+                )
+            }
             Divider()
             Button("Close Tab") {
                 if let cur = appState.currentFile {
@@ -713,15 +803,16 @@ struct AppCommands: Commands {
             Button("Explain Code") { appState.explainCode() }
                 .keyboardShortcut("e", modifiers: [.command, .option])
             Divider()
-            Button("AI Code Analysis") { appState.showingCodeAnalysis = true }
+            Button("Code Analysis") {
+                appState.selectedConsoleTab = 3
+                appState.consoleVisible = true
+            }
                 .keyboardShortcut("a", modifiers: [.command, .option])
         }
         
         CommandMenu("View") {
             Button("Toggle Sidebar") {
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    appState.toggleSidebar()
-                }
+                appState.toggleSidebar()
             }
                 .keyboardShortcut("b", modifiers: .command)
             Button("Toggle Preview & Inspector") {
@@ -748,6 +839,10 @@ struct AppCommands: Commands {
                 }
             }
                 .keyboardShortcut("p", modifiers: [.command, .option])
+
+            Button(WindowTrafficLightsController.shared.autoHideEnabled ? "Show Window Controls Always" : "Auto-Hide Window Controls") {
+                WindowTrafficLightsController.shared.autoHideEnabled.toggle()
+            }
 
             Divider()
 
@@ -833,6 +928,362 @@ struct AppCommands: Commands {
                 let text = CrashReporter.shared.recentBreadcrumbs().joined(separator: "\n")
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
+    }
+}
+
+// MARK: - Auto-Hiding macOS Window Traffic Lights Controller
+
+private final class TrafficLightsHoverSensorView: NSView {
+    static let sensorIdentifier = NSUserInterfaceItemIdentifier("MicroCodeTrafficLightsSensor")
+    private var sensorTrackingArea: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = sensorTrackingArea {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        sensorTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard let win = window else { return }
+        Task { @MainActor in
+            WindowTrafficLightsController.shared.handleSensorActivity(in: win)
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard let win = window else { return }
+        Task { @MainActor in
+            WindowTrafficLightsController.shared.handleSensorActivity(in: win)
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard let win = window else { return }
+        Task { @MainActor in
+            WindowTrafficLightsController.shared.handleSensorActivity(in: win)
+        }
+    }
+}
+
+@MainActor
+final class WindowTrafficLightsController: ObservableObject {
+    static let shared = WindowTrafficLightsController()
+
+    private static let storageKey = "autoHideWindowTrafficLights"
+
+    @Published var autoHideEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(autoHideEnabled, forKey: Self.storageKey)
+            dwellRevealTask?.cancel()
+            dwellRevealTask = nil
+            if !autoHideEnabled {
+                stopKeepAliveTimer()
+                isHoverRevealed = false
+            }
+            syncAllWindows(animated: true)
+        }
+    }
+
+    @Published private(set) var isHoverRevealed: Bool = false
+    @Published private(set) var isFullScreen: Bool = false
+
+    private var trackedWindowNumbers = Set<Int>()
+    private var localMouseMonitor: Any?
+    private var keepAliveWatchTimer: Timer?
+    private var dwellRevealTask: Task<Void, Never>?
+    private var installedWindowObservers = false
+
+    var showsInlineTrafficLights: Bool {
+        !isFullScreen && (!autoHideEnabled || isHoverRevealed)
+    }
+
+    /// Dynamic leading inset ONLY for non-interactive static titles (e.g. `"MicroCode"` label when sidebar is open).
+    func leadingInset(whenVisible: CGFloat, whenHidden: CGFloat) -> CGFloat {
+        showsInlineTrafficLights ? whenVisible : whenHidden
+    }
+
+    /// Stationary leading inset for toolbars/headers that start with interactive buttons (`[◧]`, `[+]`, `📁 🔀 🔍 ⚠️`).
+    /// Never shifts when hovering near the top-left corner (`0pt` button movement); only collapses in macOS Full Screen.
+    func interactiveLeadingInset(windowed: CGFloat, fullScreen: CGFloat = 12) -> CGFloat {
+        isFullScreen ? fullScreen : windowed
+    }
+
+    private func trafficLightsMaxX(in window: NSWindow) -> CGFloat {
+        if let zoom = window.standardWindowButton(.zoomButton), zoom.frame.maxX > 0 {
+            return min(max(zoom.frame.maxX, 58), 68)
+        }
+        return 64
+    }
+
+    private init() {
+        if let stored = UserDefaults.standard.object(forKey: Self.storageKey) as? Bool {
+            self.autoHideEnabled = stored
+        } else {
+            self.autoHideEnabled = true
+        }
+    }
+
+    func register(window: NSWindow) {
+        guard MicroCodeApp.isPrimaryWorkspaceWindow(window) else { return }
+        trackedWindowNumbers.insert(window.windowNumber)
+        window.acceptsMouseMovedEvents = true
+        installHoverSensorIfNeeded(on: window)
+        isFullScreen = window.styleMask.contains(.fullScreen)
+        installMonitorsIfNeeded()
+        applyVisibility(to: window, animated: false)
+    }
+
+    func handleSensorActivity(in window: NSWindow) {
+        guard autoHideEnabled, !isFullScreen, trackedWindowNumbers.contains(window.windowNumber) else { return }
+        window.acceptsMouseMovedEvents = true
+        evaluateCursor(in: window)
+    }
+
+    private func installHoverSensorIfNeeded(on window: NSWindow) {
+        guard let contentView = window.contentView else { return }
+        if contentView.subviews.contains(where: { $0.identifier == TrafficLightsHoverSensorView.sensorIdentifier }) {
+            return
+        }
+        let sensor = TrafficLightsHoverSensorView(frame: .zero)
+        sensor.identifier = TrafficLightsHoverSensorView.sensorIdentifier
+        sensor.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(sensor)
+        NSLayoutConstraint.activate([
+            sensor.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            sensor.topAnchor.constraint(equalTo: contentView.topAnchor),
+            sensor.widthAnchor.constraint(equalToConstant: 82),
+            sensor.heightAnchor.constraint(equalToConstant: 36)
+        ])
+    }
+
+    private func installMonitorsIfNeeded() {
+        if !installedWindowObservers {
+            installedWindowObservers = true
+            let nc = NotificationCenter.default
+            nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: nil, queue: .main) { [weak self] notif in
+                guard let win = notif.object as? NSWindow else { return }
+                Task { @MainActor in
+                    guard let self, self.trackedWindowNumbers.contains(win.windowNumber) else { return }
+                    self.isFullScreen = true
+                    self.isHoverRevealed = false
+                    self.stopKeepAliveTimer()
+                    self.applyVisibility(to: win, animated: false)
+                }
+            }
+            nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: nil, queue: .main) { [weak self] notif in
+                guard let win = notif.object as? NSWindow else { return }
+                Task { @MainActor in
+                    guard let self, self.trackedWindowNumbers.contains(win.windowNumber) else { return }
+                    self.isFullScreen = win.styleMask.contains(.fullScreen)
+                    self.applyVisibility(to: win, animated: false)
+                }
+            }
+            nc.addObserver(forName: NSWindow.didResizeNotification, object: nil, queue: .main) { [weak self] notif in
+                guard let win = notif.object as? NSWindow else { return }
+                Task { @MainActor in
+                    guard let self, self.trackedWindowNumbers.contains(win.windowNumber) else { return }
+                    self.applyVisibility(to: win, animated: false)
+                }
+            }
+            nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notif in
+                guard let win = notif.object as? NSWindow else { return }
+                Task { @MainActor in
+                    guard let self, self.trackedWindowNumbers.contains(win.windowNumber) else { return }
+                    self.isFullScreen = win.styleMask.contains(.fullScreen)
+                    self.applyVisibility(to: win, animated: false)
+                }
+            }
+        }
+
+        if localMouseMonitor == nil {
+            localMouseMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.mouseMoved, .mouseEntered, .leftMouseDragged, .leftMouseDown, .mouseExited]
+            ) { [weak self] event in
+                Task { @MainActor in
+                    self?.handleMouseEvent(event)
+                }
+                return event
+            }
+        }
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        guard autoHideEnabled, !isFullScreen else { return }
+
+        guard let targetWindow = event.window ?? NSApplication.shared.keyWindow,
+              !targetWindow.isSheet,
+              targetWindow.sheetParent == nil,
+              targetWindow.attachedSheet == nil,
+              trackedWindowNumbers.contains(targetWindow.windowNumber),
+              !targetWindow.styleMask.contains(.fullScreen) else {
+            dwellRevealTask?.cancel()
+            dwellRevealTask = nil
+            return
+        }
+
+        if event.type == .leftMouseDown {
+            let ptInWin = targetWindow.convertPoint(fromScreen: NSEvent.mouseLocation)
+            let leftX = ptInWin.x
+            let topY = targetWindow.frame.height - ptInWin.y
+            let maxBtnX = trafficLightsMaxX(in: targetWindow)
+            if leftX > maxBtnX + 4 || topY > 32 {
+                // Clicking any app toolbar button (e.g. [◧] at x >= 78 or 📁 at x >= 76) never reveals traffic lights
+                dwellRevealTask?.cancel()
+                dwellRevealTask = nil
+                if isHoverRevealed {
+                    hideNow()
+                }
+                return
+            } else if !isHoverRevealed {
+                revealNow()
+                return
+            }
+        }
+
+        evaluateCursor(in: targetWindow)
+    }
+
+    private func evaluateCursor(in window: NSWindow) {
+        let ptInWin = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let leftX = ptInWin.x
+        let topY = window.frame.height - ptInWin.y
+        let maxBtnX = trafficLightsMaxX(in: window)
+        // Strictly stay left of stationary interactive toolbar buttons ([◧] starts at x=78, 📁 starts at x=76)
+        let triggerMaxX = min(maxBtnX + 4, 68)
+        let keepAliveMaxX = min(maxBtnX + 7, 71)
+
+        if isHoverRevealed {
+            let insideKeepAlive = (leftX >= -6 && leftX <= keepAliveMaxX) && (topY >= -6 && topY <= 34)
+            if !insideKeepAlive {
+                hideNow()
+            }
+            return
+        }
+
+        let inInstantCornerZone = (leftX >= -2 && leftX <= 10) && (topY >= -2 && topY <= 28)
+        if inInstantCornerZone {
+            revealNow()
+            return
+        }
+
+        let inTrafficLightsBox = (leftX >= 0 && leftX <= triggerMaxX) && (topY >= 0 && topY <= 30)
+        if inTrafficLightsBox {
+            let isAgentStaticHeader = (AppState.shared?.editorMode == .aiAgent) && (AppState.shared?.sidebarVisible == true)
+            let dwellNs: UInt64 = isAgentStaticHeader ? 50_000_000 : 90_000_000
+            if dwellRevealTask == nil {
+                dwellRevealTask = Task { @MainActor [weak self, weak window] in
+                    try? await Task.sleep(nanoseconds: dwellNs)
+                    guard !Task.isCancelled, let self, self.autoHideEnabled, !self.isFullScreen else { return }
+                    self.dwellRevealTask = nil
+                    if let checkWin = window ?? NSApplication.shared.keyWindow {
+                        let checkPt = checkWin.convertPoint(fromScreen: NSEvent.mouseLocation)
+                        let cx = checkPt.x
+                        let cy = checkWin.frame.height - checkPt.y
+                        let checkMaxX = min(self.trafficLightsMaxX(in: checkWin) + 4, 68)
+                        if cx >= -2 && cx <= checkMaxX && cy >= -2 && cy <= 32 {
+                            self.revealNow()
+                        }
+                    }
+                }
+            }
+        } else {
+            dwellRevealTask?.cancel()
+            dwellRevealTask = nil
+        }
+    }
+
+    private func revealNow() {
+        dwellRevealTask?.cancel()
+        dwellRevealTask = nil
+        guard !isHoverRevealed else { return }
+        withAnimation(.easeOut(duration: 0.15)) {
+            isHoverRevealed = true
+        }
+        syncAllWindows(animated: true)
+        startKeepAliveTimer()
+    }
+
+    private func hideNow() {
+        dwellRevealTask?.cancel()
+        dwellRevealTask = nil
+        stopKeepAliveTimer()
+        guard isHoverRevealed else { return }
+        withAnimation(.easeOut(duration: 0.15)) {
+            isHoverRevealed = false
+        }
+        syncAllWindows(animated: true)
+    }
+
+    private func startKeepAliveTimer() {
+        keepAliveWatchTimer?.invalidate()
+        keepAliveWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.isHoverRevealed, self.autoHideEnabled, !self.isFullScreen else {
+                    self.stopKeepAliveTimer()
+                    return
+                }
+                if let win = NSApplication.shared.keyWindow ?? NSApplication.shared.windows.first(where: { self.trackedWindowNumbers.contains($0.windowNumber) }) {
+                    self.evaluateCursor(in: win)
+                } else {
+                    self.hideNow()
+                }
+            }
+        }
+    }
+
+    private func stopKeepAliveTimer() {
+        keepAliveWatchTimer?.invalidate()
+        keepAliveWatchTimer = nil
+    }
+
+    func syncAllWindows(animated: Bool = false) {
+        for win in NSApplication.shared.windows where trackedWindowNumbers.contains(win.windowNumber) {
+            applyVisibility(to: win, animated: animated)
+        }
+    }
+
+    private func applyVisibility(to window: NSWindow, animated: Bool) {
+        let inFS = window.styleMask.contains(.fullScreen)
+        let shouldShow = inFS || !autoHideEnabled || isHoverRevealed
+        let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+
+        for kind in buttonTypes {
+            guard let btn = window.standardWindowButton(kind) else { continue }
+            if shouldShow {
+                let wasHidden = btn.isHidden
+                if wasHidden {
+                    btn.alphaValue = 0
+                    btn.isHidden = false
+                }
+                if animated && wasHidden {
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.14
+                        btn.animator().alphaValue = 1
+                    }
+                } else {
+                    btn.alphaValue = 1
+                }
+                btn.superview?.updateTrackingAreas()
+                btn.superview?.needsDisplay = true
+            } else {
+                btn.isHidden = true
+                btn.alphaValue = 0
             }
         }
     }

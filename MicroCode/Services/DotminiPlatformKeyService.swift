@@ -73,8 +73,7 @@ final class DotminiPlatformKeyService: ObservableObject {
         isValidating = true
         defer { isValidating = false }
 
-        let base = StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let url = URL(string: "\(base)/models") else {
+        guard let url = URL(string: "https://microcode.dotmini.net/api/subscription/status") else {
             validationMessage = "The Platform endpoint is invalid."
             return false
         }
@@ -83,13 +82,21 @@ final class DotminiPlatformKeyService: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
             if (200..<300).contains(http.statusCode) {
-                // The production catalog is public, including when an invalid
-                // Bearer token is supplied. It cannot attest to key validity.
-                validationMessage = "Model catalog reachable. Key permissions are not verified by this public endpoint."
-                return false
+                let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+                let plan = ((json["plan"] as? String) ?? "active").uppercased()
+                let creditTHB = (json["aiCreditAvailableTHB"] as? Double)
+                    ?? (json["aiCreditAvailableTHB"] as? NSNumber)?.doubleValue
+                    ?? (json["aiCreditRemainingTHB"] as? Double)
+                    ?? (json["aiCreditRemainingTHB"] as? NSNumber)?.doubleValue
+                if let creditTHB {
+                    validationMessage = String(format: "Verified with Dotmini Cloud (Plan: %@, ฿%.2f Cloud AI Credit available).", plan, creditTHB)
+                } else {
+                    validationMessage = "Verified with Dotmini Cloud (Plan: \(plan))."
+                }
+                return true
             }
             validationMessage = http.statusCode == 401 || http.statusCode == 403
                 ? "The Platform rejected this key. Create or rotate it in Dotmini Platform."

@@ -55,9 +55,37 @@ class LSPManager: ObservableObject {
     
     // MARK: - API
     
-    /// Set the workspace root
+    /// Set the workspace root and purge stale language server state from any previous workspace
     func setWorkspace(_ url: URL) {
-        self.rootUri = url.standardizedFileURL.absoluteString
+        let newRoot = url.standardizedFileURL.absoluteString
+        if let oldRoot = self.rootUri, oldRoot != newRoot {
+            for (_, client) in activeClients {
+                client.stop()
+            }
+            activeClients.removeAll()
+            startingClients.values.forEach { $0.cancel() }
+            startingClients.removeAll()
+            documentContents.removeAll()
+            documentVersions.removeAll()
+            documentContentHashes.removeAll()
+            openedDocumentURIs.removeAll()
+            fileDiagnostics.removeAll()
+        }
+        self.rootUri = newRoot
+    }
+
+    /// Bounded local symbol cache: avoids storing a third full-file duplicate of multi-hundred-KB files
+    private func cacheDocumentContentBounded(uri: String, content: String) {
+        if content.utf8.count > 128 * 1024 {
+            documentContents.removeValue(forKey: uri)
+            return
+        }
+        if documentContents.count >= 6 && documentContents[uri] == nil {
+            if let victim = documentContents.keys.first {
+                documentContents.removeValue(forKey: victim)
+            }
+        }
+        documentContents[uri] = content
     }
     
     /// Automatically find package root (Package.swift, Cargo.toml, tsconfig.json, pyproject.toml, .git)
@@ -133,7 +161,7 @@ class LSPManager: ObservableObject {
     
     /// Notify that a document was opened
     func documentOpened(uri: String, language: String, content: String) async {
-        documentContents[uri] = content
+        cacheDocumentContentBounded(uri: uri, content: content)
         guard let serverType = LanguageServer.serverFor(language: language) else { return }
         guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else { return }
         
@@ -163,7 +191,7 @@ class LSPManager: ObservableObject {
     
     /// Notify that a document was changed (automatically calls didOpen first if never opened)
     func documentChanged(uri: String, language: String, content: String) async {
-        documentContents[uri] = content
+        cacheDocumentContentBounded(uri: uri, content: content)
         guard let serverType = LanguageServer.serverFor(language: language) else { return }
         guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else { return }
         
@@ -345,6 +373,14 @@ class LSPManager: ObservableObject {
     }
     
     /// Get hover info at a position
+    /// Compiler-accurate semantic tokens for VS Code-style highlighting (nil when the server lacks support).
+    func getSemanticTokens(uri: String, language: String) async -> [LSPSemanticToken]? {
+        guard let client = try? await clientFor(language: language, fileURI: uri),
+              client.serverCapabilities?.semanticTokensProvider != nil else { return nil }
+        guard let tokens = try? await client.semanticTokens(uri: uri), !tokens.isEmpty else { return nil }
+        return tokens
+    }
+    
     func getHover(uri: String, language: String, line: Int, character: Int) async -> String? {
         if let client = try? await clientFor(language: language, fileURI: uri),
            let result = try? await client.hover(uri: uri, line: line, character: character),

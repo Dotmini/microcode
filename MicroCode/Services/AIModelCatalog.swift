@@ -41,6 +41,22 @@ struct AIModelDefinition: Identifiable, Codable, Hashable {
     var fullDisplayName: String {
         AIModelCatalog.formatFullDisplayName(provider: provider, modelId: id, modelName: name)
     }
+
+    /// Per-1M token rate in THB on Dotmini Cloud (Upstream API USD × 36.5 THB/USD × 1.20 [+20% margin]).
+    var cloudTHBRateSummary: String {
+        let base = (inputPricePerMillion > 0 || outputPricePerMillion > 0)
+            ? (input: inputPricePerMillion, output: outputPricePerMillion)
+            : AIModelCatalog.estimatedUpstreamUSDPer1M(for: id)
+        let multiplier = 36.5 * 1.20
+        let inTHB = base.input * multiplier
+        let outTHB = base.output * multiplier
+        func fmt(_ val: Double) -> String {
+            if val >= 100 { return String(format: "฿%.0f", val) }
+            if val >= 10 { return String(format: "฿%.1f", val) }
+            return String(format: "฿%.2f", val)
+        }
+        return "\(fmt(inTHB))/\(fmt(outTHB)) · 1M"
+    }
 }
 
 struct AIProviderDefinition: Identifiable, Codable, Hashable {
@@ -59,9 +75,42 @@ final class AIModelCatalog: ObservableObject {
     static let shared = AIModelCatalog()
 
     @Published private(set) var providers: [AIProviderDefinition]
+    @Published private(set) var cloudGatewayModels: [AIModelDefinition] = []
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var isRefreshing = false
     @Published private(set) var source = "Built-in catalog"
+
+    /// Complete model list available to paid Dotmini Cloud subscribers:
+    /// Dotmini's Sovereign Omni O1X models plus live frontier models served by `microcode.dotmini.net/v1/models`
+    /// (keeping each model's true upstream provider & brand icon).
+    var dotminiCloudModels: [AIModelDefinition] {
+        var result: [AIModelDefinition] = []
+        var seen = Set<String>()
+        let sovereignModels = provider("omni")?.models ?? [
+            AIModelDefinition(id: "omni-o1x-pro", name: "Omni O1X Pro (3B MoE)", provider: "omni", badge: "SOVEREIGN"),
+            AIModelDefinition(id: "omni-o1x-lite", name: "Omni O1X Lite (0.8B)", provider: "omni", badge: "FAST")
+        ]
+        for m in sovereignModels where seen.insert(m.id).inserted {
+            result.append(m)
+        }
+        for m in cloudGatewayModels where seen.insert(m.id).inserted {
+            result.append(m)
+        }
+        if cloudGatewayModels.isEmpty {
+            let defaultCloudFrontier: [AIModelDefinition] = [
+                AIModelDefinition(id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", provider: "gemini", badge: "CLOUD"),
+                AIModelDefinition(id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "gemini", badge: "CLOUD"),
+                AIModelDefinition(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "gemini", badge: "FAST"),
+                AIModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", badge: "CLOUD"),
+                AIModelDefinition(id: "deepseek-reasoner", name: "DeepSeek Reasoner (R1)", provider: "deepseek", badge: "REASONING"),
+                AIModelDefinition(id: "deepseek-chat", name: "DeepSeek Chat", provider: "deepseek", badge: "FAST")
+            ]
+            for m in defaultCloudFrontier where seen.insert(m.id).inserted {
+                result.append(m)
+            }
+        }
+        return result
+    }
 
     private let cacheKey = "microcode.aiModelCatalog.v18"
     private let refreshDateKey = "microcode.aiModelCatalogRefreshDate.v18"
@@ -118,12 +167,16 @@ final class AIModelCatalog: ObservableObject {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         var effectiveProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
         
-        // Never let "omni" claim third-party models (Gemini, OpenAI, Claude, DeepSeek, GLM, etc.)
+        // Never let "omni" claim third-party models in non-cloud modes; in Dotmini Cloud mode, preserve cloud selection
         if effectiveProvider == "omni" {
             let detected = StreamableAIProvider.detect(from: trimmed).rawValue
-            if detected != "omni" {
+            if keyMode == "cloud" {
+                if detected != "omni" && !trimmed.isEmpty {
+                    effectiveProvider = detected
+                }
+            } else if detected != "omni" {
                 effectiveProvider = detected
-            } else if keyMode != "cloud" {
+            } else {
                 if keyMode == "subscription",
                    let subStr = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"),
                    let subType = SubscriptionProviderType(rawValue: subStr) {
@@ -315,40 +368,80 @@ final class AIModelCatalog: ObservableObject {
             let entries = try Self.decodeRemoteModels(data)
             guard !entries.isEmpty else { return }
             providers = Self.mergeLive(remoteEntries: entries, fallback: providers)
+            var gatewayList: [AIModelDefinition] = []
+            var seenGateway = Set<String>()
+            for item in entries {
+                let rawID = item.id.replacingOccurrences(of: "models/", with: "")
+                guard Self.isChatModel(rawID), !rawID.lowercased().hasPrefix("omni"), seenGateway.insert(rawID).inserted else { continue }
+                let provID = Self.inferProvider(rawID, ownedBy: item.ownedBy)
+                let fallbackUSD = Self.estimatedUpstreamUSDPer1M(for: rawID)
+                gatewayList.append(AIModelDefinition(
+                    id: rawID,
+                    name: Self.formatModelName(rawID),
+                    provider: provID,
+                    badge: "CLOUD",
+                    inputPricePerMillion: item.inputUSDPer1M ?? fallbackUSD.input,
+                    outputPricePerMillion: item.outputUSDPer1M ?? fallbackUSD.output
+                ))
+            }
+            gatewayList.sort { a, b in
+                let sa = Self.universalModelPriorityScore(a.id)
+                let sb = Self.universalModelPriorityScore(b.id)
+                if sa != sb { return sa > sb }
+                return a.id.localizedStandardCompare(b.id) == .orderedDescending
+            }
+            cloudGatewayModels = gatewayList
             source = "Dotmini Cloud (\(entries.count) models live)"
         } catch {}
     }
 
-    /// Fetches the latest live models directly from OpenAI using the user's active API key
+    /// Fetches the latest live models directly from OpenAI (or custom OpenAI / Cloudflare Tunnel Base URL) using the user's active API key
     private func fetchLiveOpenAIModels() async {
         let key = resolveKey("openai")
-        guard !key.isEmpty, let url = URL(string: "https://api.openai.com/v1/models") else { return }
+        let baseURL = StreamableAIProvider.openai.directBaseURL
+        let hasCustomBase = StreamableAIProvider.hasCustomByokBaseURL(for: "openai")
+        guard (!key.isEmpty || hasCustomBase), let url = URL(string: "\(baseURL)/models") else { return }
         var req = URLRequest(url: url, timeoutInterval: 10)
-        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        if !key.isEmpty {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = json["data"] as? [[String: Any]] else { return }
+        var list: [[String: Any]] = []
+        if let (data, resp) = try? await URLSession.shared.data(for: req),
+           let http = resp as? HTTPURLResponse, http.statusCode == 200,
+           let rawJSON = try? JSONSerialization.jsonObject(with: data) {
+            if let arr = rawJSON as? [[String: Any]] {
+                list = arr
+            } else if let json = rawJSON as? [String: Any],
+                      let nested = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]]) {
+                list = nested
+            }
+        }
+        if list.isEmpty && hasCustomBase {
+            list = await Self.probeOllamaTagsFallback(baseURL: baseURL, apiKey: key)
+        }
+        guard !list.isEmpty else { return }
         
         var liveModelsWithDate: [(model: AIModelDefinition, score: Int, created: Int)] = []
         for item in list {
-            guard let mid = item["id"] as? String else { continue }
+            guard let mid = (item["id"] as? String) ?? (item["name"] as? String), !mid.isEmpty else { continue }
             let lower = mid.lowercased()
             // Filter out non-chat/utility/image/realtime endpoints that cannot be called on /v1/chat/completions
-            if lower.contains("whisper") || lower.contains("tts") || lower.contains("dall-e") ||
+            if !hasCustomBase && (lower.contains("whisper") || lower.contains("tts") || lower.contains("dall-e") ||
                lower.contains("embedding") || lower.contains("moderation") || lower.contains("babbage") ||
                lower.contains("davinci") || lower.hasPrefix("ft:") || lower.contains("transcribe") ||
                lower.contains("audio") || lower.contains("realtime") || lower.contains("search") ||
                lower.contains("image") || lower.contains("gpt-live") || lower.contains("sora") ||
-               lower.contains("computer-use") {
+               lower.contains("computer-use")) {
                 continue
             }
             
             let created = item["created"] as? Int ?? 0
             let badge: String
-            if lower.contains("reason") || lower.range(of: #"^o[0-9]"#, options: .regularExpression) != nil {
+            if hasCustomBase {
+                badge = "CUSTOM URL"
+            } else if lower.contains("reason") || lower.range(of: #"^o[0-9]"#, options: .regularExpression) != nil {
                 badge = "REASONING"
             } else if lower.contains("codex") {
                 badge = "AGENT"
@@ -363,38 +456,66 @@ final class AIModelCatalog: ObservableObject {
             }
             
             liveModelsWithDate.append((
-                AIModelDefinition(id: mid, name: Self.formatModelName(mid), provider: "openai", badge: badge),
+                AIModelDefinition(id: mid, name: hasCustomBase ? mid : Self.formatModelName(mid), provider: "openai", badge: badge),
                 Self.openAIModelSortScore(mid),
                 created
             ))
         }
         
         // Sort newest generation models first (canonical aliases before dated snapshots), then by `created` timestamp
-        liveModelsWithDate.sort { a, b in
-            if a.score != b.score { return a.score > b.score }
-            if a.created != b.created { return a.created > b.created }
-            return a.model.id.localizedStandardCompare(b.model.id) == .orderedDescending
-        }
-        var liveModels = liveModelsWithDate.map(\.model)
-        
-        // Preserve any Codex models discovered locally and built-in flagship fallback models at the top
-        if let codexModels = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "codex" })?.models {
-            for cm in codexModels.reversed() {
-                if !liveModels.contains(where: { $0.id == cm.id }) {
-                    liveModels.insert(AIModelDefinition(id: cm.id, name: cm.name, provider: "openai", badge: cm.badge), at: 0)
-                }
+        if !hasCustomBase {
+            liveModelsWithDate.sort { a, b in
+                if a.score != b.score { return a.score > b.score }
+                if a.created != b.created { return a.created > b.created }
+                return a.model.id.localizedStandardCompare(b.model.id) == .orderedDescending
             }
         }
-        if let fallbackModels = Self.fallbackProviders.first(where: { $0.id == "openai" })?.models {
-            for fm in fallbackModels.reversed() {
-                if !liveModels.contains(where: { $0.id == fm.id }) {
-                    liveModels.insert(fm, at: 0)
+        var liveModels = liveModelsWithDate.map(\.model)
+        let isByokMode = (UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct") == "direct"
+        
+        if !hasCustomBase {
+            // In BYOK mode, keep live API models at the top and append fallback models after;
+            // only prepend Codex CLI models when in Subscription mode.
+            if !isByokMode, let codexModels = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "codex" })?.models {
+                for cm in codexModels.reversed() {
+                    if !liveModels.contains(where: { $0.id == cm.id }) {
+                        liveModels.insert(AIModelDefinition(id: cm.id, name: cm.name, provider: "openai", badge: cm.badge), at: 0)
+                    }
+                }
+            }
+            if let fallbackModels = Self.fallbackProviders.first(where: { $0.id == "openai" })?.models {
+                for fm in fallbackModels {
+                    if !liveModels.contains(where: { $0.id == fm.id }) {
+                        liveModels.append(fm)
+                    }
                 }
             }
         }
         
         if !liveModels.isEmpty, let idx = providers.firstIndex(where: { $0.id == "openai" }) {
             providers[idx].models = liveModels
+        }
+    }
+
+    private static func probeOllamaTagsFallback(baseURL: String, apiKey: String) async -> [[String: Any]] {
+        var origin = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if origin.lowercased().hasSuffix("/v1") {
+            origin = String(origin.dropLast(3))
+        }
+        guard let url = URL(string: "\(origin)/api/tags") else { return [] }
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        if !apiKey.isEmpty {
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["models"] as? [[String: Any]] else {
+            return []
+        }
+        return models.compactMap { m in
+            guard let name = (m["name"] as? String) ?? (m["model"] as? String) else { return nil }
+            return ["id": name, "name": name]
         }
     }
 
@@ -690,71 +811,90 @@ final class AIModelCatalog: ObservableObject {
         return 2000
     }
 
-    /// Fetches live Anthropic Claude models using user's API key (plus any discovered AGY Claude models)
+    /// Fetches live Anthropic Claude models using user's API key (or custom Anthropic / Cloudflare Tunnel Base URL)
     private func fetchLiveAnthropicModels() async {
         let key = resolveKey("anthropic")
+        let baseURL = StreamableAIProvider.anthropic.directBaseURL
+        let hasCustomBase = StreamableAIProvider.hasCustomByokBaseURL(for: "anthropic")
         var liveModelsWithDate: [(model: AIModelDefinition, created: String)] = []
         var seenIds = Set<String>()
         
-        if !key.isEmpty, let url = URL(string: "https://api.anthropic.com/v1/models?limit=100") {
+        let modelsURLStr = hasCustomBase ? "\(baseURL)/models" : "\(baseURL)/models?limit=100"
+        if (!key.isEmpty || hasCustomBase), let url = URL(string: modelsURLStr) {
             var req = URLRequest(url: url, timeoutInterval: 10)
-            req.setValue(key, forHTTPHeaderField: "x-api-key")
+            if !key.isEmpty {
+                req.setValue(key, forHTTPHeaderField: "x-api-key")
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             
+            var list: [[String: Any]] = []
             if let (data, resp) = try? await URLSession.shared.data(for: req),
                let http = resp as? HTTPURLResponse, http.statusCode == 200,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let list = json["data"] as? [[String: Any]] {
-                for item in list {
-                    guard let mid = item["id"] as? String, !seenIds.contains(mid) else { continue }
-                    seenIds.insert(mid)
-                    let lower = mid.lowercased()
-                    let displayName = (item["display_name"] as? String) ?? Self.formatModelName(mid)
-                    let createdAt = (item["created_at"] as? String) ?? ""
-                    
-                    let badge: String
-                    if lower.contains("opus") {
-                        badge = "REASONING"
-                    } else if lower.contains("sonnet") {
-                        badge = "AGENT"
-                    } else if lower.contains("haiku") {
-                        badge = "FAST"
-                    } else {
-                        badge = "CLAUDE"
-                    }
-                    
-                    liveModelsWithDate.append((
-                        AIModelDefinition(id: mid, name: displayName, provider: "anthropic", badge: badge),
-                        createdAt
-                    ))
+               let rawJSON = try? JSONSerialization.jsonObject(with: data) {
+                if let arr = rawJSON as? [[String: Any]] {
+                    list = arr
+                } else if let json = rawJSON as? [String: Any],
+                          let nested = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]]) {
+                    list = nested
                 }
+            }
+            if list.isEmpty && hasCustomBase {
+                list = await Self.probeOllamaTagsFallback(baseURL: baseURL, apiKey: key)
+            }
+            for item in list {
+                guard let mid = (item["id"] as? String) ?? (item["name"] as? String), !seenIds.contains(mid) else { continue }
+                seenIds.insert(mid)
+                let lower = mid.lowercased()
+                let displayName = (item["display_name"] as? String) ?? (hasCustomBase ? mid : Self.formatModelName(mid))
+                let createdAt = (item["created_at"] as? String) ?? ""
+                
+                let badge: String
+                if hasCustomBase {
+                    badge = "CUSTOM URL"
+                } else if lower.contains("opus") {
+                    badge = "REASONING"
+                } else if lower.contains("sonnet") {
+                    badge = "AGENT"
+                } else if lower.contains("haiku") {
+                    badge = "FAST"
+                } else {
+                    badge = "CLAUDE"
+                }
+                
+                liveModelsWithDate.append((
+                    AIModelDefinition(id: mid, name: displayName, provider: "anthropic", badge: badge),
+                    createdAt
+                ))
             }
         }
         
         var liveModels = liveModelsWithDate.map(\.model)
         
-        // Merge any Claude models discovered from Antigravity CLI and built-in flagship fallback models
-        if let agyModels = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.models {
-            for m in agyModels where m.id.lowercased().contains("claude") {
-                if !liveModels.contains(where: { $0.id == m.id }) {
-                    liveModels.append(AIModelDefinition(id: m.id, name: m.name, provider: "anthropic", badge: m.badge))
+        if !hasCustomBase {
+            // Merge any Claude models discovered from Antigravity CLI and built-in flagship fallback models
+            if let agyModels = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.models {
+                for m in agyModels where m.id.lowercased().contains("claude") {
+                    if !liveModels.contains(where: { $0.id == m.id }) {
+                        liveModels.append(AIModelDefinition(id: m.id, name: m.name, provider: "anthropic", badge: m.badge))
+                    }
                 }
             }
-        }
-        if let fallbackModels = Self.fallbackProviders.first(where: { $0.id == "anthropic" })?.models {
-            for fm in fallbackModels {
-                if !liveModels.contains(where: { $0.id == fm.id }) {
-                    liveModels.append(fm)
+            if let fallbackModels = Self.fallbackProviders.first(where: { $0.id == "anthropic" })?.models {
+                for fm in fallbackModels {
+                    if !liveModels.contains(where: { $0.id == fm.id }) {
+                        liveModels.append(fm)
+                    }
                 }
             }
-        }
-        
-        liveModels.sort { a, b in
-            let sa = Self.claudeModelSortScore(a.id)
-            let sb = Self.claudeModelSortScore(b.id)
-            if sa != sb { return sa > sb }
-            return a.id.localizedStandardCompare(b.id) == .orderedDescending
+            
+            liveModels.sort { a, b in
+                let sa = Self.claudeModelSortScore(a.id)
+                let sb = Self.claudeModelSortScore(b.id)
+                if sa != sb { return sa > sb }
+                return a.id.localizedStandardCompare(b.id) == .orderedDescending
+            }
         }
         
         if !liveModels.isEmpty, let idx = providers.firstIndex(where: { $0.id == "anthropic" }) {
@@ -1188,7 +1328,8 @@ final class AIModelCatalog: ObservableObject {
 
     private func fetchLiveOpenAICompatibleModels(providerId: String, endpoint: String) async {
         let key = resolveKey(providerId)
-        let allowNoKey = (providerId == "9router" || providerId == "typhoon")
+        let hasCustomBase = (providerId == "custom") || StreamableAIProvider.hasCustomByokBaseURL(for: providerId)
+        let allowNoKey = (providerId == "9router" || providerId == "typhoon" || hasCustomBase)
         guard (!key.isEmpty || allowNoKey), let url = URL(string: endpoint) else { return }
         var req = URLRequest(url: url, timeoutInterval: providerId == "9router" ? 3.5 : 10)
         if !key.isEmpty {
@@ -1200,43 +1341,54 @@ final class AIModelCatalog: ObservableObject {
             req.setValue("MicroCode IDE", forHTTPHeaderField: "X-Title")
         }
 
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let rawJSON = try? JSONSerialization.jsonObject(with: data) else { return }
-
-        let list: [[String: Any]]
-        if let topArray = rawJSON as? [[String: Any]] {
-            list = topArray
-        } else if let json = rawJSON as? [String: Any],
-                  let nested = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]]) {
-            list = nested
-        } else {
-            return
+        var list: [[String: Any]] = []
+        if let (data, resp) = try? await URLSession.shared.data(for: req),
+           let http = resp as? HTTPURLResponse, http.statusCode == 200,
+           let rawJSON = try? JSONSerialization.jsonObject(with: data) {
+            if let topArray = rawJSON as? [[String: Any]] {
+                list = topArray
+            } else if let json = rawJSON as? [String: Any],
+                      let nested = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]]) {
+                list = nested
+            }
         }
+        if list.isEmpty && hasCustomBase {
+            let base = endpoint.hasSuffix("/models") ? String(endpoint.dropLast("/models".count)) : endpoint
+            list = await Self.probeOllamaTagsFallback(baseURL: base, apiKey: key)
+        }
+        guard !list.isEmpty else { return }
 
+        if providers.firstIndex(where: { $0.id == providerId }) == nil,
+           let fb = Self.fallbackProviders.first(where: { $0.id == providerId }) {
+            providers.append(fb)
+        }
         guard let idx = providers.firstIndex(where: { $0.id == providerId }) else { return }
         var liveModels: [AIModelDefinition] = []
         var seen = Set<String>()
 
-        for item in list.prefix(80) {
-            guard let mid = item["id"] as? String, !mid.isEmpty else { continue }
+        for item in list.prefix(120) {
+            guard let mid = (item["id"] as? String) ?? (item["name"] as? String), !mid.isEmpty else { continue }
             let lower = mid.lowercased()
-            if Self.legacyStaleModelIDs.contains(lower) || !Self.isChatModel(mid) {
+            if !hasCustomBase && (Self.legacyStaleModelIDs.contains(lower) || !Self.isChatModel(mid)) {
                 continue
             }
-            if lower.contains("embed") || lower.contains("whisper") || lower.contains("tts") || lower.contains("moderation") || lower.contains("rerank") || lower.contains("ocr") || lower.contains("asr") {
+            if !hasCustomBase && (lower.contains("embed") || lower.contains("whisper") || lower.contains("tts") || lower.contains("moderation") || lower.contains("rerank") || lower.contains("ocr") || lower.contains("asr")) {
                 continue
             }
             guard seen.insert(mid).inserted else { continue }
             let rawName = (item["name"] as? String) ?? (item["display_name"] as? String)
             let displayName: String
-            if let rawName, !rawName.isEmpty, rawName.lowercased() != lower {
+            if hasCustomBase {
+                displayName = mid
+            } else if let rawName, !rawName.isEmpty, rawName.lowercased() != lower {
                 displayName = rawName
             } else {
                 displayName = Self.formatModelName(mid)
             }
             let badge: String
-            if providerId == "typhoon" {
+            if providerId == "custom" || hasCustomBase {
+                badge = "TUNNEL / URL"
+            } else if providerId == "typhoon" {
                 badge = "THAI"
             } else if providerId == "tokenme" && lower.contains("nvfp4") {
                 badge = "NVFP4"
@@ -1252,10 +1404,12 @@ final class AIModelCatalog: ObservableObject {
             liveModels.append(AIModelDefinition(id: mid, name: displayName, provider: providerId, badge: badge))
         }
 
-        // Append non-stale curated fallback models after live-discovered models
-        for existing in providers[idx].models where !Self.legacyStaleModelIDs.contains(existing.id.lowercased()) {
-            if seen.insert(existing.id).inserted {
-                liveModels.append(existing)
+        if !hasCustomBase {
+            // Append non-stale curated fallback models after live-discovered models
+            for existing in providers[idx].models where !Self.legacyStaleModelIDs.contains(existing.id.lowercased()) {
+                if seen.insert(existing.id).inserted {
+                    liveModels.append(existing)
+                }
             }
         }
 
@@ -1270,7 +1424,15 @@ final class AIModelCatalog: ObservableObject {
         case "openai": await fetchLiveOpenAIModels()
         case "gemini": await fetchLiveGeminiModels()
         case "anthropic": await fetchLiveAnthropicModels()
-        case "deepseek": await fetchLiveDeepSeekModels()
+        case "deepseek":
+            if StreamableAIProvider.hasCustomByokBaseURL(for: "deepseek") {
+                await fetchLiveOpenAICompatibleModels(providerId: "deepseek", endpoint: "\(StreamableAIProvider.deepseek.directBaseURL)/models")
+            } else {
+                await fetchLiveDeepSeekModels()
+            }
+        case "custom":
+            let base = StreamableAIProvider.custom.directBaseURL
+            await fetchLiveOpenAICompatibleModels(providerId: "custom", endpoint: "\(base)/models")
         case "glm": await fetchLiveGLMModels()
         case "grok": await fetchLiveGrokModels()
         case "groq": await fetchLiveGroqModels()
@@ -1337,18 +1499,43 @@ final class AIModelCatalog: ObservableObject {
         saveCachedCatalog()
     }
 
-    /// Integrates detected local engines (Ollama, LM Studio, MLX) into the catalog
+    /// Integrates all connected local/LAN/Tailscale/QR engines (Ollama, LM Studio, MLX, vLLM, etc.) into the catalog
     public func integrateLocalModels() {
-        let detected = LocalLLMService.shared.detectedServers.filter { $0.isOnline }
+        LocalLLMService.shared.syncPoolSnapshot()
+        let detected = LocalLLMService.shared.connectedServers
         var localModels: [AIModelDefinition] = []
+        var seenModelIds: Set<String> = []
+
+        if detected.count > 1 {
+            localModels.append(AIModelDefinition(
+                id: "auto",
+                name: "⚡ Multi-Node Auto Pool (\(detected.count) Servers Load-Balanced)",
+                provider: "local",
+                badge: "POOL×\(detected.count)"
+            ))
+        }
+
         for server in detected {
+            let hostBadge = server.sourceKind != .thisMac ? "\(server.type.rawValue.uppercased())·\(server.hostPortLabel)" : "\(server.type.rawValue.uppercased())·:\(server.port)"
             for m in server.models {
-                localModels.append(AIModelDefinition(
-                    id: m.id,
-                    name: "\(m.displayName) (\(server.type.rawValue))",
-                    provider: "local",
-                    badge: server.type.rawValue.uppercased()
-                ))
+                if !seenModelIds.contains(m.id) {
+                    seenModelIds.insert(m.id)
+                    localModels.append(AIModelDefinition(
+                        id: m.id,
+                        name: "\(m.displayName) (\(server.displayName))",
+                        provider: "local",
+                        badge: hostBadge
+                    ))
+                }
+                if detected.count > 1 {
+                    let pinnedId = "\(server.endpoint)||\(m.id)"
+                    localModels.append(AIModelDefinition(
+                        id: pinnedId,
+                        name: "\(m.displayName) @ \(server.host):\(server.port)",
+                        provider: "local",
+                        badge: hostBadge
+                    ))
+                }
             }
         }
         if localModels.isEmpty {
@@ -1372,27 +1559,67 @@ final class AIModelCatalog: ObservableObject {
     private struct RemoteModelItem {
         let id: String
         let ownedBy: String?
+        let inputUSDPer1M: Double?
+        let outputUSDPer1M: Double?
+    }
+
+    nonisolated static func estimatedUpstreamUSDPer1M(for modelID: String) -> (input: Double, output: Double) {
+        let m = modelID.lowercased()
+        if m.contains("omni-o1x-lite") || m.contains("omni-lite") { return (0.15, 0.60) }
+        if m.hasPrefix("omni") { return (0.30, 1.20) }
+        if m.contains("claude") && m.contains("opus") {
+            return m.contains("4-5") || m.contains("4.5") || m.contains("5") ? (5.00, 25.00) : (15.00, 75.00)
+        }
+        if m.contains("claude") && m.contains("haiku") { return (0.80, 4.00) }
+        if m.contains("claude") { return (3.00, 15.00) }
+        if m.contains("o3-pro") { return (20.00, 80.00) }
+        if m.contains("gpt-4.5") { return (75.00, 150.00) }
+        if m.contains("gpt-5") && m.contains("nano") { return (0.10, 0.40) }
+        if m.contains("gpt-5") && m.contains("mini") { return (0.25, 2.00) }
+        if m.contains("gpt-5") || m.contains("gpt-6") { return (1.25, 10.00) }
+        if m.contains("o4-mini") || m.contains("o3-mini") { return (1.10, 4.40) }
+        if m.contains("gpt-4.1-nano") { return (0.10, 0.40) }
+        if m.contains("gpt-4.1-mini") { return (0.40, 1.60) }
+        if m.contains("gpt-4.1") { return (2.00, 8.00) }
+        if m.contains("gpt-4o-mini") { return (0.15, 0.60) }
+        if m.contains("gpt-4o") { return (2.50, 10.00) }
+        if m.contains("gemini") && m.contains("lite") { return (0.10, 0.40) }
+        if m.contains("gemini") && m.contains("flash") { return (0.30, 2.50) }
+        if m.contains("gemini") { return (1.25, 10.00) }
+        if m.contains("deepseek") && (m.contains("reasoner") || m.contains("r1")) { return (0.55, 2.19) }
+        if m.contains("deepseek") { return (0.27, 1.10) }
+        if m.contains("grok") && m.contains("mini") { return (0.30, 0.50) }
+        if m.contains("grok") { return (3.00, 15.00) }
+        if m.contains("qwen") && m.contains("max") { return (1.60, 6.40) }
+        if m.contains("qwen") { return (0.40, 1.20) }
+        if m.contains("glm") { return (0.50, 2.00) }
+        if m.contains("typhoon") { return (0.20, 0.60) }
+        return (2.50, 10.00)
+    }
+
+    private static func parseRemoteModelDict(_ dict: [String: Any], allowNameFallback: Bool = false) -> RemoteModelItem? {
+        let id = (dict["id"] as? String) ?? (allowNameFallback ? (dict["name"] as? String) : nil)
+        guard let id, !id.isEmpty else { return nil }
+        let inUSD = (dict["input_usd_per_1m"] as? Double) ?? (dict["input_usd_per_1m"] as? NSNumber)?.doubleValue
+        let outUSD = (dict["output_usd_per_1m"] as? Double) ?? (dict["output_usd_per_1m"] as? NSNumber)?.doubleValue
+        return RemoteModelItem(
+            id: id,
+            ownedBy: dict["owned_by"] as? String,
+            inputUSDPer1M: inUSD,
+            outputUSDPer1M: outUSD
+        )
     }
 
     private static func decodeRemoteModels(_ data: Data) throws -> [RemoteModelItem] {
         let object = try JSONSerialization.jsonObject(with: data)
         if let rows = object as? [[String: Any]] {
-            return rows.compactMap { dict in
-                guard let id = dict["id"] as? String else { return nil }
-                return RemoteModelItem(id: id, ownedBy: dict["owned_by"] as? String)
-            }
+            return rows.compactMap { parseRemoteModelDict($0) }
         }
         if let dictionary = object as? [String: Any], let rows = dictionary["data"] as? [[String: Any]] {
-            return rows.compactMap { dict in
-                guard let id = dict["id"] as? String else { return nil }
-                return RemoteModelItem(id: id, ownedBy: dict["owned_by"] as? String)
-            }
+            return rows.compactMap { parseRemoteModelDict($0) }
         }
         if let dictionary = object as? [String: Any], let rows = dictionary["models"] as? [[String: Any]] {
-            return rows.compactMap { dict in
-                guard let id = (dict["id"] as? String) ?? (dict["name"] as? String) else { return nil }
-                return RemoteModelItem(id: id, ownedBy: dict["owned_by"] as? String)
-            }
+            return rows.compactMap { parseRemoteModelDict($0, allowNameFallback: true) }
         }
         return []
     }
@@ -1477,6 +1704,7 @@ final class AIModelCatalog: ObservableObject {
         case "glm": return "Zhipu GLM"
         case "copilot": return "GitHub Copilot"
         case "aipass": return "TH-AI Passport"
+        case "custom": return "Custom URL / Cloudflare Tunnel"
         case "local": return "Local LLM"
         default: return provider.isEmpty ? "AI" : provider.capitalized
         }
@@ -1676,6 +1904,10 @@ final class AIModelCatalog: ObservableObject {
             AIModelDefinition(id: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash Lite", provider: "gemini", badge: "FAST")
         ]),
         AIProviderDefinition(id: "anthropic", name: "Anthropic Claude", icon: "bubble.left.and.text.bubble.right", endpoint: "api.anthropic.com", models: [
+            AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic", badge: "AGENT"),
+            AIModelDefinition(id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "anthropic", badge: "REASONING"),
+            AIModelDefinition(id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", provider: "anthropic", badge: "AGENT"),
+            AIModelDefinition(id: "claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "anthropic", badge: "FAST"),
             AIModelDefinition(id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", provider: "anthropic", badge: "AGENT"),
             AIModelDefinition(id: "claude-opus-5-5", name: "Claude Opus 5.5", provider: "anthropic", badge: "REASONING"),
             AIModelDefinition(id: "claude-sonnet-5-5-high", name: "Claude Sonnet 5.5 (High Thinking)", provider: "anthropic", badge: "THINKING"),
@@ -1683,27 +1915,29 @@ final class AIModelCatalog: ObservableObject {
             AIModelDefinition(id: "claude-haiku-5-5", name: "Claude Haiku 5.5", provider: "anthropic", badge: "FAST"),
             AIModelDefinition(id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic", badge: "AGENT"),
             AIModelDefinition(id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic", badge: "REASONING"),
-            AIModelDefinition(id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "anthropic", badge: "REASONING"),
-            AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic", badge: "AGENT"),
-            AIModelDefinition(id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "anthropic", badge: "REASONING"),
-            AIModelDefinition(id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", provider: "anthropic", badge: "AGENT"),
-            AIModelDefinition(id: "claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "anthropic", badge: "FAST")
+            AIModelDefinition(id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "anthropic", badge: "REASONING")
         ]),
         AIProviderDefinition(id: "openai", name: "OpenAI", icon: "brain.head.profile", endpoint: "api.openai.com", models: [
-            AIModelDefinition(id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai", badge: "FLAGSHIP"),
-            AIModelDefinition(id: "gpt-6-sol", name: "GPT-6 Sol", provider: "openai", badge: "FLAGSHIP"),
-            AIModelDefinition(id: "gpt-6-luna", name: "GPT-6 Luna", provider: "openai", badge: "FAST"),
-            AIModelDefinition(id: "gpt-6-astra", name: "GPT-6 Astra", provider: "openai", badge: "REASONING"),
-            AIModelDefinition(id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "openai", badge: "FLAGSHIP"),
-            AIModelDefinition(id: "gpt-5.6-luna", name: "GPT-5.6 Luna", provider: "openai", badge: "FAST"),
-            AIModelDefinition(id: "gpt-5.5", name: "GPT-5.5", provider: "openai", badge: "CHAT"),
+            AIModelDefinition(id: "gpt-4.1", name: "GPT-4.1", provider: "openai", badge: "CODE"),
+            AIModelDefinition(id: "gpt-4o", name: "GPT-4o", provider: "openai", badge: "FAST"),
+            AIModelDefinition(id: "o3", name: "OpenAI o3", provider: "openai", badge: "REASONING"),
+            AIModelDefinition(id: "o4-mini", name: "OpenAI o4-mini", provider: "openai", badge: "REASONING"),
             AIModelDefinition(id: "gpt-5.4", name: "GPT-5.4", provider: "openai", badge: "CHAT"),
             AIModelDefinition(id: "gpt-5.4-mini", name: "GPT-5.4 Mini", provider: "openai", badge: "FAST"),
             AIModelDefinition(id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: "openai", badge: "AGENT"),
-            AIModelDefinition(id: "o3", name: "OpenAI o3", provider: "openai", badge: "REASONING"),
-            AIModelDefinition(id: "o4-mini", name: "OpenAI o4-mini", provider: "openai", badge: "REASONING"),
-            AIModelDefinition(id: "gpt-4.1", name: "GPT-4.1", provider: "openai", badge: "CODE"),
-            AIModelDefinition(id: "gpt-4o", name: "GPT-4o", provider: "openai", badge: "FAST")
+            AIModelDefinition(id: "gpt-5.5", name: "GPT-5.5", provider: "openai", badge: "CHAT"),
+            AIModelDefinition(id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "openai", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gpt-5.6-luna", name: "GPT-5.6 Luna", provider: "openai", badge: "FAST"),
+            AIModelDefinition(id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gpt-6-sol", name: "GPT-6 Sol", provider: "openai", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gpt-6-luna", name: "GPT-6 Luna", provider: "openai", badge: "FAST"),
+            AIModelDefinition(id: "gpt-6-astra", name: "GPT-6 Astra", provider: "openai", badge: "REASONING")
+        ]),
+        AIProviderDefinition(id: "custom", name: "Custom URL / Cloudflare Tunnel", icon: "network", endpoint: "Custom / Cloudflare Tunnel (/v1)", models: [
+            AIModelDefinition(id: "gpt-4.1", name: "Default Model (or Fetch / Enter Custom Model ID)", provider: "custom", badge: "CUSTOM URL"),
+            AIModelDefinition(id: "qwen2.5-coder:32b", name: "Qwen 2.5 Coder 32B (Tunnel)", provider: "custom", badge: "TUNNEL"),
+            AIModelDefinition(id: "deepseek-r1:32b", name: "DeepSeek R1 32B (Tunnel)", provider: "custom", badge: "TUNNEL"),
+            AIModelDefinition(id: "llama3.3:70b", name: "Llama 3.3 70B (Tunnel)", provider: "custom", badge: "TUNNEL")
         ]),
         AIProviderDefinition(id: "deepseek", name: "DeepSeek", icon: "water.waves", endpoint: "api.deepseek.com", models: [
             AIModelDefinition(id: "deepseek-flash", name: "DeepSeek V4.1 Flash", provider: "deepseek", badge: "FAST"),

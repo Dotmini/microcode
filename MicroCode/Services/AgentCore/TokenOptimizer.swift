@@ -246,12 +246,20 @@ class TokenOptimizer: ObservableObject {
             compressed = compressed.replacingOccurrences(of: pattern, with: "")
         }
         
-        // Strategy 3: Truncate if still over budget
+        // Strategy 3: Head + Tail preservation if still over budget.
+        // NEVER slice off the tail blindly: Pinned User Constraints, Strict Editing Scope,
+        // and the Provider Harness Contract live at the end of `buildSystemPrompt`.
         let compressedTokens = estimateTokens(compressed)
         if compressedTokens > budget {
-            let ratio = Double(budget) / Double(compressedTokens)
-            let targetChars = Int(Double(compressed.count) * ratio)
-            compressed = String(compressed.prefix(targetChars))
+            let ratio = Double(budget) / Double(max(1, compressedTokens))
+            let targetChars = max(1_200, Int(Double(compressed.count) * ratio))
+            if compressed.count > targetChars {
+                let headChars = Int(Double(targetChars) * 0.55)
+                let tailChars = max(400, targetChars - headChars)
+                let head = String(compressed.prefix(headChars))
+                let tail = String(compressed.suffix(tailChars))
+                compressed = head + "\n\n... [middle system context condensed to fit budget] ...\n\n" + tail
+            }
         }
         
         stats.savedTokens += max(0, tokens - estimateTokens(compressed))
@@ -267,12 +275,18 @@ class TokenOptimizer: ObservableObject {
         // Strategy 0: Compact only very old, massive tool dumps (> 40,000 chars) outside the recent window
         var sanitizedMessages: [(role: String, content: String)] = []
         let recentProtectedCount = 6
+        var didCompactFileReads = false
         for (idx, msg) in messages.enumerated() {
             if idx < messages.count - recentProtectedCount && msg.content.count > 40_000 {
                 if msg.content.contains(AIStructuredTurnCodec.markerKey) {
+                    if case .toolResults(let results, _) = AIStructuredTurnCodec.decode(msg.content),
+                       results.contains(where: { ($0.name == "file_read" || $0.name == "multi_file_read") && $0.output.count > 6_000 }) {
+                        didCompactFileReads = true
+                    }
                     let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(msg.content, maxCharsPerOutput: 6_000)
                     sanitizedMessages.append((role: msg.role, content: compacted))
                 } else if msg.content.contains("Tool execution results:") {
+                    didCompactFileReads = true
                     let head = String(msg.content.prefix(4_000))
                     let tail = String(msg.content.suffix(2_000))
                     let summary = head + "\n\n... [Older bulky tool output compacted] ...\n\n" + tail
@@ -283,6 +297,9 @@ class TokenOptimizer: ObservableObject {
             } else {
                 sanitizedMessages.append(msg)
             }
+        }
+        if didCompactFileReads {
+            fileReadRegistry.removeAll()
         }
         
         let totalTokens = sanitizedMessages.reduce(0) { $0 + estimateTokens($1.content) }
@@ -544,34 +561,38 @@ class TokenOptimizer: ObservableObject {
     // MARK: - Detect Task Complexity
     
     func detectComplexity(_ message: String, hasToolCalls: Bool = false) -> TokenBudget.TaskComplexity {
-        let lower = message.lowercased()
+        if hasToolCalls { return .moderate }
+        let lower = message.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         
-        // Check for casual conversation (no code-related intent)
-        let chatIndicators = [
-            "สวัสดี", "hello", "hi", "hey", "how are", "what's up", "ขอบคุณ", "thanks",
-            "tell me about", "explain", "what is", "who is", "why",
-            "ช่วยอธิบาย", "คืออะไร", "เล่าให้ฟัง", "คุยกัน", "ถาม",
-            "opinion", "think about", "recommend", "suggest", "คิดยังไง",
-            "joke", "story", "fun", "interesting", "cool",
-            "ไหน", "เป็นไง", "ทำไม", "ยังไง", "ไม่ได้", "ใช้ได้ไหม", "ตอบหน่อย", "คุยหน่อย"
+        let engineeringSignals = [
+            "code", "file", "project", "build", "fix", "create", "bug", "error", "crash", "test",
+            "api", "mcp", "harness", "agent", "tool", "ui", "ux", "css", "html", "swift", "rust",
+            "python", "sql", "database", "deploy", "server", "preview", "cell", "button", "admin",
+            "แก้", "สร้าง", "รัน", "บั๊ก", "พัง", "เพี้ยน", "ค้าง", "ปุ่ม", "หน้า", "ระบบ", "เว็บ",
+            "แอป", "โค้ด", "ไฟล์", "เชื่อม", "จ่ายเงิน", "เพิ่ม", "ลบ", "ปรับ", "เช็ค", "ตรวจ",
+            "วิจัย", "research", "ทำเลย", "ดีพลอย", "บัง"
         ]
-        let isChat = chatIndicators.contains(where: { lower.contains($0) }) &&
-            !lower.contains("code") && !lower.contains("file") && !lower.contains("project") &&
-            !lower.contains("build") && !lower.contains("fix") && !lower.contains("create") &&
-            !lower.contains("แก้") && !lower.contains("สร้าง") && !lower.contains("รัน")
+        let hasEngineeringSignal = engineeringSignals.contains(where: { lower.contains($0) })
         
-        if isChat { return .chat }
+        // Only classify short greetings/chit-chat as `.chat` — NEVER classify bug reports ("ทำไมไม่ได้", "พังตรงไหน") as `.chat`!
+        let pureGreetingIndicators = [
+            "สวัสดี", "hello", "hi", "hey", "how are you", "what's up", "ขอบคุณ", "thanks", "thank you",
+            "เล่าเรื่องตลก", "tell me a joke", "คุยเล่น"
+        ]
+        if lower.count < 80 && !hasEngineeringSignal && pureGreetingIndicators.contains(where: { lower.contains($0) }) {
+            return .chat
+        }
         
         // Code-related complexity detection
         let complexIndicators = [
             "refactor", "migrate", "redesign", "architecture", "full stack",
             "multiple files", "entire project", "database", "authentication",
-            "deploy", "ci/cd", "pipeline", "ทำ project", "สร้างโปรเจค",
+            "deploy", "ci/cd", "pipeline", "production", "ระดับprod", "prod",
+            "ทำ project", "สร้างโปรเจค", "ยกเครื่อง", "วิจัย", "research",
             "build the", "create a new", "implement", "integrate"
         ]
         let simpleIndicators = [
-            "fix this", "one line", "typo", "rename", "small change",
-            "what does this", "explain this", "single file"
+            "fix this typo", "one line", "typo", "rename variable", "small change"
         ]
         
         if complexIndicators.contains(where: { lower.contains($0) }) { return .complex }
@@ -803,10 +824,18 @@ class TokenOptimizer: ObservableObject {
         let middleTurns = history[1..<safeTailStart]
         let recentTurns = history[safeTailStart..<history.count]
         
-        // 3. Compact older middle turns deterministically while keeping file headers, errors, and code excerpts
+        // 3. Compact older middle turns deterministically while keeping file headers, errors, and code excerpts.
+        // CRITICAL: If any `file_read` / `multi_file_read` output in `middleTurns` is truncated here, evict
+        // `fileReadRegistry` so a subsequent `file_read` re-fetches full verbatim lines instead of returning
+        // a cache-hit stub pointing to already-compacted context!
+        var didCompactEarlierFileReads = false
         for item in middleTurns {
             if item.content.contains(AIStructuredTurnCodec.markerKey) {
                 if item.role == "user" {
+                    if case .toolResults(let results, _) = AIStructuredTurnCodec.decode(item.content),
+                       results.contains(where: { ($0.name == "file_read" || $0.name == "multi_file_read") && $0.output.count > 3_500 }) {
+                        didCompactEarlierFileReads = true
+                    }
                     let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(item.content, maxCharsPerOutput: 3_500)
                     optimized.append((role: "user", content: compacted))
                 } else if item.role == "assistant",
@@ -820,6 +849,7 @@ class TokenOptimizer: ObservableObject {
                 }
             } else if item.role == "user" && item.content.contains("Tool execution results:") {
                 if item.content.count > 4_000 {
+                    didCompactEarlierFileReads = true
                     let head = String(item.content.prefix(2_500))
                     let tail = String(item.content.suffix(1_000))
                     let summaryContent = head + "\n... [Earlier tool output compacted] ...\n" + tail
@@ -854,6 +884,7 @@ class TokenOptimizer: ObservableObject {
             if maxFoldLimit > 2 {
                 let foldEnd = alignAtomicToolBoundary(optimized, candidateIndex: maxFoldLimit, minIndex: 1)
                 if foldEnd > 1 {
+                    didCompactEarlierFileReads = true
                     let foldedSlice = Array(optimized[1..<foldEnd])
                     let foldedSummary = summarizeMessages(foldedSlice)
                     var rebuilt: [(role: String, content: String)] = [optimized[0]]
@@ -870,6 +901,9 @@ class TokenOptimizer: ObservableObject {
             }
         }
         
+        if didCompactEarlierFileReads {
+            fileReadRegistry.removeAll()
+        }
         let finalTokens = optimized.reduce(0) { $0 + estimateTokens($1.content) }
         let saved = max(0, totalTokens - finalTokens)
         stats.savedTokens += saved

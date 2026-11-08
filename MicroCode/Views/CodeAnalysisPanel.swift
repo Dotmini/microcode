@@ -317,3 +317,24 @@ struct CodeAnalysisPanel: View {
         }
     }
 }
+
+private struct MetricCard: View {
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Text(value)
+                .font(.system(size: 28, weight: .bold))
+                .foregroundColor(color)
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(color.opacity(0.1))
+        .cornerRadius(8)
+    }
+}

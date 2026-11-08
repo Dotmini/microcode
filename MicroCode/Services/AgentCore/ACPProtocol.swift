@@ -443,14 +443,15 @@ struct ACPStandardJsonRpcParser {
         ]
     }
     
-    static func buildSessionNewRequest(id: Int, cwd: String) -> [String: Any] {
-        [
+    static func buildSessionNewRequest(id: Int, cwd: String, mcpServers: [[String: Any]]? = nil) -> [String: Any] {
+        let resolvedServers = mcpServers ?? ACPMCPBridgeBuilder.acpSessionNewServers(workspacePath: cwd)
+        return [
             "jsonrpc": "2.0",
             "id": id,
             "method": "session/new",
             "params": [
                 "cwd": cwd,
-                "mcpServers": [] as [[String: Any]]
+                "mcpServers": resolvedServers
             ]
         ]
     }
@@ -996,7 +997,8 @@ struct CodexProcessArguments {
     }
 
     static func build(task: String, model: String?, sessionID: String?,
-                      permissionMode: ACPPermissionMode, extra: [String]) -> [String] {
+                      permissionMode: ACPPermissionMode, extra: [String],
+                      workspacePath: String? = nil) -> [String] {
         var args = ["exec"]
         if sessionID != nil { args.append("resume") }
         args.append("--json")
@@ -1007,10 +1009,118 @@ struct CodexProcessArguments {
             args += ["--sandbox", "workspace-write"]
         }
         if let validModel = sanitizeModel(model) { args += ["--model", validModel] }
+        if let ws = workspacePath, !ws.isEmpty {
+            args += ACPMCPBridgeBuilder.codexConfigOverrides(workspacePath: ws)
+        }
         args += extra
         if let sessionID { args.append(sessionID) }
         args.append(task)
         return args
+    }
+}
+
+// MARK: - MCP-over-ACP IDE Superpower Bridge
+
+/// Injects MicroCode's native `mcp-server.py` (Live WebApp Preview Dock, IDE Browser DOM/Console,
+/// `.mic` Notebook Cells, iOS/Android Simulators, API/DB Studio, LSP Diagnostics) into external ACP CLIs.
+enum ACPMCPBridgeBuilder {
+    static func resolvePythonAndScript(workspacePath: String) -> (python: String, script: String)? {
+        let fm = FileManager.default
+        let pythonCandidates = ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
+        guard let python = pythonCandidates.first(where: { fm.isExecutableFile(atPath: $0) }) else {
+            return nil
+        }
+        let bundleScript = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/mcp-server.py").path
+        let wsScript = (workspacePath as NSString).appendingPathComponent("mcp-server.py")
+        let cwdScript = fm.currentDirectoryPath + "/mcp-server.py"
+        let scriptCandidates = [bundleScript, wsScript, cwdScript]
+        guard let script = scriptCandidates.first(where: { fm.fileExists(atPath: $0) }) else {
+            return nil
+        }
+        return (python, script)
+    }
+
+    /// Formats MCP server descriptors for ACP v1 `session/new` (`params.mcpServers`)
+    static func acpSessionNewServers(workspacePath: String) -> [[String: Any]] {
+        guard let pair = resolvePythonAndScript(workspacePath: workspacePath) else {
+            return []
+        }
+        return [[
+            "name": "microcode_ide",
+            "command": pair.python,
+            "args": [pair.script],
+            "env": [
+                ["name": "MICROCODE_WORKSPACE", "value": workspacePath]
+            ]
+        ]]
+    }
+
+    /// Writes an atomic `--mcp-config` JSON file for Claude Code (`claude -p --mcp-config <path>`)
+    static func writeClaudeMCPConfigFile(workspacePath: String) -> String? {
+        guard let pair = resolvePythonAndScript(workspacePath: workspacePath) else {
+            return nil
+        }
+        let fm = FileManager.default
+        let dir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".microcode/acp", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let configURL = dir.appendingPathComponent("mcp_bridge_config.json")
+        let payload: [String: Any] = [
+            "mcpServers": [
+                "microcode_ide": [
+                    "command": pair.python,
+                    "args": [pair.script],
+                    "env": [
+                        "MICROCODE_WORKSPACE": workspacePath
+                    ]
+                ]
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
+            return nil
+        }
+        try? data.write(to: configURL, options: .atomic)
+        return configURL.path
+    }
+
+    /// Non-destructive `-c` config overrides so `codex exec` mounts `microcode_ide` for this session only
+    static func codexConfigOverrides(workspacePath: String) -> [String] {
+        guard let pair = resolvePythonAndScript(workspacePath: workspacePath) else {
+            return []
+        }
+        let escapedPy = pair.python.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedScript = pair.script.replacingOccurrences(of: "\"", with: "\\\"")
+        return [
+            "-c", "mcp_servers.microcode_ide.command=\"\(escapedPy)\"",
+            "-c", "mcp_servers.microcode_ide.args=[\"\(escapedScript)\"]"
+        ]
+    }
+
+    /// Ensures `microcode_ide` is registered in AGY's `mcp_config.json` when AGY runs inside MicroCode
+    static func ensureAGYMCPBridgeRegistered(workspacePath: String) {
+        guard let pair = resolvePythonAndScript(workspacePath: workspacePath) else { return }
+        let fm = FileManager.default
+        let configURL = fm.homeDirectoryForCurrentUser.appendingPathComponent(".gemini/antigravity/mcp_config.json")
+        guard fm.fileExists(atPath: configURL.path),
+              let data = try? Data(contentsOf: configURL),
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return
+        }
+        var servers = (root["mcpServers"] as? [String: [String: Any]]) ?? [:]
+        let desired: [String: Any] = [
+            "command": pair.python,
+            "args": [pair.script],
+            "env": ["MICROCODE_WORKSPACE": workspacePath]
+        ]
+        let existing = servers["microcode_ide"]
+        let existingArgs = existing?["args"] as? [String]
+        let existingEnv = existing?["env"] as? [String: String]
+        if existingArgs != [pair.script] || existingEnv?["MICROCODE_WORKSPACE"] != workspacePath {
+            servers["microcode_ide"] = desired
+            root["mcpServers"] = servers
+            if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
+                try? out.write(to: configURL, options: .atomic)
+            }
+        }
     }
 }
 

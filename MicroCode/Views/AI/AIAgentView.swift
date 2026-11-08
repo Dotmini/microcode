@@ -20,14 +20,248 @@ import PDFKit
 import AVKit
 import AVFoundation
 
+// MARK: - Unified Agent Workspace Bar State
+
+@MainActor
+final class AgentWorkspaceBarState: ObservableObject {
+    static let shared = AgentWorkspaceBarState()
+
+    @Published var isPlanMode: Bool = false
+    @Published var isPaperMode: Bool = false
+    @Published var isCellMode: Bool = false
+    @Published var isTaskMode: Bool = false
+    @Published var isWalkthroughMode: Bool = false
+    @Published var isPlanFullscreen: Bool = false
+    @Published var activeTaskTab: Int = 0
+    @Published var showingTeamTasks: Bool = false
+    @Published var showingTeamIntegrations: Bool = false
+    @Published var showingAgentConnections: Bool = false
+    @Published var showingAgentEcosystem: Bool = false
+    @Published var agentEcosystemTab: EcosystemTab = .agents
+    @Published var clearChatAttachmentsTrigger: Int = 0
+
+    private init() {}
+
+    func selectChatMode() {
+        isPaperMode = false
+        isCellMode = false
+        isTaskMode = false
+        isWalkthroughMode = false
+        isPlanFullscreen = false
+        isPlanMode = false
+        ImplementationPlanManager.shared.isPlanVisible = false
+    }
+
+    func togglePlanMode(workspacePath: String?) {
+        let planManager = ImplementationPlanManager.shared
+        if isPlanMode || planManager.isPlanVisible {
+            isPlanMode = false
+            planManager.isPlanVisible = false
+            isPlanFullscreen = false
+        } else {
+            isPlanMode = true
+            planManager.isPlanVisible = true
+            isPaperMode = false
+            isCellMode = false
+            isTaskMode = false
+            isWalkthroughMode = false
+            if planManager.currentPlan == nil, let ws = workspacePath {
+                planManager.loadFromTaskMarkdown(workspacePath: ws)
+            }
+        }
+    }
+
+    func selectTaskTab(_ tab: Int) {
+        isTaskMode = true
+        activeTaskTab = tab
+        isPlanMode = false
+        ImplementationPlanManager.shared.isPlanVisible = false
+        isPaperMode = false
+        isCellMode = false
+        isWalkthroughMode = false
+        isPlanFullscreen = false
+    }
+
+    func selectWalkthroughMode() {
+        isWalkthroughMode = true
+        isPlanMode = false
+        ImplementationPlanManager.shared.isPlanVisible = false
+        isPaperMode = false
+        isCellMode = false
+        isTaskMode = false
+        isPlanFullscreen = false
+    }
+
+    func selectCellMode() {
+        isCellMode = true
+        isPaperMode = false
+        isPlanMode = false
+        ImplementationPlanManager.shared.isPlanVisible = false
+        isTaskMode = false
+        isWalkthroughMode = false
+        isPlanFullscreen = false
+    }
+
+    static func switchToACPConfig(_ config: ACPAgentConfig, appState: AppState) {
+        let acpHost = ACPHostService.shared
+        UserDefaults.standard.set("acp", forKey: "aiKeyMode")
+        acpHost.activeAgentId = config.id
+        let engineId = config.type.engineId
+        appState.aiProvider = engineId
+        let engineModels = LocalEcosystemDiscovery.shared.models(for: engineId)
+        if !engineModels.contains(where: { $0.id == appState.aiModel }),
+           let firstModel = engineModels.first?.id {
+            appState.aiModel = firstModel
+        }
+        appState.saveSettings()
+    }
+
+    static func switchToNativeAgent(appState: AppState) {
+        let acpHost = ACPHostService.shared
+        let agent = AgentService.shared
+        let mode = UserDefaults.standard.string(forKey: "aiKeyMode").flatMap { $0 == "acp" ? nil : $0 } ?? "direct"
+        acpHost.stopActiveAgent()
+        agent.isLoading = false
+        acpHost.activeAgentId = nil
+        UserDefaults.standard.set(mode, forKey: "aiKeyMode")
+        if mode == "subscription" {
+            if let first = SubscriptionAuthManager.shared.connectedModelInfos().first {
+                appState.aiProvider = first.aiProviderID
+                appState.aiModel = first.modelID
+                SubscriptionAuthManager.shared.activeProvider = first.provider
+                UserDefaults.standard.set(first.provider.rawValue, forKey: "subscriptionActiveProvider")
+            }
+        } else if mode == "local" {
+            appState.aiProvider = "local"
+            appState.aiModel = LocalLLMService.shared.availableModels.first?.id ?? "local-model"
+        } else if mode == "cloud" {
+            if let first = AIModelCatalog.shared.provider("omni")?.models.first {
+                appState.aiProvider = "omni"
+                appState.aiModel = first.id
+            }
+        } else {
+            let byok = AIModelCatalog.shared.providers.filter { prov in
+                guard !["omni", "agy", "codex", "claude_code", "zed", "local"].contains(prov.id) else { return false }
+                let key = appState.resolveApiKey(for: prov.id).trimmingCharacters(in: .whitespacesAndNewlines)
+                return !key.isEmpty
+            }
+            if let firstProv = byok.first, let firstM = firstProv.models.first {
+                appState.aiProvider = firstProv.id
+                appState.aiModel = firstM.id
+            } else {
+                appState.aiProvider = "deepseek"
+                appState.aiModel = "deepseek-chat"
+            }
+        }
+        appState.saveSettings()
+    }
+
+    static func openRuntimeDestination(_ device: RuntimeDevice, appState: AppState) async {
+        let deviceRuntime = DeviceRuntimeService.shared
+        deviceRuntime.selectedDeviceID = device.id
+        if device.platform == .android {
+            AppleSimulatorCaptureService.shared.stop()
+            deviceRuntime.embeddedDockMode = .android
+            deviceRuntime.showingEmbeddedDeviceDock = true
+            deviceRuntime.showingEmbeddedAppleDock = false
+            await MainActor.run {
+                appState.showPreviewInspector(tab: "android")
+            }
+            await deviceRuntime.startEmbeddedAndroid()
+            return
+        }
+        if device.isAppleSimulator {
+            deviceRuntime.stopEmbeddedAndroid()
+            deviceRuntime.embeddedDockMode = .ios
+            deviceRuntime.showingEmbeddedDeviceDock = true
+            deviceRuntime.showingEmbeddedAppleDock = true
+            await MainActor.run {
+                appState.showPreviewInspector(tab: "ios")
+            }
+            await deviceRuntime.startEmbeddedAppleSimulator()
+            return
+        }
+        if device.isPhysicalAppleDevice {
+            await MainActor.run {
+                appState.showPreviewInspector(tab: "ios-physical")
+            }
+            return
+        }
+        await deviceRuntime.startSelectedDevice()
+    }
+}
+
+// MARK: - Zero-Reflow Width Probe for Split Dock / Plan Clamp
+
+private struct AgentRootWidthObserver: NSViewRepresentable {
+    @Binding var width: CGFloat
+    let isActive: Bool
+
+    final class ProbeView: NSView {
+        var isActive: Bool = false
+        var lastReportedWidth: CGFloat = 0
+        var onQuantizedWidthChange: ((CGFloat) -> Void)?
+
+        override func layout() {
+            super.layout()
+            let w = bounds.width
+            guard w > 120 else { return }
+            let quantized = round(w / 16.0) * 16.0
+            guard abs(quantized - lastReportedWidth) >= 16 else { return }
+            lastReportedWidth = quantized
+            onQuantizedWidthChange?(quantized)
+        }
+    }
+
+    func makeNSView(context: Context) -> ProbeView {
+        let v = ProbeView(frame: .zero)
+        v.isActive = isActive
+        v.lastReportedWidth = 0
+        v.onQuantizedWidthChange = { newW in
+            DispatchQueue.main.async {
+                if abs(width - newW) >= 12 {
+                    width = newW
+                }
+            }
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: ProbeView, context: Context) {
+        nsView.isActive = isActive
+        nsView.onQuantizedWidthChange = { newW in
+            DispatchQueue.main.async {
+                if abs(width - newW) >= 12 {
+                    width = newW
+                }
+            }
+        }
+        if nsView.bounds.width > 120 {
+            let quantized = round(nsView.bounds.width / 16.0) * 16.0
+            if abs(quantized - width) >= 12 {
+                nsView.lastReportedWidth = quantized
+                DispatchQueue.main.async {
+                    width = quantized
+                }
+            }
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ProbeView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+}
+
 // MARK: - AI Agent View (Professional)
 
 struct AIAgentView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var agent = AgentService.shared
     @StateObject private var modelCatalog = AIModelCatalog.shared
+    @ObservedObject private var unifiedBarState = AgentWorkspaceBarState.shared
     private var tokenOptimizer: TokenOptimizer { TokenOptimizer.shared }
     var allowsChatSidebar: Bool = true
+    var usesUnifiedWindowToolbar: Bool = false
     var sessionScope: AgentSessionScope = .editor
     /// Science Mode supplies an independent research root. Editor Mode retains
     /// the project currently opened in the IDE.
@@ -36,33 +270,38 @@ struct AIAgentView: View {
     
     @State private var inputText = ""
     @State private var attachments: [AIAttachment] = []
+    @State private var pendingIngestionTaskCount: Int = 0
+    private var isIngestingAttachments: Bool { pendingIngestionTaskCount > 0 }
     @State private var isDropTargeted = false
     @State private var isHoveringInput = false
-    @State private var isPaperMode = false  // A4 Paper reading mode
-    @State private var isCellMode = false   // Cell Mode (notebook-style)
+    @State private var localIsPaperMode = false  // A4 Paper reading mode
+    @State private var localIsCellMode = false   // Cell Mode (notebook-style)
     @State private var currentPaperPage = 0
     @State private var showModelPicker = false
     @State private var showProjectDropdown = false
     @State private var showSubAgentDropdown = false
     @State private var showingAddServerSheet = false
     @State private var selectedSubAgentType: String = "main"
-    @State private var isPlanMode = false
-    @State private var isTaskMode = false
-    @State private var isWalkthroughMode = false
-    @State private var showingTeamTasks = false
-    @State private var showingTeamIntegrations = false
-    @State private var showingAgentConnections = false
-    @State private var showingAgentEcosystem = false
-    @State private var agentEcosystemTab: EcosystemTab = .agents
+    @State private var localIsPlanMode = false
+    @State private var localIsTaskMode = false
+    @State private var localIsWalkthroughMode = false
+    @State private var localShowingTeamTasks = false
+    @State private var localShowingTeamIntegrations = false
+    @State private var localShowingAgentConnections = false
+    @State private var localShowingAgentEcosystem = false
+    @State private var localAgentEcosystemTab: EcosystemTab = .agents
     @State private var activeACPAgent: ACPAgentConfig? = nil
     @StateObject private var acpHost = ACPHostService.shared
     @ObservedObject private var teamIntegrations = TeamIntegrationService.shared
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @ObservedObject private var previewDock = PreviewDockService.shared
     @ObservedObject private var voiceCoding = VoiceCodingService.shared
+    @State private var voiceDictationPrefix: String? = nil
     @State private var collapsedProjectsInChatSidebar: Set<String> = []
     @State private var manuallyExpandedProjectsInChatSidebar: Set<String> = []
-    @FocusState private var isInputFocused: Bool
+    @State private var isInputFocused: Bool = false
+    @State private var composerDynamicHeight: CGFloat = 24
+    @State private var measuredRootWidth: CGFloat = 1140
     
     // MARK: - AI Enhancement State
     @StateObject private var slashCommandService = SlashCommandService.shared
@@ -74,7 +313,7 @@ struct AIAgentView: View {
     @State private var showContextSuggestions = false
     @State private var contextSearchPrefix = ""
     @State private var showRawMarkdownPlan = false
-    @State private var isPlanFullscreen = false
+    @State private var localIsPlanFullscreen = false
     @AppStorage("microcode_preview_dock_width") private var previewDockWidth: Double = 460
     @AppStorage("microcode_plan_panel_width") private var planPanelWidth: Double = 400
     @AppStorage("agentChatSidebarWidth") private var chatSidebarWidth: Double = 210
@@ -85,6 +324,120 @@ struct AIAgentView: View {
     @ObservedObject private var secretShield = SecretShieldMonitor.shared
     @ObservedObject private var subAgentHarness = SubAgentHarness.shared
     @State private var secretActionToast: String? = nil
+
+    // MARK: - Scoped vs Unified Window Bar State Routing
+
+    private var isPaperMode: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.isPaperMode : localIsPaperMode }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.isPaperMode = newValue }
+            else { localIsPaperMode = newValue }
+        }
+    }
+
+    private var isCellMode: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.isCellMode : localIsCellMode }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.isCellMode = newValue }
+            else { localIsCellMode = newValue }
+        }
+    }
+
+    private var isPlanMode: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.isPlanMode : localIsPlanMode }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.isPlanMode = newValue }
+            else { localIsPlanMode = newValue }
+        }
+    }
+
+    private var isTaskMode: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.isTaskMode : localIsTaskMode }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.isTaskMode = newValue }
+            else { localIsTaskMode = newValue }
+        }
+    }
+
+    private var isWalkthroughMode: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.isWalkthroughMode : localIsWalkthroughMode }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.isWalkthroughMode = newValue }
+            else { localIsWalkthroughMode = newValue }
+        }
+    }
+
+    private var isPlanFullscreen: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.isPlanFullscreen : localIsPlanFullscreen }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.isPlanFullscreen = newValue }
+            else { localIsPlanFullscreen = newValue }
+        }
+    }
+
+    private var activeTaskTab: Int {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.activeTaskTab : localActiveTaskTab }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.activeTaskTab = newValue }
+            else { localActiveTaskTab = newValue }
+        }
+    }
+
+    private var showingTeamTasks: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.showingTeamTasks : localShowingTeamTasks }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.showingTeamTasks = newValue }
+            else { localShowingTeamTasks = newValue }
+        }
+    }
+
+    private var showingTeamIntegrations: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.showingTeamIntegrations : localShowingTeamIntegrations }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.showingTeamIntegrations = newValue }
+            else { localShowingTeamIntegrations = newValue }
+        }
+    }
+
+    private var showingAgentConnections: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.showingAgentConnections : localShowingAgentConnections }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.showingAgentConnections = newValue }
+            else { localShowingAgentConnections = newValue }
+        }
+    }
+
+    private var showingAgentEcosystem: Bool {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.showingAgentEcosystem : localShowingAgentEcosystem }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.showingAgentEcosystem = newValue }
+            else { localShowingAgentEcosystem = newValue }
+        }
+    }
+
+    private var agentEcosystemTab: EcosystemTab {
+        get { usesUnifiedWindowToolbar ? unifiedBarState.agentEcosystemTab : localAgentEcosystemTab }
+        nonmutating set {
+            if usesUnifiedWindowToolbar { unifiedBarState.agentEcosystemTab = newValue }
+            else { localAgentEcosystemTab = newValue }
+        }
+    }
+
+    private var showingTeamTasksBinding: Binding<Bool> {
+        usesUnifiedWindowToolbar ? $unifiedBarState.showingTeamTasks : $localShowingTeamTasks
+    }
+
+    private var showingTeamIntegrationsBinding: Binding<Bool> {
+        usesUnifiedWindowToolbar ? $unifiedBarState.showingTeamIntegrations : $localShowingTeamIntegrations
+    }
+
+    private var showingAgentConnectionsBinding: Binding<Bool> {
+        usesUnifiedWindowToolbar ? $unifiedBarState.showingAgentConnections : $localShowingAgentConnections
+    }
+
+    private var showingAgentEcosystemBinding: Binding<Bool> {
+        usesUnifiedWindowToolbar ? $unifiedBarState.showingAgentEcosystem : $localShowingAgentEcosystem
+    }
     
     private var selectedSubAgentDisplayName: String {
         if selectedSubAgentType.hasPrefix("squad:") {
@@ -334,32 +687,33 @@ struct AIAgentView: View {
     }
     
     var body: some View {
-        GeometryReader { rootGeo in
-            let hasEmbeddedDock = sessionScope == .editor && (deviceRuntime.showingEmbeddedDeviceDock || previewDock.isDockVisible) && !appState.agenticContextVisible
-            let hasRightInspector = appState.agenticContextVisible
-            let isPlanActive = isPlanMode || planManager.isPlanVisible
-            let sidebarW: CGFloat = (allowsChatSidebar && agent.showChatSidebar) ? min(380, max(160, CGFloat(chatSidebarWidth))) : 0
-            let minDockW: CGFloat = 220
-            let availAfterSidebar: CGFloat = max(480, rootGeo.size.width - sidebarW)
-            let maxAllowedDockW: CGFloat = max(minDockW + 40, availAfterSidebar - 220)
-            let normalDockW: CGFloat = min(maxAllowedDockW, max(minDockW, CGFloat(previewDockWidth)))
-            let targetDockW: CGFloat = {
-                guard previewDock.isExpandedWidth else { return normalDockW }
-                if normalDockW < maxAllowedDockW * 0.78 {
-                    return min(maxAllowedDockW, max(normalDockW + 160, availAfterSidebar * 0.68))
-                } else {
-                    return min(maxAllowedDockW, max(minDockW, availAfterSidebar * 0.38))
-                }
-            }()
-            let dockW: CGFloat = hasEmbeddedDock ? (targetDockW + 6) : (hasRightInspector ? 320 : 0)
-            let mainColumnAvailWidth = rootGeo.size.width - sidebarW - dockW
-            // Auto-promote Plan to full main column when available width cannot comfortably fit Chat (min 420) + Plan (min 400) side-by-side
-            let shouldShowPlanFullColumn = isPlanActive && (
-                isPlanFullscreen ||
-                mainColumnAvailWidth < 820
-            )
-            
-            HStack(spacing: 0) {
+        let hasEmbeddedDock = sessionScope == .editor && (deviceRuntime.showingEmbeddedDeviceDock || previewDock.isDockVisible) && !appState.agenticContextVisible
+        let hasRightInspector = appState.agenticContextVisible
+        let isPlanActive = isPlanMode || planManager.isPlanVisible
+        let sidebarW: CGFloat = (allowsChatSidebar && agent.showChatSidebar) ? min(380, max(160, CGFloat(chatSidebarWidth))) : 0
+        let minDockW: CGFloat = 240
+        let availAfterSidebar: CGFloat = max(560, measuredRootWidth - sidebarW)
+        // Always reserve at least 46% of workspace width (min 360pt) for the Chat column so Chat and Preview never overlap or crush each other
+        let minChatColumnW: CGFloat = min(440, max(360, round(availAfterSidebar * 0.46)))
+        let maxAllowedDockW: CGFloat = max(minDockW, availAfterSidebar - minChatColumnW - 6)
+        let normalDockW: CGFloat = min(maxAllowedDockW, max(minDockW, CGFloat(previewDockWidth)))
+        let targetDockW: CGFloat = {
+            guard previewDock.isExpandedWidth else { return normalDockW }
+            if normalDockW < maxAllowedDockW * 0.78 {
+                return min(maxAllowedDockW, max(normalDockW + 120, availAfterSidebar * 0.54))
+            } else {
+                return min(maxAllowedDockW, max(minDockW, availAfterSidebar * 0.38))
+            }
+        }()
+        let dockW: CGFloat = hasEmbeddedDock ? (targetDockW + 6) : (hasRightInspector ? 320 : 0)
+        let mainColumnAvailWidth = measuredRootWidth - sidebarW - dockW
+        // Auto-promote Plan to full main column when available width cannot comfortably fit Chat (min 420) + Plan (min 400) side-by-side
+        let shouldShowPlanFullColumn = isPlanActive && (
+            isPlanFullscreen ||
+            mainColumnAvailWidth < 820
+        )
+
+        HStack(spacing: 0) {
                 // Chat Sidebar (Collapsible & Resizable)
                 if allowsChatSidebar && agent.showChatSidebar {
                     chatSidebar
@@ -392,11 +746,11 @@ struct AIAgentView: View {
                 
                 // Main Content
                 VStack(spacing: 0) {
-                    // 1. Toolbar / Header (Solid, Industrial)
-                    headerBar
-                        .clipped()
-                    
-                    Divider().background(borderColor)
+                    // 1. Toolbar / Header (Seamless, Borderless — omitted when elevated into unified 36pt window bar)
+                    if !usesUnifiedWindowToolbar {
+                        headerBar
+                            .clipped()
+                    }
                     
                     // 2. Main Content Area
                     if isTaskMode {
@@ -431,7 +785,7 @@ struct AIAgentView: View {
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .clipped()
 
-                            if agent.isLoading {
+                            if agent.isLoading && (agent.currentToolExecution != nil || !(agent.messages.last?.toolResults.isEmpty ?? true)) {
                                 liveTaskActivityBanner
                             }
 
@@ -523,6 +877,11 @@ struct AIAgentView: View {
                 }
                 .frame(minWidth: 200, maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
+                .onDrop(of: ["public.file-url", "com.adobe.pdf", "public.pdf", "public.image", "public.data"], isTargeted: $isDropTargeted) { providers in
+                    let ok = handleDroppedProviders(providers)
+                    if ok { isInputFocused = true }
+                    return ok
+                }
 
                 // Preview is a workspace surface, not a success toast from the
                 // capture transport.  Keep it visible while an AVD is connecting
@@ -565,10 +924,10 @@ struct AIAgentView: View {
                         .frame(maxHeight: .infinity)
                         .clipped()
                 }
-            }
-            .frame(width: rootGeo.size.width, height: rootGeo.size.height)
-            .clipped()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+        .background(AgentRootWidthObserver(width: $measuredRootWidth, isActive: hasEmbeddedDock || isPlanActive))
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
         .onAppear {
             let workspace = scopedWorkspacePath ?? (sessionScope == .editor ? appState.workspaceFolder?.path : nil)
@@ -600,7 +959,7 @@ struct AIAgentView: View {
                 planManager.isPlanVisible = false
             }
         }
-        .sheet(isPresented: $showingTeamTasks) {
+        .sheet(isPresented: showingTeamTasksBinding) {
             TeamTasksView(
                 workspacePath: agent.currentWorkspace ?? (sessionScope == .editor ? appState.workspaceFolder?.path : nil),
                 activeChatID: agent.activeChatId,
@@ -612,7 +971,7 @@ struct AIAgentView: View {
                 }
             )
         }
-        .sheet(isPresented: $showingTeamIntegrations) {
+        .sheet(isPresented: showingTeamIntegrationsBinding) {
             TeamIntegrationsSettings()
         }
         .sheet(isPresented: $showingAddServerSheet) {
@@ -622,7 +981,10 @@ struct AIAgentView: View {
             }
             .environmentObject(appState)
         }
-        .sheet(isPresented: $deviceRuntime.showingDeviceRuntimeSheet) {
+        .sheet(isPresented: Binding(
+            get: { !usesUnifiedWindowToolbar && deviceRuntime.showingDeviceRuntimeSheet },
+            set: { if !usesUnifiedWindowToolbar { deviceRuntime.showingDeviceRuntimeSheet = $0 } }
+        )) {
             DeviceRuntimeView(onEmbeddedAndroidOpened: {
                 deviceRuntime.showingEmbeddedDeviceDock = true
                 deviceRuntime.showingEmbeddedAppleDock = false
@@ -632,16 +994,26 @@ struct AIAgentView: View {
             })
             .environmentObject(appState)
         }
-        .sheet(isPresented: $showingAgentConnections) {
+        .sheet(isPresented: showingAgentConnectionsBinding) {
             AgentConnectionsView()
                 .environmentObject(appState)
         }
-        .sheet(isPresented: $showingAgentEcosystem) {
+        .sheet(isPresented: showingAgentEcosystemBinding) {
             AgentEcosystemConfigView(initialTab: agentEcosystemTab)
                 .environmentObject(appState)
         }
         .sheet(isPresented: $subAgentHarness.showSquadBuilderSheet) {
             AgentSquadBuilderSheet()
+        }
+        .onChange(of: unifiedBarState.clearChatAttachmentsTrigger) { _ in
+            if usesUnifiedWindowToolbar {
+                attachments.removeAll()
+            }
+        }
+        .onChange(of: appState.showingSettingsDialog) { isShowing in
+            if isShowing {
+                isInputFocused = false
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.OpenAgentConnections"))) { _ in
             showingAgentConnections = true
@@ -659,15 +1031,37 @@ struct AIAgentView: View {
             }
             showingAgentEcosystem = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: .voiceCodingInput)) { notification in
-            if let text = notification.userInfo?["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if inputText.isEmpty {
-                    inputText = text
-                } else {
-                    inputText += " " + text
+        .onReceive(NotificationCenter.default.publisher(for: .voiceCodingSessionStateChanged)) { notification in
+            if let listening = notification.userInfo?["listening"] as? Bool {
+                if listening {
+                    voiceDictationPrefix = inputText
                 }
-                isInputFocused = true
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .voiceCodingLiveUpdate)) { notification in
+            guard let live = notification.userInfo?["text"] as? String else { return }
+            let trimmed = live.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            let base = voiceDictationPrefix ?? inputText
+            if voiceDictationPrefix == nil { voiceDictationPrefix = base }
+            inputText = base.isEmpty ? trimmed : (base + " " + trimmed)
+            isInputFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .voiceCodingInput)) { notification in
+            if let text = notification.userInfo?["text"] as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    if let base = voiceDictationPrefix {
+                        inputText = base.isEmpty ? trimmed : (base + " " + trimmed)
+                    } else if inputText.isEmpty {
+                        inputText = trimmed
+                    } else if !inputText.hasSuffix(trimmed) {
+                        inputText += " " + trimmed
+                    }
+                    isInputFocused = true
+                }
+            }
+            voiceDictationPrefix = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentProcessQueueItem)) { notification in
             let targetScope: AgentSessionScope = agent.domain == .science ? .science : .editor
@@ -749,6 +1143,45 @@ struct AIAgentView: View {
                 activeAgentStatusHUD
 
                 securityAndFailoverAlertsBar
+
+                if voiceCoding.state == .listening || voiceCoding.errorMessage != nil {
+                    voiceStatusBanner
+                        .padding(.bottom, 5)
+                }
+
+                if showSlashSuggestions && !slashCommandService.suggestions.isEmpty {
+                    SlashCommandSuggestionView(
+                        suggestions: slashCommandService.suggestions,
+                        selectedIndex: slashSelectedIndex,
+                        onSelect: { command in
+                            showSlashSuggestions = false
+                            slashSelectedIndex = 0
+                            inputText = "/\(command.rawValue) "
+                            isInputFocused = true
+                        }
+                    )
+                    .environmentObject(appState)
+                    .transition(.opacity)
+                    .padding(.bottom, 4)
+                }
+
+                if showContextSuggestions {
+                    ContextProviderSuggestionView(
+                        suggestions: contextProviderService.getSuggestions(for: contextSearchPrefix),
+                        onSelect: { provider in
+                            if let atIdx = inputText.lastIndex(of: "@") {
+                                inputText = String(inputText[inputText.startIndex..<atIdx])
+                            }
+                            showContextSuggestions = false
+                            contextSearchPrefix = ""
+                            contextProviderService.selectProvider(provider)
+                            isInputFocused = true
+                        },
+                        selectedIndex: .constant(0)
+                    )
+                    .transition(.opacity)
+                    .padding(.bottom, 4)
+                }
                 
                 // Clean Floating Input Box
                 inputCardView
@@ -873,19 +1306,7 @@ struct AIAgentView: View {
     }
     
     private func isChatSidebarGroupExpanded(_ group: ProjectChatGroup) -> Bool {
-        if collapsedProjectsInChatSidebar.contains(group.id) {
-            return false
-        }
-        if manuallyExpandedProjectsInChatSidebar.contains(group.id) {
-            return true
-        }
-        if let ws = appState.workspaceFolder?.path ?? agent.currentWorkspace, !ws.isEmpty, group.projectPath == ws {
-            return true
-        }
-        if let activeId = agent.activeChatId, group.chats.contains(where: { $0.id == activeId }) {
-            return true
-        }
-        return group.id == agent.projectGroups.first?.id
+        return !collapsedProjectsInChatSidebar.contains(group.id)
     }
     
     // MARK: - Header Bar
@@ -918,61 +1339,62 @@ struct AIAgentView: View {
                         .help("Chat History")
                     }
                     
-                    // New Chat
-                    Button(action: {
-                        isPlanMode = false
-                        planManager.clearPlan()
-                        _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath)
-                    }) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 9.5, weight: .bold))
-                            if !isCompact {
-                                Text("New Chat")
-                                    .font(.system(size: 11, weight: .medium))
+                    // New Chat — only show in subheader when the global left sidebar (which already has "+ New Conversation") is hidden
+                    if !appState.sidebarVisible || sessionScope != .editor {
+                        Button(action: {
+                            isPlanMode = false
+                            planManager.clearPlan()
+                            _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath)
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                if !isCompact {
+                                    Text("New Chat")
+                                        .font(.system(size: 11, weight: .medium))
+                                }
                             }
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, isCompact ? 6 : 9)
+                            .frame(height: 24)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(6)
+                            .contentShape(Rectangle())
                         }
-                        .foregroundColor(.primary)
-                        .padding(.horizontal, isCompact ? 6 : 8)
-                        .frame(height: 24)
-                        .background(Color.primary.opacity(0.07))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 5)
-                                .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
-                        )
-                        .cornerRadius(5)
+                        .buttonStyle(.plain)
+                        .help("Create New Chat (⌘N)")
                     }
-                    .buttonStyle(.plain)
-                    .help("Create New Chat (⌘N)")
 
-                    if sessionScope == .editor { Menu {
-                        Button { showingTeamTasks = true } label: {
-                            Label(teamIntegrations.teamTasksEnabled ? "Team tasks" : "Team tasks (off)", systemImage: "checklist")
-                        }
-                        Button { showingTeamIntegrations = true } label: {
-                            Label("Configure Team collaboration", systemImage: "slider.horizontal.3")
-                        }
-                        if teamIntegrations.teamTasksEnabled, let task = TeamTaskService.shared.selectedTask {
-                            Divider()
-                            Text("Active: \(task.title)")
-                            Text("\(task.status.label) · \(task.owner)")
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "person.2")
-                                .font(.system(size: 10, weight: .medium))
-                            if !isCompact { Text("Team") }
-                            if teamIntegrations.teamTasksEnabled, TeamTaskService.shared.selectedTask != nil {
-                                Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+                    if sessionScope == .editor && teamIntegrations.teamTasksEnabled {
+                        Menu {
+                            Button { showingTeamTasks = true } label: {
+                                Label("Team tasks", systemImage: "checklist")
                             }
+                            Button { showingTeamIntegrations = true } label: {
+                                Label("Configure Team collaboration", systemImage: "slider.horizontal.3")
+                            }
+                            if let task = TeamTaskService.shared.selectedTask {
+                                Divider()
+                                Text("Active: \(task.title)")
+                                Text("\(task.status.label) · \(task.owner)")
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "person.2")
+                                    .font(.system(size: 10, weight: .medium))
+                                if !isCompact { Text("Team") }
+                                if TeamTaskService.shared.selectedTask != nil {
+                                    Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+                                }
+                            }
+                            .font(.system(size: 10, weight: TeamTaskService.shared.selectedTask != nil ? .semibold : .regular))
+                            .foregroundColor(TeamTaskService.shared.selectedTask != nil ? .primary : .secondary)
+                            .frame(height: 24)
                         }
-                        .font(.system(size: 10, weight: teamIntegrations.teamTasksEnabled && TeamTaskService.shared.selectedTask != nil ? .semibold : .regular))
-                        .foregroundColor(teamIntegrations.teamTasksEnabled && TeamTaskService.shared.selectedTask != nil ? .primary : .secondary)
-                        .frame(height: 24)
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Team tasks & collaboration")
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Configure Team tasks, Agent context, Slack, and Microsoft Teams") }
 
                     if sessionScope == .editor {
                         Menu {
@@ -1089,7 +1511,7 @@ struct AIAgentView: View {
                         .help("Choose an iPhone, iPad, Apple Watch, Apple TV, physical Apple device, or Android Preview")
                     }
                     
-                    Divider().frame(height: 14).padding(.horizontal, 2)
+                    Spacer().frame(width: 6)
                     
                     // Mode Tabs — Primary Heroes (Chat, Plan, Task) + Sleek More Dropdown
                     HStack(spacing: 2) {
@@ -1137,10 +1559,9 @@ struct AIAgentView: View {
                         }
 
                         // Secondary views dropdown: Keeps header clean on all screen sizes & preserves focus on Plan/Task
-                        let isSecondaryActive = isPaperMode || isCellMode || isWalkthroughMode || (isTaskMode && activeTaskTab > 0)
+                        let isSecondaryActive = isCellMode || isWalkthroughMode || (isTaskMode && activeTaskTab > 0)
                         let secondaryLabel: String = {
                             if isWalkthroughMode { return "Walkthrough" }
-                            if isPaperMode { return "Report" }
                             if isCellMode { return "Cells" }
                             if isTaskMode {
                                 switch activeTaskTab {
@@ -1150,7 +1571,7 @@ struct AIAgentView: View {
                                 case 4: return "Cost"
                                 case 5: return "Audit"
                                 case 6: return "Verify"
-                                case 7: return "PNS 24/7"
+                                case 7: return "Background"
                                 default: break
                                 }
                             }
@@ -1158,102 +1579,83 @@ struct AIAgentView: View {
                         }()
 
                         Menu {
-                            Section("PNS 24/7 Autonomous Nervous System") {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isTaskMode = true; activeTaskTab = 7
-                                        isPlanMode = false; planManager.isPlanVisible = false
-                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
-                                    }
-                                } label: {
-                                    Label("PNS 24/7 Neural System Console (pnsd)", systemImage: "point.3.connected.trianglepath.dotted")
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isWalkthroughMode = true; isPlanMode = false; planManager.isPlanVisible = false
+                                    isPaperMode = false; isCellMode = false; isTaskMode = false
                                 }
+                            } label: {
+                                Label("Walkthrough Summary", systemImage: "sparkles")
                             }
 
-                            Section("Verification & Planning") {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isTaskMode = true; activeTaskTab = 6
-                                        isPlanMode = false; planManager.isPlanVisible = false
-                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
-                                    }
-                                } label: {
-                                    Label("Consensus Engine (Builder vs. Auditor)", systemImage: "shield.checkered")
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isCellMode = true; isPaperMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
                                 }
-
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isWalkthroughMode = true; isPlanMode = false; planManager.isPlanVisible = false
-                                        isPaperMode = false; isCellMode = false; isTaskMode = false
-                                    }
-                                } label: {
-                                    Label("Walkthrough Artifact", systemImage: "sparkles")
-                                }
+                            } label: {
+                                Label("Interactive Notebook Cells", systemImage: "square.grid.2x2")
                             }
 
-                            Section("Analytics & Governance") {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isTaskMode = true; activeTaskTab = 4
-                                        isPlanMode = false; planManager.isPlanVisible = false
-                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
-                                    }
-                                } label: {
-                                    Label("Cost & Token Usage Dashboard", systemImage: "chart.bar.xaxis")
-                                }
+                            Divider()
 
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isTaskMode = true; activeTaskTab = 5
-                                        isPlanMode = false; planManager.isPlanVisible = false
-                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
-                                    }
-                                } label: {
-                                    Label("Sovereign Flight Recorder (Audit Trail)", systemImage: "airplane.circle")
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isTaskMode = true; activeTaskTab = 7
+                                    isPlanMode = false; planManager.isPlanVisible = false
+                                    isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
                                 }
+                            } label: {
+                                Label("Background Worktree Agents", systemImage: "arrow.triangle.branch")
                             }
 
-                            Section("Diagnostics & Notebook") {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isTaskMode = true; activeTaskTab = 3
-                                        isPlanMode = false; planManager.isPlanVisible = false
-                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
-                                    }
-                                } label: {
-                                    Label("Diagnostic Logs (\(agent.activityLog.count))", systemImage: "terminal")
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isTaskMode = true; activeTaskTab = 4
+                                    isPlanMode = false; planManager.isPlanVisible = false
+                                    isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
                                 }
+                            } label: {
+                                Label("Token & Cost Usage", systemImage: "chart.bar.xaxis")
+                            }
 
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isCellMode = true; isPaperMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
-                                    }
-                                } label: {
-                                    Label("Interactive Notebook Cells", systemImage: "square.grid.2x2")
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isTaskMode = true; activeTaskTab = 3
+                                    isPlanMode = false; planManager.isPlanVisible = false
+                                    isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
                                 }
+                            } label: {
+                                Label("Diagnostic Logs (\(agent.activityLog.count))", systemImage: "terminal")
+                            }
 
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        isPaperMode = true; isCellMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
-                                    }
-                                } label: {
-                                    Label("Research Report & Export", systemImage: "doc.text")
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isTaskMode = true; activeTaskTab = 5
+                                    isPlanMode = false; planManager.isPlanVisible = false
+                                    isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
                                 }
+                            } label: {
+                                Label("Audit Log (Flight Recorder)", systemImage: "shield.checkered")
+                            }
+
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isTaskMode = true; activeTaskTab = 6
+                                    isPlanMode = false; planManager.isPlanVisible = false
+                                    isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
+                                }
+                            } label: {
+                                Label("Consensus Engine", systemImage: "checkmark.shield")
                             }
                         } label: {
-                            HStack(spacing: 3) {
-                                Text(secondaryLabel)
-                                    .font(.system(size: 10, weight: isSecondaryActive ? .semibold : .regular))
-                                    .lineLimit(1)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 7, weight: .bold))
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(isSecondaryActive ? Color.primary.opacity(0.10) : Color.clear)
-                            .cornerRadius(3)
-                            .foregroundColor(isSecondaryActive ? .primary : .secondary)
+                            Text(secondaryLabel)
+                                .font(.system(size: 10, weight: isSecondaryActive ? .semibold : .regular))
+                                .lineLimit(1)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 4)
+                                .background(isSecondaryActive ? Color.primary.opacity(0.10) : Color.clear)
+                                .cornerRadius(4)
+                                .foregroundColor(isSecondaryActive ? .primary : .secondary)
                         }
                         .menuStyle(.borderlessButton)
                         .fixedSize()
@@ -1292,41 +1694,49 @@ struct AIAgentView: View {
                         }
                         
                         Menu {
-                            Button {
-                                showingAgentConnections = true
-                            } label: {
-                                Label("Agent Connections Hub…", systemImage: "link.badge.plus")
-                            }
-                            Button {
-                                agentEcosystemTab = .rules
-                                showingAgentEcosystem = true
-                            } label: {
-                                Label("Platform Rules & Interop", systemImage: "point.3.connected.trianglepath.dotted")
+                            Section("Agents, Rules & MCP") {
+                                Button {
+                                    showingAgentConnections = true
+                                } label: {
+                                    Label("Connect External Agents (1-Click)…", systemImage: "link.badge.plus")
+                                }
+                                Button {
+                                    agentEcosystemTab = .rules
+                                    showingAgentEcosystem = true
+                                } label: {
+                                    Label("Rules, MCP & Context Settings…", systemImage: "slider.horizontal.3")
+                                }
+                                Button {
+                                    showingTeamIntegrations = true
+                                } label: {
+                                    Label("Team Tasks & Collaboration…", systemImage: "person.2")
+                                }
                             }
                             if !acpHost.registeredConfigs.isEmpty {
                                 Divider()
-                                ForEach(acpHost.registeredConfigs) { config in
-                                    Button {
-                                        switchToConfig(config)
-                                    } label: {
-                                        HStack {
-                                            Label(config.name, systemImage: config.type.iconName)
-                                            if acpHost.activeAgentId == config.id {
-                                                Spacer()
-                                                Image(systemName: "checkmark")
+                                Section("Switch Active Agent") {
+                                    ForEach(acpHost.registeredConfigs) { config in
+                                        Button {
+                                            switchToConfig(config)
+                                        } label: {
+                                            HStack {
+                                                Label(config.name, systemImage: config.type.iconName)
+                                                if acpHost.activeAgentId == config.id {
+                                                    Spacer()
+                                                    Image(systemName: "checkmark")
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Divider()
-                                Button {
-                                    switchToNativeAgent()
-                                } label: {
-                                    HStack {
-                                        Label("Use Internal AI", systemImage: "brain")
-                                        if acpHost.activeAgentId == nil {
-                                            Spacer()
-                                            Image(systemName: "checkmark")
+                                    Button {
+                                        switchToNativeAgent()
+                                    } label: {
+                                        HStack {
+                                            Label("Use Internal AI", systemImage: "brain")
+                                            if acpHost.activeAgentId == nil {
+                                                Spacer()
+                                                Image(systemName: "checkmark")
+                                            }
                                         }
                                     }
                                 }
@@ -1334,6 +1744,38 @@ struct AIAgentView: View {
                             Divider()
                             Button { Task { await appState.microCodeService?.indexProject() } } label: {
                                 Label("Index Project", systemImage: "database")
+                            }
+                            Divider()
+                            Button {
+                                ARXCapsuleService.shared.exportCapsuleWithSavePanel(
+                                    chatId: agent.activeChatId,
+                                    workspacePath: agent.currentWorkspace ?? appState.workspaceFolder?.path
+                                )
+                            } label: {
+                                Label("Export .ARX Capsule…", systemImage: "shippingbox.and.arrow.backward")
+                            }
+                            Button {
+                                ARXCapsuleService.shared.importCapsuleWithOpenPanel(appState: appState)
+                            } label: {
+                                Label("Import .ARX Capsule…", systemImage: "shippingbox")
+                            }
+                            if let patchPath = agent.lastImportedArxPatchPath,
+                               FileManager.default.fileExists(atPath: patchPath) {
+                                Button {
+                                    let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path ?? ""
+                                    let res = ARXCapsuleService.shared.applyPatchFile(patchPath, in: ws)
+                                    agent.messages.append(AgentMessageModel(
+                                        id: UUID().uuidString,
+                                        role: .assistant,
+                                        content: res.success ? "✅ \(res.message)" : "⚠️ \(res.message)",
+                                        toolResults: [],
+                                        pendingChanges: [],
+                                        timestamp: Date()
+                                    ))
+                                    agent.saveChats()
+                                } label: {
+                                    Label("Apply Imported .ARX Git Patch", systemImage: "arrow.down.doc.fill")
+                                }
                             }
                             Divider()
                             Button {
@@ -1362,29 +1804,6 @@ struct AIAgentView: View {
                         }
                         .menuStyle(.borderlessButton)
                         .fixedSize()
-
-                        Button(action: {
-                            agentEcosystemTab = .rules
-                            showingAgentEcosystem = true
-                        }) {
-                            Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .font(.system(size: 11))
-                                .foregroundColor(MultiPlatformRulesEngine.shared.discoveredRules.isEmpty ? .secondary : .primary.opacity(0.8))
-                                .frame(width: 20, height: 24)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Platform Rules & Interop (Cursor, Zed, Cline, GLM)")
-                        
-                        Button(action: {
-                            showingAgentConnections = true
-                        }) {
-                            Image(systemName: "link.badge.plus")
-                                .font(.system(size: 11))
-                                .foregroundColor(acpHost.registeredConfigs.isEmpty ? .secondary : .primary.opacity(0.8))
-                                .frame(width: 20, height: 24)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Agent Connections Hub (Workser-style: Claude, AGY, OpenCode, Codex)")
                         
                         if let activeAgent = activeExternalAgentConfig {
                             HStack(spacing: 4) {
@@ -1415,7 +1834,7 @@ struct AIAgentView: View {
                 .frame(height: 30)
             }
             .frame(height: 30)
-            .background(Color(nsColor: appState.appTheme.panelBackground))
+            .background(workspaceBg)
         }
     }
 
@@ -1444,6 +1863,13 @@ struct AIAgentView: View {
                 appState.showPreviewInspector(tab: "ios")
             }
             await deviceRuntime.startEmbeddedAppleSimulator()
+            return
+        }
+        if device.isPhysicalAppleDevice {
+            // Real iPhone / iPad: open the native USB/wireless preview tab beside Chat.
+            await MainActor.run {
+                appState.showPreviewInspector(tab: "ios-physical")
+            }
             return
         }
         await deviceRuntime.startSelectedDevice()
@@ -1554,6 +1980,10 @@ struct AIAgentView: View {
             }
             
             Spacer(minLength: 4)
+
+            if usesUnifiedWindowToolbar && appState.agentMode {
+                autonomyControlView
+            }
             
             if let plan = planManager.currentPlan {
                 Button(action: {
@@ -2173,7 +2603,7 @@ struct AIAgentView: View {
     @State private var taskMdText: String = ""
     @State private var agentMdText: String = ""
     @State private var walkthroughMdText: String = ""
-    @State private var activeTaskTab: Int = 0 // 0 = task.md, 1 = agent.md, 2 = walkthrough.md, 3 = logs, 4 = cost, 5 = flight recorder
+    @State private var localActiveTaskTab: Int = 0 // 0 = task.md, 1 = agent.md, 2 = walkthrough.md, 3 = logs, 4 = cost, 5 = flight recorder
     @State private var taskViewMode: Int = 0  // 0 = Checklist Dashboard, 1 = Raw Markdown
     
     private struct ParsedTaskStep: Identifiable {
@@ -2247,6 +2677,13 @@ struct AIAgentView: View {
                 
                 // Trailing Action Controls (Fixed Size so they never collapse or distort)
                 HStack(spacing: 6) {
+                    if usesUnifiedWindowToolbar {
+                        modelSelector
+                        if appState.agentMode {
+                            autonomyControlView
+                        }
+                    }
+
                     if activeTaskTab < 3 {
                         // Compact View Mode Switcher (Rendered Document vs Edit Source)
                         HStack(spacing: 1) {
@@ -2522,6 +2959,26 @@ struct AIAgentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 10) {
+                    if usesUnifiedWindowToolbar {
+                        Button(action: {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                isWalkthroughMode = false
+                            }
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                Text("Chat")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                            }
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.accentColor.opacity(0.12))
+                            .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                    }
                     Image(systemName: "sparkles")
                         .font(.system(size: 16))
                         .foregroundColor(.accentColor)
@@ -2533,6 +2990,9 @@ struct AIAgentView: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
+                    if usesUnifiedWindowToolbar {
+                        modelSelector
+                    }
                     Button {
                         loadTaskFiles()
                     } label: {
@@ -2690,89 +3150,116 @@ struct AIAgentView: View {
     @ViewBuilder
     private var inputCardView: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Multiline text input
-            if #available(macOS 13.0, *) {
-                TextField("Ask anything, @ to mention, / for actions", text: $inputText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .lineLimit(1...8)
-                    .focused($isInputFocused)
-                    .padding(.horizontal, 4)
-                    .padding(.top, 4)
-                    .onSubmit {
-                        // If slash suggestions are showing and user presses Enter, select the highlighted command
-                        if showSlashSuggestions && !slashCommandService.suggestions.isEmpty {
-                            let cmd = slashCommandService.suggestions[min(slashSelectedIndex, slashCommandService.suggestions.count - 1)]
-                            showSlashSuggestions = false
-                            slashSelectedIndex = 0
-                            let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                            if trimmed == "/\(cmd.rawValue)" && !cmd.requiresArgument {
-                                sendMessage()
-                                return
-                            }
-                            inputText = "/\(cmd.rawValue) "
+            // Antigravity-style inline attachment & @context strip at top of composer card
+            if isDropTargeted {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.doc.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                    Text("Drop PDF, Code, Images, or Folders to attach instantly")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.accentColor)
+                    Spacer()
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+            }
+
+            if !attachments.isEmpty || isIngestingAttachments || !contextProviderService.attachedContexts.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    if !attachments.isEmpty || isIngestingAttachments {
+                        attachmentsBar
+                    }
+                    if !contextProviderService.attachedContexts.isEmpty {
+                        attachedContextsBar
+                    }
+                }
+                Divider()
+                    .opacity(0.25)
+            }
+
+            // Native AppKit Auto-Growing & Scrollable Prompt Editor (1 line -> ~240pt dynamic growth, then smooth NSScrollView with scrollbar)
+            DynamicGrowingPromptEditor(
+                text: $inputText,
+                isFocused: $isInputFocused,
+                measuredHeight: $composerDynamicHeight,
+                placeholder: "Ask anything, @ to mention, / for actions — paste (⌘V) or drop PDF, Code & Images",
+                minHeight: 24,
+                maxHeight: 240,
+                onSubmit: {
+                    if showSlashSuggestions && !slashCommandService.suggestions.isEmpty {
+                        let cmd = slashCommandService.suggestions[min(slashSelectedIndex, slashCommandService.suggestions.count - 1)]
+                        showSlashSuggestions = false
+                        slashSelectedIndex = 0
+                        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        if trimmed == "/\(cmd.rawValue)" && !cmd.requiresArgument {
+                            sendMessage()
                             return
                         }
-                        if !NSEvent.modifierFlags.contains(.shift) && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            sendMessage()
-                        }
+                        inputText = "/\(cmd.rawValue) "
+                        return
                     }
-                    .onChange(of: inputText) { newValue in
-                        // Slash Commands: detect /prefix without redundant @State mutations on normal keystrokes
-                        slashCommandService.updateSuggestions(for: newValue)
-                        let shouldShowSlash = slashCommandService.isShowingSuggestions
-                        if showSlashSuggestions != shouldShowSlash {
-                            showSlashSuggestions = shouldShowSlash
-                        }
-                        if !shouldShowSlash && slashSelectedIndex != 0 {
-                            slashSelectedIndex = 0
-                        }
-                        
-                        // @ Context Provider: detect @prefix only when actively typing a short token at the end
-                        var nextShowContext = false
-                        var nextContextPrefix = contextSearchPrefix
-                        if newValue.count <= 2000, let atIdx = newValue.lastIndex(of: "@") {
-                            let afterAt = String(newValue[newValue.index(after: atIdx)...])
-                            if afterAt.count <= 48 && !afterAt.contains(" ") && !afterAt.contains("\n") && !afterAt.contains("/") && (atIdx == newValue.startIndex || newValue[newValue.index(before: atIdx)] == " " || newValue[newValue.index(before: atIdx)] == "\n") {
-                                nextShowContext = true
-                                nextContextPrefix = afterAt
-                            }
-                        }
-                        if showContextSuggestions != nextShowContext {
-                            showContextSuggestions = nextShowContext
-                        }
-                        if nextShowContext && contextSearchPrefix != nextContextPrefix {
-                            contextSearchPrefix = nextContextPrefix
-                        }
+                    if !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty {
+                        sendMessage()
                     }
-            } else {
-                TextField("Ask anything, @ to mention, / for actions", text: $inputText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .focused($isInputFocused)
-                    .padding(.horizontal, 4)
-                    .padding(.top, 4)
-                    .onSubmit {
-                        if !inputText.isEmpty { sendMessage() }
+                },
+                onPasteboardAttachment: { pb in
+                    let consumed = ingestPasteboard(pb, allowPathStrings: !inputText.trimmingCharacters(in: .whitespaces).hasPrefix("/"))
+                    if consumed {
+                        isInputFocused = true
                     }
+                    return consumed
+                },
+                onDropTargetChanged: { targeted in
+                    if isDropTargeted != targeted {
+                        isDropTargeted = targeted
+                    }
+                }
+            )
+            .frame(height: composerDynamicHeight)
+            .padding(.horizontal, 2)
+            .padding(.top, 2)
+            .onChange(of: inputText) { newValue in
+                slashCommandService.updateSuggestions(for: newValue)
+                let shouldShowSlash = slashCommandService.isShowingSuggestions
+                if showSlashSuggestions != shouldShowSlash {
+                    showSlashSuggestions = shouldShowSlash
+                }
+                if !shouldShowSlash && slashSelectedIndex != 0 {
+                    slashSelectedIndex = 0
+                }
+                
+                var nextShowContext = false
+                var nextContextPrefix = contextSearchPrefix
+                if newValue.count <= 2000, let atIdx = newValue.lastIndex(of: "@") {
+                    let afterAt = String(newValue[newValue.index(after: atIdx)...])
+                    if afterAt.count <= 48 && !afterAt.contains(" ") && !afterAt.contains("\n") && !afterAt.contains("/") && (atIdx == newValue.startIndex || newValue[newValue.index(before: atIdx)] == " " || newValue[newValue.index(before: atIdx)] == "\n") {
+                        nextShowContext = true
+                        nextContextPrefix = afterAt
+                    }
+                }
+                if showContextSuggestions != nextShowContext {
+                    showContextSuggestions = nextShowContext
+                }
+                if nextShowContext && contextSearchPrefix != nextContextPrefix {
+                    contextSearchPrefix = nextContextPrefix
+                }
             }
             
             // Bottom Toolbar inside the Input Box (Single consolidated row)
             inputBottomToolbar
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.04))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isDropTargeted ? Color.accentColor : (isInputFocused ? Color.accentColor.opacity(0.4) : Color.clear), lineWidth: isDropTargeted ? 1.5 : 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isDropTargeted ? Color.accentColor : (isInputFocused ? Color.accentColor.opacity(0.42) : Color.primary.opacity(0.10)), lineWidth: isDropTargeted ? 1.5 : 1)
         )
-        .onDrop(of: ["public.file-url", "public.image", "public.data"], isTargeted: $isDropTargeted) { providers in
-            handleDroppedProviders(providers)
-        }
+        .animation(.easeOut(duration: 0.12), value: composerDynamicHeight)
     }
     
     // MARK: - Compact Agent Activity & Queue Indicator
@@ -2870,16 +3357,6 @@ struct AIAgentView: View {
                         .padding(.bottom, 4)
                 }
                 
-                // Attachment Pills
-                if !attachments.isEmpty {
-                    attachmentsBar
-                }
-                
-                // Attached Context Badges (from @ mentions)
-                if !contextProviderService.attachedContexts.isEmpty {
-                    attachedContextsBar
-                }
-                
                 // Slash Command Suggestions (above input)
                 if showSlashSuggestions && !slashCommandService.suggestions.isEmpty {
                     SlashCommandSuggestionView(
@@ -2923,6 +3400,11 @@ struct AIAgentView: View {
                 }
 
                 securityAndFailoverAlertsBar
+
+                if voiceCoding.state == .listening || voiceCoding.errorMessage != nil {
+                    voiceStatusBanner
+                        .padding(.bottom, 5)
+                }
                 
                 // Keep the composer visually aligned with the reading column.
                 // The two flexible spacers leave a small gutter on narrow splits,
@@ -2944,8 +3426,26 @@ struct AIAgentView: View {
     private var attachmentsBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                if attachments.isEmpty && isIngestingAttachments {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("Attaching...")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.85))
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.accentColor.opacity(0.28), lineWidth: 1)
+                    )
+                }
                 ForEach(attachments) { file in
                     AttachmentChipView(file: file, onRemove: {
+                        UniversalAttachmentEngine.shared.cancelBackgroundStage(id: file.id)
                         attachments.removeAll(where: { $0.id == file.id })
                     })
                 }
@@ -3092,55 +3592,128 @@ struct AIAgentView: View {
         )
     }
 
-    private var inputBottomToolbar: some View {
-        HStack(spacing: 6) {
-            plusActionMenu
-            modelSelectorDropdown
-                .layoutPriority(1)
-
-            if sessionScope == .editor {
-                scopeLockMenuPill
-                AgentTargetEnvironmentMenu(showingAddServer: $showingAddServerSheet)
-            }
-            
-            Spacer(minLength: 4)
-            
-            // SubAgent Dropdown Pill Button (Consolidated into main input toolbar)
-            Button(action: { showSubAgentDropdown.toggle() }) {
-                HStack(spacing: 3) {
-                    let runningCount = SubAgentHarness.shared.activeSubagents.filter { $0.state == .running }.count
-                    if runningCount > 0 {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 6, height: 6)
+    @ViewBuilder
+    private var autonomyControlView: some View {
+        if let external = activeExternalAgentConfig,
+           external.type == .codexEngine || external.type == .claudeCode || external.type == .agy {
+            Menu {
+                ForEach(ACPPermissionMode.allCases, id: \.self) { mode in
+                    Button {
+                        acpHost.setPermissionMode(mode, for: external.id)
+                    } label: {
+                        Text(mode.displayName)
+                        if external.permissionMode == mode { Image(systemName: "checkmark") }
                     }
-                    Text(selectedSubAgentType == "main" ? "Agent" : selectedSubAgentDisplayName)
-                        .font(.system(size: 10, weight: selectedSubAgentType == "main" ? .regular : .medium))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 7))
                 }
-                .foregroundColor(selectedSubAgentType == "main" ? .secondary.opacity(0.85) : .accentColor)
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: external.permissionMode == .fullAuto ? "bolt.fill" : "checkmark.shield")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(external.permissionMode == .fullAuto ? .green : .orange)
+                    Text(external.permissionMode == .fullAuto ? "Full Auto" : "Review")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.primary.opacity(0.85))
+                        .lineLimit(1)
+                }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
-                .background(selectedSubAgentType == "main" ? Color.primary.opacity(0.03) : Color.accentColor.opacity(0.1))
+                .frame(height: 22)
+                .background((external.permissionMode == .fullAuto ? Color.green : Color.orange).opacity(0.10))
                 .cornerRadius(5)
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
             .fixedSize()
-            .popover(isPresented: $showSubAgentDropdown, arrowEdge: .bottom) {
-                SubAgentSelectorMenu(
-                    selectedType: $selectedSubAgentType,
-                    isPresented: $showSubAgentDropdown
-                )
-                .environmentObject(appState)
+            .disabled(agent.isLoading)
+            .help("Autonomy for \(external.name)")
+        } else if activeExternalAgentConfig == nil {
+            ToolApprovalModePickerView(manager: toolApprovalManager)
+                .fixedSize()
+        }
+    }
+
+    private var subAgentPickerButton: some View {
+        Button(action: { showSubAgentDropdown.toggle() }) {
+            HStack(spacing: 3) {
+                let runningCount = SubAgentHarness.shared.activeSubagents.filter { $0.state == .running }.count
+                if runningCount > 0 {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 6, height: 6)
+                }
+                Text(selectedSubAgentType == "main" ? "Agent" : selectedSubAgentDisplayName)
+                    .font(.system(size: 10, weight: selectedSubAgentType == "main" ? .regular : .medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7))
             }
-            
+            .foregroundColor(selectedSubAgentType == "main" ? .secondary.opacity(0.85) : .accentColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(selectedSubAgentType == "main" ? Color.primary.opacity(0.03) : Color.accentColor.opacity(0.1))
+            .cornerRadius(5)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .popover(isPresented: $showSubAgentDropdown, arrowEdge: .bottom) {
+            SubAgentSelectorMenu(
+                selectedType: $selectedSubAgentType,
+                isPresented: $showSubAgentDropdown
+            )
+            .environmentObject(appState)
+        }
+    }
+
+    @ViewBuilder
+    private func inputBottomToolbarRow(includeEnvPills: Bool, includeModePills: Bool) -> some View {
+        HStack(spacing: 5) {
+            plusActionMenu
+                .fixedSize()
+            modelSelectorDropdown
+
+            if usesUnifiedWindowToolbar, let activeAgent = activeExternalAgentConfig {
+                Button {
+                    switchToNativeAgent()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 20, height: 20)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help("Running via \(activeAgent.name). Click to return to Native AI.")
+            }
+
+            if includeEnvPills && sessionScope == .editor {
+                scopeLockMenuPill
+                AgentTargetEnvironmentMenu(showingAddServer: $showingAddServerSheet)
+                    .fixedSize()
+            }
+
+            Spacer(minLength: 4)
+
+            if includeModePills {
+                if usesUnifiedWindowToolbar && appState.agentMode {
+                    autonomyControlView
+                }
+                subAgentPickerButton
+            }
+
             voiceInputButton
                 .fixedSize()
-            
+
             sendOrStopButton
                 .fixedSize()
+        }
+    }
+
+    private var inputBottomToolbar: some View {
+        ViewThatFits(in: .horizontal) {
+            inputBottomToolbarRow(includeEnvPills: true, includeModePills: true)
+            inputBottomToolbarRow(includeEnvPills: false, includeModePills: true)
+            inputBottomToolbarRow(includeEnvPills: false, includeModePills: false)
         }
         .padding(.top, 2)
     }
@@ -3225,6 +3798,7 @@ struct AIAgentView: View {
             .cornerRadius(5)
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
         .help("Scope Lock & Protected Files Guard — Lock files from AI edits or enforce Strict @Mention Scope")
     }
@@ -3463,6 +4037,91 @@ struct AIAgentView: View {
         )
     }
     
+    private var voiceStatusBanner: some View {
+        HStack(spacing: 8) {
+            if voiceCoding.state == .listening {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 7, height: 7)
+                Text("กำลังฟังเสียง...")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                Spacer(minLength: 4)
+                HStack(spacing: 4) {
+                    let isThai = voiceCoding.locale.identifier.lowercased().hasPrefix("th")
+                    Button(action: { voiceCoding.setLocale("th-TH") }) {
+                        Text("ไทย")
+                            .font(.system(size: 10, weight: isThai ? .bold : .regular))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(isThai ? Color.accentColor.opacity(0.22) : Color.primary.opacity(0.05))
+                            .foregroundColor(isThai ? .accentColor : .secondary)
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: { voiceCoding.setLocale("en-US") }) {
+                        Text("EN")
+                            .font(.system(size: 10, weight: !isThai ? .bold : .regular))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(!isThai ? Color.accentColor.opacity(0.22) : Color.primary.opacity(0.05))
+                            .foregroundColor(!isThai ? .accentColor : .secondary)
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: { voiceCoding.stopListening() }) {
+                        Text("เสร็จสิ้น")
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Color.red.opacity(0.16))
+                            .foregroundColor(.red)
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else if let err = voiceCoding.errorMessage {
+                Image(systemName: "mic.slash.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+                Text(err)
+                    .font(.system(size: 11))
+                    .foregroundColor(.primary.opacity(0.9))
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                if voiceCoding.state == .noPermission {
+                    Button(action: { voiceCoding.openPrivacySettings() }) {
+                        Text("ตั้งค่าสิทธิ์")
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.accentColor.opacity(0.2))
+                            .foregroundColor(.accentColor)
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button(action: { voiceCoding.errorMessage = nil; if voiceCoding.state == .error { voiceCoding.state = .idle } }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.88))
+        .cornerRadius(7)
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(voiceCoding.state == .listening ? Color.red.opacity(0.35) : Color.orange.opacity(0.3), lineWidth: 0.8)
+        )
+    }
+
     private var voiceInputButton: some View {
         Button(action: {
             Task {
@@ -3486,13 +4145,24 @@ struct AIAgentView: View {
             }
         }
         .buttonStyle(.plain)
-        .help(voiceCoding.state == .listening ? "Stop voice recording" : "Voice Input (Speak to AI)")
+        .contextMenu {
+            Button("🇹🇭 ภาษาไทย (th-TH)") { voiceCoding.setLocale("th-TH") }
+            Button("🇺🇸 English (en-US)") { voiceCoding.setLocale("en-US") }
+            Button("🇯🇵 日本語 (ja-JP)") { voiceCoding.setLocale("ja-JP") }
+            Button("🇨🇳 中文 (zh-CN)") { voiceCoding.setLocale("zh-CN") }
+        }
+        .help(voiceCoding.state == .listening ? "หยุดฟังเสียง" : "สั่งงานด้วยเสียง (คลิกขวาเพื่อเลือกภาษา ไทย/EN)")
     }
     
     private var plusActionMenu: some View {
         Menu {
             Button(action: pickFile) {
-                Label("Add Files or Images...", systemImage: "paperclip")
+                Label("Add Files, PDF, Code or Images…", systemImage: "paperclip")
+            }
+            if PromptPasteboardClassifier.hasAttachablePayload(NSPasteboard.general, allowPathStrings: true) {
+                Button(action: pasteClipboardContent) {
+                    Label("Paste Attachment from Clipboard (⌘V)", systemImage: "doc.on.clipboard")
+                }
             }
             Button(action: {
                 if let file = appState.currentFile {
@@ -3512,16 +4182,30 @@ struct AIAgentView: View {
             }) {
                 Label("Code Review (/review)", systemImage: "checkmark.shield")
             }
+            Divider()
+            Button(action: {
+                showingAgentConnections = true
+            }) {
+                Label("Connect External Agents…", systemImage: "link.badge.plus")
+            }
+            Button(action: {
+                agentEcosystemTab = .rules
+                showingAgentEcosystem = true
+            }) {
+                Label("Rules, MCP & Context Settings…", systemImage: "slider.horizontal.3")
+            }
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(.secondary)
                 .frame(width: 24, height: 24)
-                .background(Color.primary.opacity(0.04))
+                .background(Color.primary.opacity(0.055))
                 .clipShape(Circle())
         }
         .menuStyle(.borderlessButton)
-        .frame(width: 24, height: 24)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Attach files, insert commands, or configure Agents & MCP")
     }
     
     private var isDotminiSubscribed: Bool {
@@ -3581,7 +4265,7 @@ struct AIAgentView: View {
                     .font(.system(size: 8.5, weight: .semibold))
                     .foregroundColor(.secondary)
             }
-            .frame(maxWidth: 235)
+            .frame(minWidth: 64, maxWidth: 220, alignment: .leading)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(Color.primary.opacity(0.06))
@@ -3598,6 +4282,7 @@ struct AIAgentView: View {
     private var sendOrStopButton: some View {
         Group {
             let hasInput = !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+            let canSubmitNow = hasInput
             
             if agent.isLoading {
                 HStack(spacing: 5) {
@@ -3606,7 +4291,7 @@ struct AIAgentView: View {
                         Button(action: enqueueCurrentInput) {
                             ZStack {
                                 Circle()
-                                    .fill(Color.orange.opacity(0.88))
+                                    .fill(canSubmitNow ? Color.orange.opacity(0.88) : Color.primary.opacity(0.15))
                                     .frame(width: 24, height: 24)
                                 Image(systemName: "plus")
                                     .font(.system(size: 11, weight: .bold))
@@ -3614,13 +4299,14 @@ struct AIAgentView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .disabled(!canSubmitNow)
                         .help("Add to Queue (Runs after active task finishes)")
 
                         // Send Now Button (Stops current loop & sends new message immediately)
                         Button(action: sendMessage) {
                             ZStack {
                                 Circle()
-                                    .fill(Color.accentColor)
+                                    .fill(canSubmitNow ? Color.accentColor : Color.primary.opacity(0.15))
                                     .frame(width: 26, height: 26)
                                 Image(systemName: "arrow.up")
                                     .font(.system(size: 11, weight: .bold))
@@ -3628,6 +4314,7 @@ struct AIAgentView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .disabled(!canSubmitNow)
                         .help("Send Immediately (Interrupts active loop and starts new message)")
                     }
 
@@ -3653,15 +4340,15 @@ struct AIAgentView: View {
                 Button(action: sendMessage) {
                     ZStack {
                         Circle()
-                            .fill(hasInput ? Color.accentColor : Color.primary.opacity(0.12))
+                            .fill(canSubmitNow ? Color.accentColor : Color.primary.opacity(0.12))
                             .frame(width: 26, height: 26)
                         Image(systemName: "arrow.up")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(hasInput ? .white : .secondary.opacity(0.6))
+                            .foregroundColor(canSubmitNow ? .white : .secondary.opacity(0.6))
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(!hasInput)
+                .disabled(!canSubmitNow)
                 .help("Send Message")
             }
         }
@@ -3910,95 +4597,218 @@ struct AIAgentView: View {
     private func pickFile() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        panel.allowedContentTypes = [
-            .image,
-            .png,
-            .jpeg,
-            .pdf,
-            .plainText,
-            .sourceCode,
-            .json,
-            .data
-        ]
+        panel.treatsFilePackagesAsDirectories = false
         
         if panel.runModal() == .OK {
-            for url in panel.urls {
-                processFile(url)
-            }
+            ingestURLs(panel.urls)
         }
     }
     
+    private func ingestURLs(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        var seenPaths = Set(self.attachments.compactMap { $0.sourceURL?.standardizedFileURL.path })
+        var deduplicated: [URL] = []
+        for url in urls {
+            let canonical = url.standardizedFileURL.path
+            if !canonical.isEmpty, seenPaths.insert(canonical).inserted {
+                deduplicated.append(url)
+            }
+        }
+        guard !deduplicated.isEmpty else { return }
+
+        if deduplicated.count == 1,
+           let single = deduplicated.first,
+           single.pathExtension.lowercased() == "arx",
+           single.lastPathComponent.lowercased() != "ai.arx",
+           agent.messages.isEmpty,
+           inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let _ = try? ARXCapsuleService.shared.importAndResumeCapsule(from: single, appState: appState) {
+                return
+            }
+        }
+        let activeChatId = agent.activeChatId
+        let previews = UniversalAttachmentEngine.shared.makeInstantPreviewAttachments(urls: deduplicated)
+        self.attachments.append(contentsOf: previews)
+        let batchCount = previews.count
+        for preview in previews {
+            let task = UniversalAttachmentEngine.shared.stageInBackground(
+                preview: preview,
+                chatId: activeChatId,
+                totalBatchCount: batchCount
+            )
+            Task { @MainActor in
+                let enriched = await task.value
+                if let idx = self.attachments.firstIndex(where: { $0.id == preview.id }) {
+                    self.attachments[idx] = enriched
+                }
+            }
+        }
+    }
+
     private func processFile(_ url: URL) {
-        do {
-            let data = try Data(contentsOf: url)
-            let ext = url.pathExtension.lowercased()
-            let fileName = url.lastPathComponent
-            
-            var type: AIAttachment.AttachmentType = .text
-            
-            if ["png", "jpg", "jpeg", "webp", "heic", "gif", "bmp", "tiff", "svg"].contains(ext) {
-                let fmt = (ext == "jpg" || ext == "jpeg") ? "jpeg" : (ext == "svg" ? "svg+xml" : ext)
-                type = .image(format: fmt)
-            } else if ext == "pdf" {
-                type = .pdf
-            } else {
-                type = .text // Default to text for code/markdown/data files
+        ingestURLs([url])
+    }
+
+    private static func loadDroppedFileURL(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, _ in
+                if let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
+                    continuation.resume(returning: url)
+                } else if let url = item as? URL {
+                    continuation.resume(returning: url)
+                } else if let nsurl = item as? NSURL, let path = nsurl.path {
+                    continuation.resume(returning: URL(fileURLWithPath: path))
+                } else {
+                    continuation.resume(returning: nil)
+                }
             }
-            
-            let attachment = AIAttachment(name: fileName, data: data, type: type)
-            attachments.append(attachment)
-        } catch {
-            print("Failed to read file: \(error)")
         }
     }
-    
+
+    private static func loadDroppedImageData(from provider: NSItemProvider) async -> Data? {
+        await withCheckedContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: "public.image") { data, _ in
+                continuation.resume(returning: data)
+            }
+        }
+    }
+
+    private static func loadDroppedPDFData(from provider: NSItemProvider) async -> Data? {
+        let typeId = provider.hasItemConformingToTypeIdentifier("com.adobe.pdf") ? "com.adobe.pdf" : "public.pdf"
+        return await withCheckedContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: typeId) { data, _ in
+                continuation.resume(returning: data)
+            }
+        }
+    }
+
+    private func stageRawAttachmentData(data: Data, fileName: String, explicitType: AIAttachment.AttachmentType) {
+        let activeChatId = agent.activeChatId
+        let preview = UniversalAttachmentEngine.shared.makeInstantDataPreview(
+            data: data,
+            fileName: fileName,
+            explicitType: explicitType
+        )
+        self.attachments.append(preview)
+        let task = UniversalAttachmentEngine.shared.stageInBackground(
+            preview: preview,
+            rawData: data,
+            chatId: activeChatId
+        )
+        Task { @MainActor in
+            let enriched = await task.value
+            if let idx = self.attachments.firstIndex(where: { $0.id == preview.id }) {
+                self.attachments[idx] = enriched
+            }
+        }
+    }
+
     private func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier("public.file-url") {
-                provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, error in
-                    guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) else {
-                        if let url = item as? URL {
-                            DispatchQueue.main.async { self.processFile(url) }
-                        }
-                        return
+        guard !providers.isEmpty else { return false }
+        pendingIngestionTaskCount += 1
+        Task { @MainActor in
+            defer { self.pendingIngestionTaskCount = max(0, self.pendingIngestionTaskCount - 1) }
+            var droppedURLs: [URL] = []
+            var droppedImages: [(String, Data)] = []
+            var droppedPDFs: [(String, Data)] = []
+            for provider in providers {
+                if provider.hasItemConformingToTypeIdentifier("public.file-url") {
+                    if let url = await Self.loadDroppedFileURL(from: provider) {
+                        droppedURLs.append(url)
                     }
-                    DispatchQueue.main.async { self.processFile(url) }
-                }
-            } else if provider.hasItemConformingToTypeIdentifier("public.image") {
-                provider.loadDataRepresentation(forTypeIdentifier: "public.image") { data, error in
-                    guard let data = data else { return }
-                    DispatchQueue.main.async {
-                        let name = "dropped_image_\(Int(Date().timeIntervalSince1970)).png"
-                        let attachment = AIAttachment(name: name, data: data, type: .image(format: "png"))
-                        self.attachments.append(attachment)
+                } else if provider.hasItemConformingToTypeIdentifier("com.adobe.pdf") || provider.hasItemConformingToTypeIdentifier("public.pdf") {
+                    if let data = await Self.loadDroppedPDFData(from: provider), !data.isEmpty {
+                        let name = "dropped_document_\(Int(Date().timeIntervalSince1970))_\(droppedPDFs.count + 1).pdf"
+                        droppedPDFs.append((name, data))
+                    }
+                } else if provider.hasItemConformingToTypeIdentifier("public.image") {
+                    if let data = await Self.loadDroppedImageData(from: provider), !data.isEmpty {
+                        let name = "dropped_image_\(Int(Date().timeIntervalSince1970))_\(droppedImages.count + 1).png"
+                        droppedImages.append((name, data))
                     }
                 }
+            }
+            if !droppedURLs.isEmpty {
+                self.ingestURLs(droppedURLs)
+            }
+            for (name, data) in droppedPDFs {
+                self.stageRawAttachmentData(data: data, fileName: name, explicitType: .pdf)
+            }
+            for (name, data) in droppedImages {
+                self.stageRawAttachmentData(data: data, fileName: name, explicitType: .image(format: "png"))
             }
         }
         return true
     }
-    
-    private func pasteClipboardContent() {
-        let pb = NSPasteboard.general
-        if let images = pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage], let firstImg = images.first {
-            if let tiff = firstImg.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let pngData = bitmap.representation(using: .png, properties: [:]) {
-                let name = "pasted_image_\(Int(Date().timeIntervalSince1970)).png"
-                let attachment = AIAttachment(name: name, data: pngData, type: .image(format: "png"))
-                attachments.append(attachment)
-                return
+
+    @discardableResult
+    private func ingestPasteboard(_ pb: NSPasteboard, allowPathStrings: Bool = true) -> Bool {
+        // 1. Any copied/dragged file or folder URLs (Finder ⌘C puts BOTH public.file-url AND filename plain text!)
+        let fileURLs = PromptPasteboardClassifier.extractExistingFileURLs(from: pb)
+        if !fileURLs.isEmpty {
+            ingestURLs(fileURLs)
+            return true
+        }
+
+        // 2. Raw PDF data copied from Preview / Keynote / Browser
+        if let pdfData = PromptPasteboardClassifier.extractStandalonePDFData(from: pb) {
+            let name = "pasted_document_\(Int(Date().timeIntervalSince1970)).pdf"
+            stageRawAttachmentData(data: pdfData, fileName: name, explicitType: .pdf)
+            return true
+        }
+
+        // 3. Raw Screenshot / Browser "Copy Image" / Preview image selection
+        if PromptPasteboardClassifier.hasStandaloneImagePayload(from: pb),
+           let images = pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage],
+           let firstImg = images.first {
+            let name = "pasted_image_\(Int(Date().timeIntervalSince1970)).png"
+            let activeChatId = agent.activeChatId
+            let (preview, cgImage) = UniversalAttachmentEngine.shared.makeInstantClipboardImagePreview(
+                nsImage: firstImg,
+                fileName: name
+            )
+            self.attachments.append(preview)
+            let fallbackTIFF: Data? = cgImage == nil ? firstImg.tiffRepresentation : nil
+            let task = UniversalAttachmentEngine.shared.stageInBackground(
+                preview: preview,
+                clipboardCGImage: cgImage,
+                rawData: fallbackTIFF,
+                chatId: activeChatId
+            )
+            Task { @MainActor in
+                let enriched = await task.value
+                if let idx = self.attachments.firstIndex(where: { $0.id == preview.id }) {
+                    self.attachments[idx] = enriched
+                }
+            }
+            return true
+        }
+
+        // 4. Finder ⌥⌘C ("Copy as Pathname") or Terminal local file paths
+        if allowPathStrings {
+            let pathURLs = PromptPasteboardClassifier.extractExistingFilePathStrings(from: pb)
+            if !pathURLs.isEmpty {
+                ingestURLs(pathURLs)
+                return true
             }
         }
-        
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
-            for url in urls {
-                processFile(url)
-            }
-        }
+
+        return false
     }
-    
+
+    private func pasteClipboardContent() {
+        _ = ingestPasteboard(NSPasteboard.general, allowPathStrings: true)
+    }
+
     private func sendMessage() {
+        if voiceCoding.state == .listening {
+            voiceDictationPrefix = nil
+            voiceCoding.autoSendToAgent = false
+            voiceCoding.stopListening()
+            voiceCoding.autoSendToAgent = true
+        }
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
         var userText = inputText
         let currentAttachments = attachments
@@ -4059,20 +4869,84 @@ struct AIAgentView: View {
                     let ruleText = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
                     let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
                     if !ruleText.isEmpty {
-                        ProjectMemoryService.shared.appendLearnedRule(ruleText, workspace: ws)
+                        let savedPath = ProjectMemoryService.shared.appendLearnedRule(ruleText, workspace: ws)
                         let savedMsg = AgentMessageModel(
                             id: UUID().uuidString, role: .assistant,
-                            content: "**Saved Project Rule** to `.microcode/rules.md`:\n\n- \(ruleText)",
+                            content: "**Saved Project Rule** (`\(savedPath)` — synced live to Settings → Rules & SubAgents):\n\n- \(ruleText)",
                             toolResults: [], pendingChanges: [], timestamp: Date()
                         )
                         agent.messages.append(savedMsg)
                     } else {
                         let usageMsg = AgentMessageModel(
                             id: UUID().uuidString, role: .assistant,
-                            content: "Usage: `/learn <rule>` — appends a persistent rule to `.microcode/rules.md` and injects it automatically into all future Agent turns.",
+                            content: "Usage: `/learn <rule>` — saves a persistent workspace rule in `~/.microcode/workspaces/<id>/rules.md` and syncs it immediately across Settings UI, SubAgents, and Rust Engine.",
                             toolResults: [], pendingChanges: [], timestamp: Date()
                         )
                         agent.messages.append(usageMsg)
+                    }
+                    return
+                case .arx:
+                    let arg = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let lower = arg.lowercased()
+                    let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path ?? ""
+                    if lower == "export" || lower.isEmpty {
+                        ARXCapsuleService.shared.exportCapsuleWithSavePanel(chatId: agent.activeChatId, workspacePath: ws)
+                    } else if lower.hasPrefix("export ") {
+                        let rawPath = String(arg.dropFirst("export ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let expanded = (rawPath as NSString).expandingTildeInPath
+                        let destURL = URL(fileURLWithPath: expanded.hasSuffix(".arx") ? expanded : "\(expanded).arx")
+                        let capsule = ARXCapsuleService.shared.buildCapsule(chatId: agent.activeChatId, workspacePath: ws, includeGitDiff: true)
+                        do {
+                            try ARXCapsuleService.shared.writeCapsule(capsule, to: destURL, compressed: true)
+                            agent.messages.append(AgentMessageModel(
+                                id: UUID().uuidString, role: .assistant,
+                                content: "✅ **Exported `.ARX` Capsule** to `\(destURL.path)` (\(capsule.messages.count) messages).",
+                                toolResults: [], pendingChanges: [], timestamp: Date()
+                            ))
+                            agent.saveChats()
+                        } catch {
+                            agent.messages.append(AgentMessageModel(
+                                id: UUID().uuidString, role: .assistant,
+                                content: "⚠️ Failed to export `.ARX` capsule: \(error.localizedDescription)",
+                                toolResults: [], pendingChanges: [], timestamp: Date()
+                            ))
+                        }
+                    } else if lower == "import" {
+                        ARXCapsuleService.shared.importCapsuleWithOpenPanel(appState: appState)
+                    } else if lower.hasPrefix("import ") {
+                        let rawPath = String(arg.dropFirst("import ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let expanded = (rawPath as NSString).expandingTildeInPath
+                        do {
+                            _ = try ARXCapsuleService.shared.importAndResumeCapsule(from: URL(fileURLWithPath: expanded), appState: appState)
+                        } catch {
+                            agent.messages.append(AgentMessageModel(
+                                id: UUID().uuidString, role: .assistant,
+                                content: "⚠️ Failed to import `.ARX` capsule: \(error.localizedDescription)",
+                                toolResults: [], pendingChanges: [], timestamp: Date()
+                            ))
+                        }
+                    } else if lower == "apply" || lower == "apply-patch" {
+                        if let patchPath = agent.lastImportedArxPatchPath {
+                            let res = ARXCapsuleService.shared.applyPatchFile(patchPath, in: ws)
+                            agent.messages.append(AgentMessageModel(
+                                id: UUID().uuidString, role: .assistant,
+                                content: res.success ? "✅ \(res.message)" : "⚠️ \(res.message)",
+                                toolResults: [], pendingChanges: [], timestamp: Date()
+                            ))
+                            agent.saveChats()
+                        } else {
+                            agent.messages.append(AgentMessageModel(
+                                id: UUID().uuidString, role: .assistant,
+                                content: "No imported `.ARX` git patch is pending in this session.",
+                                toolResults: [], pendingChanges: [], timestamp: Date()
+                            ))
+                        }
+                    } else {
+                        agent.messages.append(AgentMessageModel(
+                            id: UUID().uuidString, role: .assistant,
+                            content: "Usage:\n- `/arx export [path]` — Export current chat + plan + git diff to a portable `.arx` capsule\n- `/arx import [path]` — Import & resume a `.arx` capsule\n- `/arx apply` — Apply the git diff patch included in the imported `.arx` capsule",
+                            toolResults: [], pendingChanges: [], timestamp: Date()
+                        ))
                     }
                     return
                 case .squad:
@@ -4149,8 +5023,7 @@ struct AIAgentView: View {
     }
     
     private func runCEOSquadMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
-        let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
-        _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
+        _ = agent.prepareUserTurn(userText, attachments: currentAttachments, createStreamingPlaceholder: false)
         
         let responseId = UUID().uuidString
         let preset = subAgentHarness.activeSquadPreset ?? AgentSquadPreset.builtInPresets[0]
@@ -4162,10 +5035,21 @@ struct AIAgentView: View {
         agent.isLoading = true
         agent.saveChats()
         let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path
+        let chatId = agent.activeChatId
         
         Task { @MainActor in
+            var squadObjective = userText
+            if !currentAttachments.isEmpty {
+                let enriched = await UniversalAttachmentEngine.shared.ensureIngested(currentAttachments, chatId: chatId)
+                let grounded = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(attachments: enriched, maxInlineChars: 60_000)
+                if !grounded.isEmpty {
+                    squadObjective = squadObjective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? grounded
+                        : (squadObjective + "\n\n" + grounded)
+                }
+            }
             let finalReport = await SubAgentHarness.shared.runCEOSquadSession(
-                objective: userText,
+                objective: squadObjective,
                 workspacePath: ws,
                 presetOverride: preset,
                 onProgress: { statusText in
@@ -4191,27 +5075,44 @@ struct AIAgentView: View {
     }
     
     private func runDirectSubAgentMessage(typeName: String, userText: String, attachments currentAttachments: [AIAttachment] = []) {
-        let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
-        _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
+        _ = agent.prepareUserTurn(userText, attachments: currentAttachments, createStreamingPlaceholder: false)
         
         let responseId = UUID().uuidString
         let roleName = SubAgentHarness.shared.registeredDefinitions[typeName]?.role ?? typeName.capitalized
         let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path
-        let instance = SubAgentHarness.shared.invokeSubagent(
-            typeName: typeName,
-            role: roleName,
-            prompt: userText,
-            workspacePath: ws
-        )
+        let chatId = agent.activeChatId
         agent.messages.append(AgentMessageModel(
             id: responseId, role: .assistant,
-            content: "⚡ **[\(roleName)] (`\(instance.endpointBadge ?? "Active Model")`)** กำลังดำเนินการ...",
+            content: "⚡ **[\(roleName)]** กำลังดำเนินการ...",
             toolResults: [], pendingChanges: [], timestamp: Date()
         ))
         agent.isLoading = true
         agent.saveChats()
         
         Task { @MainActor in
+            var subAgentPrompt = userText
+            if !currentAttachments.isEmpty {
+                let enriched = await UniversalAttachmentEngine.shared.ensureIngested(currentAttachments, chatId: chatId)
+                let grounded = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(attachments: enriched, maxInlineChars: 60_000)
+                if !grounded.isEmpty {
+                    subAgentPrompt = subAgentPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? grounded
+                        : (subAgentPrompt + "\n\n" + grounded)
+                }
+            }
+            let instance = SubAgentHarness.shared.invokeSubagent(
+                typeName: typeName,
+                role: roleName,
+                prompt: subAgentPrompt,
+                workspacePath: ws
+            )
+            if let idx = self.agent.messages.firstIndex(where: { $0.id == responseId }) {
+                self.agent.messages[idx] = AgentMessageModel(
+                    id: responseId, role: .assistant,
+                    content: "⚡ **[\(roleName)] (`\(instance.endpointBadge ?? "Active Model")`)** กำลังดำเนินการ...",
+                    toolResults: [], pendingChanges: [], timestamp: Date()
+                )
+            }
             let outcome = try? await SubAgentHarness.shared.waitForSubagent(id: instance.id)
             let report = outcome?.instance.finalReport ?? outcome?.instance.stateDetail ?? "SubAgent finished."
             let badge = outcome?.instance.endpointBadge ?? roleName
@@ -4294,8 +5195,7 @@ struct AIAgentView: View {
         }
         
         if let activeConfig = targetConfig {
-            let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
-            _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
+            _ = agent.prepareUserTurn(userText, attachments: currentAttachments, createStreamingPlaceholder: false)
             
             let responseId = UUID().uuidString
             agent.messages.append(AgentMessageModel(
@@ -4357,7 +5257,17 @@ struct AIAgentView: View {
             Task { @MainActor in
                 let stream = session.eventStream
                 let mentionContext = await AgentContextProtocolBridge.shared.expandMentions(prompt: userText, workspaceRoot: workspace)
-                session.start(task: mentionContext.expandedPrompt, workspacePath: workspace, model: chosenModel)
+                var acpTaskPrompt = mentionContext.expandedPrompt
+                if !currentAttachments.isEmpty {
+                    let enriched = await UniversalAttachmentEngine.shared.ensureIngested(currentAttachments, chatId: agent.activeChatId)
+                    let grounded = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(attachments: enriched, maxInlineChars: 60_000)
+                    if !grounded.isEmpty {
+                        acpTaskPrompt = acpTaskPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? grounded
+                            : (acpTaskPrompt + "\n\n" + grounded)
+                    }
+                }
+                session.start(task: acpTaskPrompt, workspacePath: workspace, model: chosenModel)
                 
                 var accumulatedThinking = ""
                 var accumulatedText = ""
@@ -4549,8 +5459,34 @@ struct AIAgentView: View {
             )
         } else {
             // Simple Chat Mode: Direct AIClient streaming
-            let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
-            _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
+            let preparedUser = agent.prepareUserTurn(userText, attachments: currentAttachments, createStreamingPlaceholder: false)
+            if !currentAttachments.isEmpty {
+                let targetChatId = agent.activeChatId
+                let targetMsgId = preparedUser.id
+                Task { @MainActor in
+                    let staged = await UniversalAttachmentEngine.shared.ensureIngested(
+                        currentAttachments,
+                        chatId: targetChatId,
+                        requireImageOCR: false
+                    )
+                    let digest = UniversalAttachmentEngine.shared.buildFollowUpHistoryDigest(attachments: staged)
+                    let items = staged.map { SentAttachmentItem.from($0) }
+                    if let idx = agent.messages.firstIndex(where: { $0.id == targetMsgId }) {
+                        agent.messages[idx] = AgentMessageModel(
+                            id: agent.messages[idx].id,
+                            role: agent.messages[idx].role,
+                            content: agent.messages[idx].content,
+                            toolResults: agent.messages[idx].toolResults,
+                            pendingChanges: agent.messages[idx].pendingChanges,
+                            timestamp: agent.messages[idx].timestamp,
+                            turnTelemetryLabel: agent.messages[idx].turnTelemetryLabel,
+                            attachmentHistoryContext: digest.isEmpty ? nil : digest,
+                            attachments: items
+                        )
+                        agent.saveChats()
+                    }
+                }
+            }
             
             let responseId = UUID().uuidString
             agent.messages.append(AgentMessageModel(
@@ -4563,8 +5499,19 @@ struct AIAgentView: View {
             let provider: StreamableAIProvider = StreamableAIProvider(rawValue: providerString) ?? .gemini
             let history: [(role: String, content: String)] = agent.messages.dropLast(2)
                 .filter { $0.role == .user || $0.role == .assistant }
-                .filter { !$0.content.isEmpty }
-                .map { (role: $0.role.rawValue, content: $0.content) }
+                .compactMap { msg in
+                    var body = msg.content
+                    if msg.role == .user {
+                        if let attCtx = msg.attachmentHistoryContext, !attCtx.isEmpty {
+                            body = body.isEmpty ? attCtx : (body + "\n\n" + attCtx)
+                        } else if !msg.attachments.isEmpty {
+                            let fallback = "[Attached: \(msg.attachments.map(\.name).joined(separator: ", "))]"
+                            body = body.isEmpty ? fallback : (body + "\n\n" + fallback)
+                        }
+                    }
+                    guard !body.isEmpty else { return nil }
+                    return (role: msg.role.rawValue, content: body)
+                }
 
             let simpleChatPrompt: String
             if agent.domain == .science {
@@ -5075,10 +6022,10 @@ struct AIAgentView: View {
             submenu: byokMenu
         ))
         
-        // 3. Local LLM (9Router, LiteLLM, Ollama, LM Studio, MLX)
+        // 3. Local LLM (Multi-Node Active Pool: Ollama, LM Studio, MLX, LAN, Tailscale, QR)
         let localMenu = NSMenu(title: "Local LLM")
         localMenu.autoenablesItems = false
-        let onlineServers = LocalLLMService.shared.detectedServers.filter { $0.isOnline }
+        let onlineServers = LocalLLMService.shared.detectedServers.filter { $0.isOnline && !$0.requiresAuthToUnlock }
         if onlineServers.isEmpty {
             localMenu.addItem(makeActionMenuItem("No Running Local LLM Server Found", enabled: false))
             localMenu.addItem(.separator())
@@ -5092,41 +6039,85 @@ struct AIAgentView: View {
                 appState.showingSettingsDialog = true
             })
         } else {
+            let poolServers = LocalLLMService.shared.connectedServers
+            let totalModelsCount = onlineServers.reduce(0) { $0 + $1.models.count }
+            localMenu.addItem(makeActionMenuItem(
+                "🟢 Active Multi-Node Pool: \(poolServers.count)/\(onlineServers.count) Servers · \(totalModelsCount) Models",
+                enabled: false
+            ))
+            if onlineServers.count > 1 {
+                let isAutoChecked = (currentExecutionMode == .local && appState.aiModel == "auto")
+                localMenu.addItem(makeActionMenuItem(
+                    "⚡ Multi-Node Auto Pool (Load-Balanced Across \(poolServers.count) Servers)",
+                    systemImage: "bolt.horizontal.circle.fill",
+                    checked: isAutoChecked
+                ) {
+                    LocalLLMService.shared.enableAllServersInPool()
+                    switchToNativeMode(mode: "local")
+                    appState.aiProvider = "local"
+                    appState.aiModel = "auto"
+                    LocalLLMService.shared.selectedModelId = "auto"
+                    appState.saveSettings()
+                })
+            }
+            localMenu.addItem(.separator())
+
             for srv in onlineServers {
+                let inPool = LocalLLMService.shared.isServerInActivePool(srv)
+                let inFlight = LocalLLMService.shared.inFlightCount(forEndpoint: srv.endpoint)
+                let hostTag = srv.sourceKind != .thisMac ? srv.hostPortLabel : ":\(srv.port)"
                 let srvMenu = NSMenu(title: srv.displayName)
                 srvMenu.autoenablesItems = false
+                srvMenu.addItem(makeActionMenuItem(
+                    inPool ? "✓ Included in Active Multi-Node Pool" : "Include Server in Multi-Node Pool",
+                    systemImage: inPool ? "checkmark.circle.fill" : "circle",
+                    checked: inPool
+                ) {
+                    LocalLLMService.shared.toggleServerInPool(srv)
+                })
+                srvMenu.addItem(.separator())
                 if srv.models.isEmpty {
                     srvMenu.addItem(makeActionMenuItem("No models loaded on this server", enabled: false))
                 } else {
                     for m in srv.models {
                         let title = (m.size?.isEmpty == false) ? "\(m.displayName) • \(m.size!)" : m.displayName
-                        let isChecked = (currentExecutionMode == .local && appState.aiModel == m.id)
+                        let pinnedId = "\(srv.endpoint)||\(m.id)"
+                        let isChecked = currentExecutionMode == .local && (appState.aiModel == pinnedId || (appState.aiModel == m.id && LocalLLMService.cachedEndpoint == srv.endpoint))
                         srvMenu.addItem(makeActionMenuItem(title, brandKey: srv.type.brandKey, checked: isChecked) {
                             switchToNativeMode(mode: "local")
                             appState.aiProvider = "local"
-                            appState.aiModel = m.id
-                            LocalLLMService.shared.selectedModelId = m.id
+                            let effectiveModelId = onlineServers.count > 1 ? pinnedId : m.id
+                            appState.aiModel = effectiveModelId
+                            LocalLLMService.shared.selectModelAcrossServers(modelId: m.id, endpointHint: srv.endpoint)
                             LocalLLMService.cachedEndpoint = srv.endpoint
                             LocalLLMService.cachedModel = m.id
                             appState.saveSettings()
                         })
                     }
                 }
-                localMenu.addItem(makeSubmenuItem("\(srv.displayName) (\(srv.models.count) models)", brandKey: srv.type.brandKey, submenu: srvMenu))
+                let inFlightSuffix = inFlight > 0 ? " · ⚡\(inFlight) active" : ""
+                let poolPrefix = inPool ? "● " : "○ "
+                localMenu.addItem(makeSubmenuItem(
+                    "\(poolPrefix)\(srv.displayName) [\(hostTag)] (\(srv.models.count) models\(inFlightSuffix))",
+                    brandKey: srv.type.brandKey,
+                    submenu: srvMenu
+                ))
             }
             localMenu.addItem(.separator())
-            localMenu.addItem(makeActionMenuItem("Rescan Local Engines", systemImage: "arrow.clockwise") {
+            localMenu.addItem(makeActionMenuItem("Rescan Local & LAN Engines", systemImage: "arrow.clockwise") {
                 Task {
                     await LocalLLMService.shared.scanForServers()
                     AIModelCatalog.shared.integrateLocalModels()
                 }
             })
-            localMenu.addItem(makeActionMenuItem("Local LLM Settings...", systemImage: "gearshape") {
+            localMenu.addItem(makeActionMenuItem("Connect Multiple Local LLM Servers...", systemImage: "gearshape") {
                 appState.showingSettingsDialog = true
             })
         }
         rootMenu.addItem(makeSubmenuItem(
-            "Local LLM (Ollama, LM Studio, MLX)",
+            onlineServers.count > 1
+                ? "Local LLM Pool (\(onlineServers.count) Connected Servers)"
+                : "Local LLM (Ollama, LM Studio, MLX)",
             brandKey: "local",
             checked: currentExecutionMode == .local,
             submenu: localMenu
@@ -5160,21 +6151,56 @@ struct AIAgentView: View {
             submenu: acpMenu
         ))
         
-        // 5. Dotmini Sovereign AI (Strictly Dotmini's own Omni O1X models — never claim third-party models)
-        let cloudMenu = NSMenu(title: "Dotmini Sovereign AI")
+        // 5. Dotmini Cloud (Token-Metered Subscription + AI Credit Pool — Sovereign Omni O1X + Live Gateway Models)
+        let cloudMenu = NSMenu(title: "Dotmini Cloud")
         cloudMenu.autoenablesItems = false
-        if let omni = AIModelCatalog.shared.provider("omni") {
-            let omniModels = omni.models.filter { $0.id.lowercased().hasPrefix("omni") }
-            for m in omniModels {
-                let isChecked = (currentExecutionMode == .cloud && appState.aiModel == m.id)
-                cloudMenu.addItem(makeActionMenuItem(m.name, brandKey: "microcode", checked: isChecked) {
-                    switchToNativeMode(mode: "cloud")
-                    setModel("omni", m.id)
-                })
-            }
+        let supa = SupabaseAuthService.shared
+        if let activeSession = supa.session {
+            let planUpper = supa.entitlement.plan.isEmpty ? "FREE" : supa.entitlement.plan.uppercased()
+            let quotaSummary = supa.entitlement.isLoaded
+                ? "\(activeSession.email) · \(planUpper) (\(supa.entitlement.formattedAvailableCredit) AI Credit · API +20%)"
+                : "\(activeSession.email) · Syncing AI Credit…"
+            cloudMenu.addItem(makeActionMenuItem(quotaSummary, systemImage: "checkmark.seal.fill", enabled: false))
+        } else {
+            cloudMenu.addItem(makeActionMenuItem("Sign in to Dotmini Cloud…", systemImage: "person.badge.key.fill") {
+                appState.settingsSelectedTab = 9
+                appState.showingSettingsDialog = true
+            })
         }
+        cloudMenu.addItem(.separator())
+        let cloudModels = AIModelCatalog.shared.dotminiCloudModels
+        for m in cloudModels {
+            let baseName = m.badge.isEmpty ? m.name : "\(m.name) [\(m.badge)]"
+            let label = "\(baseName) · \(m.cloudTHBRateSummary)"
+            let brand = m.provider == "omni" ? "microcode" : m.provider
+            let isChecked = (currentExecutionMode == .cloud && appState.aiModel == m.id)
+            cloudMenu.addItem(makeActionMenuItem(label, brandKey: brand, checked: isChecked) {
+                switchToNativeMode(mode: "cloud")
+                appState.aiProvider = m.provider
+                appState.aiModel = m.id
+                UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
+                appState.saveSettings()
+            })
+        }
+        cloudMenu.addItem(.separator())
+        cloudMenu.addItem(makeActionMenuItem("Top Up Cloud AI Credit / Upgrade Plan…", systemImage: "creditcard.fill") {
+            appState.settingsSelectedTab = 9
+            appState.showingSettingsDialog = true
+        })
+        cloudMenu.addItem(makeActionMenuItem("Open Cloud Console (microcode.dotmini.net)…", systemImage: "safari") {
+            NSWorkspace.shared.open(SupabaseAuthService.shared.authenticatedPortalURL(path: "/dashboard"))
+        })
+        let cloudTitle: String = {
+            if supa.session != nil, supa.entitlement.isLoaded {
+                let p = supa.entitlement.plan.isEmpty ? "FREE" : supa.entitlement.plan.uppercased()
+                if p != "FREE" || supa.entitlement.totalAvailableTHB > 0 {
+                    return "Dotmini Cloud (\(p) · \(supa.entitlement.formattedAvailableCredit))"
+                }
+            }
+            return "Dotmini Cloud (Subscription & AI Credit)"
+        }()
         rootMenu.addItem(makeSubmenuItem(
-            "Dotmini Sovereign AI (Omni O1X)",
+            cloudTitle,
             brandKey: "microcode",
             checked: currentExecutionMode == .cloud,
             submenu: cloudMenu
@@ -5414,4 +6440,493 @@ struct AIAgentView: View {
         return "\(count)"
     }
 }
+
+// MARK: - Smart Pasteboard & Drag-Drop Attachment Classifier
+
+private enum PromptPasteboardClassifier {
+    private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+    private static let bitmapImageTypes: [String] = [
+        NSPasteboard.PasteboardType.png.rawValue,
+        NSPasteboard.PasteboardType.tiff.rawValue,
+        "public.jpeg",
+        "public.heic",
+        "public.heif",
+        "org.webmproject.webp",
+        "com.compuserve.gif"
+    ]
+
+    /// Extracts existing local file/folder URLs from modern `public.file-url` and legacy `NSFilenamesPboardType`.
+    /// Note: macOS Finder `⌘C` writes BOTH `public.file-url` AND bare filenames into `public.utf8-plain-text` —
+    /// so checking `extractExistingFileURLs` FIRST guarantees copied PDFs, Code files, Images, and Folders attach immediately.
+    static func extractExistingFileURLs(from pb: NSPasteboard) -> [URL] {
+        let fm = FileManager.default
+        var collected: [URL] = []
+        var seen = Set<String>()
+
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            for url in urls {
+                let path = url.standardizedFileURL.path
+                if !path.isEmpty, fm.fileExists(atPath: path), seen.insert(path).inserted {
+                    collected.append(URL(fileURLWithPath: path))
+                }
+            }
+        }
+
+        if let filenames = pb.propertyList(forType: legacyFilenamesType) as? [String] {
+            for rawPath in filenames {
+                let path = URL(fileURLWithPath: rawPath).standardizedFileURL.path
+                if !path.isEmpty, fm.fileExists(atPath: path), seen.insert(path).inserted {
+                    collected.append(URL(fileURLWithPath: path))
+                }
+            }
+        }
+
+        return collected
+    }
+
+    /// Extracts standalone PDF bytes (e.g. copied page/selection from macOS Preview or Keynote) when no prose text is present.
+    static func extractStandalonePDFData(from pb: NSPasteboard) -> Data? {
+        let plain = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard plain.isEmpty else { return nil }
+        if let data = pb.data(forType: .pdf), !data.isEmpty {
+            return data
+        }
+        let adobePDF = NSPasteboard.PasteboardType("com.adobe.pdf")
+        if let data = pb.data(forType: adobePDF), !data.isEmpty {
+            return data
+        }
+        return nil
+    }
+
+    /// Detects screenshots (`⌃⇧⌘4`), Preview image copies, and Browser "Copy Image" (which may also write a single image URL string).
+    static func hasStandaloneImagePayload(from pb: NSPasteboard) -> Bool {
+        guard pb.canReadItem(withDataConformingToTypes: bitmapImageTypes) else { return false }
+        let plain = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if plain.isEmpty {
+            return true
+        }
+        // Browser "Copy Image" in Chrome/Safari/Arc often puts the single image URL or filename alongside PNG/TIFF data.
+        if !plain.contains("\n") && !plain.contains("\r") {
+            let lower = plain.lowercased()
+            if (lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("data:image/")) && !plain.contains(" ") {
+                return true
+            }
+            let imageExts = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".heif", ".bmp", ".tiff", ".tif", ".svg"]
+            if plain.count <= 180 && !plain.contains("/") && imageExts.contains(where: { lower.hasSuffix($0) }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Detects Finder `⌥⌘C` ("Copy as Pathname") or Terminal copied file paths (`/Users/.../spec.pdf`, `~/src/api.ts`).
+    static func extractExistingFilePathStrings(from pb: NSPasteboard) -> [URL] {
+        guard let raw = pb.string(forType: .string) else { return [] }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 8192 else { return [] }
+
+        let lines = trimmed
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty && lines.count <= 25 else { return [] }
+
+        let fm = FileManager.default
+        var urls: [URL] = []
+        var seen = Set<String>()
+
+        for var line in lines {
+            if (line.hasPrefix("'") && line.hasSuffix("'") && line.count > 2) ||
+               (line.hasPrefix("\"") && line.hasSuffix("\"") && line.count > 2) {
+                line.removeFirst()
+                line.removeLast()
+            } else if line.contains("\\ ") {
+                line = line.replacingOccurrences(of: "\\ ", with: " ")
+            }
+            guard line.hasPrefix("/") || line.hasPrefix("~/") else {
+                return []
+            }
+            let expanded = (line as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: expanded, isDirectory: &isDir), !isDir.boolValue else {
+                return []
+            }
+            let canonical = URL(fileURLWithPath: expanded).standardizedFileURL.path
+            if seen.insert(canonical).inserted {
+                urls.append(URL(fileURLWithPath: canonical))
+            }
+        }
+        return urls
+    }
+
+    static func hasAttachablePayload(_ pb: NSPasteboard, allowPathStrings: Bool) -> Bool {
+        if !extractExistingFileURLs(from: pb).isEmpty { return true }
+        if extractStandalonePDFData(from: pb) != nil { return true }
+        if hasStandaloneImagePayload(from: pb) { return true }
+        if allowPathStrings && !extractExistingFilePathStrings(from: pb).isEmpty { return true }
+        return false
+    }
+}
+
+// MARK: - Native AppKit Auto-Growing & Scrollable Prompt Composer
+
+private final class PromptComposerScrollView: NSScrollView {
+    var onLayoutWidthChanged: (() -> Void)?
+    private var lastContentWidth: CGFloat = 0
+
+    override func layout() {
+        super.layout()
+        let w = contentSize.width
+        if abs(w - lastContentWidth) > 0.5 {
+            lastContentWidth = w
+            onLayoutWidthChanged?()
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if hasVerticalScroller {
+            super.scrollWheel(with: event)
+        } else {
+            nextResponder?.scrollWheel(with: event)
+        }
+    }
+}
+
+private final class PromptComposerTextView: NSTextView {
+    var placeholderString: String = "" {
+        didSet {
+            if oldValue != placeholderString {
+                needsDisplay = true
+            }
+        }
+    }
+    var onSubmit: (() -> Void)?
+    var onPasteboardAttachment: ((NSPasteboard) -> Bool)?
+    var onDropTargetChanged: ((Bool) -> Void)?
+    var onFocusChanged: ((Bool) -> Void)?
+
+    static let supportedDragTypes: [NSPasteboard.PasteboardType] = [
+        .fileURL,
+        NSPasteboard.PasteboardType("NSFilenamesPboardType"),
+        .pdf,
+        NSPasteboard.PasteboardType("com.adobe.pdf"),
+        .png,
+        .tiff,
+        NSPasteboard.PasteboardType("public.jpeg"),
+        NSPasteboard.PasteboardType("public.image"),
+        NSPasteboard.PasteboardType("public.data"),
+        .string
+    ]
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted {
+            onFocusChanged?(true)
+        }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            onFocusChanged?(false)
+        }
+        return resigned
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholderString.isEmpty else { return }
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 13.5),
+            .foregroundColor: NSColor.placeholderTextColor
+        ]
+        let x = textContainerInset.width + (textContainer?.lineFragmentPadding ?? 2)
+        let y = textContainerInset.height
+        let rect = NSRect(x: x, y: y, width: max(0, bounds.width - x * 2), height: max(0, bounds.height - y * 2))
+        (placeholderString as NSString).draw(in: rect, withAttributes: attrs)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let isReturn = (event.keyCode == 36 || event.keyCode == 76)
+        if isReturn && !hasMarkedText() {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if flags.contains(.shift) || flags.contains(.option) {
+                insertNewlineIgnoringFieldEditor(nil)
+                scrollRangeToVisible(selectedRange())
+                return
+            } else {
+                onSubmit?()
+                return
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        if onPasteboardAttachment?(pb) == true {
+            return
+        }
+        super.pasteAsPlainText(sender)
+        scrollRangeToVisible(selectedRange())
+    }
+
+    // Intercept file/PDF/code/image drops directly over the NSTextView so AppKit never dumps filenames as raw text
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if PromptPasteboardClassifier.hasAttachablePayload(sender.draggingPasteboard, allowPathStrings: true) {
+            onDropTargetChanged?(true)
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if PromptPasteboardClassifier.hasAttachablePayload(sender.draggingPasteboard, allowPathStrings: true) {
+            onDropTargetChanged?(true)
+            return .copy
+        }
+        return super.draggingUpdated(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onDropTargetChanged?(false)
+        super.draggingExited(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onDropTargetChanged?(false)
+        if PromptPasteboardClassifier.hasAttachablePayload(sender.draggingPasteboard, allowPathStrings: true) {
+            if onPasteboardAttachment?(sender.draggingPasteboard) == true {
+                return true
+            }
+        }
+        return super.performDragOperation(sender)
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        onDropTargetChanged?(false)
+        super.concludeDragOperation(sender)
+    }
+}
+
+private struct DynamicGrowingPromptEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    @Binding var measuredHeight: CGFloat
+    let placeholder: String
+    let minHeight: CGFloat
+    let maxHeight: CGFloat
+    let onSubmit: () -> Void
+    let onPasteboardAttachment: (NSPasteboard) -> Bool
+    let onDropTargetChanged: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> PromptComposerScrollView {
+        let scrollView = PromptComposerScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = false
+        scrollView.scrollerStyle = .overlay
+
+        let textView = PromptComposerTextView()
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.font = NSFont.systemFont(ofSize: 13.5)
+        textView.textColor = NSColor.labelColor
+        textView.insertionPointColor = NSColor.controlAccentColor
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: minHeight)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainerInset = NSSize(width: 2, height: 3)
+        textView.textContainer?.lineFragmentPadding = 2
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.placeholderString = placeholder
+        textView.registerForDraggedTypes(PromptComposerTextView.supportedDragTypes)
+
+        let coordinator = context.coordinator
+        textView.onSubmit = { [weak coordinator] in
+            coordinator?.parent.onSubmit()
+        }
+        textView.onPasteboardAttachment = { [weak coordinator] pb in
+            coordinator?.parent.onPasteboardAttachment(pb) ?? false
+        }
+        textView.onDropTargetChanged = { [weak coordinator] targeted in
+            DispatchQueue.main.async {
+                coordinator?.parent.onDropTargetChanged(targeted)
+            }
+        }
+        textView.onFocusChanged = { [weak coordinator] focused in
+            guard let coordinator else { return }
+            if coordinator.parent.isFocused != focused {
+                DispatchQueue.main.async {
+                    coordinator.parent.isFocused = focused
+                }
+            }
+        }
+
+        scrollView.documentView = textView
+        scrollView.onLayoutWidthChanged = { [weak coordinator, weak scrollView, weak textView] in
+            guard let coordinator, let scrollView, let textView else { return }
+            coordinator.recalculateHeight(scrollView: scrollView, textView: textView, scrollCursorVisible: false)
+        }
+
+        context.coordinator.scrollView = scrollView
+        context.coordinator.textView = textView
+        textView.string = text
+        context.coordinator.recalculateHeight(scrollView: scrollView, textView: textView, scrollCursorVisible: false)
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: PromptComposerScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let textView = scrollView.documentView as? PromptComposerTextView else { return }
+
+        textView.placeholderString = placeholder
+
+        if textView.string != text {
+            context.coordinator.isUpdatingFromSwiftUI = true
+            let wasEmpty = text.isEmpty
+            textView.string = text
+            textView.needsDisplay = true
+            if wasEmpty {
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+                scrollView.contentView.scroll(to: .zero)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            } else {
+                let end = (text as NSString).length
+                textView.setSelectedRange(NSRange(location: end, length: 0))
+            }
+            context.coordinator.isUpdatingFromSwiftUI = false
+            context.coordinator.recalculateHeight(scrollView: scrollView, textView: textView, scrollCursorVisible: !wasEmpty)
+        } else {
+            context.coordinator.recalculateHeight(scrollView: scrollView, textView: textView, scrollCursorVisible: false)
+        }
+
+        if isFocused,
+           AppState.shared?.showingSettingsDialog != true,
+           let window = scrollView.window,
+           window.attachedSheet == nil,
+           !window.isSheet,
+           window.firstResponder !== textView {
+            DispatchQueue.main.async {
+                if self.isFocused,
+                   AppState.shared?.showingSettingsDialog != true,
+                   let w = scrollView.window,
+                   w.attachedSheet == nil,
+                   !w.isSheet,
+                   w.isKeyWindow,
+                   w.firstResponder !== textView {
+                    w.makeFirstResponder(textView)
+                }
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: DynamicGrowingPromptEditor
+        weak var scrollView: PromptComposerScrollView?
+        weak var textView: PromptComposerTextView?
+        var isUpdatingFromSwiftUI = false
+
+        init(_ parent: DynamicGrowingPromptEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard !isUpdatingFromSwiftUI,
+                  let textView = notification.object as? PromptComposerTextView,
+                  let scrollView = self.scrollView else { return }
+            let newString = textView.string
+            textView.needsDisplay = true
+            if parent.text != newString {
+                parent.text = newString
+            }
+            recalculateHeight(scrollView: scrollView, textView: textView, scrollCursorVisible: true)
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            if !parent.isFocused {
+                DispatchQueue.main.async { self.parent.isFocused = true }
+            }
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            if parent.isFocused {
+                DispatchQueue.main.async { self.parent.isFocused = false }
+            }
+        }
+
+        func recalculateHeight(scrollView: PromptComposerScrollView, textView: PromptComposerTextView, scrollCursorVisible: Bool) {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+
+            let availW = max(80, scrollView.contentSize.width)
+            if abs(textContainer.containerSize.width - availW) > 0.5 {
+                textContainer.containerSize = NSSize(width: availW, height: CGFloat.greatestFiniteMagnitude)
+            }
+
+            let rawHeight: CGFloat
+            if textView.string.isEmpty {
+                rawHeight = parent.minHeight
+            } else {
+                layoutManager.ensureLayout(for: textContainer)
+                var used = layoutManager.usedRect(for: textContainer).height + (textView.textContainerInset.height * 2)
+                if layoutManager.extraLineFragmentTextContainer == nil,
+                   textView.string.hasSuffix("\n"),
+                   let font = textView.font {
+                    used += layoutManager.defaultLineHeight(for: font)
+                }
+                rawHeight = ceil(used)
+            }
+
+            let clampedHeight = min(parent.maxHeight, max(parent.minHeight, rawHeight))
+            let needsVerticalScroll = rawHeight > (parent.maxHeight + 1)
+
+            if scrollView.hasVerticalScroller != needsVerticalScroll {
+                scrollView.hasVerticalScroller = needsVerticalScroll
+                if needsVerticalScroll {
+                    scrollView.flashScrollers()
+                }
+            }
+
+            let docHeight = max(clampedHeight, rawHeight)
+            if abs(textView.frame.height - docHeight) > 0.5 || abs(textView.frame.width - availW) > 0.5 {
+                textView.frame = NSRect(x: 0, y: 0, width: availW, height: docHeight)
+            }
+
+            if scrollCursorVisible && needsVerticalScroll {
+                textView.scrollRangeToVisible(textView.selectedRange())
+            }
+
+            if abs(parent.measuredHeight - clampedHeight) > 0.5 {
+                DispatchQueue.main.async {
+                    if abs(self.parent.measuredHeight - clampedHeight) > 0.5 {
+                        self.parent.measuredHeight = clampedHeight
+                    }
+                }
+            }
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: PromptComposerScrollView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 400, height: measuredHeight)
+    }
+}
+
 

@@ -22,6 +22,7 @@ struct MicroCodeLicenseSettingsView: View {
     @State private var isCheckingOut = false
     @State private var checkoutStatus = ""
     @State private var checkoutVerified = false
+    @State private var customTopupTHB = ""
 
     var body: some View {
         ScrollView {
@@ -171,12 +172,15 @@ struct MicroCodeLicenseSettingsView: View {
 
     private var entitlementCard: some View {
         let activePlan = auth.entitlement.plan.lowercased()
+        let limitTHB = auth.entitlement.creditLimitTHB
+        let remTHB = auth.entitlement.creditRemainingTHB
+        let ratioRemaining: Double = limitTHB > 0 ? min(1.0, max(0.0, remTHB / limitTHB)) : 0
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Cloud Subscription & Entitlement")
+                    Text("Cloud Subscription & Token-Metered AI Credit")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("Verified live from Dotmini Supabase & Beam Payment Gateway (Thai QR PromptPay & Credit/Debit Card).")
+                    Text("Metered per token at Upstream API Cost + \(Int(auth.entitlement.marginPct))% margin (Input / Cached / Output) — never flat-rate.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -196,47 +200,106 @@ struct MicroCodeLicenseSettingsView: View {
             }
             Divider()
             if auth.entitlement.isLoaded {
-                HStack {
-                    metric("AI requests remaining", "\(auth.entitlement.tokensRemaining)")
+                HStack(spacing: 18) {
+                    metric("Total Available AI Credit", auth.entitlement.formattedAvailableCredit)
                     Spacer()
-                    metric("AI requests used", "\(auth.entitlement.tokensUsed)")
+                    metric("Monthly Plan Pool Left", auth.entitlement.formattedPlanCreditSummary)
+                    Spacer()
+                    metric("AI Top-Up Wallet", String(format: "฿%.2f", auth.entitlement.aiTopupBalanceTHB))
+                    Spacer()
+                    metric("Metered Tokens", NumberFormatter.localizedString(from: NSNumber(value: auth.entitlement.totalTokensUsed), number: .decimal))
+                }
+                if limitTHB > 0 {
+                    VStack(alignment: .leading, spacing: 4) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.secondary.opacity(0.16))
+                                Capsule()
+                                    .fill(ratioRemaining > 0.2 ? Color.accentColor : Color.orange)
+                                    .frame(width: max(4, geo.size.width * ratioRemaining))
+                            }
+                        }
+                        .frame(height: 6)
+                        Text(String(format: "Monthly Plan Allowance: ฿%.2f used of ฿%.0f · When monthly credit hits ฿0.00, usage automatically draws from your non-expiring AI Top-Up Wallet.", auth.entitlement.creditUsedTHB, limitTHB))
+                            .font(.system(size: 10.5))
+                            .foregroundColor(.secondary)
+                    }
                 }
             } else {
-                Text(auth.session == nil ? "Sign in to load your entitlement and purchase a subscription." : "Could not load your cloud entitlement. Try Refresh.")
+                Text(auth.session == nil ? "Sign in to load your Cloud AI Credit balance and purchase a subscription." : "Could not load your cloud entitlement. Try Refresh.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             Divider()
-            Text("Upgrade or Subscribe (Instant QR PromptPay / Visa / Mastercard)")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("On-Demand Cloud AI Credit Top-Up (Non-Expiring)")
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Spacer()
+                    Text("AI CREDIT WALLET ONLY · 100% SEPARATE FROM CLOUD GPU WALLET")
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.purple.opacity(0.16)))
+                        .foregroundStyle(.purple)
+                }
+                HStack(spacing: 8) {
+                    aiCreditTopupButton(label: "+ ฿100", planKey: "ai_topup_100")
+                    aiCreditTopupButton(label: "+ ฿300", planKey: "ai_topup_300")
+                    aiCreditTopupButton(label: "+ ฿500", planKey: "ai_topup_500")
+                    aiCreditTopupButton(label: "+ ฿1,000", planKey: "ai_topup_1000")
+                    Spacer()
+                    TextField("Custom ฿ (≥50)", text: $customTopupTHB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 115)
+                    Button("Top Up") {
+                        let amt = Double(customTopupTHB.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                        guard amt >= 50 else {
+                            checkoutVerified = false
+                            checkoutStatus = "กรุณาระบุยอดเติมเครดิต Cloud AI ขั้นต่ำ ฿50"
+                            return
+                        }
+                        Task { await startAITopup(planKey: "ai_topup_custom", customAmountTHB: amt, title: "฿\(Int(amt))") }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(isCheckingOut || auth.session == nil)
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+
+            Divider()
+            Text("Monthly Subscription Plans (Includes Full Monthly THB AI Credit Pool · QR PromptPay / Card)")
                 .font(.system(size: 11.5, weight: .semibold))
 
             HStack(spacing: 10) {
                 subscriptionTierTile(
                     title: "Lite",
                     price: "฿179/mo",
-                    quota: "1,000 reqs/mo",
+                    quota: "฿179 AI Credit Pool",
                     planKey: "microai_lite",
                     isCurrent: activePlan == "lite" || activePlan == "microai_lite"
                 )
                 subscriptionTierTile(
                     title: "Pro",
                     price: "฿529/mo",
-                    quota: "5,000 reqs/mo",
+                    quota: "฿529 AI Credit Pool",
                     planKey: "microai_pro",
                     isCurrent: activePlan == "pro" || activePlan == "microai_pro"
                 )
                 subscriptionTierTile(
                     title: "Advanced",
                     price: "฿990/mo",
-                    quota: "12,000 reqs/mo",
+                    quota: "฿990 AI Credit Pool",
                     planKey: "microai_advanced",
                     isCurrent: activePlan == "advanced" || activePlan == "microai_advanced"
                 )
                 subscriptionTierTile(
                     title: "Bundle Pro",
                     price: "฿1,365/mo",
-                    quota: "15,000 reqs + IDE",
+                    quota: "฿1,365 AI Credit + IDE",
                     planKey: "bundle_pro",
                     isCurrent: activePlan == "bundle_pro" || activePlan == "bundle"
                 )
@@ -258,13 +321,13 @@ struct MicroCodeLicenseSettingsView: View {
                         isCheckingOut = false
                     }
                 } label: {
-                    Label(isCheckingOut ? "Verifying…" : "Verify Payment & Sync Plan", systemImage: "checkmark.seal.fill")
+                    Label(isCheckingOut ? "Verifying…" : "Verify Payment & Sync Credit", systemImage: "checkmark.seal.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isCheckingOut || auth.session == nil)
 
                 Button {
-                    NSWorkspace.shared.open(URL(string: "https://microcode.dotmini.net/subscription")!)
+                    NSWorkspace.shared.open(auth.authenticatedPortalURL(path: "/dashboard"))
                 } label: {
                     Label("Open Subscription Portal", systemImage: "safari")
                 }
@@ -273,6 +336,29 @@ struct MicroCodeLicenseSettingsView: View {
             }
         }
         .cardStyle()
+    }
+
+    private func aiCreditTopupButton(label: String, planKey: String) -> some View {
+        Button(label) {
+            Task { await startAITopup(planKey: planKey, customAmountTHB: nil, title: label) }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(isCheckingOut || auth.session == nil)
+    }
+
+    private func startAITopup(planKey: String, customAmountTHB: Double?, title: String) async {
+        isCheckingOut = true
+        checkoutVerified = false
+        checkoutStatus = "กำลังสร้างลิงก์เติมเครดิต Cloud AI (\(title)) ผ่าน Beam Checkout…"
+        do {
+            let session = try await auth.createAICreditTopupCheckout(planKey: planKey, customAmountTHB: customAmountTHB)
+            checkoutStatus = "เปิดหน้าชำระเงินเติมเครดิต Cloud AI (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment & Sync Credit"
+            NSWorkspace.shared.open(session.checkoutURL)
+        } catch {
+            checkoutStatus = error.localizedDescription
+        }
+        isCheckingOut = false
     }
 
     private func subscriptionTierTile(
@@ -806,28 +892,70 @@ struct MicroCodeLicenseSettingsView: View {
                 }
             }
 
-            if enterprise.isEnterpriseActive {
-                Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Zero Data Retention (ZDR) — Never cache or log prompts on gateway", isOn: $enterprise.zeroDataRetention)
-                        .font(.system(size: 12, weight: .medium))
-                    Toggle("Local DLP Secret Redaction — Strip API keys, PEM keys & .env secrets before sending", isOn: $enterprise.localDLPRedaction)
-                        .font(.system(size: 12, weight: .medium))
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Sovereign DLP, Command Firewall & Policy Engine", systemImage: "lock.shield.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Text("Vaulted: \(AgentPrivacyGuard.vaultedSecretCount)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.green.opacity(0.15)))
+                            .foregroundStyle(.green)
+                        Text("Blocked Cmds: \(enterprise.blockedCommandsCount)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.orange.opacity(0.15)))
+                            .foregroundStyle(.orange)
+                    }
                 }
 
-                HStack {
+                Toggle("Zero Data Retention (ZDR) — Enforce X-Dotmini-ZDR no-training / no-logging header", isOn: $enterprise.zeroDataRetention)
+                    .font(.system(size: 12, weight: .medium))
+                Toggle("Reversible Secret Vault (Bidirectional DLP) — Tokenize secrets (<VAULT_…>) in prompts & restore on disk writes", isOn: $enterprise.localDLPRedaction)
+                    .font(.system(size: 12, weight: .medium))
+                Toggle("Confidential Split-Routing — Route turns accessing .env / *.pem / *.key to Local LLM or Enterprise VPC", isOn: $enterprise.enforceConfidentialSplitRouting)
+                    .font(.system(size: 12, weight: .medium))
+                Toggle("Enterprise Shell Command Firewall — Block destructive commands (rm -rf /, curl | sh, terraform destroy, DROP DATABASE)", isOn: $enterprise.commandFirewallEnabled)
+                    .font(.system(size: 12, weight: .medium))
+                Toggle("Air-Gapped Sovereign Lockdown — Block all public cloud AI calls (Local LLM / Internal VPC only)", isOn: $enterprise.isAirGappedLockdownEnabled)
+                    .font(.system(size: 12, weight: .medium))
+            }
+
+            HStack(spacing: 8) {
+                if enterprise.isEnterpriseActive {
                     Button(enterprise.isVerifying ? "Verifying…" : "Verify Enterprise Connection") {
                         Task { _ = await enterprise.verifyConnection() }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(enterprise.isVerifying)
-
-                    if !enterprise.statusMessage.isEmpty {
-                        Text(enterprise.statusMessage)
-                            .font(.system(size: 11))
-                            .foregroundColor(enterprise.statusMessage.contains("✓") ? .green : .secondary)
-                    }
                 }
+
+                Button {
+                    let wsPath = UserDefaults.standard.string(forKey: "lastOpenedWorkspacePath")
+                    _ = enterprise.exportWorkspacePolicyTemplate(workspacePath: wsPath)
+                } label: {
+                    Label("Generate enterprise-policy.json", systemImage: "doc.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    _ = FlightRecorder.shared.saveComplianceReportWithPanel()
+                } label: {
+                    Label("Export Compliance Report (SOC2 / PDPA)", systemImage: "checkmark.shield")
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if !enterprise.statusMessage.isEmpty {
+                Text(enterprise.statusMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(enterprise.statusMessage.contains("✓") || enterprise.statusMessage.contains("Saved") ? .green : .secondary)
             }
         }
         .cardStyle()

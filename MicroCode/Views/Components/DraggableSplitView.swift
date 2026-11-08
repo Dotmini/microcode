@@ -177,30 +177,30 @@ final class PaneResizeSplitterNSView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let active = isHovered || isDragging
+        guard active else {
+            // Borderless at rest: no permanent vertical line or grey grip pill cluttering the workspace
+            return
+        }
+
         let midX = bounds.midX
         let midY = bounds.midY
 
-        if active {
-            NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
-            bounds.fill()
-        }
+        NSColor.controlAccentColor.withAlphaComponent(0.12).setFill()
+        bounds.fill()
 
-        let lineWidth: CGFloat = active ? 2.0 : 1.0
+        let lineWidth: CGFloat = 1.5
         let lineRect = NSRect(
             x: midX - lineWidth * 0.5,
             y: bounds.minY,
             width: lineWidth,
             height: bounds.height
         )
-        let lineColor = active
-            ? NSColor.controlAccentColor
-            : NSColor.labelColor.withAlphaComponent(0.11)
-        lineColor.setFill()
+        NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
         lineRect.fill()
 
-        if showsGripPill || active {
+        if showsGripPill {
             let pillW: CGFloat = 3.0
-            let pillH: CGFloat = active ? 36.0 : 26.0
+            let pillH: CGFloat = 32.0
             let pillRect = NSRect(
                 x: midX - pillW * 0.5,
                 y: midY - pillH * 0.5,
@@ -208,10 +208,7 @@ final class PaneResizeSplitterNSView: NSView {
                 height: pillH
             )
             let pillPath = NSBezierPath(roundedRect: pillRect, xRadius: 1.5, yRadius: 1.5)
-            let pillColor = active
-                ? NSColor.controlAccentColor
-                : NSColor.secondaryLabelColor.withAlphaComponent(0.36)
-            pillColor.setFill()
+            NSColor.controlAccentColor.setFill()
             pillPath.fill()
         }
     }
@@ -291,14 +288,35 @@ final class PaneResizeSplitterNSView: NSView {
 /// moves the macOS window while `window.isMovableByWindowBackground` stays `false`
 /// (preventing accidental window drags on splitters, editors, and canvases).
 struct WindowDragSpacerView: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        WindowDragHandleNSView()
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    var isEnabled: Bool = true
 
-    private final class WindowDragHandleNSView: NSView {
-        override var mouseDownCanMoveWindow: Bool { true }
+    func makeNSView(context: Context) -> WindowDragHandleNSView {
+        let view = WindowDragHandleNSView()
+        view.isEnabled = isEnabled
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowDragHandleNSView, context: Context) {
+        nsView.isEnabled = isEnabled
+    }
+
+    final class WindowDragHandleNSView: NSView {
+        var isEnabled: Bool = true
+
+        override var mouseDownCanMoveWindow: Bool { isEnabled }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard isEnabled, !isHidden, alphaValue > 0.01, bounds.width > 4, bounds.height > 4 else {
+                return nil
+            }
+            return super.hitTest(point)
+        }
+
         override func mouseDown(with event: NSEvent) {
+            guard isEnabled else {
+                super.mouseDown(with: event)
+                return
+            }
             if event.clickCount == 2 {
                 window?.performZoom(nil)
             } else {

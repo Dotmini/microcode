@@ -22,6 +22,121 @@ public enum AgentPrivacyGuard {
     
     public static let redactionPlaceholder = "[REDACTED_SECRET_FOR_PRIVACY]"
     
+    // MARK: - Enterprise Reversible Secret Vault (Bidirectional DLP)
+    
+    private static let vaultLock = NSLock()
+    private static var secretToToken: [String: String] = [:]
+    private static var tokenToSecret: [String: String] = [:]
+    private static var nextVaultIndex: Int = 1
+    private static var _totalDLPInterceptCount: Int = 0
+    
+    /// Number of unique secrets currently stored in the ephemeral in-memory session vault.
+    public static var vaultedSecretCount: Int {
+        vaultLock.lock()
+        defer { vaultLock.unlock() }
+        return secretToToken.count
+    }
+    
+    /// Total number of secret occurrences intercepted and tokenized during this session.
+    public static var totalDLPInterceptCount: Int {
+        vaultLock.lock()
+        defer { vaultLock.unlock() }
+        return _totalDLPInterceptCount
+    }
+    
+    private static func registerInVault(_ rawSecret: String, ruleTag: String) -> String {
+        vaultLock.lock()
+        defer { vaultLock.unlock() }
+        _totalDLPInterceptCount += 1
+        if let existing = secretToToken[rawSecret] {
+            return existing
+        }
+        let idx = nextVaultIndex
+        nextVaultIndex += 1
+        let shortTag = ruleTag
+            .uppercased()
+            .replacingOccurrences(of: "[^A-Z0-9]+", with: "_", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        let token = "<VAULT_\(shortTag)_\(idx)>"
+        secretToToken[rawSecret] = token
+        tokenToSecret[token] = rawSecret
+        return token
+    }
+    
+    /// Replaces all identified secrets with deterministic session vault tokens (`<VAULT_..._N>`)
+    /// so the LLM never sees raw credentials, while preserving round-trip file editing capability.
+    public static func tokenizeAndVault(_ text: String) -> String {
+        guard !text.isEmpty else { return text }
+        var result = text
+        
+        for p in patterns {
+            let nsString = result as NSString
+            let fullRange = NSRange(location: 0, length: nsString.length)
+            let matches = p.regex.matches(in: result, options: [], range: fullRange)
+            guard !matches.isEmpty else { continue }
+            
+            // Replace in reverse order so character offsets remain valid
+            for match in matches.reversed() {
+                let targetRange: NSRange
+                if (p.name == "Database Credential URI" || p.name == "Hardcoded Credential Assignment"),
+                   match.numberOfRanges > 2,
+                   match.range(at: 2).location != NSNotFound {
+                    targetRange = match.range(at: 2)
+                } else {
+                    targetRange = match.range
+                }
+                
+                guard let swiftRange = Range(targetRange, in: result) else { continue }
+                let secretValue = String(result[swiftRange])
+                // Skip if already tokenized or redacted
+                if secretValue.hasPrefix("<VAULT_") || secretValue.contains(redactionPlaceholder) || secretValue == "[REDACTED_PASSWORD]" {
+                    continue
+                }
+                let token = registerInVault(secretValue, ruleTag: p.name)
+                result.replaceSubrange(swiftRange, with: token)
+            }
+        }
+        
+        return result
+    }
+    
+    /// Restores any `<VAULT_..._N>` tokens back to their original secret strings before writing to local disk.
+    public static func detokenize(_ text: String) -> String {
+        guard !text.isEmpty, text.contains("<VAULT_") else { return text }
+        vaultLock.lock()
+        let snapshot = tokenToSecret
+        vaultLock.unlock()
+        guard !snapshot.isEmpty else { return text }
+        
+        var result = text
+        for (token, secret) in snapshot {
+            if result.contains(token) {
+                result = result.replacingOccurrences(of: token, with: secret)
+            }
+        }
+        return result
+    }
+    
+    /// Recursively detokenizes string values in tool parameter dictionaries before executing local file mutations.
+    public static func detokenizeParams(_ params: [String: Any]) -> [String: Any] {
+        vaultLock.lock()
+        let isEmpty = tokenToSecret.isEmpty
+        vaultLock.unlock()
+        guard !isEmpty else { return params }
+        
+        func restore(_ value: Any) -> Any {
+            if let str = value as? String {
+                return detokenize(str)
+            } else if let arr = value as? [Any] {
+                return arr.map(restore)
+            } else if let dict = value as? [String: Any] {
+                return dict.mapValues(restore)
+            }
+            return value
+        }
+        return params.mapValues(restore)
+    }
+    
     // MARK: - Secret Detection Regex Patterns
     
     private struct SecretPattern {

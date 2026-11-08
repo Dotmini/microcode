@@ -434,9 +434,9 @@ elif [ -f "Package.swift" ]; then
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.39</string>
+    <string>2.5.40</string>
     <key>CFBundleVersion</key>
-    <string>37</string>
+    <string>38</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -445,6 +445,12 @@ elif [ -f "Package.swift" ]; then
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
     <string>MicroCode captures only the Apple Device Hub window you select to display an interactive iOS Simulator beside your chat.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>MicroCode requires camera and video input access to preview and mirror physical iOS devices (iPhone and iPad) connected via USB.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MicroCode uses your microphone for voice commands and live audio preview.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>MicroCode uses on-device Speech Recognition to transcribe your voice commands directly into AI Agent prompts.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>MicroCode discovers and connects to Local LLM servers (LM Studio, Ollama, Apple MLX, vLLM, and MicroCode peers) across your Wi-Fi and LAN network.</string>
     <key>NSBonjourServices</key>
@@ -478,6 +484,47 @@ elif [ -f "Package.swift" ]; then
                 <string>microcode</string>
                 <string>codetuner</string>
             </array>
+        </dict>
+    </array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>MicroCode Portable Agent Capsule</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>AppIcon</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.dotmini.microcode.arx</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>arx</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.dotmini.microcode.arx</string>
+            <key>UTTypeDescription</key>
+            <string>MicroCode Portable Agent Capsule (.arx)</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>arx</string>
+                </array>
+            </dict>
         </dict>
     </array>
 </dict>

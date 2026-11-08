@@ -30,6 +30,7 @@ struct AuthenticEditor: NSViewRepresentable {
         // Create the text system stack manually for full control
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
+        layoutManager.allowsNonContiguousLayout = true
         textStorage.addLayoutManager(layoutManager)
         
         let textContainer = NSTextContainer(size: CGSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude))
@@ -149,9 +150,10 @@ struct AuthenticEditor: NSViewRepresentable {
         // Ghost Text AI Autocomplete
         var ghostManager: GhostTextManager?
         
-        // Performance: Debounce timer + dirty tracking
+        // Performance: Debounce timer + dirty tracking (hash/length avoids full-document String copy)
         private var highlightWorkItem: DispatchWorkItem?
-        private var lastHighlightedText: String = ""
+        private var lastHighlightedHash: Int = 0
+        private var lastHighlightedLength: Int = -1
         private var isHighlighting = false
         
         init(_ parent: AuthenticEditor) {
@@ -211,11 +213,13 @@ struct AuthenticEditor: NSViewRepresentable {
             isHighlighting = true
             defer { isHighlighting = false }
             
-            let text = textView.string
+            let len = textView.textStorage?.length ?? 0
+            let h = textView.string.hashValue
             
             // Skip if nothing changed
-            guard text != lastHighlightedText else { return }
-            lastHighlightedText = text
+            guard len != lastHighlightedLength || h != lastHighlightedHash else { return }
+            lastHighlightedLength = len
+            lastHighlightedHash = h
             
             highlight(textView.textStorage, language: currentLanguage, textView: textView)
         }

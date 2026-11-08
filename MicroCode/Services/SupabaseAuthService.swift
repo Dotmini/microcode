@@ -34,6 +34,8 @@ final class SupabaseAuthService: ObservableObject {
         let anonKey: String
         let redirectURL: String
 
+        static let defaultPublicAnonKey = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJzdXBhYmFzZSIsImlhdCI6MTc4NDExODEyMCwiZXhwIjo0OTM5NzkxNzIwLCJyb2xlIjoiYW5vbiJ9.mYIkNUopKdGqKfEnzV68pXTni670PFd-nuWXjCx174M"
+
         static func load() -> Configuration? {
             var values: [String: Any] = [:]
             if let url = Bundle.main.url(forResource: "Secrets", withExtension: "plist"),
@@ -43,14 +45,9 @@ final class SupabaseAuthService: ObservableObject {
                 let supportSecrets = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
                     .first?.appendingPathComponent("MicroCode/Secrets.plist")
                 if let supportSecrets,
+                   FileManager.default.fileExists(atPath: supportSecrets.path),
                    let secrets = NSDictionary(contentsOf: supportSecrets) as? [String: Any] {
                     values = secrets
-                }
-                let developmentSecrets = URL(fileURLWithPath: #file)
-                    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                    .appendingPathComponent("Secrets.plist")
-                if values.isEmpty {
-                    values = (NSDictionary(contentsOf: developmentSecrets) as? [String: Any]) ?? [:]
                 }
             }
 
@@ -69,7 +66,7 @@ final class SupabaseAuthService: ObservableObject {
                 if !cached.isEmpty { return cached }
                 switch key {
                 case "SUPABASE_URL": return "https://supabase-ai.dotmini.net"
-                case "SUPABASE_ANON_KEY": return ""
+                case "SUPABASE_ANON_KEY": return defaultPublicAnonKey
                 case "SUPABASE_AUTH_REDIRECT_URL": return "microcode://auth/callback"
                 default: return ""
                 }
@@ -123,9 +120,43 @@ final class SupabaseAuthService: ObservableObject {
         let role: String
         let tokensRemaining: Int
         let tokensUsed: Int
+        let creditLimitTHB: Double
+        let creditUsedTHB: Double
+        let creditRemainingTHB: Double
+        let aiTopupBalanceTHB: Double
+        let totalAvailableTHB: Double
+        let marginPct: Double
+        let totalTokensUsed: Int64
         let isLoaded: Bool
 
-        static let unknown = Entitlement(plan: "", role: "", tokensRemaining: 0, tokensUsed: 0, isLoaded: false)
+        var formattedAvailableCredit: String {
+            if role.lowercased() == "admin" && totalAvailableTHB <= 0 {
+                return "ADMIN"
+            }
+            return String(format: "฿%.2f", totalAvailableTHB)
+        }
+
+        var formattedPlanCreditSummary: String {
+            if creditLimitTHB > 0 {
+                return String(format: "฿%.2f / ฿%.0f", creditRemainingTHB, creditLimitTHB)
+            }
+            return String(format: "฿%.2f", creditRemainingTHB)
+        }
+
+        static let unknown = Entitlement(
+            plan: "",
+            role: "",
+            tokensRemaining: 0,
+            tokensUsed: 0,
+            creditLimitTHB: 0,
+            creditUsedTHB: 0,
+            creditRemainingTHB: 0,
+            aiTopupBalanceTHB: 0,
+            totalAvailableTHB: 0,
+            marginPct: 20,
+            totalTokensUsed: 0,
+            isLoaded: false
+        )
     }
 
     private struct PersistedEntitlement: Codable {
@@ -134,6 +165,30 @@ final class SupabaseAuthService: ObservableObject {
         let role: String
         let tokensRemaining: Int
         let tokensUsed: Int
+        let creditLimitTHB: Double?
+        let creditUsedTHB: Double?
+        let creditRemainingTHB: Double?
+        let aiTopupBalanceTHB: Double?
+        let totalAvailableTHB: Double?
+        let marginPct: Double?
+        let totalTokensUsed: Int64?
+    }
+
+    private static func defaultMonthlyPlanCreditTHB(for rawPlan: String) -> Double {
+        let clean = rawPlan.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "microai_", with: "")
+        switch clean {
+        case "starter": return 70
+        case "lite": return 179
+        case "pro": return 529
+        case "advanced": return 990
+        case "professional": return 1015
+        case "bundle_pro", "bundle", "microcode_ai_bundle": return 1365
+        case "business": return 1690
+        case "team": return 3465
+        default: return 0
+        }
     }
 
     enum AuthError: LocalizedError {
@@ -324,36 +379,228 @@ final class SupabaseAuthService: ObservableObject {
     }
 
     func handleCallback(_ url: URL) async -> Bool {
-        guard let pending = pendingOAuth, pending.expires > Date(),
-              url.scheme == pending.redirect.scheme, url.host == pending.redirect.host,
-              url.path == pending.redirect.path, url.fragment == nil,
-              url.port == pending.redirect.port, url.user == nil, url.password == nil,
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let configuration = configurationProvider() else { return false }
-        let items = components.queryItems ?? []
-        let states = items.filter { $0.name == "state" }
-        let codes = items.filter { $0.name == "code" }
-        guard states.count == 1, states.first?.value == pending.state,
-              codes.count == 1, let code = codes.first?.value, !code.isEmpty else { return false }
-        pendingOAuth = nil // one attempt, including failed/replayed exchanges
-        let generation = sessionGeneration
-        var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/token")
-            .appending(queryItems: [URLQueryItem(name: "grant_type", value: "pkce")]))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 20
-        request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["auth_code": code, "code_verifier": pending.verifier])
+        if let pending = pendingOAuth, pending.expires > Date(),
+           url.scheme == pending.redirect.scheme, url.host == pending.redirect.host,
+           url.path == pending.redirect.path, url.fragment == nil,
+           url.port == pending.redirect.port, url.user == nil, url.password == nil,
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let configuration = configurationProvider() {
+            let items = components.queryItems ?? []
+            let states = items.filter { $0.name == "state" }
+            let codes = items.filter { $0.name == "code" }
+            if states.count == 1, states.first?.value == pending.state,
+               codes.count == 1, let code = codes.first?.value, !code.isEmpty {
+                pendingOAuth = nil // one attempt, including failed/replayed exchanges
+                let generation = sessionGeneration
+                var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/token")
+                    .appending(queryItems: [URLQueryItem(name: "grant_type", value: "pkce")]))
+                request.httpMethod = "POST"
+                request.timeoutInterval = 20
+                request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try? JSONSerialization.data(withJSONObject: ["auth_code": code, "code_verifier": pending.verifier])
+                do {
+                    let saved = try await fetchSession(request)
+                    guard generation == sessionGeneration else { return false }
+                    sessionGeneration = UUID()
+                    refreshTask?.cancel()
+                    refreshTask = nil
+                    try persist(saved)
+                    await refreshEntitlement()
+                    await CloudGPUService.shared.refresh()
+                    return true
+                } catch { return false }
+            }
+        }
+
+        // Seamless WebApp -> Desktop IDE deep-link fallback (`microcode://auth?token=...&refresh_token=...` or `#access_token=...`)
+        guard url.scheme?.lowercased() == "microcode",
+              url.host?.lowercased() == "auth" else { return false }
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        var params: [String: String] = [:]
+        for item in components?.queryItems ?? [] {
+            if let v = item.value, !v.isEmpty { params[item.name] = v }
+        }
+        if let fragment = components?.fragment, !fragment.isEmpty {
+            var fragComp = URLComponents()
+            fragComp.query = fragment
+            for item in fragComp.queryItems ?? [] {
+                if let v = item.value, !v.isEmpty { params[item.name] = v }
+            }
+        }
+        let accessToken = (params["access_token"] ?? params["token"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !accessToken.isEmpty else { return false }
+        let refreshToken = (params["refresh_token"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = (params["name"] ?? params["display_name"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let expiresAtEpoch = params["expires_at"].flatMap(TimeInterval.init)
+        return await ingestWebSession(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            expiresAtEpoch: expiresAtEpoch,
+            displayName: displayName
+        )
+    }
+
+    /// Verifies a browser-synced Supabase JWT directly with the self-hosted Supabase Auth server (`auth/v1/user`),
+    /// persists the verified session into Keychain, and refreshes subscription entitlement + Cloud GPU wallet silently.
+    @discardableResult
+    func ingestWebSession(
+        accessToken: String,
+        refreshToken: String = "",
+        expiresAtEpoch: TimeInterval? = nil,
+        displayName: String = ""
+    ) async -> Bool {
+        let cleanAccess = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanAccess.split(separator: ".").count >= 3 else { return false }
+
+        // Skip redundant network round-trip if exact same valid token & loaded entitlement are already active
+        if let current = session,
+           current.accessToken == cleanAccess,
+           !current.userID.isEmpty,
+           (refreshToken.isEmpty || current.refreshToken == refreshToken),
+           entitlement.isLoaded {
+            return true
+        }
+
+        _ = await bootstrapConfiguration()
+        guard let configuration = configurationProvider() ?? Configuration.cached() else { return false }
+
+        var userReq = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/user"))
+        userReq.httpMethod = "GET"
+        userReq.timeoutInterval = 8
+        userReq.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+        userReq.setValue("Bearer \(cleanAccess)", forHTTPHeaderField: "Authorization")
+
+        var verifiedUser: [String: Any]?
+        if let (data, response) = try? await network.data(for: userReq),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let id = obj["id"] as? String, !id.isEmpty {
+            verifiedUser = obj
+        }
+
+        if verifiedUser == nil {
+            let userURL = userReq.url?.absoluteString ?? "https://supabase-ai.dotmini.net/auth/v1/user"
+            let anonKey = configuration.anonKey
+            let fallbackData = await Task.detached(priority: .userInitiated) {
+                Self.curlIPv4JSON(arguments: [
+                    userURL,
+                    "-H", "apikey: \(anonKey)",
+                    "-H", "Authorization: Bearer \(cleanAccess)"
+                ])
+            }.value
+            if let fallbackData,
+               let obj = try? JSONSerialization.jsonObject(with: fallbackData) as? [String: Any],
+               let id = obj["id"] as? String, !id.isEmpty {
+                verifiedUser = obj
+            }
+        }
+
+        guard let verifiedUser,
+              let verifiedUID = verifiedUser["id"] as? String, !verifiedUID.isEmpty else {
+            return false
+        }
+
+        let verifiedEmail = (verifiedUser["email"] as? String) ?? ""
+        let meta = verifiedUser["user_metadata"] as? [String: Any]
+        let resolvedName: String = {
+            if !displayName.isEmpty { return displayName }
+            if let full = meta?["full_name"] as? String, !full.isEmpty { return full }
+            if let name = meta?["name"] as? String, !name.isEmpty { return name }
+            return verifiedEmail.components(separatedBy: "@").first ?? "Developer"
+        }()
+
+        let cleanRefresh: String = {
+            let trimmed = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+            if let existing = session, existing.userID == verifiedUID, !existing.refreshToken.isEmpty {
+                return existing.refreshToken
+            }
+            return ""
+        }()
+
+        let resolvedExpiry: Date = {
+            if let expiresAtEpoch, expiresAtEpoch > 1_000_000_000 {
+                return Date(timeIntervalSince1970: expiresAtEpoch)
+            }
+            if let jwtExp = Self.decodeJWTExpiry(cleanAccess) {
+                return jwtExp
+            }
+            return Date().addingTimeInterval(3600)
+        }()
+
+        let newSession = Session(
+            accessToken: cleanAccess,
+            refreshToken: cleanRefresh,
+            expiresAt: resolvedExpiry,
+            userID: verifiedUID,
+            email: verifiedEmail
+        )
+
         do {
-            let saved = try await fetchSession(request)
-            guard generation == sessionGeneration else { return false }
             sessionGeneration = UUID()
             refreshTask?.cancel()
             refreshTask = nil
-            try persist(saved)
+            try persist(newSession)
             await refreshEntitlement()
+            AuthService.shared.syncWithWebSession(
+                email: verifiedEmail,
+                token: cleanAccess,
+                displayName: resolvedName
+            )
+            AppState.shared?.syncGoogleOrDotminiAccount(
+                email: verifiedEmail,
+                token: cleanAccess,
+                displayName: resolvedName
+            )
+            await CloudGPUService.shared.refresh()
+            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil)
             return true
-        } catch { return false }
+        } catch {
+            return false
+        }
+    }
+
+    private static func decodeJWTExpiry(_ jwt: String) -> Date? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = payload.count % 4
+        if remainder > 0 {
+            payload += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exp = (json["exp"] as? TimeInterval) ?? (json["exp"] as? NSNumber)?.doubleValue else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: exp)
+    }
+
+    /// Builds a secure zero-click WebApp portal URL. When signed in on the Mac, passes session tokens in the URL hash
+    /// fragment (`#mc_handoff=1...`, never sent over HTTP headers or server logs) so the browser signs in automatically.
+    func authenticatedPortalURL(path: String = "/dashboard") -> URL {
+        let cleanPath = path.hasPrefix("/") ? path : "/\(path)"
+        let baseStr = "https://microcode.dotmini.net\(cleanPath)"
+        guard let current = session, !current.accessToken.isEmpty else {
+            return URL(string: baseStr) ?? URL(string: "https://microcode.dotmini.net/dashboard")!
+        }
+        var frag = URLComponents()
+        var items = [
+            URLQueryItem(name: "mc_handoff", value: "1"),
+            URLQueryItem(name: "access_token", value: current.accessToken)
+        ]
+        if !current.refreshToken.isEmpty {
+            items.append(URLQueryItem(name: "refresh_token", value: current.refreshToken))
+        }
+        frag.queryItems = items
+        if let encodedFrag = frag.percentEncodedQuery,
+           let handoffURL = URL(string: "\(baseStr)#\(encodedFrag)") {
+            return handoffURL
+        }
+        return URL(string: baseStr) ?? URL(string: "https://microcode.dotmini.net/dashboard")!
     }
 
     @discardableResult
@@ -407,64 +654,125 @@ final class SupabaseAuthService: ObservableObject {
         guard let configuration = configurationProvider() ?? Configuration.cached(),
               let userID = session?.userID, !userID.isEmpty else { return }
         let token = await refreshAccessTokenIfNeeded() ?? session?.accessToken ?? configuration.anonKey
-        var components = URLComponents(url: configuration.baseURL.appending(path: "rest/v1/users"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            URLQueryItem(name: "select", value: "role,plan,ai_quota,ai_used"),
-            URLQueryItem(name: "id", value: "eq.\(userID)")
-        ]
-        guard let url = components.url else { return }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 4
-        request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         var profile: [String: Any]?
-        if let (data, response) = try? await network.data(for: request),
-           (response as? HTTPURLResponse)?.statusCode == 200,
-           let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-           let first = rows.first {
-            profile = first
-        }
 
-        if profile == nil {
-            let urlStr = url.absoluteString
-            let anonKey = configuration.anonKey
-            let fallbackData = await Task.detached(priority: .userInitiated) {
-                Self.curlIPv4JSON(arguments: [
-                    urlStr,
-                    "-H", "apikey: \(anonKey)",
-                    "-H", "Authorization: Bearer \(token)"
-                ])
-            }.value
-            if let fallbackData,
-               let rows = try? JSONSerialization.jsonObject(with: fallbackData) as? [[String: Any]],
-               let first = rows.first {
-                profile = first
-            }
-        }
-
-        if profile == nil, let jwt = session?.accessToken, !jwt.isEmpty {
+        // 1. Primary canonical ledger: Dotmini Cloud subscription & Beam payment gateway (`/api/subscription/status`)
+        if let jwt = session?.accessToken, !jwt.isEmpty {
             let emailParam = (session?.email ?? "").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             let uidParam = userID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-            let statusURL = "https://microcode.dotmini.net/api/subscription/status?uid=\(uidParam)&email=\(emailParam)"
-            let statusData = await Task.detached(priority: .userInitiated) {
-                Self.curlIPv4JSON(arguments: [
-                    statusURL,
-                    "-H", "Authorization: Bearer \(jwt)"
-                ])
-            }.value
-            if let statusData,
-               let statusObj = try? JSONSerialization.jsonObject(with: statusData) as? [String: Any],
-               let statusPlan = statusObj["plan"] as? String {
+            let statusURLString = "https://microcode.dotmini.net/api/subscription/status?uid=\(uidParam)&email=\(emailParam)"
+
+            var statusObj: [String: Any]?
+            if let statusURL = URL(string: statusURLString) {
+                var statusReq = URLRequest(url: statusURL, timeoutInterval: 5)
+                statusReq.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+                statusReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                if let (data, resp) = try? await network.data(for: statusReq),
+                   (resp as? HTTPURLResponse)?.statusCode == 200,
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    statusObj = obj
+                }
+            }
+            if statusObj == nil {
+                let fallbackStatus = await Task.detached(priority: .userInitiated) {
+                    Self.curlIPv4JSON(arguments: [
+                        statusURLString,
+                        "-H", "Authorization: Bearer \(jwt)"
+                    ])
+                }.value
+                if let fallbackStatus,
+                   let obj = try? JSONSerialization.jsonObject(with: fallbackStatus) as? [String: Any] {
+                    statusObj = obj
+                }
+            }
+            if let statusObj, let statusPlan = statusObj["plan"] as? String {
                 let statusRole = (statusObj["role"] as? String) ?? "user"
                 let statusQuota = (statusObj["ai_quota"] as? Int) ?? (statusObj["ai_quota"] as? NSNumber)?.intValue ?? 0
                 let statusUsed = (statusObj["ai_used"] as? Int) ?? (statusObj["ai_used"] as? NSNumber)?.intValue ?? 0
-                profile = [
+                var merged: [String: Any] = [
                     "role": statusRole,
                     "plan": statusPlan,
                     "ai_quota": statusQuota,
                     "ai_used": statusUsed
                 ]
+                for key in [
+                    "ai_credit_limit_thb",
+                    "ai_credit_used_thb",
+                    "ai_credit_remaining_thb",
+                    "ai_topup_balance_thb",
+                    "ai_total_available_thb",
+                    "ai_margin_pct",
+                    "ai_total_tokens",
+                    "billing_mode"
+                ] {
+                    if let val = statusObj[key] {
+                        merged[key] = val
+                    }
+                }
+                profile = merged
+            }
+        }
+
+        // 2. Secondary fallback / merge: Self-hosted Supabase `public.users`
+        var components = URLComponents(url: configuration.baseURL.appending(path: "rest/v1/users"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "select", value: "role,plan,ai_quota,ai_used"),
+            URLQueryItem(name: "id", value: "eq.\(userID)")
+        ]
+        if let url = components.url {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 4
+            request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+            var supaRow: [String: Any]?
+            if let (data, response) = try? await network.data(for: request),
+               (response as? HTTPURLResponse)?.statusCode == 200,
+               let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+               let first = rows.first {
+                supaRow = first
+            } else if profile == nil {
+                let urlStr = url.absoluteString
+                let anonKey = configuration.anonKey
+                let fallbackData = await Task.detached(priority: .userInitiated) {
+                    Self.curlIPv4JSON(arguments: [
+                        urlStr,
+                        "-H", "apikey: \(anonKey)",
+                        "-H", "Authorization: Bearer \(token)"
+                    ])
+                }.value
+                if let fallbackData,
+                   let rows = try? JSONSerialization.jsonObject(with: fallbackData) as? [[String: Any]],
+                   let first = rows.first {
+                    supaRow = first
+                }
+            }
+
+            if let supaRow {
+                if var existing = profile {
+                    let existingPlan = ((existing["plan"] as? String) ?? "").lowercased()
+                    let supaPlan = ((supaRow["plan"] as? String) ?? "").lowercased()
+                    if (existingPlan.isEmpty || existingPlan == "free") && !supaPlan.isEmpty && supaPlan != "free" {
+                        existing["plan"] = supaRow["plan"]
+                    }
+                    let existingRole = ((existing["role"] as? String) ?? "").lowercased()
+                    let supaRole = ((supaRow["role"] as? String) ?? "").lowercased()
+                    if existingRole != "admin" && supaRole == "admin" {
+                        existing["role"] = supaRow["role"]
+                    }
+                    let existingQuota = (existing["ai_quota"] as? Int) ?? (existing["ai_quota"] as? NSNumber)?.intValue ?? 0
+                    let supaQuota = (supaRow["ai_quota"] as? Int) ?? (supaRow["ai_quota"] as? NSNumber)?.intValue ?? 0
+                    if supaQuota > existingQuota {
+                        existing["ai_quota"] = supaQuota
+                    }
+                    let existingUsed = (existing["ai_used"] as? Int) ?? (existing["ai_used"] as? NSNumber)?.intValue ?? 0
+                    let supaUsed = (supaRow["ai_used"] as? Int) ?? (supaRow["ai_used"] as? NSNumber)?.intValue ?? 0
+                    existing["ai_used"] = max(existingUsed, supaUsed)
+                    profile = existing
+                } else {
+                    profile = supaRow
+                }
             }
         }
 
@@ -486,12 +794,25 @@ final class SupabaseAuthService: ObservableObject {
                 let syncedPlan = (dataObj["plan"] as? String) ?? (verifiedRole == "admin" ? "advanced" : "free")
                 let syncedQuota = (dataObj["ai_quota"] as? Int) ?? (dataObj["ai_quota"] as? NSNumber)?.intValue ?? (verifiedRole == "admin" ? 12000 : 50)
                 let syncedUsed = (dataObj["ai_used"] as? Int) ?? (dataObj["ai_used"] as? NSNumber)?.intValue ?? 0
-                profile = [
+                var syncedProfile: [String: Any] = [
                     "role": verifiedRole,
                     "plan": syncedPlan,
                     "ai_quota": syncedQuota,
                     "ai_used": syncedUsed
                 ]
+                for key in [
+                    "ai_credit_limit_thb",
+                    "ai_credit_used_thb",
+                    "ai_credit_remaining_thb",
+                    "ai_topup_balance_thb",
+                    "ai_total_available_thb",
+                    "ai_total_tokens"
+                ] {
+                    if let val = dataObj[key] {
+                        syncedProfile[key] = val
+                    }
+                }
+                profile = syncedProfile
             }
         }
 
@@ -502,13 +823,56 @@ final class SupabaseAuthService: ObservableObject {
             return
         }
         guard session?.userID == userID, session != nil else { return }
+        let resolvedPlanStr = (profile["plan"] as? String) ?? ""
+        let resolvedRoleStr = (profile["role"] as? String) ?? ""
         let quota = max(0, (profile["ai_quota"] as? Int) ?? (profile["ai_quota"] as? NSNumber)?.intValue ?? 0)
         let used = max(0, (profile["ai_used"] as? Int) ?? (profile["ai_used"] as? NSNumber)?.intValue ?? 0)
+
+        func doubleVal(_ key: String) -> Double? {
+            if let d = profile[key] as? Double { return d }
+            if let n = profile[key] as? NSNumber { return n.doubleValue }
+            return nil
+        }
+
+        let hasServerMetered = (profile["billing_mode"] as? String) == "metered_credit_pool"
+            || profile["ai_credit_limit_thb"] != nil
+            || profile["ai_total_available_thb"] != nil
+
+        var creditLimit = max(0, doubleVal("ai_credit_limit_thb") ?? 0)
+        var creditUsed = max(0, doubleVal("ai_credit_used_thb") ?? 0)
+        var creditRemaining = max(0, doubleVal("ai_credit_remaining_thb") ?? max(0, creditLimit - creditUsed))
+        let topupBalance = max(0, doubleVal("ai_topup_balance_thb") ?? 0)
+        let marginPct = doubleVal("ai_margin_pct") ?? 20.0
+        let totalTokens = (profile["ai_total_tokens"] as? Int64)
+            ?? (profile["ai_total_tokens"] as? NSNumber)?.int64Value
+            ?? 0
+
+        if !hasServerMetered && creditLimit == 0 {
+            let fallbackPool = Self.defaultMonthlyPlanCreditTHB(for: resolvedPlanStr)
+            if fallbackPool > 0 {
+                creditLimit = fallbackPool
+                if quota > 0 && quota < 900_000 && used > 0 {
+                    let ratio = min(1.0, Double(used) / Double(quota))
+                    creditUsed = (fallbackPool * ratio * 100).rounded() / 100
+                }
+                creditRemaining = max(0, creditLimit - creditUsed)
+            }
+        }
+
+        let totalAvailable = max(0, doubleVal("ai_total_available_thb") ?? (creditRemaining + topupBalance))
+
         let newEntitlement = Entitlement(
-            plan: profile["plan"] as? String ?? "",
-            role: profile["role"] as? String ?? "",
+            plan: resolvedPlanStr,
+            role: resolvedRoleStr,
             tokensRemaining: max(0, quota - used),
             tokensUsed: used,
+            creditLimitTHB: creditLimit,
+            creditUsedTHB: creditUsed,
+            creditRemainingTHB: creditRemaining,
+            aiTopupBalanceTHB: topupBalance,
+            totalAvailableTHB: totalAvailable,
+            marginPct: marginPct,
+            totalTokensUsed: totalTokens,
             isLoaded: true
         )
         entitlement = newEntitlement
@@ -517,7 +881,14 @@ final class SupabaseAuthService: ObservableObject {
             plan: newEntitlement.plan,
             role: newEntitlement.role,
             tokensRemaining: newEntitlement.tokensRemaining,
-            tokensUsed: newEntitlement.tokensUsed
+            tokensUsed: newEntitlement.tokensUsed,
+            creditLimitTHB: newEntitlement.creditLimitTHB,
+            creditUsedTHB: newEntitlement.creditUsedTHB,
+            creditRemainingTHB: newEntitlement.creditRemainingTHB,
+            aiTopupBalanceTHB: newEntitlement.aiTopupBalanceTHB,
+            totalAvailableTHB: newEntitlement.totalAvailableTHB,
+            marginPct: newEntitlement.marginPct,
+            totalTokensUsed: newEntitlement.totalTokensUsed
         )
         if let data = try? JSONEncoder().encode(persisted),
            let encoded = String(data: data, encoding: .utf8) {
@@ -538,13 +909,14 @@ final class SupabaseAuthService: ObservableObject {
     func createSubscriptionCheckout(
         plan: String,
         billingInterval: String = "monthly",
-        paymentMethod: String = "promptpay"
+        paymentMethod: String = "promptpay",
+        customAmountTHB: Double? = nil
     ) async throws -> CheckoutSessionResult {
         guard let currentSession = session else {
-            throw AuthError.rejected("กรุณาเข้าสู่ระบบบัญชี MicroCode ก่อนทำการสมัครแพ็กเกจ")
+            throw AuthError.rejected("กรุณาเข้าสู่ระบบบัญชี MicroCode ก่อนทำการสมัครแพ็กเกจหรือเติมเครดิต")
         }
         let jwt = await refreshAccessTokenIfNeeded() ?? currentSession.accessToken
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "plan": plan,
             "uid": currentSession.userID,
             "email": currentSession.email,
@@ -553,6 +925,9 @@ final class SupabaseAuthService: ObservableObject {
             "paymentMethod": paymentMethod,
             "seats": 1
         ]
+        if let customAmountTHB, customAmountTHB > 0 {
+            payload["amountTHB"] = customAmountTHB
+        }
         let bodyData = try JSONSerialization.data(withJSONObject: payload)
         let bodyStr = String(data: bodyData, encoding: .utf8) ?? "{}"
 
@@ -593,12 +968,27 @@ final class SupabaseAuthService: ObservableObject {
         )
     }
 
+    /// Creates an isolated Cloud AI Credit Top-Up session (`ai_topup_100`..`ai_topup_2000` or `ai_topup_custom`).
+    /// Strictly separated from the Cloud GPU Compute Wallet (`gpu_wallets`).
+    func createAICreditTopupCheckout(
+        planKey: String,
+        customAmountTHB: Double? = nil,
+        paymentMethod: String = "promptpay"
+    ) async throws -> CheckoutSessionResult {
+        try await createSubscriptionCheckout(
+            plan: planKey,
+            billingInterval: "monthly",
+            paymentMethod: paymentMethod,
+            customAmountTHB: customAmountTHB
+        )
+    }
+
     func verifyLatestPayment() async -> (verified: Bool, message: String, checkoutURL: URL?) {
         let orderRef = defaults.string(forKey: "microcode.lastOrderRef") ?? ""
         let paymentLinkID = defaults.string(forKey: "microcode.lastPaymentLinkID") ?? ""
         if orderRef.isEmpty && paymentLinkID.isEmpty {
             await refreshEntitlement()
-            return (false, "ซิงค์สิทธิ์แพ็กเกจจากเซิร์ฟเวอร์เรียบร้อยแล้ว (Plan: \(entitlement.plan.isEmpty ? "free" : entitlement.plan.uppercased()))", nil)
+            return (false, "ซิงค์สิทธิ์แพ็กเกจและเครดิต Cloud AI เรียบร้อยแล้ว (Plan: \(entitlement.plan.isEmpty ? "FREE" : entitlement.plan.uppercased()) · พร้อมใช้ \(entitlement.formattedAvailableCredit))", nil)
         }
         let jwt = await refreshAccessTokenIfNeeded() ?? session?.accessToken ?? ""
         let payload: [String: Any] = [
@@ -628,8 +1018,12 @@ final class SupabaseAuthService: ObservableObject {
         let isVerified = (json["verified"] as? Bool) ?? false
         if isVerified {
             await refreshEntitlement()
+            let isAITopup = (json["isAICreditTopup"] as? Bool) ?? ((json["plan"] as? String) == "ai_credit_topup")
+            if isAITopup {
+                return (true, "เติมเครดิต Cloud AI สำเร็จ! เครดิตพร้อมใช้งานรวม \(entitlement.formattedAvailableCredit) (AI Top-Up: \(String(format: "฿%.2f", entitlement.aiTopupBalanceTHB)))", nil)
+            }
             let planName = (json["displayName"] as? String) ?? (json["plan"] as? String) ?? entitlement.plan
-            return (true, "ชำระเงินสำเร็จ! เปิดใช้งานแพ็กเกจ \(planName.uppercased()) เรียบร้อยแล้ว", nil)
+            return (true, "ชำระเงินสำเร็จ! เปิดใช้งาน \(planName) เรียบร้อยแล้ว (เครดิตพร้อมใช้ \(entitlement.formattedAvailableCredit))", nil)
         } else {
             let msg = (json["message"] as? String) ?? "รายการชำระเงินยังรอดำเนินการ (สถานะ: \((json["status"] as? String) ?? "PENDING"))"
             let resumeURL = (json["checkoutUrl"] as? String).flatMap { URL(string: $0) }
@@ -749,11 +1143,24 @@ final class SupabaseAuthService: ObservableObject {
                let entData = entEncoded.data(using: .utf8),
                let persisted = try? JSONDecoder().decode(PersistedEntitlement.self, from: entData),
                persisted.userID == restored.userID {
+                let fallbackLimit = Self.defaultMonthlyPlanCreditTHB(for: persisted.plan)
+                let lim = persisted.creditLimitTHB ?? fallbackLimit
+                let usedTHB = persisted.creditUsedTHB ?? 0
+                let remTHB = persisted.creditRemainingTHB ?? max(0, lim - usedTHB)
+                let topupTHB = persisted.aiTopupBalanceTHB ?? 0
+                let availTHB = persisted.totalAvailableTHB ?? (remTHB + topupTHB)
                 entitlement = Entitlement(
                     plan: persisted.plan,
                     role: persisted.role,
                     tokensRemaining: persisted.tokensRemaining,
                     tokensUsed: persisted.tokensUsed,
+                    creditLimitTHB: lim,
+                    creditUsedTHB: usedTHB,
+                    creditRemainingTHB: remTHB,
+                    aiTopupBalanceTHB: topupTHB,
+                    totalAvailableTHB: availTHB,
+                    marginPct: persisted.marginPct ?? 20,
+                    totalTokensUsed: persisted.totalTokensUsed ?? 0,
                     isLoaded: true
                 )
             }

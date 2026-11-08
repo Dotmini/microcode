@@ -9,6 +9,7 @@
 
 import Foundation
 import AppKit
+import ImageIO
 import Vision
 import CoreImage
 
@@ -26,83 +27,128 @@ public struct VisionAnalysisResult {
 
 // MARK: - Apple Vision Engine
 
-@MainActor
-public final class AppleVisionEngine {
+public final class AppleVisionEngine: @unchecked Sendable {
     public static let shared = AppleVisionEngine()
     
     private init() {}
     
-    /// Analyzes an image data payload using Apple Neural Engine Vision & OCR
-    public func analyzeImage(data: Data, filename: String = "image.png") async -> VisionAnalysisResult {
-        guard let nsImage = NSImage(data: data),
-              let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return VisionAnalysisResult(
-                filename: filename,
-                dimensions: .zero,
-                extractedText: "",
-                recognizedLines: [],
-                detectedElements: [],
-                isCodeOrTerminal: false,
-                formattedSummary: "[Image: \(filename)] (Unable to decode image bitmap)"
-            )
+    /// Thread-safe CGImage decoder that avoids @MainActor NSImage contention.
+    private static func decodeCGImage(from data: Data) -> CGImage? {
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        if let src = CGImageSourceCreateWithData(data as CFData, options as CFDictionary),
+           let cg = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary) {
+            return cg
         }
-        
-        let width = CGFloat(cgImage.width)
-        let height = CGFloat(cgImage.height)
-        let dimensions = CGSize(width: width, height: height)
-        
+        if let rep = NSBitmapImageRep(data: data), let cg = rep.cgImage {
+            return cg
+        }
+        return nil
+    }
+
+    /// Analyzes an image data payload using Apple Neural Engine Vision & OCR off the MainActor.
+    public func analyzeImage(
+        data: Data,
+        filename: String = "image.png",
+        fastPreview: Bool = false,
+        includeSceneClassification: Bool = false
+    ) async -> VisionAnalysisResult {
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                guard let cgImage = Self.decodeCGImage(from: data) else {
+                    continuation.resume(returning: VisionAnalysisResult(
+                        filename: filename,
+                        dimensions: .zero,
+                        extractedText: "",
+                        recognizedLines: [],
+                        detectedElements: [],
+                        isCodeOrTerminal: false,
+                        formattedSummary: "[Image: \(filename)] (Unable to decode image bitmap)"
+                    ))
+                    return
+                }
+                
+                let width = CGFloat(cgImage.width)
+                let height = CGFloat(cgImage.height)
+                let dimensions = CGSize(width: width, height: height)
                 var recognizedLines: [String] = []
                 var detectedElements: [String] = []
                 
                 // 1. Text & Code OCR Recognition Request
-                let textRequest = VNRecognizeTextRequest { request, error in
-                    guard let observations = request.results as? [VNRecognizedTextObservation], error == nil else {
-                        return
-                    }
-                    
+                func extractLines(from request: VNRecognizeTextRequest) -> [String] {
+                    guard let observations = request.results else { return [] }
+                    var lines: [String] = []
+                    lines.reserveCapacity(observations.count)
                     for observation in observations {
                         if let topCandidate = observation.topCandidates(1).first {
                             let text = topCandidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
                             if !text.isEmpty {
-                                recognizedLines.append(text)
+                                lines.append(text)
                             }
                         }
                     }
+                    return lines
                 }
-                
-                textRequest.recognitionLevel = .accurate
-                textRequest.usesCPUOnly = false // Use Apple Silicon Neural Engine (ANE)
-                textRequest.recognitionLanguages = ["en-US", "th-TH", "zh-Hans", "ja-JP"]
-                
-                // 2. Rectangle / UI Box Detection Request
-                let rectRequest = VNDetectRectanglesRequest { request, error in
-                    guard let observations = request.results as? [VNRectangleObservation], error == nil else {
-                        return
-                    }
-                    if observations.count > 0 {
-                        detectedElements.append("\(observations.count) UI containers/panels detected")
-                    }
-                }
-                rectRequest.minimumConfidence = 0.6
-                
-                // 3. Image Classification / Scene Understanding Request
-                let classifyRequest = VNClassifyImageRequest { request, error in
-                    guard let observations = request.results as? [VNClassificationObservation], error == nil else {
-                        return
-                    }
-                    let topClasses = observations.prefix(3)
-                        .filter { $0.confidence > 0.4 }
-                        .map { "\($0.identifier) (\(Int($0.confidence * 100))%)" }
-                    if !topClasses.isEmpty {
-                        detectedElements.append("Scene context: " + topClasses.joined(separator: ", "))
-                    }
-                }
-                
-                // Execute Vision Pipeline
+
                 let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-                try? handler.perform([textRequest, rectRequest, classifyRequest])
+
+                let primaryTextReq = VNRecognizeTextRequest()
+                primaryTextReq.recognitionLevel = fastPreview ? .fast : .accurate
+                if !fastPreview {
+                    if #available(macOS 13.0, *) {
+                        primaryTextReq.automaticallyDetectsLanguage = true
+                    }
+                    primaryTextReq.recognitionLanguages = ["th-TH", "en-US", "zh-Hans", "ja-JP"]
+                } else {
+                    primaryTextReq.recognitionLanguages = ["en-US"]
+                }
+                do {
+                    try handler.perform([primaryTextReq])
+                    recognizedLines = extractLines(from: primaryTextReq)
+                } catch {
+                    // Fallback when Apple Neural Engine e5rt is restricted (e.g. headless CI, VM, or sandboxed process)
+                    let fallbackFastReq = VNRecognizeTextRequest()
+                    fallbackFastReq.recognitionLevel = .fast
+                    fallbackFastReq.recognitionLanguages = ["en-US"]
+                    if (try? handler.perform([fallbackFastReq])) != nil {
+                        recognizedLines = extractLines(from: fallbackFastReq)
+                    }
+                    if recognizedLines.isEmpty && !fastPreview {
+                        let legacyReq = VNRecognizeTextRequest()
+                        legacyReq.revision = 2
+                        legacyReq.recognitionLevel = .accurate
+                        if (try? handler.perform([legacyReq])) != nil {
+                            recognizedLines = extractLines(from: legacyReq)
+                        }
+                    }
+                }
+
+                if includeSceneClassification {
+                    // 2. Optional Rectangle / UI Box Detection Request
+                    let rectRequest = VNDetectRectanglesRequest { request, error in
+                        guard let observations = request.results as? [VNRectangleObservation], error == nil else {
+                            return
+                        }
+                        if observations.count > 0 {
+                            detectedElements.append("\(observations.count) UI containers/panels detected")
+                        }
+                    }
+                    rectRequest.minimumConfidence = 0.6
+                    try? handler.perform([rectRequest])
+
+                    // 3. Optional Image Classification / Scene Understanding Request
+                    let classifyRequest = VNClassifyImageRequest { request, error in
+                        guard let observations = request.results as? [VNClassificationObservation], error == nil else {
+                            return
+                        }
+                        let topClasses = observations.prefix(3)
+                            .filter { $0.confidence > 0.4 }
+                            .map { "\($0.identifier) (\(Int($0.confidence * 100))%)" }
+                        if !topClasses.isEmpty {
+                            detectedElements.append("Scene context: " + topClasses.joined(separator: ", "))
+                        }
+                    }
+                    try? handler.perform([classifyRequest])
+                }
                 
                 let extractedText = recognizedLines.joined(separator: "\n")
                 

@@ -251,11 +251,12 @@ struct NotebookInlineDataGridStudio: View {
                 columnStatsBody
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(isDark ? 0.032 : 0.02))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(isDark ? 0.12 : 0.09), lineWidth: 0.8)
+                .strokeBorder(Color.primary.opacity(isDark ? 0.12 : 0.09), lineWidth: 0.8)
         )
         .onAppear {
             if xColumn.isEmpty {
@@ -268,20 +269,24 @@ struct NotebookInlineDataGridStudio: View {
     }
 
     private var headerBar: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
             HStack(spacing: 4) {
                 Image(systemName: "tablecells.fill")
                     .font(.system(size: 10))
                     .foregroundColor(.accentColor)
                 Text(payload.variableName)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                Text("· \(payload.totalRows) × \(payload.totalCols)")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text("· \(payload.totalRows)×\(payload.totalCols)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
             }
-            .fixedSize()
+            .layoutPriority(1)
 
-            // Tab switcher (always untruncated)
+            // Tab switcher
             HStack(spacing: 2) {
                 ForEach([Tab.table, .chart, .stats], id: \.rawValue) { t in
                     let sel = activeTab == t
@@ -291,7 +296,7 @@ struct NotebookInlineDataGridStudio: View {
                             .foregroundColor(sel ? .primary : .secondary)
                             .lineLimit(1)
                             .fixedSize()
-                            .padding(.horizontal, 6.5)
+                            .padding(.horizontal, 6)
                             .padding(.vertical, 2.5)
                             .background(sel ? Color.primary.opacity(isDark ? 0.13 : 0.09) : Color.clear)
                             .cornerRadius(4)
@@ -306,30 +311,34 @@ struct NotebookInlineDataGridStudio: View {
             .fixedSize()
 
             if activeTab == .table {
-                HStack(spacing: 4) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(.secondary)
-                    TextField("Filter…", text: $filterText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 10.5))
-                        .frame(minWidth: 42, maxWidth: 105)
-                    if !filterText.isEmpty {
-                        Button(action: { filterText = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 9.5))
-                                .foregroundColor(.secondary)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 9.5))
+                            .foregroundColor(.secondary)
+                        TextField("Filter…", text: $filterText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 10.5))
+                            .frame(minWidth: 36, maxWidth: 96)
+                        if !filterText.isEmpty {
+                            Button(action: { filterText = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 9.5))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
+                    .padding(.horizontal, 6)
+                    .frame(height: 20)
+                    .background(Color.primary.opacity(isDark ? 0.05 : 0.035))
+                    .cornerRadius(4.5)
+
+                    EmptyView()
                 }
-                .padding(.horizontal, 6)
-                .frame(height: 20)
-                .background(Color.primary.opacity(isDark ? 0.05 : 0.035))
-                .cornerRadius(4.5)
             }
 
-            Spacer(minLength: 3)
+            Spacer(minLength: 2)
 
             if let onCreateSQLQueryCell, let csvPath = payload.csvExportPath {
                 Button(action: {
@@ -351,7 +360,7 @@ struct NotebookInlineDataGridStudio: View {
                             .lineLimit(1)
                     }
                     .foregroundColor(.cyan)
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 5.5)
                     .frame(height: 20)
                     .background(Color.cyan.opacity(0.11))
                     .cornerRadius(4)
@@ -370,7 +379,7 @@ struct NotebookInlineDataGridStudio: View {
                         .lineLimit(1)
                 }
                 .foregroundColor(copiedCSV ? .green : .secondary)
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 5.5)
                 .frame(height: 20)
                 .background(Color.primary.opacity(isDark ? 0.055 : 0.04))
                 .cornerRadius(4)
@@ -392,7 +401,9 @@ struct NotebookInlineDataGridStudio: View {
             .help("Save DataFrame as CSV…")
         }
         .padding(.horizontal, 9)
+        .frame(maxWidth: .infinity)
         .frame(height: 29)
+        .clipped()
     }
 
     private var gridBody: some View {
@@ -489,7 +500,8 @@ struct NotebookInlineDataGridStudio: View {
                 }
             }
         }
-        .frame(maxHeight: 255)
+        .frame(maxWidth: .infinity)
+        .frame(height: min(255, CGFloat(34 + max(1, min(rows.count, 9)) * 23)))
     }
 
     // MARK: - Native Retina Vector Chart Studio
@@ -1017,56 +1029,58 @@ struct RichMarkdownCellView: View {
 
     @State private var isEditing: Bool = false
 
-    private enum Block {
-        case heading(level: Int, text: String)
-        case math(expr: String)
-        case code(lang: String, body: String)
-        case callout(kind: String, body: String)
-        case bullet(text: String)
-        case table(headers: [String], rows: [[String]])
-        case divider
-        case paragraph(text: String)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if isEditing && !forceRenderedOnly {
                 HStack {
-                    Text("Editing Markdown & LaTeX Math")
-                        .font(.system(size: 10, weight: .medium))
+                    Text("Editing Markdown & LaTeX Math ($...$ / $$...$$)")
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundColor(.secondary)
                     Spacer()
                     Button(action: { isEditing = false }) {
                         HStack(spacing: 3) {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 9, weight: .bold))
-                            Text("Render")
+                            Text("Render Preview")
                                 .font(.system(size: 10, weight: .semibold))
                         }
                         .foregroundColor(.green)
-                        .padding(.horizontal, 7)
-                        .frame(height: 19)
-                        .background(Color.green.opacity(0.13))
+                        .padding(.horizontal, 8)
+                        .frame(height: 20)
+                        .background(Color.green.opacity(0.14))
                         .cornerRadius(4)
                     }
                     .buttonStyle(.plain)
                 }
 
                 TextEditor(text: $text)
-                    .font(.system(size: 12.5, design: .monospaced))
+                    .font(.system(size: 13, design: .monospaced))
                     .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .frame(minHeight: 72, maxHeight: 240)
+                    .padding(8)
+                    .frame(minHeight: 132, maxHeight: 420)
                     .background(Color.primary.opacity(isDark ? 0.045 : 0.03))
                     .cornerRadius(6)
             } else {
                 ZStack(alignment: .topTrailing) {
-                    renderedDocument
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) {
-                            if !forceRenderedOnly { isEditing = true }
-                        }
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty {
+                        Text("Double-click to write Markdown, LaTeX math ($...$ / $$...$$), tables, or {{ variable }} templates…")
+                            .font(.system(size: 12.5))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) {
+                                if !forceRenderedOnly { isEditing = true }
+                            }
+                    } else {
+                        RenderedMarkdownDocumentView(markdown: resolveRelativeMediaAndVariables(in: text))
+                            .padding(.trailing, forceRenderedOnly ? 0 : 44)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) {
+                                if !forceRenderedOnly { isEditing = true }
+                            }
+                    }
 
                     if !forceRenderedOnly {
                         Button(action: { isEditing = true }) {
@@ -1078,7 +1092,7 @@ struct RichMarkdownCellView: View {
                             }
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 6)
-                            .frame(height: 18)
+                            .frame(height: 19)
                             .background(Color.primary.opacity(isDark ? 0.06 : 0.04))
                             .cornerRadius(4)
                         }
@@ -1091,274 +1105,36 @@ struct RichMarkdownCellView: View {
         .padding(.vertical, 8)
     }
 
-    private var renderedDocument: some View {
-        let interpolated = interpolateVariables(in: text)
-        let blocks = parseBlocks(interpolated)
-        return VStack(alignment: .leading, spacing: 7) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                renderBlock(block)
-            }
-        }
-    }
-
-    private func interpolateVariables(in raw: String) -> String {
-        guard raw.contains("{{") else { return raw }
+    private func resolveRelativeMediaAndVariables(in raw: String) -> String {
         var out = raw
-        for v in liveVariables {
-            let token1 = "{{\(v.name)}}"
-            let token2 = "{{ \(v.name) }}"
-            let val = v.preview.components(separatedBy: "\n").first ?? v.preview
-            if out.contains(token1) { out = out.replacingOccurrences(of: token1, with: val) }
-            if out.contains(token2) { out = out.replacingOccurrences(of: token2, with: val) }
+        if out.contains("{{") {
+            for v in liveVariables {
+                let token1 = "{{\(v.name)}}"
+                let token2 = "{{ \(v.name) }}"
+                let val = v.preview.components(separatedBy: "\n").first ?? v.preview
+                if out.contains(token1) { out = out.replacingOccurrences(of: token1, with: val) }
+                if out.contains(token2) { out = out.replacingOccurrences(of: token2, with: val) }
+            }
         }
-        return out
-    }
-
-    @ViewBuilder
-    private func renderBlock(_ block: Block) -> some View {
-        switch block {
-        case .heading(let level, let content):
-            let size: CGFloat = level == 1 ? 18 : (level == 2 ? 15 : (level == 3 ? 13.5 : 12.5))
-            inlineMarkdownText(content)
-                .font(.system(size: size, weight: .bold))
-                .padding(.top, level <= 2 ? 3 : 1)
-
-        case .math(let expr):
-            HStack {
-                Spacer(minLength: 8)
-                Text(prettifyLatexSymbols(expr))
-                    .font(.system(size: 13.5, weight: .medium, design: .serif))
-                    .italic()
-                    .foregroundColor(.primary.opacity(0.95))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color.primary.opacity(isDark ? 0.05 : 0.035))
-                    .cornerRadius(6)
-                Spacer(minLength: 8)
-            }
-
-        case .code(let lang, let body):
-            VStack(alignment: .leading, spacing: 3) {
-                if !lang.isEmpty {
-                    Text(lang.uppercased())
-                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-                Text(body)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .textSelection(.enabled)
-            }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(isDark ? 0.06 : 0.04))
-            .cornerRadius(6)
-
-        case .callout(let kind, let body):
-            let accent: Color = kind.contains("WARN") || kind.contains("CAUTION") ? .orange : (kind.contains("IMPORTANT") ? .purple : .accentColor)
-            HStack(alignment: .top, spacing: 8) {
-                Rectangle()
-                    .fill(accent)
-                    .frame(width: 3)
-                    .cornerRadius(1.5)
-                inlineMarkdownText(body)
-                    .font(.system(size: 12))
-            }
-            .padding(8)
-            .background(accent.opacity(0.08))
-            .cornerRadius(6)
-
-        case .bullet(let item):
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("•")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.accentColor)
-                inlineMarkdownText(item)
-                    .font(.system(size: 12.5))
-            }
-
-        case .table(let headers, let rows):
-            ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 0) {
-                        ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                            Text(h)
-                                .font(.system(size: 11, weight: .semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .frame(minWidth: 95, alignment: .leading)
-                                .background(Color.primary.opacity(0.07))
+        // Resolve relative Markdown image paths `![alt](relative.png)` against the Notebook working directory
+        if out.contains("![") {
+            let baseDir = NotebookViewModel.shared.workingDirectory
+            if let regex = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#) {
+                let ns = out as NSString
+                let matches = regex.matches(in: out, range: NSRange(location: 0, length: ns.length))
+                for m in matches.reversed() where m.numberOfRanges >= 3 {
+                    let alt = ns.substring(with: m.range(at: 1))
+                    let target = ns.substring(with: m.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !target.hasPrefix("http://") && !target.hasPrefix("https://") && !target.hasPrefix("file://") && !target.hasPrefix("/") {
+                        let resolved = baseDir.appendingPathComponent(target)
+                        if FileManager.default.fileExists(atPath: resolved.path) {
+                            out = (out as NSString).replacingCharacters(in: m.range, with: "![\(alt)](\(resolved.path))")
                         }
                     }
-                    Divider()
-                    ForEach(Array(rows.enumerated()), id: \.offset) { rIdx, r in
-                        HStack(spacing: 0) {
-                            ForEach(0..<headers.count, id: \.self) { cIdx in
-                                Text(cIdx < r.count ? r[cIdx] : "")
-                                    .font(.system(size: 11))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .frame(minWidth: 95, alignment: .leading)
-                            }
-                        }
-                        .background(rIdx.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.025))
-                    }
                 }
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.primary.opacity(0.11), lineWidth: 0.7))
-            }
-
-        case .divider:
-            Divider().padding(.vertical, 2)
-
-        case .paragraph(let p):
-            inlineMarkdownText(p)
-                .font(.system(size: 12.5))
-                .foregroundColor(.primary.opacity(0.92))
-        }
-    }
-
-    private func inlineMarkdownText(_ s: String) -> Text {
-        let mathReady = prettifyInlineDollarMath(s)
-        if let attr = try? AttributedString(markdown: mathReady) {
-            return Text(attr)
-        }
-        return Text(mathReady)
-    }
-
-    private func prettifyInlineDollarMath(_ s: String) -> String {
-        guard s.contains("$") else { return s }
-        let parts = s.components(separatedBy: "$")
-        guard parts.count >= 3 else { return s }
-        var out = ""
-        for (i, seg) in parts.enumerated() {
-            if i.isMultiple(of: 2) {
-                out += seg
-            } else {
-                out += "*\(prettifyLatexSymbols(seg))*"
             }
         }
         return out
-    }
-
-    private func prettifyLatexSymbols(_ expr: String) -> String {
-        let replacements: [(String, String)] = [
-            ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"), ("\\delta", "δ"),
-            ("\\sigma", "σ"), ("\\mu", "μ"), ("\\lambda", "λ"), ("\\theta", "θ"),
-            ("\\pi", "π"), ("\\sum", "∑"), ("\\prod", "∏"), ("\\int", "∫"),
-            ("\\sqrt", "√"), ("\\pm", "±"), ("\\times", "×"), ("\\cdot", "·"),
-            ("\\leq", "≤"), ("\\geq", "≥"), ("\\neq", "≠"), ("\\approx", "≈"),
-            ("\\rightarrow", "→"), ("\\infty", "∞"),
-            ("^{-1}", "⁻¹"), ("^{-2}", "⁻²"), ("^{2}", "²"), ("^{3}", "³"),
-            ("^2", "²"), ("^3", "³"), ("{", ""), ("}", "")
-        ]
-        var res = expr.trimmingCharacters(in: .whitespacesAndNewlines)
-        for (k, v) in replacements {
-            res = res.replacingOccurrences(of: k, with: v)
-        }
-        return res
-    }
-
-    private func parseBlocks(_ src: String) -> [Block] {
-        let lines = src.components(separatedBy: "\n")
-        var blocks: [Block] = []
-        var i = 0
-
-        while i < lines.count {
-            let line = lines[i]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            if trimmed.isEmpty {
-                i += 1
-                continue
-            }
-
-            // Display Math `$$ ... $$`
-            if trimmed.hasPrefix("$$") {
-                if trimmed.count > 4 && trimmed.hasSuffix("$$") {
-                    let inner = String(trimmed.dropFirst(2).dropLast(2))
-                    blocks.append(.math(expr: inner))
-                    i += 1
-                    continue
-                }
-                var mathLines: [String] = []
-                i += 1
-                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("$$") {
-                    mathLines.append(lines[i])
-                    i += 1
-                }
-                i += 1
-                blocks.append(.math(expr: mathLines.joined(separator: "\n")))
-                continue
-            }
-
-            // Fenced Code
-            if trimmed.hasPrefix("```") {
-                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                var codeLines: [String] = []
-                i += 1
-                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                    codeLines.append(lines[i])
-                    i += 1
-                }
-                i += 1
-                blocks.append(.code(lang: lang, body: codeLines.joined(separator: "\n")))
-                continue
-            }
-
-            // Headings
-            if trimmed.hasPrefix("#") {
-                let hashes = trimmed.prefix { $0 == "#" }.count
-                if hashes <= 4 && trimmed.dropFirst(hashes).first == " " {
-                    blocks.append(.heading(level: hashes, text: String(trimmed.dropFirst(hashes + 1))))
-                    i += 1
-                    continue
-                }
-            }
-
-            // Horizontal Rule
-            if trimmed == "---" || trimmed == "***" {
-                blocks.append(.divider)
-                i += 1
-                continue
-            }
-
-            // GFM Table
-            if trimmed.hasPrefix("|") && i + 1 < lines.count && lines[i + 1].contains("|---") {
-                let headers = trimmed.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-                i += 2
-                var tRows: [[String]] = []
-                while i < lines.count && lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cols = lines[i].trimmingCharacters(in: .whitespaces).split(separator: "|", omittingEmptySubsequences: false)
-                    let cleaned = cols.dropFirst().dropLast().map { $0.trimmingCharacters(in: .whitespaces) }
-                    tRows.append(cleaned)
-                    i += 1
-                }
-                blocks.append(.table(headers: headers, rows: tRows))
-                continue
-            }
-
-            // Callout / Blockquote
-            if trimmed.hasPrefix(">") {
-                let body = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
-                blocks.append(.callout(kind: body.uppercased(), body: body))
-                i += 1
-                continue
-            }
-
-            // Bullet / Numbered List
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
-                blocks.append(.bullet(text: String(trimmed.dropFirst(2))))
-                i += 1
-                continue
-            }
-
-            blocks.append(.paragraph(text: trimmed))
-            i += 1
-        }
-
-        if blocks.isEmpty {
-            blocks.append(.paragraph(text: "Double-click to write Markdown, LaTeX math (`$$...$$`), or `{{ variable }}` templates…"))
-        }
-        return blocks
     }
 }
 
@@ -1683,35 +1459,128 @@ struct CellVersionHistoryButton: View {
     }
 }
 
-// MARK: - 7. 120FPS Virtualized Cell Output Log Viewer
+// MARK: - Smooth Vertical Drag-Resize Handle for Notebook Cells & Outputs
+
+struct NotebookCellHorizontalResizeBar: View {
+    let onDragDelta: (_ translationY: CGFloat, _ isEnded: Bool) -> Void
+    var onDoubleClickReset: (() -> Void)? = nil
+
+    @State private var isHovering = false
+    @State private var isDragging = false
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.clear)
+                .frame(maxWidth: .infinity)
+                .frame(height: 9)
+
+            Capsule()
+                .fill(
+                    isDragging
+                        ? Color.accentColor.opacity(0.85)
+                        : (isHovering ? Color.secondary.opacity(0.55) : Color.secondary.opacity(0.18))
+                )
+                .frame(width: isDragging || isHovering ? 42 : 28, height: 3)
+                .animation(.easeOut(duration: 0.12), value: isHovering)
+                .animation(.easeOut(duration: 0.12), value: isDragging)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+            if hovering {
+                NSCursor.resizeUpDown.push()
+            } else if !isDragging {
+                NSCursor.pop()
+            }
+        }
+        .onTapGesture(count: 2) {
+            onDoubleClickReset?()
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    if !isDragging { isDragging = true }
+                    onDragDelta(value.translation.height, false)
+                }
+                .onEnded { value in
+                    isDragging = false
+                    if !isHovering { NSCursor.pop() }
+                    onDragDelta(value.translation.height, true)
+                }
+        )
+        .help("ลากขึ้น-ลงเพื่อปรับความสูง (ดับเบิลคลิกเพื่อรีเซ็ตขนาดอัตโนมัติ)")
+    }
+}
+
+// MARK: - 7. 120FPS Virtualized Cell Output Log Viewer (Natural Fit + Resizable + MD/TeX Preview)
 
 struct VirtualizedCellOutputLogView: View {
     let output: String
     let hasError: Bool
 
     @State private var showFullUnbounded: Bool = false
+    @State private var renderAsMarkdownTeX: Bool = false
 
     private let charWindowThreshold = 28_000
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            let isTruncated = !showFullUnbounded && output.count > charWindowThreshold
-            let displayString: String = {
-                guard isTruncated else { return output }
-                let head = String(output.prefix(8_000))
-                let tail = String(output.suffix(16_000))
-                let omitted = output.count - 24_000
-                return head + "\n\n⋯ [\(omitted) characters hidden for 120FPS responsiveness] ⋯\n\n" + tail
-            }()
+    private var looksLikeMarkdownOrTeX: Bool {
+        guard !hasError else { return false }
+        return output.contains("$$")
+            || output.contains("\\(")
+            || output.contains("\\text{")
+            || output.contains("\\frac{")
+            || output.contains("\n# ")
+            || output.contains("\n## ")
+            || output.hasPrefix("# ")
+            || output.hasPrefix("## ")
+            || output.contains("|---|")
+            || output.contains("| ---")
+    }
 
-            ScrollView {
+    var body: some View {
+        let isTruncated = !showFullUnbounded && output.count > charWindowThreshold
+        let displayString: String = {
+            guard isTruncated else { return output }
+            let head = String(output.prefix(8_000))
+            let tail = String(output.suffix(16_000))
+            let omitted = output.count - 24_000
+            return head + "\n\n⋯ [\(omitted) characters hidden for 120FPS responsiveness] ⋯\n\n" + tail
+        }()
+
+        VStack(alignment: .leading, spacing: 5) {
+            if looksLikeMarkdownOrTeX {
+                HStack(spacing: 8) {
+                    Button(action: { renderAsMarkdownTeX.toggle() }) {
+                        HStack(spacing: 3.5) {
+                            Image(systemName: renderAsMarkdownTeX ? "terminal" : "function")
+                                .font(.system(size: 9.5, weight: .semibold))
+                            Text(renderAsMarkdownTeX ? "Raw Console" : "MD / TeX Preview")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(renderAsMarkdownTeX ? .accentColor : .secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background((renderAsMarkdownTeX ? Color.accentColor : Color.primary).opacity(0.08))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+                }
+            }
+
+            if renderAsMarkdownTeX {
+                RenderedMarkdownDocumentView(markdown: displayString)
+                    .padding(.vertical, 4)
+            } else {
                 Text(displayString)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(hasError ? .red : .primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
-            .frame(maxHeight: 220)
 
             if output.count > charWindowThreshold {
                 HStack(spacing: 8) {

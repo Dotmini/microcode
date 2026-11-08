@@ -845,6 +845,19 @@ public struct SubscriptionAccount: Identifiable, Codable {
     public var source: String
     public var expiresAt: Date?
     public var lastVerified: Date
+    public var rateLimitedUntil: Date?
+    public var consecutiveFailures: Int?
+    
+    public var isCoolingDown: Bool {
+        if let until = rateLimitedUntil, until > Date() {
+            return true
+        }
+        return false
+    }
+    
+    public var isHealthyNow: Bool {
+        isValid && !sessionToken.isEmpty && (expiresAt.map { $0 > Date() } ?? true) && !isCoolingDown
+    }
     
     public init(id: String = UUID().uuidString,
                 provider: SubscriptionProviderType,
@@ -853,7 +866,9 @@ public struct SubscriptionAccount: Identifiable, Codable {
                 isValid: Bool = true,
                 source: String = "Manual",
                 expiresAt: Date? = nil,
-                lastVerified: Date = Date()) {
+                lastVerified: Date = Date(),
+                rateLimitedUntil: Date? = nil,
+                consecutiveFailures: Int? = nil) {
         self.id = id
         self.provider = provider
         self.emailOrUser = emailOrUser
@@ -862,6 +877,8 @@ public struct SubscriptionAccount: Identifiable, Codable {
         self.source = source
         self.expiresAt = expiresAt
         self.lastVerified = lastVerified
+        self.rateLimitedUntil = rateLimitedUntil
+        self.consecutiveFailures = consecutiveFailures
     }
 }
 
@@ -870,11 +887,16 @@ public class SubscriptionAuthManager: ObservableObject {
     
     @Published public var activeProvider: SubscriptionProviderType = .chatgpt
     @Published public var accounts: [SubscriptionProviderType: SubscriptionAccount] = [:]
+    /// Multi-account rotation ring per provider (allows stacking multiple Claude, Copilot, Groq, Cerebras, OpenRouter, or AiPass accounts)
+    @Published public var accountPools: [SubscriptionProviderType: [SubscriptionAccount]] = [:]
     @Published public var isVerifying: Bool = false
     @Published public var detectedSessionCount: Int = 0
     @Published public var lastDetectionMessage: String = ""
+    @Published public var lastFailoverBanner: String = ""
     
     private let userDefaultsKey = "microcode_subscription_accounts_v1"
+    private let accountPoolsDefaultsKey = "microcode_subscription_pools_v1"
+    private let poolLock = NSLock()
     
     private init() {
         loadSavedAccounts()
@@ -884,8 +906,19 @@ public class SubscriptionAuthManager: ObservableObject {
     }
     
     public func isConnected(_ provider: SubscriptionProviderType) -> Bool {
+        if let pool = accountPools[provider], pool.contains(where: { $0.isValid && !$0.sessionToken.isEmpty && ($0.expiresAt.map { $0 > Date() } ?? true) }) {
+            return true
+        }
         guard let acc = accounts[provider] else { return false }
         return acc.isValid && !acc.sessionToken.isEmpty && (acc.expiresAt.map { $0 > Date() } ?? true)
+    }
+    
+    /// Returns true if the provider has at least one connected account not currently in 429/529 rate-limit cooldown, OR has a live CLI harness bridge.
+    public func hasHealthyRoute(_ provider: SubscriptionProviderType) -> Bool {
+        if nextHealthyAccount(for: provider) != nil {
+            return true
+        }
+        return cliBridgeBinaryPath(for: provider) != nil
     }
     
     public var hasAnyConnected: Bool {
@@ -896,36 +929,178 @@ public class SubscriptionAuthManager: ObservableObject {
         return SubscriptionProviderType.allCases.filter { isConnected($0) }
     }
     
+    /// Returns the next healthy (non-rate-limited, non-expired) account from the provider's multi-account ring.
+    public func nextHealthyAccount(for provider: SubscriptionProviderType) -> SubscriptionAccount? {
+        poolLock.lock()
+        defer { poolLock.unlock() }
+        if let active = accounts[provider], active.isHealthyNow {
+            return active
+        }
+        if let pool = accountPools[provider], let healthy = pool.first(where: { $0.isHealthyNow }) {
+            return healthy
+        }
+        return nil
+    }
+    
+    /// Marks the matching account as rate-limited (429 / 5-hour quota cap) and rotates `accounts[provider]` to the next healthy account in the ring if available.
+    @discardableResult
+    public func markRateLimited(
+        provider: SubscriptionProviderType,
+        tokenOrAccountId: String? = nil,
+        cooldownSeconds: TimeInterval = 180
+    ) -> SubscriptionAccount? {
+        poolLock.lock()
+        let until = Date().addingTimeInterval(max(15, cooldownSeconds))
+        var pool = accountPools[provider] ?? []
+        if pool.isEmpty, let primary = accounts[provider] {
+            pool = [primary]
+        }
+        for i in pool.indices {
+            let matches: Bool
+            if let needle = tokenOrAccountId, !needle.isEmpty {
+                matches = (pool[i].id == needle || pool[i].sessionToken == needle)
+            } else {
+                matches = (pool[i].id == accounts[provider]?.id || pool[i].sessionToken == accounts[provider]?.sessionToken)
+            }
+            if matches {
+                pool[i].rateLimitedUntil = until
+                pool[i].consecutiveFailures = (pool[i].consecutiveFailures ?? 0) + 1
+            }
+        }
+        let nextHealthy = pool.first(where: { $0.isHealthyNow })
+        poolLock.unlock()
+        
+        let applyUpdate = {
+            self.accountPools[provider] = pool
+            if let nextHealthy {
+                self.accounts[provider] = nextHealthy
+                self.lastFailoverBanner = "Auto-rotated \(provider.shortLabel) to healthy account (\(nextHealthy.emailOrUser))."
+            } else if var cur = self.accounts[provider] {
+                cur.rateLimitedUntil = until
+                self.accounts[provider] = cur
+            }
+            self.persistAccounts()
+        }
+        if Thread.isMainThread {
+            applyUpdate()
+        } else {
+            DispatchQueue.main.async(execute: applyUpdate)
+        }
+        return nextHealthy
+    }
+    
+    public func clearCooldown(for provider: SubscriptionProviderType, tokenOrAccountId: String? = nil) {
+        poolLock.lock()
+        var pool = accountPools[provider] ?? []
+        for i in pool.indices {
+            if tokenOrAccountId == nil || pool[i].id == tokenOrAccountId || pool[i].sessionToken == tokenOrAccountId {
+                pool[i].rateLimitedUntil = nil
+                pool[i].consecutiveFailures = 0
+            }
+        }
+        poolLock.unlock()
+        let applyClear = {
+            if !pool.isEmpty {
+                self.accountPools[provider] = pool
+            }
+            if var cur = self.accounts[provider] {
+                cur.rateLimitedUntil = nil
+                cur.consecutiveFailures = 0
+                self.accounts[provider] = cur
+            }
+            self.persistAccounts()
+        }
+        if Thread.isMainThread {
+            applyClear()
+        } else {
+            DispatchQueue.main.async(execute: applyClear)
+        }
+    }
+    
+    /// Resolves an authenticated local CLI binary path when a user connects Claude Pro/Max, ChatGPT Plus, or Gemini without a paid per-token API key.
+    public func cliBridgeBinaryPath(for provider: SubscriptionProviderType) -> String? {
+        switch provider {
+        case .claude:
+            return ACPHostService.resolveAgentBinary(for: .claudeCode) ?? ACPHostService.resolveAgentBinary(for: .agy)
+        case .chatgpt:
+            return ACPHostService.resolveAgentBinary(for: .codexEngine)
+        case .gemini:
+            return ACPHostService.resolveAgentBinary(for: .agy) ?? ACPHostService.resolveAgentBinary(for: .geminiCLI)
+        case .copilot:
+            return ACPHostService.resolveAgentBinary(for: .githubCopilot)
+        case .qwen:
+            return ACPHostService.resolveAgentBinary(for: .qwenCode)
+        default:
+            return nil
+        }
+    }
+    
+    private static let cachedAllModelInfos: [SubscriptionModelInfo] = {
+        SubscriptionProviderType.allCases.flatMap { $0.modelInfos }
+    }()
+
+    private static let cachedModelsByID: [String: [SubscriptionModelInfo]] = {
+        Dictionary(grouping: cachedAllModelInfos, by: { $0.modelID })
+    }()
+
     public func connectedModelInfos() -> [SubscriptionModelInfo] {
         return connectedProviders().flatMap { $0.modelInfos }
     }
     
     public func allModelInfos() -> [SubscriptionModelInfo] {
-        return SubscriptionProviderType.allCases.flatMap { $0.modelInfos }
+        return Self.cachedAllModelInfos
     }
     
     public func findModel(id: String, provider: SubscriptionProviderType? = nil) -> SubscriptionModelInfo? {
-        if let provider = provider {
-            return provider.modelInfos.first(where: { $0.modelID == id })
+        guard let matches = Self.cachedModelsByID[id], !matches.isEmpty else {
+            return nil
         }
-        if let active = connectedModelInfos().first(where: { $0.modelID == id && $0.provider == activeProvider }) {
+        if let provider = provider {
+            return matches.first(where: { $0.provider == provider })
+        }
+        if let active = matches.first(where: { $0.provider == activeProvider && isConnected($0.provider) }) {
             return active
         }
-        return connectedModelInfos().first(where: { $0.modelID == id }) ?? allModelInfos().first(where: { $0.modelID == id })
+        if let connected = matches.first(where: { isConnected($0.provider) }) {
+            return connected
+        }
+        return matches.first
     }
     
     public func getAccount(_ provider: SubscriptionProviderType) -> SubscriptionAccount? {
-        return accounts[provider]
+        if let healthy = nextHealthyAccount(for: provider) {
+            return healthy
+        }
+        return accounts[provider] ?? accountPools[provider]?.first
     }
     
     public func token(for provider: SubscriptionProviderType) -> String? {
-        return accounts[provider]?.sessionToken
+        return getAccount(provider)?.sessionToken
     }
     
-    /// Subscription mode strictly uses MicroCode's Native Agent (`AgentService` + `AIClient`) and never spawns an external ACP CLI agent.
+    /// Returns the preferred local CLI engine (`claude`, `codex`, `agy`) when Subscription Mode has a web/CLI subscription without a direct API key.
     @MainActor
     public func preferredCLIEngine(for provider: SubscriptionProviderType, model: String) -> String? {
-        return nil
+        let tok = (token(for: provider) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        switch provider {
+        case .claude:
+            if tok.hasPrefix("sk-ant-api") || tok.hasPrefix("codeassist_oauth:") {
+                return nil
+            }
+            return cliBridgeBinaryPath(for: .claude)
+        case .chatgpt:
+            if tok.hasPrefix("sk-") || AIClient.loadCodexOAuthCredentials(fallbackToken: tok) != nil {
+                return nil
+            }
+            return cliBridgeBinaryPath(for: .chatgpt)
+        case .gemini:
+            if tok.hasPrefix("AIzaSy") || tok.hasPrefix("codeassist_oauth:") || AIClient.loadGoogleCodeAssistCredentials(fallbackToken: tok) != nil {
+                return nil
+            }
+            return cliBridgeBinaryPath(for: .gemini)
+        default:
+            return nil
+        }
     }
     
     public static func setLiveModels(for provider: SubscriptionProviderType, models: [SubscriptionModelInfo]) {
@@ -1103,7 +1278,14 @@ public class SubscriptionAuthManager: ObservableObject {
             UserDefaults.standard.set(trimmedToken, forKey: "\(provider.aiProviderID)_api_key")
         }
         
+        let accountId: String = {
+            if let existing = accountPools[provider]?.first(where: { $0.sessionToken == trimmedToken }) {
+                return existing.id
+            }
+            return UUID().uuidString
+        }()
         let account = SubscriptionAccount(
+            id: accountId,
             provider: provider,
             emailOrUser: emailOrUser.isEmpty ? "Active Subscriber" : emailOrUser,
             sessionToken: trimmedToken,
@@ -1115,6 +1297,16 @@ public class SubscriptionAuthManager: ObservableObject {
             lastDetectionMessage = "Could not save the credential to Keychain. Please reconnect."
             return
         }
+        _ = saveTokenToKeychain(provider: "pool_\(provider.rawValue)_\(account.id)", token: trimmedToken)
+        poolLock.lock()
+        var pool = accountPools[provider] ?? []
+        if let idx = pool.firstIndex(where: { $0.id == account.id || $0.sessionToken == trimmedToken }) {
+            pool[idx] = account
+        } else {
+            pool.insert(account, at: 0)
+        }
+        poolLock.unlock()
+        accountPools[provider] = pool
         accounts[provider] = account
         persistAccounts()
         
@@ -1224,6 +1416,14 @@ public class SubscriptionAuthManager: ObservableObject {
             copilotTokenExpiresAt = nil
             copilotLock.unlock()
         }
+        if let pool = accountPools[provider] {
+            for acc in pool {
+                deleteTokenFromKeychain(provider: "pool_\(provider.rawValue)_\(acc.id)")
+            }
+        }
+        poolLock.lock()
+        accountPools.removeValue(forKey: provider)
+        poolLock.unlock()
         accounts.removeValue(forKey: provider)
         deleteTokenFromKeychain(provider: provider.rawValue)
         persistAccounts()
@@ -1293,12 +1493,15 @@ public class SubscriptionAuthManager: ObservableObject {
         let claudeConfig = home.appendingPathComponent(".claude/config.json")
         var claudeToken: String?
         var claudeEmail = "Claude Pro / Max"
+        var hasClaudeOAuthLogin = false
         if FileManager.default.fileExists(atPath: claudeHomeJson.path),
            let data = try? Data(contentsOf: claudeHomeJson),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let oauthAccount = json["oauthAccount"] as? [String: Any],
-               let mail = (oauthAccount["emailAddress"] ?? oauthAccount["displayName"]) as? String, !mail.isEmpty {
-                claudeEmail = mail
+            if let oauthAccount = json["oauthAccount"] as? [String: Any] {
+                hasClaudeOAuthLogin = true
+                if let mail = (oauthAccount["emailAddress"] ?? oauthAccount["displayName"]) as? String, !mail.isEmpty {
+                    claudeEmail = mail
+                }
             }
             if let token = (json["apiKey"] ?? json["oauthToken"] ?? json["sessionKey"]) as? String,
                token.hasPrefix("sk-ant-api") {
@@ -1338,18 +1541,30 @@ public class SubscriptionAuthManager: ObservableObject {
                 }
                 detected += 1
             }
+        } else if hasClaudeOAuthLogin, ACPHostService.resolveAgentBinary(for: .claudeCode) != nil {
+            let finalClaudeEmail = claudeEmail
+            await MainActor.run {
+                self.saveAccount(
+                    provider: .claude,
+                    emailOrUser: "\(finalClaudeEmail) (Claude Code CLI)",
+                    sessionToken: "claude_cli_bridge:\(finalClaudeEmail)",
+                    source: "Claude Code CLI (Zero API Cost)"
+                )
+            }
+            detected += 1
         }
         
-        // 3. Check for Google AI Ultra / Code Assist OAuth (~/.gemini/jetski-standalone-oauth-token) or Gemini API Key
+        // 3. Check for Google AI Ultra / Code Assist OAuth (~/.gemini/jetski-standalone-oauth-token), Gemini API Key, or AGY CLI Bridge
         if let codeAssistCreds = await MainActor.run(body: { AIClient.loadGoogleCodeAssistCredentials(fallbackToken: "") }) {
             let oauthToken = "codeassist_oauth:\(codeAssistCreds.refreshToken)"
+            let shouldMountVertexClaude = (claudeToken == nil && !hasClaudeOAuthLogin)
             await MainActor.run {
                 self.saveAccount(provider: .gemini, emailOrUser: "\(codeAssistCreds.email) (Google AI Ultra)", sessionToken: oauthToken, source: "Google AI Ultra OAuth")
-                if claudeToken == nil {
+                if shouldMountVertexClaude {
                     self.saveAccount(provider: .claude, emailOrUser: "\(codeAssistCreds.email) (Claude 5.5 Ultra)", sessionToken: oauthToken, source: "Vertex Claude 5.5 OAuth")
                 }
             }
-            detected += (claudeToken == nil ? 2 : 1)
+            detected += (shouldMountVertexClaude ? 2 : 1)
         } else {
             let geminiKey: String = await MainActor.run {
                 ProcessInfo.processInfo.environment["GEMINI_API_KEY"]
@@ -1359,6 +1574,18 @@ public class SubscriptionAuthManager: ObservableObject {
             if geminiKey.hasPrefix("AIzaSy") {
                 await MainActor.run {
                     self.saveAccount(provider: .gemini, emailOrUser: "Google Gemini Advanced", sessionToken: geminiKey, source: "Google AI")
+                }
+                detected += 1
+            } else if ACPHostService.resolveAgentBinary(for: .agy) != nil {
+                await MainActor.run {
+                    if !self.isConnected(.gemini) {
+                        self.saveAccount(
+                            provider: .gemini,
+                            emailOrUser: "Google Antigravity (AGY CLI)",
+                            sessionToken: "agy_cli_bridge:active",
+                            source: "Antigravity CLI (Zero API Cost)"
+                        )
+                    }
                 }
                 detected += 1
             }
@@ -1723,6 +1950,14 @@ public class SubscriptionAuthManager: ObservableObject {
         for provider in accounts.keys {
             deleteTokenFromKeychain(provider: provider.rawValue)
         }
+        for (provider, pool) in accountPools {
+            for acc in pool {
+                deleteTokenFromKeychain(provider: "pool_\(provider.rawValue)_\(acc.id)")
+            }
+        }
+        poolLock.lock()
+        accountPools.removeAll()
+        poolLock.unlock()
         accounts.removeAll()
         copilotLock.lock()
         cachedCopilotSessionToken = nil
@@ -1730,6 +1965,7 @@ public class SubscriptionAuthManager: ObservableObject {
         copilotTokenExpiresAt = nil
         copilotLock.unlock()
         UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: accountPoolsDefaultsKey)
     }
 
     private func persistAccounts() {
@@ -1742,10 +1978,41 @@ public class SubscriptionAuthManager: ObservableObject {
         if let encoded = try? JSONEncoder().encode(metadata) {
             UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
         }
+        poolLock.lock()
+        let poolSnapshot = accountPools
+        poolLock.unlock()
+        let poolMetadata = poolSnapshot.mapValues { list in
+            list.map { account -> SubscriptionAccount in
+                var copy = account
+                copy.sessionToken = ""
+                return copy
+            }
+        }
+        if let encodedPool = try? JSONEncoder().encode(poolMetadata) {
+            UserDefaults.standard.set(encodedPool, forKey: accountPoolsDefaultsKey)
+        }
     }
     
     private func loadSavedAccounts() {
         var validAccounts: [SubscriptionProviderType: SubscriptionAccount] = [:]
+        var validPools: [SubscriptionProviderType: [SubscriptionAccount]] = [:]
+        if let poolData = UserDefaults.standard.data(forKey: accountPoolsDefaultsKey),
+           let decodedPools = try? JSONDecoder().decode([SubscriptionProviderType: [SubscriptionAccount]].self, from: poolData) {
+            for (prov, list) in decodedPools {
+                var hydratedList: [SubscriptionAccount] = []
+                for acc in list {
+                    let tok = (loadTokenFromKeychain(provider: "pool_\(prov.rawValue)_\(acc.id)") ?? acc.sessionToken)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !Self.isCorruptedToken(tok), acc.isValid, !tok.isEmpty else { continue }
+                    var updated = acc
+                    updated.sessionToken = tok
+                    hydratedList.append(updated)
+                }
+                if !hydratedList.isEmpty {
+                    validPools[prov] = hydratedList
+                }
+            }
+        }
         if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
            let decoded = try? JSONDecoder().decode([SubscriptionProviderType: SubscriptionAccount].self, from: data) {
             for (prov, acc) in decoded {
@@ -1771,6 +2038,12 @@ public class SubscriptionAuthManager: ObservableObject {
                     var updatedAcc = acc
                     updatedAcc.sessionToken = tok
                     validAccounts[prov] = updatedAcc
+                    _ = saveTokenToKeychain(provider: "pool_\(prov.rawValue)_\(updatedAcc.id)", token: tok)
+                    var pool = validPools[prov] ?? []
+                    if !pool.contains(where: { $0.sessionToken == tok }) {
+                        pool.insert(updatedAcc, at: 0)
+                    }
+                    validPools[prov] = pool
                 }
             }
         }
@@ -1809,7 +2082,7 @@ public class SubscriptionAuthManager: ObservableObject {
             }
             if !candidate.isEmpty && !Self.isCorruptedToken(candidate) {
                 if saveTokenToKeychain(provider: subProv.rawValue, token: candidate) {
-                    validAccounts[subProv] = SubscriptionAccount(
+                    let acc = SubscriptionAccount(
                         provider: subProv,
                         emailOrUser: label,
                         sessionToken: candidate,
@@ -1817,13 +2090,19 @@ public class SubscriptionAuthManager: ObservableObject {
                         source: "Direct / Env",
                         lastVerified: Date()
                     )
+                    validAccounts[subProv] = acc
+                    _ = saveTokenToKeychain(provider: "pool_\(subProv.rawValue)_\(acc.id)", token: candidate)
+                    validPools[subProv] = [acc]
                     hydratedAny = true
                 }
             }
         }
 
-        if !validAccounts.isEmpty || hydratedAny {
+        if !validAccounts.isEmpty || !validPools.isEmpty || hydratedAny {
             self.accounts = validAccounts
+            poolLock.lock()
+            self.accountPools = validPools
+            poolLock.unlock()
             persistAccounts()
         }
     }

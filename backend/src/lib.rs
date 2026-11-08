@@ -9,6 +9,7 @@ pub mod llm;
 pub mod mcp;
 pub mod microcode_core;
 pub mod polyglot;
+pub mod rules;
 pub mod shm_broker;
 pub mod vm;
 uniffi::setup_scaffolding!("microcode_core");

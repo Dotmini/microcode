@@ -182,7 +182,166 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
             }
         }
         
-        return (tokens, state)
+        return (postProcess(tokens, line: line), state)
+    }
+    
+    // MARK: - Post-processing (escapes, interpolation, JSON keys)
+    
+    private static let plainIdentifierLanguages: Set<String> = ["html", "markdown", "yaml", "toml", "json", "shell"]
+    private static let jsxHtmlTags: Set<String> = ["div", "span", "p", "a", "ul", "ol", "li", "button", "input", "form", "img", "section", "nav", "header", "footer", "main", "label", "table", "tr", "td", "th", "thead", "tbody", "svg", "path", "h1", "h2", "h3", "h4", "h5", "h6", "textarea", "select", "option", "article", "aside", "pre", "code", "video", "canvas", "iframe", "strong", "em", "br", "hr"]
+    private static let escapeFreeLanguages: Set<String> = ["sql", "markdown", "html", "css", "yaml", "toml"]
+    private static let singleQuoteInterpolating: Set<String> = ["dart", "kotlin", "ruby", "julia"]
+    
+    /// Splits plain `.string` tokens into string / escape / interpolation pieces and
+    /// recolours JSON object keys, so strings look like VS Code (TextMate) instead of one flat block.
+    private func postProcess(_ tokens: [SyntaxToken], line: String) -> [SyntaxToken] {
+        guard !tokens.isEmpty else { return tokens }
+        let isJSON = (languageId == "json")
+        var hasCandidate = false
+        for t in tokens where t.type == .string { hasCandidate = true; break }
+        guard hasCandidate else { return tokens }
+        
+        var lineUnits: [UInt16] = []
+        if isJSON { lineUnits = Array(line.utf16) }
+        
+        var out: [SyntaxToken] = []
+        out.reserveCapacity(tokens.count + 4)
+        for token in tokens {
+            guard token.type == .string else { out.append(token); continue }
+            
+            if isJSON {
+                var j = token.range.endColumn
+                while j < lineUnits.count, lineUnits[j] == 0x20 || lineUnits[j] == 0x09 { j += 1 }
+                if token.endState == .normal, j < lineUnits.count, lineUnits[j] == 0x3A {
+                    out.append(SyntaxToken(type: .property, text: token.text, range: token.range, endState: token.endState))
+                    continue
+                }
+            }
+            
+            if Self.escapeFreeLanguages.contains(languageId) { out.append(token); continue }
+            var needs = false
+            for b in token.text.utf8 where b == 0x5C || b == 0x24 || b == 0x23 { needs = true; break }
+            guard needs else { out.append(token); continue }
+            out.append(contentsOf: splitStringToken(token))
+        }
+        return out
+    }
+    
+    private func splitStringToken(_ token: SyntaxToken) -> [SyntaxToken] {
+        let u = Array(token.text.utf16)
+        let n = u.count
+        let startsWith = u.first
+        let isSingleQuoted = (startsWith == 0x27)
+        let isDoubleQuoted = (startsWith == 0x22)
+        
+        enum Mode { case none, swift, dollar, braces, hash }
+        var mode: Mode = .none
+        if let istart = interpolationStart {
+            if istart == "\\(" { mode = .swift }
+            else if istart == "$" { mode = .dollar }
+            else if istart == "${" { mode = .braces }
+            else if istart == "#{" { mode = .hash }
+        }
+        if isSingleQuoted && !Self.singleQuoteInterpolating.contains(languageId) { mode = .none }
+        if mode == .braces && (isSingleQuoted || isDoubleQuoted) { mode = .none }
+        if languageId == "shell" && isSingleQuoted { return [token] }
+        
+        var pieces: [SyntaxToken] = []
+        var cur = 0
+        var i = 0
+        
+        func emit(_ s: Int, _ e: Int, _ type: SyntaxTokenType) {
+            guard e > s else { return }
+            let text = String(utf16CodeUnits: Array(u[s..<e]), count: e - s)
+            let range = SyntaxTextRange(line: token.range.startLine,
+                                        column: token.range.startColumn + s,
+                                        length: e - s,
+                                        offset: token.range.startOffset + s)
+            pieces.append(SyntaxToken(type: type, text: text, range: range, endState: .normal))
+        }
+        func findClose(from: Int, open: UInt16, close: UInt16) -> Int {
+            var depth = 1
+            var k = from
+            while k < n {
+                if u[k] == open { depth += 1 }
+                else if u[k] == close { depth -= 1; if depth == 0 { return k } }
+                k += 1
+            }
+            return -1
+        }
+        
+        while i < n {
+            let c = u[i]
+            if c == 0x5C, i + 1 < n {
+                if mode == .swift, u[i + 1] == 0x28 {
+                    emit(cur, i, .string)
+                    let close = findClose(from: i + 2, open: 0x28, close: 0x29)
+                    let innerEnd = close >= 0 ? close : n
+                    emit(i, i + 2, .stringInterpolation)
+                    emit(i + 2, innerEnd, .variable)
+                    if close >= 0 { emit(close, close + 1, .stringInterpolation) }
+                    i = close >= 0 ? close + 1 : n
+                    cur = i
+                    continue
+                }
+                var len = 2
+                if u[i + 1] == 0x75, i + 2 < n, u[i + 2] == 0x7B { // \u{...}
+                    var k = i + 3
+                    while k < n, u[k] != 0x7D { k += 1 }
+                    len = min(n, k + 1) - i
+                } else if u[i + 1] == 0x78 || u[i + 1] == 0x75 { // \xHH / \uHHHH
+                    let want = u[i + 1] == 0x78 ? 2 : 4
+                    var k = i + 2
+                    var cnt = 0
+                    while k < n, cnt < want, Character(UnicodeScalar(u[k]) ?? " ").isHexDigit { k += 1; cnt += 1 }
+                    len = k - i
+                }
+                emit(cur, i, .string)
+                emit(i, i + len, .escape)
+                i += len
+                cur = i
+                continue
+            }
+            if (mode == .dollar || mode == .braces), c == 0x24, i + 1 < n {
+                if u[i + 1] == 0x7B {
+                    emit(cur, i, .string)
+                    let close = findClose(from: i + 2, open: 0x7B, close: 0x7D)
+                    let innerEnd = close >= 0 ? close : n
+                    emit(i, i + 2, .stringInterpolation)
+                    emit(i + 2, innerEnd, .variable)
+                    if close >= 0 { emit(close, close + 1, .stringInterpolation) }
+                    i = close >= 0 ? close + 1 : n
+                    cur = i
+                    continue
+                } else if mode == .dollar, let sc = UnicodeScalar(u[i + 1]), (Character(sc).isLetter || sc == "_") {
+                    emit(cur, i, .string)
+                    var k = i + 1
+                    while k < n, let s2 = UnicodeScalar(u[k]), (Character(s2).isLetter || Character(s2).isNumber || s2 == "_") { k += 1 }
+                    emit(i, k, .variable)
+                    i = k
+                    cur = i
+                    continue
+                }
+            }
+            if mode == .hash, c == 0x23, i + 1 < n, u[i + 1] == 0x7B {
+                emit(cur, i, .string)
+                let close = findClose(from: i + 2, open: 0x7B, close: 0x7D)
+                let innerEnd = close >= 0 ? close : n
+                emit(i, i + 2, .stringInterpolation)
+                emit(i + 2, innerEnd, .variable)
+                if close >= 0 { emit(close, close + 1, .stringInterpolation) }
+                i = close >= 0 ? close + 1 : n
+                cur = i
+                continue
+            }
+            i += 1
+        }
+        emit(cur, n, .string)
+        guard pieces.count > 1 else { return [token] }
+        // Preserve the original continuation state on the final piece.
+        let last = pieces.removeLast()
+        pieces.append(SyntaxToken(type: last.type, text: last.text, range: last.range, endState: token.endState))
+        return pieces
     }
     
     // MARK: - State-Specific SyntaxTokenizers
@@ -247,6 +406,29 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
                 // Regular string
                 let (stringSyntaxToken, endState, consumed) = tokenizeString(text, line: line, column: column, offset: offset, delimiter: delimiter, isStart: true)
                 return (stringSyntaxToken, endState, consumed)
+            }
+        }
+        
+        // Shell words: commands, --flags and file paths (so `.DS_Store` is not mistaken for a Type)
+        if languageId == "shell",
+           first.isLetter || first == "_" || first == "." || first == "/" || first == "~" ||
+           (first == "-" && (text.dropFirst().first.map { $0.isLetter || $0 == "-" } ?? false)) {
+            let word = String(text.prefix(while: { $0.isLetter || $0.isNumber || "_./-~@+%".contains($0) }))
+            if !word.isEmpty {
+                let prevText = previousToken?.text
+                let commandStarters: Set<String> = ["|", "&&", "||", ";", "(", "&", "{", "!", "then", "do", "else", "elif", "if", "while", "until", "sudo", "time", "exec", "xargs", "env"]
+                let type: SyntaxTokenType
+                if word.hasPrefix("-") && word.count > 1 {
+                    type = .parameter
+                } else if let kw = keywords[word] {
+                    type = kw
+                } else if previousToken == nil || (prevText.map { commandStarters.contains($0) } ?? false) {
+                    type = .function
+                } else {
+                    type = .identifier
+                }
+                let range = SyntaxTextRange(line: line, column: column, length: word.utf16.count, offset: offset)
+                return (SyntaxToken(type: type, text: word, range: range, endState: .normal), .normal, word.count)
             }
         }
         
@@ -566,8 +748,17 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
             tokenType = .keyword
         } else if languageId == "html" && nextNonWS == "=" {
             tokenType = .property
-        } else {
+        } else if (languageId == "javascript" || languageId == "typescript"),
+                  prevText == "<" || prevText == "</",
+                  let p = previousToken, p.range.endOffset == offset,
+                  Self.jsxHtmlTags.contains(identText) {
+            // JSX intrinsic element: <div>, </span>
+            tokenType = .keyword
+        } else if Self.plainIdentifierLanguages.contains(languageId) {
             tokenType = .identifier
+        } else {
+            // VS Code colours plain identifiers as variables (#9CDCFE in Dark+)
+            tokenType = .variable
         }
         
         let token = SyntaxToken(type: tokenType, text: identText, range: range, endState: .normal)

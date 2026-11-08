@@ -90,36 +90,80 @@ def validate_cell_id(cell_id: str) -> str:
         raise ValueError("Invalid cell id")
     return cell_id
 
-def validate_read_only_shell(command: str) -> list[str]:
-    """Allow only simple, non-mutating workspace inspection commands.
-
-    This server is invoked by autonomous models. A blacklist cannot safely
-    contain a shell, so commands requiring writes or execution must go through
-    an explicit user-approved execution flow in the app instead.
+def validate_workspace_shell(command: str, cwd: str) -> None:
+    """Validate workspace-scoped developer shell commands while blocking destructive,
+    privilege-escalation, remote pipe-to-shell, and workspace-escape operations.
     """
     if not isinstance(command, str) or not command.strip():
         raise ValueError("Command is required")
-    if any(token in command for token in (";", "|", "&", ">", "<", "`", "$", "\n", "\r")):
-        raise PermissionError("Shell composition, redirection, and substitution require explicit user approval.")
-    args = shlex.split(command)
-    if not args:
+
+    destructive_patterns = [
+        r"(^|[;&|])\s*sudo\b",
+        r"(^|[;&|])\s*su\b",
+        r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+[/~*.]",
+        r"\brm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+[/~*.]",
+        r"\brm\s+-rf\s+\$HOME",
+        r"\bfind\b.*\s-delete\b",
+        r"\bmkfs\b",
+        r"\bdd\s+if=.*of=/dev",
+        r"\bgit\s+clean\s+-[a-zA-Z]*f[a-zA-Z]*d[a-zA-Z]*x",
+        r"\bgit\s+reset\s+--hard\b",
+        r"\b(curl|wget)\b.*\|\s*(sh|bash|zsh|python|python3)\b",
+        r"\b(csrutil|shutdown|reboot|halt)\b",
+    ]
+    for pat in destructive_patterns:
+        if re.search(pat, command, flags=re.IGNORECASE):
+            raise PermissionError(f"Blocked unsafe or destructive command pattern in MCP shell: {command}")
+
+    if "`" in command or "$(" in command:
+        raise PermissionError("Command substitution (`...` or $(...)) is blocked in MCP shell.")
+
+    sanitized = command.replace("2>&1", "")
+    if any(tok in sanitized for tok in (";", ">", "<", "\n", "\r")):
+        raise PermissionError("Arbitrary file redirection and multi-statement ';' chaining are blocked in MCP shell.")
+
+    allowed_executables = {
+        "git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "wc", "stat", "cat", "sed", "awk", "jq", "which",
+        "swift", "xcodebuild", "xcrun", "cargo", "rustc", "rustup", "go", "zig", "dart", "flutter",
+        "python", "python3", "pytest", "uv", "pip", "pip3",
+        "node", "npm", "npx", "pnpm", "yarn", "bun", "tsc", "eslint", "vitest", "jest",
+        "sqlite3", "ardium", "arc", "make", "cmake"
+    }
+    allowed_roots = [WORKSPACE, "/Volumes", "/tmp", "/private/tmp", "/opt/homebrew", "/usr", "/Applications/Xcode.app", "/Library/Developer"]
+
+    segments = []
+    for chain_part in sanitized.split("&&"):
+        for pipe_part in chain_part.split("|"):
+            seg = pipe_part.strip()
+            if seg:
+                segments.append(seg)
+    if not segments:
         raise ValueError("Command is required")
-    allowed = {"git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "wc", "stat"}
-    if args[0] not in allowed:
-        raise PermissionError("Only read-only workspace inspection commands are available through MCP.")
-    allowed_roots = [WORKSPACE, "/Volumes", "/tmp", "/private/tmp"]
-    for arg in args[1:]:
-        if ".." in arg:
-            raise PermissionError("Parent traversal is not allowed in MCP terminal commands.")
-        if arg.startswith("/") and not any(arg.startswith(r) for r in allowed_roots):
-            raise PermissionError(f"Absolute path '{arg}' is outside allowed workspace/volumes.")
-    if args[0] == "git" and len(args) > 1 and args[1] not in {"status", "diff", "log", "branch", "show", "rev-parse"}:
-        raise PermissionError("Only read-only git operations are available through MCP.")
-    if args[0] == "rg" and any(arg.startswith("--pre") or arg.startswith("--dfa-size") for arg in args[1:]):
-        raise PermissionError("Preprocessor execution in rg is not allowed through MCP.")
-    if args[0] == "find" and any(arg in {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls", "-fprintf"} for arg in args[1:]):
-        raise PermissionError("Mutating or file-writing find actions are not allowed through MCP.")
-    return args
+
+    for seg in segments:
+        args = shlex.split(seg)
+        if not args:
+            continue
+        exe = os.path.basename(args[0]) if args[0].startswith("./") else args[0]
+        if args[0].startswith("./"):
+            resolved_script = os.path.realpath(os.path.join(cwd, args[0]))
+            if os.path.commonpath([resolved_script, WORKSPACE]) != WORKSPACE:
+                raise PermissionError(f"Script '{args[0]}' resolves outside active workspace.")
+        elif exe not in allowed_executables:
+            raise PermissionError(f"Executable '{args[0]}' is not permitted in workspace MCP shell.")
+
+        for arg in args[1:]:
+            if arg == ".." or arg.startswith("../") or "/../" in arg or arg.endswith("/.."):
+                resolved_candidate = os.path.realpath(os.path.join(cwd, arg))
+                if os.path.commonpath([resolved_candidate, WORKSPACE]) != WORKSPACE:
+                    raise PermissionError(f"Parent traversal '{arg}' escapes active workspace.")
+            elif arg.startswith("/") and not any(arg == r or arg.startswith(r + "/") for r in allowed_roots):
+                raise PermissionError(f"Absolute path '{arg}' is outside allowed workspace/toolchain directories.")
+
+        if exe == "rg" and any(a.startswith("--pre") for a in args[1:]):
+            raise PermissionError("Preprocessor execution in rg is not allowed through MCP.")
+        if exe == "find" and any(a in {"-delete", "-exec", "-execdir", "-ok", "-okdir"} for a in args[1:]):
+            raise PermissionError("Mutating or arbitrary-exec find flags are not allowed through MCP.")
 
 # ============================================================
 # Tool Implementations
@@ -200,12 +244,13 @@ def tool_list_directory_tree(params: dict) -> str:
 def tool_shell(params: dict) -> str:
     command = params["command"]
     cwd = validate_workspace_path(params.get("cwd", WORKSPACE))
-    validate_read_only_shell(command)
+    timeout_sec = max(5, min(int(params.get("timeout", 60)), 300))
+    validate_workspace_shell(command, cwd)
     
     result = subprocess.run(
         ["zsh", "-c", command],
         capture_output=True, text=True,
-        cwd=cwd, timeout=30
+        cwd=cwd, timeout=timeout_sec
     )
     output = result.stdout
     if result.stderr:
@@ -752,88 +797,243 @@ def tool_ardium_diagnose(params: dict) -> str:
     return "🔍 Ardium Diagnostics Summary:\n" + "\n".join(issues)
 
 # ============================================================
-# Dotmini Computer Use Tools (MicroCode Native)
+# Dotmini Computer Use Tools (MicroCode Native Swift Engine)
 # ============================================================
 
-def _get_computer_use_engine():
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+def _get_computer_use_engine(app: str = None):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for candidate_dir in (script_dir, WORKSPACE):
+        if candidate_dir and candidate_dir not in sys.path:
+            sys.path.insert(0, candidate_dir)
     try:
         import importlib
         import tools.computer_use_engine as cue
         importlib.reload(cue)
-        return cue.MicroCodeComputerUse()
-    except Exception as e:
-        raise RuntimeError(f"Failed to initialize MicroCode Computer Use engine: {e}")
+        return cue.MicroCodeComputerUse(app=app)
+    except Exception:
+        # Standalone fallback if tools/ directory was not copied alongside mcp-server.py
+        class _StandaloneNativeComputerUse:
+            def __init__(self, target_app=None):
+                self.app = target_app
+
+            def call_native(self, payload: dict, timeout: float = 30.0) -> dict:
+                import urllib.request
+                import urllib.error
+                body = dict(payload)
+                if self.app and "app" not in body:
+                    body["app"] = self.app
+                req = urllib.request.Request(
+                    "http://127.0.0.1:18888/v1/computer-use",
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        return json.loads(resp.read().decode("utf-8", errors="replace"))
+                except urllib.error.HTTPError as he:
+                    try:
+                        return json.loads(he.read().decode("utf-8", errors="replace"))
+                    except Exception:
+                        return {"success": False, "error": f"HTTP {he.code}"}
+
+            def list_windows(self, app=None):
+                return self.call_native({"action": "windows", "app": app or self.app})
+
+            def observe(self, app=None, window_id=None, set_of_mark=True, output_path=None, include_image=True):
+                p = {"action": "observe", "set_of_mark": set_of_mark, "include_image": include_image}
+                if app or self.app:
+                    p["app"] = app or self.app
+                if window_id is not None:
+                    p["window_id"] = int(window_id)
+                if output_path:
+                    p["output_path"] = output_path
+                return self.call_native(p)
+
+            def act(self, params: dict):
+                return self.call_native(params)
+
+            def batch(self, steps: list, app=None):
+                return self.call_native({"action": "batch", "steps": steps, "app": app or self.app}, timeout=60.0)
+
+            def qa_verify(self, params: dict):
+                p = dict(params)
+                p["action"] = "qa_verify"
+                return self.call_native(p, timeout=60.0)
+
+            def click_element(self, query=None, role=None, click_count=1, mark_id=None, delivery="auto", app=None):
+                p = {"action": "double_click" if click_count == 2 else "click", "click_count": click_count, "delivery": delivery}
+                if mark_id is not None:
+                    p["mark_id"] = int(mark_id)
+                if query:
+                    p["target"] = query
+                if role:
+                    p["role"] = role
+                if app or self.app:
+                    p["app"] = app or self.app
+                res = self.call_native(p)
+                if not res.get("success", False):
+                    raise RuntimeError(res.get("error", "Click failed"))
+                return res
+
+            def mouse_click(self, x, y, click_count=1, button="left", window_relative=False, restore_cursor=True, app=None):
+                p = {"action": "right_click" if button == "right" else ("double_click" if click_count == 2 else "click"),
+                     "x": float(x), "y": float(y), "click_count": int(click_count), "button": button,
+                     "window_relative": bool(window_relative), "restore_cursor": bool(restore_cursor)}
+                if app or self.app:
+                    p["app"] = app or self.app
+                res = self.call_native(p)
+                if not res.get("success", False):
+                    raise RuntimeError(res.get("error", "Mouse click failed"))
+                return res
+
+            def type_text(self, text, press_enter=False, mark_id=None, mode="auto", app=None):
+                p = {"action": "type", "text": text, "press_enter": bool(press_enter), "mode": mode}
+                if mark_id is not None:
+                    p["mark_id"] = int(mark_id)
+                if app or self.app:
+                    p["app"] = app or self.app
+                res = self.call_native(p)
+                if not res.get("success", False):
+                    raise RuntimeError(res.get("error", "Type failed"))
+                return res
+
+            def send_shortcut(self, modifiers, key, app=None):
+                res = self.call_native({"action": "shortcut", "modifiers": modifiers, "key": key, "app": app or self.app})
+                if not res.get("success", False):
+                    raise RuntimeError(res.get("error", "Shortcut failed"))
+                return res
+
+        return _StandaloneNativeComputerUse(app)
+
+def _format_multimodal_computer_use_response(res: dict):
+    """Formats a NativeComputerUseService dict into MCP multimodal content blocks (`text` + optional `image`)."""
+    if not isinstance(res, dict):
+        return json.dumps(res, indent=2, ensure_ascii=False)
+    if res.get("success") is False and "error" in res:
+        raise RuntimeError(res["error"])
+    clean = dict(res)
+    b64 = clean.pop("image_base64", None)
+    mime = clean.pop("image_mime_type", "image/jpeg")
+    text_block = {"type": "text", "text": json.dumps(clean, indent=2, ensure_ascii=False)}
+    if b64:
+        return [text_block, {"type": "image", "data": b64, "mimeType": mime}]
+    return [text_block]
+
+def tool_computer_use_windows(args: dict):
+    engine = _get_computer_use_engine(args.get("app"))
+    res = engine.list_windows(app=args.get("app"))
+    return _format_multimodal_computer_use_response(res)
+
+def tool_computer_use_observe(args: dict):
+    engine = _get_computer_use_engine(args.get("app"))
+    res = engine.observe(
+        app=args.get("app"),
+        window_id=args.get("window_id"),
+        set_of_mark=args.get("set_of_mark", True),
+        output_path=args.get("output_path"),
+        include_image=args.get("include_image", True),
+    )
+    return _format_multimodal_computer_use_response(res)
+
+def tool_computer_use_act(args: dict):
+    engine = _get_computer_use_engine(args.get("app"))
+    res = engine.act(args)
+    return _format_multimodal_computer_use_response(res)
+
+def tool_computer_use_batch(args: dict):
+    engine = _get_computer_use_engine(args.get("app"))
+    steps = args.get("steps", [])
+    res = engine.batch(steps=steps, app=args.get("app"))
+    return _format_multimodal_computer_use_response(res)
 
 def tool_computer_use_inspect(args: dict) -> str:
-    engine = _get_computer_use_engine()
-    elements = engine.inspect_elements()
-    query = args.get("query")
-    role = args.get("role")
-    if query:
-        q = query.lower()
-        elements = [e for e in elements if q in e["label"].lower() or q in e["role"].lower()]
-    if role:
-        r = role.lower()
-        elements = [e for e in elements if r in e["role"].lower()]
-    return json.dumps(elements, indent=2)
+    engine = _get_computer_use_engine(args.get("app"))
+    payload = {"action": "inspect"}
+    if args.get("query"):
+        payload["query"] = args["query"]
+    if args.get("role"):
+        payload["role"] = args["role"]
+    if args.get("app"):
+        payload["app"] = args["app"]
+    if args.get("window_id") is not None:
+        payload["window_id"] = int(args["window_id"])
+    res = engine.call_native(payload)
+    if res.get("success") is False and "error" in res:
+        raise RuntimeError(res["error"])
+    return json.dumps(res, indent=2, ensure_ascii=False)
 
 def tool_computer_use_click(args: dict) -> str:
-    engine = _get_computer_use_engine()
+    engine = _get_computer_use_engine(args.get("app"))
+    mark_id = args.get("mark_id")
     target = args.get("target")
     x = args.get("x")
     y = args.get("y")
-    click_count = args.get("click_count", 1)
-    if target:
-        res = engine.click_element(target, role=args.get("role"), click_count=click_count)
-        return json.dumps(res, indent=2)
+    click_count = int(args.get("click_count", 1))
+    button = args.get("button", "left")
+    delivery = args.get("delivery", "auto")
+    if mark_id is not None or target:
+        res = engine.click_element(
+            query=target,
+            role=args.get("role"),
+            click_count=click_count,
+            mark_id=mark_id,
+            delivery=delivery,
+            app=args.get("app"),
+        )
+        return json.dumps(res, indent=2, ensure_ascii=False)
     elif x is not None and y is not None:
-        engine.mouse_click(float(x), float(y), click_count=click_count)
-        return json.dumps({"success": True, "clicked_at": {"x": float(x), "y": float(y)}}, indent=2)
+        res = engine.mouse_click(
+            float(x),
+            float(y),
+            click_count=click_count,
+            button=button,
+            window_relative=bool(args.get("window_relative", False)),
+            restore_cursor=bool(args.get("restore_cursor", True)),
+            app=args.get("app"),
+        )
+        return json.dumps(res, indent=2, ensure_ascii=False)
     else:
-        raise ValueError("Must provide either 'target' (label) or 'x' and 'y'")
+        raise ValueError("Provide 'mark_id' ([1..N]), 'target' (label), or ('x', 'y') coordinates")
 
 def tool_computer_use_type(args: dict) -> str:
-    engine = _get_computer_use_engine()
+    engine = _get_computer_use_engine(args.get("app"))
     text = args.get("text", "")
-    press_enter = args.get("press_enter", False)
-    engine.type_text(text, press_enter=press_enter)
-    return json.dumps({"success": True, "typed_length": len(text)})
+    press_enter = bool(args.get("press_enter", False))
+    res = engine.type_text(
+        text,
+        press_enter=press_enter,
+        mark_id=args.get("mark_id"),
+        mode=args.get("mode", "auto"),
+        app=args.get("app"),
+    )
+    return json.dumps(res, indent=2, ensure_ascii=False)
 
 def tool_computer_use_shortcut(args: dict) -> str:
-    engine = _get_computer_use_engine()
+    engine = _get_computer_use_engine(args.get("app"))
     modifiers = args.get("modifiers", [])
     key = args.get("key", "")
-    engine.send_shortcut(modifiers, key)
-    return json.dumps({"success": True, "shortcut": f"{'+'.join(modifiers)}+{key}"})
+    res = engine.send_shortcut(modifiers, key, app=args.get("app"))
+    return json.dumps(res, indent=2, ensure_ascii=False)
 
-def tool_computer_use_capture(args: dict) -> str:
-    engine = _get_computer_use_engine()
+def tool_computer_use_capture(args: dict):
+    engine = _get_computer_use_engine(args.get("app"))
     output_path = args.get("output_path", "/tmp/microcode_screenshot.png")
-    res = engine.capture_screenshot(output_path)
-    return json.dumps({"success": True, "path": res})
+    set_of_mark = bool(args.get("set_of_mark", False))
+    include_image = bool(args.get("include_image", True))
+    res = engine.observe(
+        app=args.get("app"),
+        window_id=args.get("window_id"),
+        set_of_mark=set_of_mark,
+        output_path=output_path,
+        include_image=include_image,
+    )
+    return _format_multimodal_computer_use_response(res)
 
-def tool_computer_use_live_test(args: dict) -> str:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from tools.computer_use_engine import MicroCodeComputerUse
-    engine = MicroCodeComputerUse()
-    art_dir = "/Users/dotmini/.gemini/antigravity/brain/197fe973-60a3-4cf1-b2bf-10645e78f063"
-    s0 = engine.capture_screenshot(f"{art_dir}/live_step0_initial.png")
-    engine.click_element("Clear Outputs")
-    time.sleep(1.0)
-    s1 = engine.capture_screenshot(f"{art_dir}/live_step1_cleared.png")
-    try:
-        engine.click_element("Play")
-    except Exception:
-        engine.send_shortcut(["cmd"], "return")
-    time.sleep(3.5)
-    s2 = engine.capture_screenshot(f"{art_dir}/live_step2_executed.png")
-    return json.dumps({
-        "status": "success",
-        "initial": s0,
-        "cleared": s1,
-        "executed": s2
-    }, indent=2)
+def tool_computer_use_live_test(args: dict):
+    engine = _get_computer_use_engine(args.get("app"))
+    res = engine.qa_verify(args or {})
+    return _format_multimodal_computer_use_response(res)
 def tool_device_list(args: dict) -> str:
     """List connected Android devices (physical & emulator), AVDs, and iOS Simulators."""
     devices = []
@@ -1366,12 +1566,80 @@ TOOLS = {
         },
         "handler": tool_ardium_diagnose
     },
-    # --- Dotmini Computer Use Tools ---
-    "computer_use_inspect": {
-        "description": "Inspect all interactive UI elements in the MicroCode native macOS window (buttons, menus, cells, editors) with bounding boxes and coordinates.",
+    # --- Dotmini Computer Use Tools (Native Swift Engine + Hybrid Set-of-Mark) ---
+    "computer_use_observe": {
+        "description": "Capture a 1x Retina-normalized window screenshot with numbered Set-of-Mark (`[1..N]`) visual badges combining macOS Accessibility (`AXUIElement`), in-process AppKit views, and Apple Vision OCR. Returns both the structured mark list and an inline MCP image content block.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "app": {"type": "string", "description": "Target application name (default: 'MicroCode'). Security-sensitive apps (SecurityAgent, Keychain, Password Managers, System Settings) are blocked."},
+                "window_id": {"type": "integer", "description": "Optional specific CGWindowID from computer_use_windows"},
+                "set_of_mark": {"type": "boolean", "description": "Draw numbered [1..N] Set-of-Mark bounding boxes on screenshot (default: true)"},
+                "output_path": {"type": "string", "description": "Optional file path for PNG output"},
+                "include_image": {"type": "boolean", "description": "Return inline base64 JPEG image block in MCP response (default: true)"}
+            }
+        },
+        "handler": tool_computer_use_observe
+    },
+    "computer_use_act": {
+        "description": "Perform a high-precision Computer Use action: 'click', 'double_click', 'right_click', 'hover', 'drag', 'scroll', 'type', 'shortcut', 'zoom', or 'wait_for'. Supports clicking by Set-of-Mark ID (`mark_id`), semantic label (`target`), or 1x coordinates (`x`, `y`). Uses background `AXPress`/`AXValue` first before cursor-restoring `CGEvent` fallback.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: 'click', 'double_click', 'right_click', 'hover', 'drag', 'scroll', 'type', 'shortcut', 'zoom', 'wait_for'"},
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
+                "mark_id": {"type": "integer", "description": "Set-of-Mark badge ID [1..N] from computer_use_observe"},
+                "target": {"type": "string", "description": "Element label or OCR text to click or wait_for"},
+                "role": {"type": "string", "description": "Optional AX role filter"},
+                "x": {"type": "number", "description": "Logical 1x X coordinate"},
+                "y": {"type": "number", "description": "Logical 1x Y coordinate"},
+                "to_x": {"type": "number", "description": "Drag destination X coordinate"},
+                "to_y": {"type": "number", "description": "Drag destination Y coordinate"},
+                "delta_y": {"type": "integer", "description": "Vertical scroll delta (negative scrolls down)"},
+                "delta_x": {"type": "integer", "description": "Horizontal scroll delta"},
+                "text": {"type": "string", "description": "Text to type or wait for"},
+                "press_enter": {"type": "boolean", "description": "Press Return after typing"},
+                "modifiers": {"type": "array", "items": {"type": "string"}, "description": "Shortcut modifiers: cmd, shift, opt, ctrl"},
+                "key": {"type": "string", "description": "Shortcut key name (return, escape, tab, k, s, etc.)"},
+                "delivery": {"type": "string", "description": "'auto' (background AXPress first, then CGEvent), 'ax' (background only), or 'cgevent' (physical mouse)"},
+                "restore_cursor": {"type": "boolean", "description": "Restore mouse cursor position after physical click (default: true)"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_computer_use_act
+    },
+    "computer_use_batch": {
+        "description": "Execute a multi-step sequence of Computer Use actions (e.g. click mark -> type text -> press shortcut -> wait_for) in a single round-trip and return an annotated Set-of-Mark screenshot after completion.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered list of action objects (each with 'action' or 'sleep_ms')",
+                    "items": {"type": "object"}
+                }
+            },
+            "required": ["steps"]
+        },
+        "handler": tool_computer_use_batch
+    },
+    "computer_use_windows": {
+        "description": "List all visible on-screen macOS application windows (`window_id`, `app_name`, `bundle_id`, `title`, 1x logical `bounds`, and TCC permission status).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "Optional application name filter"}
+            }
+        },
+        "handler": tool_computer_use_windows
+    },
+    "computer_use_inspect": {
+        "description": "Inspect interactive UI elements and OCR text labels in the target macOS window (`mark_id`, `role`, `label`, `center`, `bounds`), plus current macOS TCC permission status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
                 "query": {"type": "string", "description": "Filter by element title or label substring"},
                 "role": {"type": "string", "description": "Filter by AX role (e.g. AXButton, AXMenuButton)"}
             }
@@ -1379,36 +1647,44 @@ TOOLS = {
         "handler": tool_computer_use_inspect
     },
     "computer_use_click": {
-        "description": "Simulate physical human mouse click on a MicroCode UI element by label/title (e.g. 'Clear Outputs', 'Play', 'Code') or explicit screen coordinates (x, y).",
+        "description": "Click a UI element by Set-of-Mark ID (`mark_id`), semantic label/title (`target`), or 1x logical coordinates (`x`, `y`). Attempts background `AXPress` / `NSButton.performClick` first before cursor-restoring `CGEvent` fallback.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
+                "mark_id": {"type": "integer", "description": "Set-of-Mark badge ID [1..N]"},
                 "target": {"type": "string", "description": "Target UI element title or label"},
                 "role": {"type": "string", "description": "Optional AX role filter"},
-                "x": {"type": "number", "description": "Target screen X coordinate"},
-                "y": {"type": "number", "description": "Target screen Y coordinate"},
-                "click_count": {"type": "integer", "description": "1 for single click, 2 for double click"}
+                "x": {"type": "number", "description": "Target 1x screen X coordinate"},
+                "y": {"type": "number", "description": "Target 1x screen Y coordinate"},
+                "click_count": {"type": "integer", "description": "1 for single click, 2 for double click"},
+                "button": {"type": "string", "description": "'left' or 'right'"},
+                "delivery": {"type": "string", "description": "'auto', 'ax', or 'cgevent'"}
             }
         },
         "handler": tool_computer_use_click
     },
     "computer_use_type": {
-        "description": "Type text directly into the focused editor or cell with natural human typing cadence.",
+        "description": "Type text into the focused element or a specific Set-of-Mark input (`mark_id`). Uses background `AXValue`, clipboard-preserving fast paste, or Unicode key events.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
+                "mark_id": {"type": "integer", "description": "Optional Set-of-Mark ID of input field to focus/set"},
                 "text": {"type": "string", "description": "Text or code to type"},
-                "press_enter": {"type": "boolean", "description": "Whether to hit Enter after typing"}
+                "press_enter": {"type": "boolean", "description": "Whether to hit Enter after typing"},
+                "mode": {"type": "string", "description": "'auto', 'ax', 'paste', or 'keystroke'"}
             },
             "required": ["text"]
         },
         "handler": tool_computer_use_type
     },
     "computer_use_shortcut": {
-        "description": "Send native macOS keyboard shortcuts to MicroCode (e.g. Cmd+Return to run cell, Cmd+K, Cmd+S).",
+        "description": "Send native macOS keyboard shortcuts (e.g. Cmd+Return, Cmd+K, Cmd+S).",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
                 "modifiers": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1421,20 +1697,28 @@ TOOLS = {
         "handler": tool_computer_use_shortcut
     },
     "computer_use_capture": {
-        "description": "Capture a crystal clear real-time screenshot of the MicroCode native window.",
+        "description": "Capture a 1x logical window screenshot (with optional Set-of-Mark badges) and return both file path and inline multimodal image content.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "output_path": {"type": "string", "description": "Destination file path for PNG screenshot"}
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
+                "output_path": {"type": "string", "description": "Destination file path for PNG screenshot"},
+                "set_of_mark": {"type": "boolean", "description": "Draw numbered [1..N] Set-of-Mark badges (default: false)"},
+                "include_image": {"type": "boolean", "description": "Include inline base64 JPEG image in MCP response (default: true)"}
             }
         },
         "handler": tool_computer_use_capture
     },
     "computer_use_live_test": {
-        "description": "Execute a full real-time human simulation test on the running MicroCode notebook (captures before, clicks Clear Outputs, executes Play, and captures rendered output).",
+        "description": "Run an automated visual QA verification (`qa_verify`) capturing before/after screenshots, computing pixel-diff ratio, optionally executing action steps, and verifying expected text on screen.",
         "inputSchema": {
             "type": "object",
-            "properties": {}
+            "properties": {
+                "app": {"type": "string", "description": "Optional target application name (default: 'MicroCode')"},
+                "target": {"type": "string", "description": "Optional UI element label to click during test"},
+                "expect_text": {"type": "string", "description": "Optional text/label expected in after-state"},
+                "steps": {"type": "array", "items": {"type": "object"}, "description": "Optional action steps to run between before and after screenshots"}
+            }
         },
         "handler": tool_computer_use_live_test
     },
@@ -1652,11 +1936,12 @@ def handle_request(request: dict) -> dict:
         
         try:
             result = TOOLS[tool_name]["handler"](tool_args)
+            content_blocks = result if isinstance(result, list) else [{"type": "text", "text": str(result)}]
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "content": [{"type": "text", "text": result}],
+                    "content": content_blocks,
                     "isError": False
                 }
             }

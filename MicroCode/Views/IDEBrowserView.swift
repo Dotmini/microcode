@@ -856,9 +856,18 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
         if t == "browser", let bv = activeBrowserWebView {
             return bv
         }
-        if let bv = activeBrowserWebView { return bv }
-        if let pv = activePreviewWebView { return pv }
-        if let bg = backgroundWebView { return bg }
+        if t == "preview" || AppState.shared?.editorMode != .browser {
+            if let pv = activePreviewWebView {
+                return pv
+            }
+            if let bg = backgroundWebView {
+                return bg
+            }
+        } else {
+            if let bv = activeBrowserWebView { return bv }
+            if let pv = activePreviewWebView { return pv }
+            if let bg = backgroundWebView { return bg }
+        }
         
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
@@ -1064,26 +1073,36 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             guard let url = targetURL else {
                 throw NSError(domain: "IDEBrowser", code: -2, userInfo: [NSLocalizedDescriptionKey: "Invalid URL: \(urlStr)"])
             }
-            if target == "preview" {
+            var targetWV = wv
+            if target != "browser" {
+                AppState.shared?.showPreviewInspector(tab: "web")
                 DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
                 DeviceRuntimeService.shared.embeddedDockMode = .web
+                PreviewDockService.shared.isDockVisible = true
+                PreviewDockService.shared.selectTab(id: "web")
                 DeviceRuntimeService.shared.targetWebURL = url
+                if activePreviewWebView == nil {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                }
+                if let pv = activePreviewWebView {
+                    targetWV = pv
+                }
             } else {
                 AppState.shared?.browserURL = url.absoluteString
                 NotificationCenter.default.post(name: .browserNavigate, object: url.absoluteString)
             }
             if url.isFileURL {
-                wv.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+                targetWV.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: "/"))
             } else {
-                wv.load(URLRequest(url: url))
+                targetWV.load(URLRequest(url: url))
             }
             // Wait up to 3.5s for page load to settle
             for _ in 0..<35 {
                 try? await Task.sleep(nanoseconds: 100_000_000)
-                if !wv.isLoading && (wv.url != nil) { break }
+                if !targetWV.isLoading && (targetWV.url != nil) { break }
             }
-            let title = (try? await evalJS("document.title", target: target)) ?? (wv.title ?? "")
-            return "✅ Navigated (\(target)) to \(wv.url?.absoluteString ?? url.absoluteString) | Title: \(title)"
+            let title = (try? await evalJS("document.title", target: target)) ?? (targetWV.title ?? "")
+            return "✅ Navigated (\(target != "browser" ? "preview" : "browser")) to \(targetWV.url?.absoluteString ?? url.absoluteString) | Title: \(title)"
             
         case "inspect_elements", "elements", "interactive":
             let js = """

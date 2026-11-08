@@ -47,8 +47,104 @@ enum WorkspaceStoragePaths {
     /// Global `~/.microcode` root directory under the current user's Home folder.
     static var microcodeHomeDirectory: URL {
         let dir = userHomeDirectory.appendingPathComponent(".microcode", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        return dir
+    }
+
+    /// Centralized `~/.microcode/runtime` directory (`0700`) for daemon tokens, PIDs, and logs.
+    static var runtimeDirectory: URL {
+        let dir = microcodeHomeDirectory.appendingPathComponent("runtime", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        return dir
+    }
+
+    /// Global `~/.microcode/rules` directory for user-wide persistent rules across all workspaces.
+    static var globalRulesDirectory: URL {
+        let dir = microcodeHomeDirectory.appendingPathComponent("rules", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// Atomically writes sensitive data with strict `0600` (`rw-------`) owner-only POSIX permissions.
+    static func writeSecureData(_ data: Data, to fileURL: URL) throws {
+        let fm = FileManager.default
+        let parent = fileURL.deletingLastPathComponent()
+        try fm.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try data.write(to: fileURL, options: .atomic)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+    }
+
+    /// Consolidates stray `$HOME/.microcode_*` files into `~/.microcode/runtime/` and enforces
+    /// `0700` directory / `0600` file permissions across all credentials, tokens, and SSH keys in `~/.microcode/`.
+    static func hardenAndConsolidateMicrocodeStorage() {
+        let fm = FileManager.default
+        let home = userHomeDirectory
+        let mcRoot = microcodeHomeDirectory
+        let runtimeDir = runtimeDirectory
+
+        // 1. Relocate stray $HOME/.microcode_jupyter.{token,log} into ~/.microcode/runtime/
+        let legacyMigrations: [(srcName: String, dstName: String, mode: Int)] = [
+            (".microcode_jupyter.token", "jupyter.token", 0o600),
+            (".microcode_jupyter.log", "jupyter.log", 0o600)
+        ]
+        for item in legacyMigrations {
+            let srcURL = home.appendingPathComponent(item.srcName)
+            let dstURL = runtimeDir.appendingPathComponent(item.dstName)
+            guard fm.fileExists(atPath: srcURL.path) else { continue }
+            if !fm.fileExists(atPath: dstURL.path) {
+                try? fm.moveItem(at: srcURL, to: dstURL)
+            } else {
+                try? fm.removeItem(at: srcURL)
+            }
+            if fm.fileExists(atPath: dstURL.path) {
+                try? fm.setAttributes([.posixPermissions: item.mode], ofItemAtPath: dstURL.path)
+            }
+        }
+
+        // 2. Enforce 0700 on sensitive subdirectories inside ~/.microcode/
+        let sensitiveDirs = ["keys", "runtime", "pns"]
+        for dirName in sensitiveDirs {
+            let dirURL = mcRoot.appendingPathComponent(dirName, isDirectory: true)
+            if fm.fileExists(atPath: dirURL.path) {
+                try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dirURL.path)
+            }
+        }
+
+        // 3. Enforce 0600 on all files inside ~/.microcode/keys/ and ~/.microcode/runtime/
+        for dirName in ["keys", "runtime"] {
+            let dirURL = mcRoot.appendingPathComponent(dirName, isDirectory: true)
+            if let children = try? fm.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: [.isRegularFileKey], options: []) {
+                for child in children {
+                    var isDir: ObjCBool = false
+                    if fm.fileExists(atPath: child.path, isDirectory: &isDir), !isDir.boolValue {
+                        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: child.path)
+                    }
+                }
+            }
+        }
+
+        // 4. Enforce 0600 on known sensitive top-level files and any *.token / *.secret / *.key / *.pem in ~/.microcode/
+        let explicitSensitiveFiles: Set<String> = [
+            "supabase_live_token.json",
+            "dotmini_account.json",
+            "remote_servers.json",
+            "ssh_known_hosts",
+            "config.json",
+            "agent_sessions.json"
+        ]
+        let sensitiveExts: Set<String> = ["token", "secret", "key", "pem", "p12", "env"]
+        if let rootEntries = try? fm.contentsOfDirectory(at: mcRoot, includingPropertiesForKeys: nil, options: []) {
+            for entry in rootEntries {
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: entry.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+                let name = entry.lastPathComponent
+                let ext = entry.pathExtension.lowercased()
+                if explicitSensitiveFiles.contains(name) || sensitiveExts.contains(ext) {
+                    try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: entry.path)
+                }
+            }
+        }
     }
 
     /// Universal default parent directory for QuickStart and newly created projects:

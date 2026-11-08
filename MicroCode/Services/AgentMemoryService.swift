@@ -98,6 +98,14 @@ class AgentMemoryService: ObservableObject {
     private var embeddingCacheOrder: [String] = []
     private let maximumEmbeddingCacheEntries = 64
     private var pendingMemorySave: Task<Void, Never>?
+    private var lastBackendUnreachableAt: Date = .distantPast
+    private lazy var loopbackSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 0.10
+        cfg.timeoutIntervalForResource = 0.15
+        cfg.waitsForConnectivity = false
+        return URLSession(configuration: cfg)
+    }()
     
     private var storageURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -223,8 +231,12 @@ class AgentMemoryService: ObservableObject {
         return recallMemories(query: query, queryEmbedding: queryEmbedding, limit: limit, excludeChatId: currentChatId, includeCurrentChat: false, projectPath: projectPath)
     }
     
-    /// Fetch high-fidelity BERT embeddings from the Rust backend (with local DJB2 fallback)
+    /// Fetch high-fidelity BERT embeddings from the Rust backend (with instant 0ms circuit-breaker & local DJB2 fallback)
     func fetchEmbeddingFromBackend(_ text: String) async -> [Float]? {
+        guard !memories.isEmpty else { return nil }
+        if Date().timeIntervalSince(lastBackendUnreachableAt) < 120 {
+            return nil
+        }
         let normalized = String(text.prefix(12_000))
         let cacheKey = Self.stableCacheKey(normalized)
         if let cached = embeddingCache[cacheKey] {
@@ -233,12 +245,12 @@ class AgentMemoryService: ObservableObject {
         }
         TokenOptimizer.shared.recordContextCache(hit: false, tokens: 0)
 
-        guard let url = URL(string: "http://localhost:3000/api/ai/embedding") else { return nil }
+        guard let url = URL(string: "http://127.0.0.1:3000/api/ai/embedding") else { return nil }
         
         var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 0.5 // Fast timeout to prevent blocking UI
+        request.timeoutInterval = 0.10
         
         struct Req: Codable {
             let text: String
@@ -252,8 +264,9 @@ class AgentMemoryService: ObservableObject {
             let reqBody = Req(text: normalized)
             request.httpBody = try JSONEncoder().encode(reqBody)
             
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await loopbackSession.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                lastBackendUnreachableAt = Date()
                 return nil
             }
             
@@ -261,7 +274,7 @@ class AgentMemoryService: ObservableObject {
             cacheEmbedding(decoded.embedding, for: cacheKey)
             return decoded.embedding
         } catch {
-            print("[Memory] BERT embedding fetch failed (falling back to DJB2): \(error)")
+            lastBackendUnreachableAt = Date()
             return nil
         }
     }

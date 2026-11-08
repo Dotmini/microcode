@@ -303,7 +303,13 @@ struct WebSubscriptionLoginSheet: View {
                                 .foregroundColor(.green.opacity(0.9))
                         }
                         
-                        Text(provider == .copilot ? "Copilot access verified. Your credential is saved in Keychain." : "Session saved in Keychain. Use the provider’s CLI agent in Connections; a web session does not verify API or subscription access.")
+                        Text(
+                            provider == .copilot
+                                ? "Copilot access verified. Your credential is saved in Keychain."
+                                : (SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: provider) != nil
+                                    ? "Credential saved in Keychain & linked to your local \(provider.shortLabel) CLI Bridge (Zero API Charges)."
+                                    : "Credential saved in Keychain and added to your Unified Subscription Pool.")
+                        )
                             .font(.system(size: 12))
                             .foregroundColor(.white.opacity(0.8))
                             .multilineTextAlignment(.center)

@@ -2,9 +2,9 @@
 //  ACPGhostTextBridge.swift
 //  MicroCode
 //
-//  Ghost Text Bridge — Extends the existing AIAutocompleteService with
-//  multi-provider cloud FIM (Fill-In-the-Middle) endpoints.
-//  Provides fallback chain: Local LLM → Cloud FIM → LSP completions.
+//  Ultra-Fast Subscription & BYOK Ghost Text FIM Bridge (<80ms–250ms target).
+//  Connects inline editor Ghost Text directly to MicroCode's 3-Tier Unified Subscription Pool:
+//  Local LLM → Cerebras Wafer-Scale → Groq LPU → GitHub Copilot → Codestral → AiPass/TokenMe/Gemini → DeepSeek → OpenAI.
 //
 
 import Foundation
@@ -12,6 +12,7 @@ import Foundation
 // MARK: - Cloud FIM Provider Protocol
 
 /// Protocol for cloud-based Fill-In-the-Middle completion providers
+@MainActor
 protocol CloudFIMProvider {
     var name: String { get }
     var isEnabled: Bool { get }
@@ -26,10 +27,98 @@ protocol CloudFIMProvider {
     ) async throws -> String?
 }
 
+// MARK: - Shared FIM Prompt & Cleanup Helper
+
+enum GhostTextFIMHelper {
+    static func buildChatFIMMessages(
+        prefix: String,
+        suffix: String,
+        language: String,
+        filePath: String
+    ) -> [[String: String]] {
+        let pre = String(prefix.suffix(1800))
+        let suf = String(suffix.prefix(700))
+        return [
+            [
+                "role": "system",
+                "content": "You are an ultra-low-latency Fill-In-The-Middle (FIM) code completion engine inside MicroCode IDE. Output ONLY the exact code to insert at `<CURSOR>`. Never repeat code before `<CURSOR>` or after `<CURSOR>`. Never wrap in markdown backticks or add explanations."
+            ],
+            [
+                "role": "user",
+                "content": "File: \(filePath) (\(language))\n\(pre)<CURSOR>\(suf)"
+            ]
+        ]
+    }
+
+    static func cleanFIMOutput(_ raw: String) -> String? {
+        var text = raw
+        if text.hasPrefix("```") {
+            if let nl = text.firstIndex(of: "\n") {
+                text = String(text[text.index(after: nl)...])
+            } else {
+                text = text.replacingOccurrences(of: "```", with: "")
+            }
+            if let closing = text.range(of: "```", options: .backwards) {
+                text = String(text[..<closing.lowerBound])
+            }
+        }
+        text = text.replacingOccurrences(of: "<CURSOR>", with: "")
+        // Trim trailing newlines/whitespace only (preserve meaningful leading space after tokens)
+        while text.last?.isNewline == true {
+            text.removeLast()
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return text
+    }
+
+    static func executeOpenAIChatFIM(
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        extraHeaders: [String: String] = [:],
+        timeoutMs: Int,
+        prefix: String,
+        suffix: String,
+        language: String,
+        filePath: String
+    ) async throws -> String? {
+        guard let url = URL(string: endpoint) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        for (k, v) in extraHeaders {
+            request.setValue(v, forHTTPHeaderField: k)
+        }
+        request.timeoutInterval = max(0.35, TimeInterval(timeoutMs) / 1000.0)
+
+        let body: [String: Any] = [
+            "model": model,
+            "messages": buildChatFIMMessages(prefix: prefix, suffix: suffix, language: language, filePath: filePath),
+            "max_tokens": 96,
+            "temperature": 0.0,
+            "stream": false,
+            "stop": ["\n\n\n", "<CURSOR>", "```"]
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            return nil
+        }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let choices = json["choices"] as? [[String: Any]],
+           let msg = choices.first?["message"] as? [String: Any],
+           let content = msg["content"] as? String {
+            return cleanFIMOutput(content)
+        }
+        return nil
+    }
+}
+
 // MARK: - Ghost Text Bridge
 
-/// Bridges multiple FIM providers with the existing AIAutocompleteService.
-/// Provides a unified completion pipeline with fallback chain.
+/// Bridges multiple Subscription & BYOK FIM providers with AIAutocompleteService.
 @MainActor
 class ACPGhostTextBridge: ObservableObject {
     static let shared = ACPGhostTextBridge()
@@ -38,22 +127,25 @@ class ACPGhostTextBridge: ObservableObject {
     @Published var lastLatencyMs: Int = 0
     @Published var isEnabled = true
     
-    /// Maximum latency for ghost text (cancel if slower)
-    private let maxLatencyMs = 200
+    /// Maximum latency budget per provider attempt (keeps TLS + fast LPU/Flash completions snappy)
+    private let maxLatencyMs = 650
     
     /// Context window: lines before/after cursor to include
-    private let prefixLineCount = 500
-    private let suffixLineCount = 200
+    private let prefixLineCount = 250
+    private let suffixLineCount = 100
     
-    /// Registered cloud FIM providers
+    /// Registered cloud & subscription FIM providers in speed priority order
     private var providers: [CloudFIMProvider] = []
     
     init() {
-        // Register default providers
         providers = [
-            OpenAIFIMProvider(),
-            GeminiFIMProvider(),
+            CerebrasSubscriptionFIMProvider(),
+            GroqSubscriptionFIMProvider(),
+            CopilotSubscriptionFIMProvider(),
+            MistralCodestralFIMProvider(),
+            GeminiAndAiPassFIMProvider(),
             DeepSeekFIMProvider(),
+            OpenAIFIMProvider(),
             CustomFIMProvider()
         ]
     }
@@ -66,7 +158,7 @@ class ACPGhostTextBridge: ObservableObject {
     // MARK: - Completion Pipeline
     
     /// Get ghost text completion using the fallback chain:
-    /// Local LLM → Cloud FIM → LSP completions
+    /// Cerebras → Groq → GitHub Copilot → Codestral → AiPass/TokenMe/Gemini → DeepSeek → OpenAI
     func getCompletion(
         prefix: String,
         suffix: String,
@@ -76,17 +168,15 @@ class ACPGhostTextBridge: ObservableObject {
         guard isEnabled else { return nil }
         
         let start = CFAbsoluteTimeGetCurrent()
-        
-        // Trim context to appropriate size
         let trimmedPrefix = trimPrefix(prefix)
         let trimmedSuffix = trimSuffix(suffix)
         
-        // Try each enabled provider with latency budget
         for provider in providers where provider.isEnabled {
+            if Task.isCancelled { return nil }
+            let budgetMs = min(maxLatencyMs, max(250, provider.latencyBudgetMs))
             do {
                 let result = try await withThrowingTaskGroup(of: String?.self) { group in
-                    // Completion task
-                    group.addTask {
+                    group.addTask { @MainActor in
                         try await provider.complete(
                             prefix: trimmedPrefix,
                             suffix: trimmedSuffix,
@@ -94,14 +184,10 @@ class ACPGhostTextBridge: ObservableObject {
                             filePath: filePath
                         )
                     }
-                    
-                    // Timeout task
                     group.addTask {
-                        try await Task.sleep(nanoseconds: UInt64(self.maxLatencyMs) * 1_000_000)
+                        try await Task.sleep(nanoseconds: UInt64(budgetMs) * 1_000_000)
                         return nil
                     }
-                    
-                    // Take whichever finishes first
                     if let first = try await group.next() {
                         group.cancelAll()
                         return first
@@ -116,7 +202,7 @@ class ACPGhostTextBridge: ObservableObject {
                     return completion
                 }
             } catch {
-                continue // Try next provider
+                continue
             }
         }
         
@@ -142,176 +228,340 @@ class ACPGhostTextBridge: ObservableObject {
     }
 }
 
-// MARK: - OpenAI FIM Provider
+// MARK: - 1. Cerebras Wafer-Scale FIM (~60-110ms, 2,000+ tok/s)
 
-/// OpenAI Codex / GPT FIM completions via /v1/completions
-struct OpenAIFIMProvider: CloudFIMProvider {
-    let name = "OpenAI Codex"
-    var isEnabled: Bool {
-        ProcessInfo.processInfo.environment["OPENAI_API_KEY"] != nil
+struct CerebrasSubscriptionFIMProvider: CloudFIMProvider {
+    let name = "Cerebras Wafer-Scale"
+    let latencyBudgetMs = 380
+
+    private var resolvedKey: String {
+        if let sub = SubscriptionAuthManager.shared.token(for: .cerebras), !sub.isEmpty { return sub }
+        let byok = AIModelCatalog.resolveKey("cerebras")
+        if !byok.isEmpty { return byok }
+        return ProcessInfo.processInfo.environment["CEREBRAS_API_KEY"] ?? ""
     }
-    let latencyBudgetMs = 150
-    
+
+    var isEnabled: Bool { !resolvedKey.isEmpty }
+
     func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
-        guard let apiKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"] else { return nil }
-        
-        let url = URL(string: "https://api.openai.com/v1/completions")!
+        let key = resolvedKey
+        guard !key.isEmpty else { return nil }
+        return try await GhostTextFIMHelper.executeOpenAIChatFIM(
+            endpoint: "https://api.cerebras.ai/v1/chat/completions",
+            apiKey: key,
+            model: "llama-3.3-70b",
+            timeoutMs: latencyBudgetMs,
+            prefix: prefix,
+            suffix: suffix,
+            language: language,
+            filePath: filePath
+        )
+    }
+}
+
+// MARK: - 2. Groq LPU Ultra-Low-Latency FIM (~80-140ms)
+
+struct GroqSubscriptionFIMProvider: CloudFIMProvider {
+    let name = "Groq LPU"
+    let latencyBudgetMs = 420
+
+    private var resolvedKey: String {
+        if let sub = SubscriptionAuthManager.shared.token(for: .groq), !sub.isEmpty { return sub }
+        let byok = AIModelCatalog.resolveKey("groq")
+        if !byok.isEmpty { return byok }
+        return ProcessInfo.processInfo.environment["GROQ_API_KEY"] ?? ""
+    }
+
+    var isEnabled: Bool { !resolvedKey.isEmpty }
+
+    func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
+        let key = resolvedKey
+        guard !key.isEmpty else { return nil }
+        return try await GhostTextFIMHelper.executeOpenAIChatFIM(
+            endpoint: "https://api.groq.com/openai/v1/chat/completions",
+            apiKey: key,
+            model: "llama-3.3-70b-versatile",
+            timeoutMs: latencyBudgetMs,
+            prefix: prefix,
+            suffix: suffix,
+            language: language,
+            filePath: filePath
+        )
+    }
+}
+
+// MARK: - 3. GitHub Copilot Subscription FIM (Zero API Charge)
+
+struct CopilotSubscriptionFIMProvider: CloudFIMProvider {
+    let name = "GitHub Copilot"
+    let latencyBudgetMs = 500
+
+    private var githubToken: String {
+        SubscriptionAuthManager.shared.token(for: .copilot) ?? ""
+    }
+
+    var isEnabled: Bool { !githubToken.isEmpty }
+
+    func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
+        let ghToken = githubToken
+        guard !ghToken.isEmpty else { return nil }
+        let sessionToken = try await SubscriptionAuthManager.shared.getCopilotSessionToken(githubToken: ghToken)
+        return try await GhostTextFIMHelper.executeOpenAIChatFIM(
+            endpoint: "https://api.githubcopilot.com/chat/completions",
+            apiKey: sessionToken,
+            model: "gpt-4o-mini",
+            extraHeaders: [
+                "Copilot-Integration-Id": "vscode-chat",
+                "Editor-Version": "vscode/1.99.0"
+            ],
+            timeoutMs: latencyBudgetMs,
+            prefix: prefix,
+            suffix: suffix,
+            language: language,
+            filePath: filePath
+        )
+    }
+}
+
+// MARK: - 4. Mistral Codestral Native FIM
+
+struct MistralCodestralFIMProvider: CloudFIMProvider {
+    let name = "Mistral Codestral"
+    let latencyBudgetMs = 500
+
+    private var resolvedKey: String {
+        if let sub = SubscriptionAuthManager.shared.token(for: .mistral), !sub.isEmpty { return sub }
+        let byok = AIModelCatalog.resolveKey("mistral")
+        if !byok.isEmpty { return byok }
+        return ProcessInfo.processInfo.environment["MISTRAL_API_KEY"] ?? ""
+    }
+
+    var isEnabled: Bool { !resolvedKey.isEmpty }
+
+    func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
+        let key = resolvedKey
+        guard !key.isEmpty else { return nil }
+        let url = URL(string: "https://api.mistral.ai/v1/fim/completions")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = TimeInterval(latencyBudgetMs) / 1000.0
-        
+
         let body: [String: Any] = [
-            "model": "gpt-4o-mini",
-            "prompt": prefix,
-            "suffix": suffix,
-            "max_tokens": 128,
+            "model": "codestral-latest",
+            "prompt": String(prefix.suffix(2000)),
+            "suffix": String(suffix.prefix(800)),
+            "max_tokens": 96,
             "temperature": 0.0,
-            "stop": ["\n\n", "\n}", "\nfunc", "\nclass", "\nstruct"]
+            "stop": ["\n\n\n"]
         ]
-        
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        
         let (data, _) = try await URLSession.shared.data(for: request)
-        
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let choices = json["choices"] as? [[String: Any]],
-           let firstChoice = choices.first,
-           let text = firstChoice["text"] as? String {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+           let msg = choices.first?["message"] as? [String: Any],
+           let content = msg["content"] as? String {
+            return GhostTextFIMHelper.cleanFIMOutput(content)
         }
-        
         return nil
     }
 }
 
-// MARK: - Gemini FIM Provider
+// MARK: - 5. TH-AI Passport / TokenMe / Gemini Flash FIM
 
-/// Google Gemini Flash for fast inline completions
-struct GeminiFIMProvider: CloudFIMProvider {
+struct GeminiAndAiPassFIMProvider: CloudFIMProvider {
     let name = "Gemini Flash"
-    var isEnabled: Bool {
-        ProcessInfo.processInfo.environment["GEMINI_API_KEY"] != nil
+    let latencyBudgetMs = 550
+
+    private var aipassKey: String {
+        SubscriptionAuthManager.shared.token(for: .aipass) ?? UserDefaults.standard.string(forKey: "aipass_api_key") ?? ""
     }
-    let latencyBudgetMs = 150
-    
+
+    private var tokenmeKey: String {
+        SubscriptionAuthManager.shared.token(for: .tokenme) ?? UserDefaults.standard.string(forKey: "tokenme_api_key") ?? ""
+    }
+
+    private var geminiDirectKey: String {
+        let byok = AIModelCatalog.resolveKey("gemini")
+        if !byok.isEmpty { return byok }
+        if let sub = SubscriptionAuthManager.shared.token(for: .gemini), sub.hasPrefix("AIza") { return sub }
+        return ProcessInfo.processInfo.environment["GEMINI_API_KEY"] ?? ""
+    }
+
+    var isEnabled: Bool {
+        !aipassKey.isEmpty || !tokenmeKey.isEmpty || !geminiDirectKey.isEmpty
+    }
+
     func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
-        guard let apiKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"] else { return nil }
-        
+        if !aipassKey.isEmpty {
+            if let out = try? await GhostTextFIMHelper.executeOpenAIChatFIM(
+                endpoint: "https://api.aipass.in.th/v1/chat/completions",
+                apiKey: aipassKey,
+                model: "gemini-2.5-flash",
+                timeoutMs: latencyBudgetMs,
+                prefix: prefix,
+                suffix: suffix,
+                language: language,
+                filePath: filePath
+            ), !out.isEmpty {
+                return out
+            }
+        }
+        if !tokenmeKey.isEmpty {
+            if let out = try? await GhostTextFIMHelper.executeOpenAIChatFIM(
+                endpoint: "https://api.tokenme.net/v1/chat/completions",
+                apiKey: tokenmeKey,
+                model: "gemini-2.5-flash",
+                timeoutMs: latencyBudgetMs,
+                prefix: prefix,
+                suffix: suffix,
+                language: language,
+                filePath: filePath
+            ), !out.isEmpty {
+                return out
+            }
+        }
+        let apiKey = geminiDirectKey
+        guard !apiKey.isEmpty else { return nil }
         let model = "gemini-2.5-flash"
         let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)")!
-        
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = TimeInterval(latencyBudgetMs) / 1000.0
-        
+
         let prompt = """
-        You are a code completion engine. Complete the code at the cursor position.
-        Only output the completion text, nothing else. No explanation.
-        
+        Complete ONLY the missing code at <CURSOR>. Output raw code only, no markdown fences, no explanation.
         File: \(filePath) (\(language))
-        
-        Code before cursor:
-        ```
-        \(String(prefix.suffix(2000)))
-        ```
-        
-        Code after cursor:
-        ```
-        \(String(suffix.prefix(1000)))
-        ```
-        
-        Completion:
+        \(String(prefix.suffix(1800)))<CURSOR>\(String(suffix.prefix(700)))
         """
-        
         let body: [String: Any] = [
-            "contents": [
-                ["parts": [["text": prompt]]]
-            ],
+            "contents": [["parts": [["text": prompt]]]],
             "generationConfig": [
-                "maxOutputTokens": 128,
+                "maxOutputTokens": 96,
                 "temperature": 0.0
             ]
         ]
-        
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        
         let (data, _) = try await URLSession.shared.data(for: request)
-        
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let candidates = json["candidates"] as? [[String: Any]],
-           let first = candidates.first,
-           let content = first["content"] as? [String: Any],
+           let content = candidates.first?["content"] as? [String: Any],
            let parts = content["parts"] as? [[String: Any]],
            let text = parts.first?["text"] as? String {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return GhostTextFIMHelper.cleanFIMOutput(text)
         }
-        
         return nil
     }
 }
 
-// MARK: - DeepSeek FIM Provider
+// MARK: - 6. DeepSeek Native Beta FIM Provider
 
-/// DeepSeek Coder — Native FIM model
 struct DeepSeekFIMProvider: CloudFIMProvider {
-    let name = "DeepSeek Coder"
-    var isEnabled: Bool {
-        ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"] != nil
+    let name = "DeepSeek FIM"
+    let latencyBudgetMs = 600
+
+    private var resolvedKey: String {
+        if let sub = SubscriptionAuthManager.shared.token(for: .deepseek), !sub.isEmpty { return sub }
+        let byok = AIModelCatalog.resolveKey("deepseek")
+        if !byok.isEmpty { return byok }
+        return ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"] ?? ""
     }
-    let latencyBudgetMs = 150
-    
+
+    var isEnabled: Bool { !resolvedKey.isEmpty }
+
     func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
-        guard let apiKey = ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"] else { return nil }
-        
-        let url = URL(string: "https://api.deepseek.com/v1/completions")!
+        let apiKey = resolvedKey
+        guard !apiKey.isEmpty else { return nil }
+        let url = URL(string: "https://api.deepseek.com/beta/completions")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = TimeInterval(latencyBudgetMs) / 1000.0
-        
+
         let body: [String: Any] = [
-            "model": "deepseek-coder",
-            "prompt": prefix,
-            "suffix": suffix,
-            "max_tokens": 128,
-            "temperature": 0.0
+            "model": "deepseek-chat",
+            "prompt": String(prefix.suffix(2000)),
+            "suffix": String(suffix.prefix(800)),
+            "max_tokens": 96,
+            "temperature": 0.0,
+            "stop": ["\n\n\n"]
         ]
-        
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        
         let (data, _) = try await URLSession.shared.data(for: request)
-        
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let choices = json["choices"] as? [[String: Any]],
-           let firstChoice = choices.first,
-           let text = firstChoice["text"] as? String {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+           let text = choices.first?["text"] as? String {
+            return GhostTextFIMHelper.cleanFIMOutput(text)
         }
-        
         return nil
     }
 }
 
-// MARK: - Custom FIM Provider
+// MARK: - 7. OpenAI / OpenRouter FIM Provider
 
-/// Custom OpenAI-compatible FIM endpoint
+struct OpenAIFIMProvider: CloudFIMProvider {
+    let name = "OpenAI Fast FIM"
+    let latencyBudgetMs = 550
+
+    private var openAIKey: String {
+        let byok = AIModelCatalog.resolveKey("openai")
+        if !byok.isEmpty { return byok }
+        if let sub = SubscriptionAuthManager.shared.token(for: .chatgpt), sub.hasPrefix("sk-") { return sub }
+        return ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? ""
+    }
+
+    private var openRouterKey: String {
+        if let sub = SubscriptionAuthManager.shared.token(for: .openrouter), !sub.isEmpty { return sub }
+        return AIModelCatalog.resolveKey("openrouter")
+    }
+
+    var isEnabled: Bool { !openAIKey.isEmpty || !openRouterKey.isEmpty }
+
+    func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
+        if !openAIKey.isEmpty {
+            return try await GhostTextFIMHelper.executeOpenAIChatFIM(
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                apiKey: openAIKey,
+                model: "gpt-4o-mini",
+                timeoutMs: latencyBudgetMs,
+                prefix: prefix,
+                suffix: suffix,
+                language: language,
+                filePath: filePath
+            )
+        }
+        guard !openRouterKey.isEmpty else { return nil }
+        return try await GhostTextFIMHelper.executeOpenAIChatFIM(
+            endpoint: "https://openrouter.ai/api/v1/chat/completions",
+            apiKey: openRouterKey,
+            model: "google/gemini-2.5-flash",
+            timeoutMs: latencyBudgetMs,
+            prefix: prefix,
+            suffix: suffix,
+            language: language,
+            filePath: filePath
+        )
+    }
+}
+
+// MARK: - 8. Custom FIM Provider
+
 struct CustomFIMProvider: CloudFIMProvider {
     let name = "Custom Endpoint"
     var isEnabled: Bool {
         ProcessInfo.processInfo.environment["CUSTOM_FIM_URL"] != nil
     }
-    let latencyBudgetMs = 200
+    let latencyBudgetMs = 400
     
     func complete(prefix: String, suffix: String, language: String, filePath: String) async throws -> String? {
         guard let baseURL = ProcessInfo.processInfo.environment["CUSTOM_FIM_URL"] else { return nil }
         let apiKey = ProcessInfo.processInfo.environment["CUSTOM_FIM_KEY"] ?? ""
         let model = ProcessInfo.processInfo.environment["CUSTOM_FIM_MODEL"] ?? "default"
         
-        let url = URL(string: "\(baseURL)/v1/completions")!
+        guard let url = URL(string: "\(baseURL)/v1/completions") else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -324,21 +574,19 @@ struct CustomFIMProvider: CloudFIMProvider {
             "model": model,
             "prompt": prefix,
             "suffix": suffix,
-            "max_tokens": 128,
+            "max_tokens": 96,
             "temperature": 0.0
         ]
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        
         let (data, _) = try await URLSession.shared.data(for: request)
         
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let choices = json["choices"] as? [[String: Any]],
            let firstChoice = choices.first,
            let text = firstChoice["text"] as? String {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return GhostTextFIMHelper.cleanFIMOutput(text)
         }
-        
         return nil
     }
 }

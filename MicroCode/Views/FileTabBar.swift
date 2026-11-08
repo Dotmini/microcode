@@ -47,9 +47,11 @@ struct FileTab: View {
     let onSelect: () -> Void
     let onClose: () -> Void
     
+    @ObservedObject private var collab = CollaborationService.shared
     @State private var isHovering = false
     
     var body: some View {
+        let tabPeers = collab.currentSession != nil ? collab.remoteCollaborators(inFilePath: file.path) : []
         HStack(spacing: 6) {
             // File icon
             Image(systemName: fileIcon(for: file.language))
@@ -61,6 +63,24 @@ struct FileTab: View {
                 .font(.system(size: 12))
                 .lineLimit(1)
             
+            // Live Collaborator Indicators on Tab
+            if !tabPeers.isEmpty {
+                HStack(spacing: -3) {
+                    ForEach(Array(tabPeers.prefix(3))) { peer in
+                        let c = CollaborationColorHelper.swiftUIColor(fromHex: peer.color)
+                        ZStack {
+                            Circle()
+                                .fill(c)
+                                .frame(width: 13, height: 13)
+                            Text(peer.displayName.prefix(1).uppercased())
+                                .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                        }
+                        .help("\(peer.displayName) — \(peer.liveActivitySummary)")
+                    }
+                }
+            }
+
             // Unsaved indicator
             if file.isUnsaved {
                 Circle()
@@ -85,6 +105,13 @@ struct FileTab: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(isActive ? Color(nsColor: .textBackgroundColor) : (isHovering ? Color(nsColor: .controlBackgroundColor).opacity(0.5) : Color.clear))
+        .overlay(alignment: .bottom) {
+            if let leadPeer = tabPeers.first {
+                Rectangle()
+                    .fill(CollaborationColorHelper.swiftUIColor(fromHex: leadPeer.color))
+                    .frame(height: 2)
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }

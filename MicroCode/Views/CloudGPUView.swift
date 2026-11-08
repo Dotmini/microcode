@@ -311,9 +311,18 @@ struct CloudGPUView: View {
         VStack(alignment: .leading, spacing: 16) {
             // Balance Card
             VStack(alignment: .leading, spacing: 6) {
-                Text("GPU WALLET BALANCE")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+                HStack {
+                    Text("GPU COMPUTE WALLET BALANCE")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text("GPU COMPUTE ONLY · SEPARATE FROM CLOUD AI CREDITS")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(Color.cyan.opacity(0.16)))
+                        .foregroundStyle(.cyan)
+                }
 
                 HStack(alignment: .firstTextBaseline) {
                     Text(svc.balanceText)
@@ -330,7 +339,7 @@ struct CloudGPUView: View {
                     .help("Refresh Balance")
                 }
 
-                Text("Pay-as-you-go computing. Balance is deducted only while your GPU cluster is actively running.")
+                Text("Pay-as-you-go GPU compute only (`gpu_wallets`). Deducted per minute only while your GPU cluster is actively running — never touched by Cloud AI chat/agent usage.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }

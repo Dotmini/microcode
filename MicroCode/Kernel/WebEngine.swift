@@ -53,6 +53,58 @@ class WebEngine: ObservableObject {
     }
 }
 
+// MARK: - Hardware-Clipped WebKit Container View
+
+final class ClippedWebBrowserContainerView: NSView {
+    let webView: WKWebView
+    private let maskShapeLayer = CAShapeLayer()
+    var cornerRadius: CGFloat = 0 { didSet { if oldValue != cornerRadius { needsLayout = true } } }
+    var isMacBook: Bool = false { didSet { if oldValue != isMacBook { needsLayout = true } } }
+    var cornerRadii: ScreenCornerRadii? = nil { didSet { if oldValue != cornerRadii { needsLayout = true } } }
+
+    override var isFlipped: Bool { true }
+
+    init(webView: WKWebView) {
+        self.webView = webView
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            webView.topAnchor.constraint(equalTo: topAnchor),
+            webView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        guard bounds.width > 1, bounds.height > 1 else {
+            layer?.mask = nil
+            return
+        }
+        if cornerRadius <= 0 && cornerRadii == nil && !isMacBook {
+            layer?.mask = nil
+            return
+        }
+        let shape = ScreenClipShape(
+            cornerRadius: cornerRadius,
+            isMacBook: isMacBook,
+            cornerRadii: cornerRadii
+        )
+        let swiftPath = shape.path(in: bounds)
+        maskShapeLayer.frame = bounds
+        maskShapeLayer.path = swiftPath.cgPath
+        layer?.mask = maskShapeLayer
+    }
+}
+
 // MARK: - SwiftUI Bridge
 
 /// A production-grade Web Browser View powered by the WebEngine Kernel
@@ -71,6 +123,10 @@ struct WebBrowserView: NSViewRepresentable {
     @Binding var refreshTrigger: Bool
     @Binding var goBackTrigger: Bool
     @Binding var goForwardTrigger: Bool
+    var pageZoom: CGFloat = 1.0
+    var cornerRadius: CGFloat = 0
+    var isMacBook: Bool = false
+    var cornerRadii: ScreenCornerRadii? = nil
     
     init(url: URL? = nil, 
          htmlContent: String? = nil,
@@ -80,7 +136,11 @@ struct WebBrowserView: NSViewRepresentable {
          canGoForward: Binding<Bool> = .constant(false),
          refreshTrigger: Binding<Bool> = .constant(false),
          goBackTrigger: Binding<Bool> = .constant(false),
-         goForwardTrigger: Binding<Bool> = .constant(false)) {
+         goForwardTrigger: Binding<Bool> = .constant(false),
+         pageZoom: CGFloat = 1.0,
+         cornerRadius: CGFloat = 0,
+         isMacBook: Bool = false,
+         cornerRadii: ScreenCornerRadii? = nil) {
         self.url = url
         self.htmlContent = htmlContent
         self._title = title
@@ -90,12 +150,17 @@ struct WebBrowserView: NSViewRepresentable {
         self._refreshTrigger = refreshTrigger
         self._goBackTrigger = goBackTrigger
         self._goForwardTrigger = goForwardTrigger
+        self.pageZoom = pageZoom
+        self.cornerRadius = cornerRadius
+        self.isMacBook = isMacBook
+        self.cornerRadii = cornerRadii
     }
     
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> ClippedWebBrowserContainerView {
         let config = WebEngine.shared.createConfiguration()
         IDEBrowserAutomationService.shared.attachTelemetry(to: config)
         let webView = WKWebView(frame: .zero, configuration: config)
+        webView.pageZoom = pageZoom
         
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -104,10 +169,22 @@ struct WebBrowserView: NSViewRepresentable {
         // Load initial content
         loadContent(in: webView)
         
-        return webView
+        let container = ClippedWebBrowserContainerView(webView: webView)
+        container.cornerRadius = cornerRadius
+        container.isMacBook = isMacBook
+        container.cornerRadii = cornerRadii
+        return container
     }
     
-    func updateNSView(_ webView: WKWebView, context: Context) {
+    func updateNSView(_ container: ClippedWebBrowserContainerView, context: Context) {
+        let webView = container.webView
+        container.cornerRadius = cornerRadius
+        container.isMacBook = isMacBook
+        container.cornerRadii = cornerRadii
+        if abs(webView.pageZoom - pageZoom) > 0.002 {
+            webView.pageZoom = pageZoom
+        }
+
         // Handle trigger updates
         if refreshTrigger {
             PreviewHotReloadEngine.shared.reloadWebViewPreservingScroll(webView)
@@ -153,7 +230,8 @@ struct WebBrowserView: NSViewRepresentable {
         Coordinator(self)
     }
     
-    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+    static func dismantleNSView(_ container: ClippedWebBrowserContainerView, coordinator: Coordinator) {
+        let webView = container.webView
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil

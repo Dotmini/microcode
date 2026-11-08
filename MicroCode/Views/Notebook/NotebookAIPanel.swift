@@ -931,25 +931,28 @@ struct CellAIMessageRow: View {
     var body: some View {
         Group {
             if message.role == .user {
-                // Formal left-aligned IDE prompt block (no bright blue chat bubble)
-                Text(message.content)
-                    .font(.system(size: 12.5))
-                    .foregroundColor(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.primary.opacity(isDark ? 0.065 : 0.045))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Color.primary.opacity(isDark ? 0.11 : 0.08), lineWidth: 0.8)
-                    )
-                    .padding(.horizontal, 12)
-                    .padding(.top, 2)
+                // Right-aligned user bubble (Apple HIG: User on right, AI on left)
+                HStack(spacing: 0) {
+                    Spacer(minLength: 44)
+                    Text(AgentService.cleanUserPromptText(message.content))
+                        .font(.system(size: 12.5))
+                        .foregroundColor(.primary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.primary.opacity(isDark ? 0.095 : 0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.primary.opacity(isDark ? 0.14 : 0.09), lineWidth: 0.8)
+                        )
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 2)
             } else {
                 // Flat, borderless executive assistant turn (zero boxes-inside-boxes)
                 VStack(alignment: .leading, spacing: 8) {
@@ -1054,52 +1057,65 @@ struct CellAIRichContentView: View {
                         CellAITextView(text: text, isError: isError)
                     }
                 case .code(let lang, let code):
-                    CellAICodeBlockView(language: lang, code: code, maxWidth: maxCodeBlockWidth)
+                    let lower = lang.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                    if lower == "latex" || lower == "tex" || lower == "math" {
+                        LaTeXBlockView(expression: code, isBlock: true)
+                    } else if lower == "markdown" || lower == "md" {
+                        RenderedMarkdownDocumentView(markdown: code)
+                    } else {
+                        CellAICodeBlockView(language: lang, code: code, maxWidth: maxCodeBlockWidth)
+                    }
                 case .heading(let level, let title):
-                    Text(title)
-                        .font(.system(size: level <= 2 ? 14 : 12.5, weight: .semibold))
+                    let headingSize: CGFloat = level == 1 ? 15 : (level == 2 ? 14 : 13)
+                    Text(MarkdownAttrCache.getOrParse(title, fontSize: headingSize))
+                        .font(.system(size: headingSize, weight: .semibold))
                         .foregroundColor(.primary)
-                case .list(let items, _):
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(items, id: \.self) { item in
+                        .fixedSize(horizontal: false, vertical: true)
+                case .list(let items, let isOrdered):
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
                             HStack(alignment: .top, spacing: 6) {
-                                Text("•")
+                                Text(isOrdered ? "\(idx + 1)." : "•")
+                                    .font(.system(size: 12.5, weight: isOrdered ? .semibold : .regular))
                                     .foregroundColor(.secondary)
+                                    .frame(minWidth: isOrdered ? 18 : 10, alignment: .trailing)
                                 CellAITextView(text: item)
                             }
                         }
                     }
+                case .table(let headers, let rows):
+                    TableBlockView(headers: headers, rows: rows)
+                case .blockquote(let quote):
+                    BlockquoteView(content: quote)
+                case .latex(let expr, let isBlock):
+                    LaTeXBlockView(expression: expr, isBlock: isBlock)
+                case .html(let html):
+                    HTMLBlockView(content: html)
                 case .media(let kind, let title, let target):
                     ChatMediaBlockView(kind: kind, title: title, target: target)
-                default:
-                    EmptyView()
                 }
             }
         }
+        .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-// MARK: - Cell AI Text View (Inline Markdown)
+// MARK: - Cell AI Text View (Inline Markdown + TeX Math)
 
 struct CellAITextView: View {
     let text: String
     var isError: Bool = false
+    var fontSize: CGFloat = 12.5
 
     var body: some View {
-        Text(parseInlineMarkdown(text))
-            .font(.system(size: 12.5))
-            .lineSpacing(2)
-            .foregroundColor(isError ? Color.red.opacity(0.9) : .primary.opacity(0.9))
+        Text(MarkdownAttrCache.getOrParse(text, fontSize: fontSize))
+            .font(.system(size: fontSize))
+            .lineSpacing(3)
+            .foregroundColor(isError ? Color.red.opacity(0.9) : .primary.opacity(0.92))
+            .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
-    }
-
-    private func parseInlineMarkdown(_ text: String) -> AttributedString {
-        if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            return attributed
-        }
-        return AttributedString(text)
     }
 }
 

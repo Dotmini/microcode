@@ -168,10 +168,9 @@ final class PhoneCompanionService: ObservableObject {
     
     private init() {
         self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.phoneCompanion.enabled") as? Bool) ?? true
-        if let savedMode = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.mode"),
-           let mode = PhoneConnectionMode(rawValue: savedMode) {
-            self.connectionMode = mode
-        }
+        // Default to zero-overhead LAN mode on cold launch; public online tunnels (cloudflared)
+        // are started strictly on-demand when the user selects Worldwide/Online mode in Settings.
+        self.connectionMode = .lan
         self.requireMacApprovalForNewDevices = (UserDefaults.standard.object(forKey: Self.requireApprovalDefaultsKey) as? Bool) ?? true
         if let savedApproved = UserDefaults.standard.stringArray(forKey: Self.approvedDevicesDefaultsKey) {
             self.approvedDeviceIDs = Set(savedApproved)
@@ -509,7 +508,6 @@ final class PhoneCompanionService: ObservableObject {
         guard !isServerRunning && listener == nil else { return }
         refreshNetworkAddresses()
         startServer(onPort: 8470)
-        regenerateQRCode()
     }
     
     private func startServer(onPort candidatePort: UInt16, attempt: Int = 0) {
@@ -540,7 +538,9 @@ final class PhoneCompanionService: ObservableObject {
                                 self.startOnlineTunnel()
                             }
                         }
-                        self.regenerateQRCode()
+                        if self.qrCodeImage != nil {
+                            self.regenerateQRCode()
+                        }
                     case .failed:
                         self.isServerRunning = false
                         newListener.cancel()
@@ -635,6 +635,12 @@ final class PhoneCompanionService: ObservableObject {
     
     private func launchCloudflaredQuickTunnel(binaryPath: String, port: Int) {
         tunnelState = .starting("Starting Cloudflare Quick Tunnel (HTTPS)…")
+        // Reap any orphaned cloudflared quick tunnel bound to this exact loopback port from prior crashes/restarts
+        let reap = Process()
+        reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        reap.arguments = ["-f", "cloudflared tunnel --url http://127.0.0.1:\(port)"]
+        try? reap.run()
+        reap.waitUntilExit()
         
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)

@@ -60,7 +60,7 @@ final class LocalLLMGatewayService: ObservableObject {
 
     @Published var isEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(isEnabled, forKey: "microcode.localLLMGateway.enabled")
+            UserDefaults.standard.set(isEnabled, forKey: "microcode.localLLMGateway.enabled.v2")
             if isEnabled {
                 startServerIfNeeded()
                 if transportMode == .worldwide {
@@ -73,7 +73,7 @@ final class LocalLLMGatewayService: ObservableObject {
         }
     }
 
-    @Published var transportMode: LocalLLMShareTransportMode = .worldwide {
+    @Published var transportMode: LocalLLMShareTransportMode = .lan {
         didSet {
             UserDefaults.standard.set(transportMode.rawValue, forKey: "microcode.localLLMGateway.mode")
             if transportMode == .worldwide && isEnabled {
@@ -116,7 +116,7 @@ final class LocalLLMGatewayService: ObservableObject {
     }()
 
     private init() {
-        self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.localLLMGateway.enabled") as? Bool) ?? true
+        self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.localLLMGateway.enabled.v2") as? Bool) ?? false
         if let savedMode = UserDefaults.standard.string(forKey: "microcode.localLLMGateway.mode"),
            let mode = LocalLLMShareTransportMode(rawValue: savedMode) {
             self.transportMode = mode
@@ -380,6 +380,12 @@ final class LocalLLMGatewayService: ObservableObject {
 
     private func launchCloudflaredTunnel(binaryPath: String, port: Int) {
         tunnelState = .starting("Starting Cloudflare Worldwide HTTPS Tunnel…")
+        let reap = Process()
+        reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        reap.arguments = ["-f", "cloudflared tunnel --url http://127.0.0.1:\(port)"]
+        try? reap.run()
+        reap.waitUntilExit()
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
         proc.arguments = ["tunnel", "--url", "http://127.0.0.1:\(port)", "--no-autoupdate"]

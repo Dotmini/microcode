@@ -259,7 +259,12 @@ final class DeviceRuntimeService: ObservableObject {
     @Published private(set) var output = ""
     @Published private(set) var isWorking = false
     @Published var selectedDeviceID: String? {
-        didSet { if !assigningSelectionAutomatically { selectionWasExplicit = true } }
+        didSet {
+            if !assigningSelectionAutomatically { selectionWasExplicit = true }
+            if let dev = devices.first(where: { $0.id == selectedDeviceID }), dev.platform == .android {
+                updateActiveAndroidSkin(for: dev)
+            }
+        }
     }
     /// True when `selectedDeviceID` was last assigned by `refresh` (a default
     /// pick) rather than by the user or an explicit request.
@@ -288,15 +293,44 @@ final class DeviceRuntimeService: ObservableObject {
     @Published var embeddedAndroidSerial: String?
     @Published var isEmbeddedAndroidActive = false
     @Published var embeddedAndroidStatus = ""
-    @Published var selectedAndroidSkin: AndroidDeviceSkin = .galaxyNote20Ultra {
+    @Published var selectedAndroidSkin: AndroidDeviceSkin = .pixelPro {
         didSet {
             updateActiveAndroidSkin()
         }
     }
+    @Published var activeAndroidSkinGeometry: AndroidSkinGeometry = .pixelProDefault
 
-    func updateActiveAndroidSkin() {
-        embeddedAndroidFrame = DeviceFrameAssets.loadAndroidDeviceBezel(for: selectedAndroidSkin)
-        embeddedAndroidMask = DeviceFrameAssets.loadAndroidDeviceMask(for: selectedAndroidSkin)
+    func updateActiveAndroidSkin(for explicitDevice: RuntimeDevice? = nil, forceLoadBitmaps: Bool = false) {
+        let shouldMaterializeBitmaps = forceLoadBitmaps || (showingEmbeddedDeviceDock && embeddedDockMode == .android)
+        let target = explicitDevice ?? selectedAndroidDevice
+        if let target {
+            let avdLookup = target.id.hasPrefix("avd:") ? String(target.id.dropFirst(4)) : target.name
+            let resolved = resolveOfficialAndroidSkin(forAVDNamed: avdLookup, loadBitmaps: shouldMaterializeBitmaps)
+            activeAndroidSkinGeometry = resolved.geometry
+            if shouldMaterializeBitmaps {
+                embeddedAndroidFrame = resolved.frame ?? DeviceFrameAssets.loadAndroidPixelProBezel()
+                embeddedAndroidMask = resolved.mask ?? DeviceFrameAssets.loadAndroidPixelProMask()
+            }
+        } else {
+            activeAndroidSkinGeometry = .pixelProDefault
+            if shouldMaterializeBitmaps {
+                embeddedAndroidFrame = DeviceFrameAssets.loadAndroidPixelProBezel()
+                embeddedAndroidMask = DeviceFrameAssets.loadAndroidPixelProMask()
+            }
+        }
+    }
+
+    func ensureAndroidSkinLoadedIfNeeded() {
+        if embeddedAndroidFrame == nil {
+            updateActiveAndroidSkin(forceLoadBitmaps: true)
+        }
+    }
+
+    func releaseAndroidSkinBitmapsIfHidden() {
+        guard !showingEmbeddedDeviceDock || embeddedDockMode != .android else { return }
+        embeddedAndroidFrame = nil
+        embeddedAndroidMask = nil
+        DeviceFrameAssets.purgeCachedAndroidSkinImages()
     }
     enum EmbeddedDockMode: String, CaseIterable, Identifiable {
         case web = "Web"
@@ -312,12 +346,28 @@ final class DeviceRuntimeService: ObservableObject {
         }
     }
 
-    @Published var embeddedDockMode: EmbeddedDockMode = .ios
+    @Published var embeddedDockMode: EmbeddedDockMode = .ios {
+        didSet {
+            if showingEmbeddedDeviceDock && embeddedDockMode == .android {
+                ensureAndroidSkinLoadedIfNeeded()
+            } else {
+                releaseAndroidSkinBitmapsIfHidden()
+            }
+        }
+    }
     @Published var lastDetectedDevServerPort: Int? = 3000
     @Published var targetWebURL: URL? = URL(string: "http://localhost:3000")
     @Published var webRefreshTrigger: Bool = false
     @Published var targetViewport: String = "responsive"
-    @Published var showingEmbeddedDeviceDock = false
+    @Published var showingEmbeddedDeviceDock = false {
+        didSet {
+            if showingEmbeddedDeviceDock && embeddedDockMode == .android {
+                ensureAndroidSkinLoadedIfNeeded()
+            } else if !showingEmbeddedDeviceDock {
+                releaseAndroidSkinBitmapsIfHidden()
+            }
+        }
+    }
     @Published var showingEmbeddedAppleDock = false
     @Published var showingDeviceRuntimeSheet = false
     @Published var showingMobileDevTools = false
@@ -360,10 +410,12 @@ final class DeviceRuntimeService: ObservableObject {
     private var lastAndroidScrollEvent = Date.distantPast
     private var lastRefreshedWorkspacePath: String?
     private var lastRefreshDate: Date = .distantPast
+    private var cachedGlobalHardwareDevices: [RuntimeDevice] = []
+    private var lastGlobalHardwareScanDate: Date = .distantPast
 
     private init() {
         allowAgentDeviceControl = UserDefaults.standard.bool(forKey: Self.agentControlDefaultsKey)
-        updateActiveAndroidSkin()
+        // Do not eagerly decode 32 MB of Android WebP bitmaps at launch; resolve geometry lazily when needed.
     }
 
     func refresh(workspace: URL?, force: Bool = false) async {
@@ -390,9 +442,22 @@ final class DeviceRuntimeService: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         var found: [RuntimeDevice] = []
-        found += await listAppleSimulators()
-        found += await listApplePhysicalDevices()
-        found += await listAndroidDevices()
+        let isMobileUIActive = showingEmbeddedDeviceDock || showingEmbeddedAppleDock || showingDeviceRuntimeSheet || showingMobileDevTools
+        let isMobileProject = descriptor != nil && descriptor?.runtime != .unknown
+        let hardwareCacheTTL: TimeInterval = (isMobileUIActive || isMobileProject) ? 120.0 : 600.0
+        if !force,
+           !cachedGlobalHardwareDevices.isEmpty,
+           Date().timeIntervalSince(lastGlobalHardwareScanDate) < hardwareCacheTTL {
+            found = cachedGlobalHardwareDevices
+        } else {
+            var scanned: [RuntimeDevice] = []
+            scanned += await listAppleSimulators()
+            scanned += await listApplePhysicalDevices()
+            scanned += await listAndroidDevices()
+            cachedGlobalHardwareDevices = scanned
+            lastGlobalHardwareScanDate = Date()
+            found = scanned
+        }
         if descriptor?.runtime.supportedPlatforms.contains(.macOS) == true {
             found.append(RuntimeDevice(id: "macos-host", name: "My Mac", platform: .macOS, state: "Available", runtime: "Local"))
         }
@@ -504,6 +569,61 @@ final class DeviceRuntimeService: ObservableObject {
         }
     }
 
+    /// Selects a default Android AVD / physical ADB device detected on the user's Mac without booting it.
+    func selectDefaultAndroidDeviceIfNeeded() {
+        if !devices.contains(where: { $0.platform == .android }) {
+            let diskAVDs = discoverAndroidAVDsOnDisk()
+            if !diskAVDs.isEmpty {
+                devices.append(contentsOf: diskAVDs)
+            }
+        }
+        if selectedDevice?.platform != .android,
+           let preferred = androidDevices.first(where: { $0.state == "Running" }) ?? androidDevices.first {
+            assigningSelectionAutomatically = true
+            selectedDeviceID = preferred.id
+            assigningSelectionAutomatically = false
+            updateActiveAndroidSkin(for: preferred)
+        } else {
+            updateActiveAndroidSkin()
+        }
+        Task { @MainActor in
+            await self.refreshAndroidDevices()
+        }
+    }
+
+    func refreshAndroidDevices() async {
+        let fresh = await listAndroidDevices()
+        devices.removeAll { $0.platform == .android }
+        devices.append(contentsOf: fresh)
+        devices.sort { $0.platform.rawValue < $1.platform.rawValue || ($0.platform == $1.platform && $0.name < $1.name) }
+        if selectedDevice?.platform != .android || !devices.contains(where: { $0.id == selectedDeviceID }),
+           let preferred = fresh.first(where: { $0.state == "Running" }) ?? fresh.first {
+            if embeddedDockMode == .android || selectedDeviceID == nil {
+                assigningSelectionAutomatically = true
+                selectedDeviceID = preferred.id
+                assigningSelectionAutomatically = false
+            }
+            updateActiveAndroidSkin(for: preferred)
+        } else {
+            updateActiveAndroidSkin()
+        }
+    }
+
+    func selectAndroidDevice(_ device: RuntimeDevice, autoStartIfActive: Bool = true) async {
+        let previousDevice = selectedDevice
+        selectedDeviceID = device.id
+        updateActiveAndroidSkin(for: device)
+
+        if autoStartIfActive && (isEmbeddedAndroidActive || isWorking) {
+            if previousDevice?.id != device.id {
+                stopEmbeddedAndroid(shutdownEmulator: previousDevice?.id.hasPrefix("avd:") == true)
+            }
+            await startEmbeddedAndroid()
+        } else {
+            statusMessage = "Selected \(device.name) (\(device.runtime))."
+        }
+    }
+
     /// Header shortcut for starting or attaching the preferred Apple Simulator
     func startPreferredEmbeddedAppleSimulator() async {
         if !devices.contains(where: { $0.isAppleSimulator }) {
@@ -540,6 +660,11 @@ final class DeviceRuntimeService: ObservableObject {
             showingEmbeddedDeviceDock = true
             showingEmbeddedAppleDock = true
             await startEmbeddedAppleSimulator()
+            return
+        }
+        if device.isPhysicalAppleDevice {
+            // Real iPhone / iPad: open the native USB/wireless preview tab.
+            AppState.shared?.showPreviewInspector(tab: "ios-physical")
             return
         }
         await startSelectedDevice()
@@ -1053,6 +1178,22 @@ final class DeviceRuntimeService: ObservableObject {
         detectedAppleModels.filter { $0.family != .iPhone && $0.family != .iPad }
     }
     var isSelectedDeviceIPhoneDuo: Bool { selectedDevice?.isIPhoneDuoFamily == true }
+    var androidDevices: [RuntimeDevice] { devices.filter { $0.platform == .android } }
+    var androidEmulators: [RuntimeDevice] {
+        androidDevices.filter { $0.id.hasPrefix("avd:") || $0.id.hasPrefix("emulator-") }
+    }
+    var physicalAndroidDevices: [RuntimeDevice] {
+        androidDevices.filter { !$0.id.hasPrefix("avd:") && !$0.id.hasPrefix("emulator-") }
+    }
+    var selectedAndroidDevice: RuntimeDevice? {
+        if let selected = selectedDevice, selected.platform == .android {
+            return selected
+        }
+        return androidDevices.first(where: { $0.state == "Running" }) ?? androidDevices.first
+    }
+    var selectedAndroidToolbarTitle: String {
+        selectedAndroidDevice?.name ?? "Android"
+    }
 
     /// Attaches MicroCode's native device surface to a genuine Android device.
     /// ADB is the documented, authenticated control channel; no process or RAM
@@ -1781,15 +1922,7 @@ final class DeviceRuntimeService: ObservableObject {
         isEmbeddedAndroidActive = true
         embeddedAndroidStatus = "Connecting live display to \(deviceName)…"
         
-        // Retain user's chosen skin if already customized, or default to Note 20 Ultra / Pixel
-        let lower = deviceName.lowercased()
-        if selectedAndroidSkin == .galaxyNote20Ultra || selectedAndroidSkin == .pixel9Pro {
-            // keep current skin
-        } else if lower.contains("pixel") {
-            selectedAndroidSkin = .pixel9Pro
-        } else {
-            selectedAndroidSkin = .galaxyNote20Ultra
-        }
+        // Resolve official skin & layout geometry from the user's attached Android device / AVD
         updateActiveAndroidSkin()
         
         androidConnectionTask?.cancel()
@@ -3100,20 +3233,72 @@ final class DeviceRuntimeService: ObservableObject {
         }
     }
 
+    /// Synchronously discovers all configured Android AVDs on disk (`~/.android/avd/*.ini`) in <1ms.
+    func discoverAndroidAVDsOnDisk() -> [RuntimeDevice] {
+        let fm = FileManager.default
+        let env = ProcessInfo.processInfo.environment
+        let roots = [
+            env["ANDROID_AVD_HOME"],
+            NSHomeDirectory() + "/.android/avd",
+            NSHomeDirectory() + "/Library/Android/sdk/avd"
+        ].compactMap { $0 }
+
+        var seen = Set<String>()
+        var found: [RuntimeDevice] = []
+        for root in roots {
+            guard let items = try? fm.contentsOfDirectory(atPath: root) else { continue }
+            for item in items.sorted() where item.hasSuffix(".ini") {
+                let rawName = String(item.dropLast(4))
+                guard !rawName.isEmpty, seen.insert(rawName).inserted else { continue }
+                let preflight = androidAVDPreflight(named: rawName)
+                found.append(
+                    RuntimeDevice(
+                        id: "avd:\(rawName)",
+                        name: preflight.displayName,
+                        platform: .android,
+                        state: preflight.isReady ? "Stopped" : "Needs space",
+                        runtime: preflight.runtimeDetail,
+                        isReadyForLaunch: preflight.isReady,
+                        preflightMessage: preflight.message
+                    )
+                )
+            }
+        }
+        return found
+    }
+
+    private func humanizeAndroidDeviceName(_ raw: String, configText: String = "") -> String {
+        if let configuredDisplay = iniValue("avd.ini.displayname", in: configText),
+           !configuredDisplay.isEmpty,
+           configuredDisplay != "<build>" {
+            return configuredDisplay
+        }
+        let cleaned = raw
+            .replacingOccurrences(of: "_", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? raw : cleaned
+    }
+
     private func listAndroidDevices() async -> [RuntimeDevice] {
-        var result: [RuntimeDevice] = []
+        var result = discoverAndroidAVDsOnDisk()
+        var seenAVDs = Set(result.map(\.id))
+
         if let emulator = try? androidTool("emulator"), let avds = try? await command(emulator, ["-list-avds"], directory: nil) {
-            result += avds.output.split(whereSeparator: \.isNewline).map { rawName in
-                let name = String(rawName)
-                let preflight = androidAVDPreflight(named: name)
-                return RuntimeDevice(
-                    id: "avd:\(name)",
-                    name: name,
-                    platform: .android,
-                    state: preflight.isReady ? "Stopped" : "Needs space",
-                    runtime: preflight.runtimeDetail,
-                    isReadyForLaunch: preflight.isReady,
-                    preflightMessage: preflight.message
+            for rawSub in avds.output.split(whereSeparator: \.isNewline) {
+                let rawName = String(rawSub).trimmingCharacters(in: .whitespacesAndNewlines)
+                let avdID = "avd:\(rawName)"
+                guard !rawName.isEmpty, seenAVDs.insert(avdID).inserted else { continue }
+                let preflight = androidAVDPreflight(named: rawName)
+                result.append(
+                    RuntimeDevice(
+                        id: avdID,
+                        name: preflight.displayName,
+                        platform: .android,
+                        state: preflight.isReady ? "Stopped" : "Needs space",
+                        runtime: preflight.runtimeDetail,
+                        isReadyForLaunch: preflight.isReady,
+                        preflightMessage: preflight.message
+                    )
                 )
             }
         }
@@ -3124,9 +3309,7 @@ final class DeviceRuntimeService: ObservableObject {
                 let serial = String(id)
                 // An AVD is simultaneously listed by the emulator binary and
                 // by ADB. Treat those as one destination, never as a generic
-                // `emulator-5554` device plus a second stopped AVD. Besides
-                // avoiding a confusing duplicate, this retains the AVD's
-                // exact disk image, Quick Boot snapshot and official skin.
+                // `emulator-5554` device plus a second stopped AVD.
                 if serial.hasPrefix("emulator-"),
                    let avdName = await androidAVDName(serial: serial),
                    let index = result.firstIndex(where: { $0.id == "avd:\(avdName)" }) {
@@ -3141,8 +3324,31 @@ final class DeviceRuntimeService: ObservableObject {
                         preflightMessage: nil
                     )
                 } else {
+                    var modelLabel = serial
+                    if let modelField = fields.first(where: { $0.hasPrefix("model:") }) {
+                        let rawModel = String(modelField.dropFirst("model:".count))
+                        if !rawModel.isEmpty {
+                            modelLabel = humanizeAndroidDeviceName(rawModel)
+                        }
+                    } else if let prop = try? await command(adb, ["-s", serial, "shell", "getprop", "ro.product.model"], directory: nil) {
+                        let trimmed = prop.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            modelLabel = trimmed
+                        }
+                    }
                     result.removeAll { $0.id == serial }
-                    result.append(RuntimeDevice(id: serial, name: serial, platform: .android, state: "Running", runtime: "ADB", isReadyForLaunch: true, preflightMessage: nil))
+                    result.append(
+                        RuntimeDevice(
+                            id: serial,
+                            name: modelLabel,
+                            platform: .android,
+                            state: "Running",
+                            runtime: "USB · ADB",
+                            isReadyForLaunch: true,
+                            preflightMessage: nil,
+                            kind: .physical
+                        )
+                    )
                 }
             }
         }
@@ -3152,25 +3358,31 @@ final class DeviceRuntimeService: ObservableObject {
     /// Reads the AVD's own config before any emulator process is launched.
     /// This makes a low-space AVD visibly unavailable rather than presenting a
     /// Start button that is guaranteed to fail.
-    private func androidAVDPreflight(named name: String) -> (isReady: Bool, runtimeDetail: String, message: String?) {
+    private func androidAVDPreflight(named name: String) -> (displayName: String, isReady: Bool, runtimeDetail: String, message: String?) {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
         let roots = [env["ANDROID_AVD_HOME"], NSHomeDirectory() + "/.android/avd"].compactMap { $0 }
+        var apiTargetLabel: String?
         let avdPath: String? = roots.lazy.compactMap { root in
             let metadata = URL(fileURLWithPath: root).appendingPathComponent("\(name).ini")
-            if let text = try? String(contentsOf: metadata, encoding: .utf8),
-               let path = self.iniValue("path", in: text) {
-                return path
+            if let text = try? String(contentsOf: metadata, encoding: .utf8) {
+                if let target = self.iniValue("target", in: text) {
+                    apiTargetLabel = target.replacingOccurrences(of: "android-", with: "API ")
+                }
+                if let path = self.iniValue("path", in: text) {
+                    return path
+                }
             }
             let fallback = URL(fileURLWithPath: root).appendingPathComponent("\(name).avd").path
             return fm.fileExists(atPath: fallback) ? fallback : nil
         }.first
 
         guard let avdPath, fm.fileExists(atPath: avdPath) else {
-            return (false, "AVD configuration unavailable", "MicroCode could not locate the storage directory for Android AVD ‘\(name)’. Refresh Android Studio Device Manager, then refresh MicroCode.")
+            return (humanizeAndroidDeviceName(name), false, "AVD configuration unavailable", "MicroCode could not locate the storage directory for Android AVD ‘\(name)’. Refresh Android Studio Device Manager, then refresh MicroCode.")
         }
         let configURL = URL(fileURLWithPath: avdPath).appendingPathComponent("config.ini")
         let config = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+        let friendlyName = humanizeAndroidDeviceName(name, configText: config)
         let configuredBytes = storageSize(in: config, key: "disk.dataPartition.size") ?? 2 * 1_024 * 1_024 * 1_024
         let avdDirURL = URL(fileURLWithPath: avdPath)
         let existingUserdataBytes: UInt64 = [
@@ -3194,22 +3406,22 @@ final class DeviceRuntimeService: ObservableObject {
         let freeText = formatter.string(fromByteCount: Int64(available))
         let dataText = formatter.string(fromByteCount: Int64(configuredBytes))
         let neededText = formatter.string(fromByteCount: Int64(required))
-        let detail = "AVD · \(freeText) free"
+        let prefix = apiTargetLabel ?? "AVD"
+        let detail = "\(prefix) · \(freeText) free"
         guard available >= required else {
             return (
+                friendlyName,
                 false,
                 detail,
-                "Android AVD ‘\(name)’ is stored at \(avdPath). Its data partition is \(dataText); MicroCode requires at least \(neededText) free on that volume, but only \(freeText) is available. Free space or move/create this AVD on a volume with sufficient capacity."
+                "Android AVD ‘\(friendlyName)’ is stored at \(avdPath). Its data partition is \(dataText); MicroCode requires at least \(neededText) free on that volume, but only \(freeText) is available. Free space or move/create this AVD on a volume with sufficient capacity."
             )
         }
-        return (true, detail, nil)
+        return (friendlyName, true, detail, nil)
     }
 
     /// Resolves the exact skin selected in this AVD's `config.ini` or matches the AVD model to installed SDK skins.
-    /// Android Studio ships `back.webp` as the official device chassis and `mask.webp` as the camera punch-hole cutout;
-    /// using them preserves manufacturer proportions, camera treatment and buttons.
-    /// If no custom skin is located, it ALWAYS falls back to the authentic Pixel 9 Pro hardware frame from DeviceFrameAssets.
-    func resolveOfficialAndroidSkin(forAVDNamed name: String) -> (frame: NSImage?, mask: NSImage?) {
+    /// Android Studio ships `back.webp`, `mask.webp`, and `layout`; using them preserves exact hardware proportions.
+    func resolveOfficialAndroidSkin(forAVDNamed name: String, loadBitmaps: Bool = true) -> (frame: NSImage?, mask: NSImage?, geometry: AndroidSkinGeometry) {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
         let roots = [
@@ -3223,6 +3435,20 @@ final class DeviceRuntimeService: ObservableObject {
             env["ANDROID_HOME"].map { "\($0)/skins" },
             env["ANDROID_SDK_ROOT"].map { "\($0)/skins" }
         ].compactMap { $0 }
+
+        func loadSkinBundle(at dirURL: URL) -> (frame: NSImage?, mask: NSImage?, geometry: AndroidSkinGeometry)? {
+            let back = dirURL.appendingPathComponent("back.webp")
+            let mask = dirURL.appendingPathComponent("mask.webp")
+            let layout = dirURL.appendingPathComponent("layout")
+            guard fm.fileExists(atPath: back.path) else { return nil }
+            let geo = DeviceFrameAssets.parseAndroidSkinLayout(at: layout) ?? .pixelProDefault
+            guard loadBitmaps else {
+                return (nil, nil, geo)
+            }
+            guard let frameImg = DeviceFrameAssets.loadDownsampledImage(at: back) else { return nil }
+            let maskImg = fm.fileExists(atPath: mask.path) ? DeviceFrameAssets.loadDownsampledImage(at: mask) : nil
+            return (frameImg, maskImg, geo)
+        }
 
         // 1. Try resolving through AVD config.ini
         for root in roots {
@@ -3240,57 +3466,62 @@ final class DeviceRuntimeService: ObservableObject {
                 let skinName = iniValue("skin.name", in: config)
                 let skinPath = iniValue("skin.path", in: config)
 
-                // Try skin.path directly if absolute
-                if let skinPath, skinPath.hasPrefix("/"), fm.fileExists(atPath: skinPath) {
-                    let back = URL(fileURLWithPath: skinPath).appendingPathComponent("back.webp")
-                    let mask = URL(fileURLWithPath: skinPath).appendingPathComponent("mask.webp")
-                    if let frameImg = NSImage(contentsOf: back) {
-                        return (frameImg, NSImage(contentsOf: mask))
-                    }
+                if let skinPath, skinPath.hasPrefix("/"), fm.fileExists(atPath: skinPath),
+                   let bundle = loadSkinBundle(at: URL(fileURLWithPath: skinPath)) {
+                    return bundle
                 }
 
-                // Try resolving skin.name or skin.path inside SDK skin roots
                 let identifiers = [skinName, skinPath?.replacingOccurrences(of: "skins/", with: "")].compactMap { $0 }
                 for id in identifiers {
                     for sdkRoot in sdkSkinRoots {
                         let candidateDir = URL(fileURLWithPath: sdkRoot).appendingPathComponent(id)
-                        let back = candidateDir.appendingPathComponent("back.webp")
-                        let mask = candidateDir.appendingPathComponent("mask.webp")
-                        if let frameImg = NSImage(contentsOf: back) {
-                            return (frameImg, NSImage(contentsOf: mask))
+                        if let bundle = loadSkinBundle(at: candidateDir) {
+                            return bundle
                         }
                     }
                 }
             }
         }
 
-        // 2. Try fuzzy matching AVD name to SDK skins (e.g. Pixel_9_Pro_ARM64 -> pixel_9_pro)
+        // 2. Try fuzzy matching device/AVD name to installed SDK skins (e.g. Pixel 11 Pro -> pixel_10_pro / pixel_9_pro)
         let cleanName = name.lowercased()
             .replacingOccurrences(of: "_arm64", with: "")
             .replacingOccurrences(of: "-arm64", with: "")
             .replacingOccurrences(of: " ", with: "_")
-        for sdkRoot in sdkSkinRoots {
-            let candidateDir = URL(fileURLWithPath: sdkRoot).appendingPathComponent(cleanName)
-            let back = candidateDir.appendingPathComponent("back.webp")
-            let mask = candidateDir.appendingPathComponent("mask.webp")
-            if let frameImg = NSImage(contentsOf: back) {
-                return (frameImg, NSImage(contentsOf: mask))
+        var candidateSkinNames = [cleanName]
+        if cleanName.contains("pixel_11") {
+            if cleanName.contains("xl") {
+                candidateSkinNames.append("pixel_10_pro_xl")
+            } else if cleanName.contains("fold") {
+                candidateSkinNames.append("pixel_10_pro_fold")
+            } else if cleanName.contains("pro") {
+                candidateSkinNames.append("pixel_10_pro")
+            } else {
+                candidateSkinNames.append("pixel_10")
+            }
+        }
+        candidateSkinNames.append("pixel_10_pro")
+
+        for skinFolder in candidateSkinNames {
+            for sdkRoot in sdkSkinRoots {
+                let candidateDir = URL(fileURLWithPath: sdkRoot).appendingPathComponent(skinFolder)
+                if let bundle = loadSkinBundle(at: candidateDir) {
+                    return bundle
+                }
             }
         }
 
-        let lower = name.lowercased()
-        if lower.contains("note") || lower.contains("samsung") || lower.contains("galaxy") {
-            return (DeviceFrameAssets.loadSamsungGalaxyNote20UltraBezel(), DeviceFrameAssets.loadSamsungGalaxyNote20UltraMask())
+        // 3. Fallback: Authentic Pixel Pro frame & mask
+        guard loadBitmaps else {
+            return (nil, nil, .pixelProDefault)
         }
-
-        // 3. Fallback: Return user's selected skin frame and mask
-        let frameImg = DeviceFrameAssets.loadAndroidDeviceBezel(for: selectedAndroidSkin)
-        let maskImg = DeviceFrameAssets.loadAndroidDeviceMask(for: selectedAndroidSkin)
-        return (frameImg, maskImg)
+        let frameImg = DeviceFrameAssets.loadAndroidPixelProBezel()
+        let maskImg = DeviceFrameAssets.loadAndroidPixelProMask()
+        return (frameImg, maskImg, .pixelProDefault)
     }
 
     func officialAndroidFrame(forAVDNamed name: String) -> NSImage? {
-        return resolveOfficialAndroidSkin(forAVDNamed: name).frame ?? DeviceFrameAssets.loadAndroidDeviceBezel(for: selectedAndroidSkin)
+        return resolveOfficialAndroidSkin(forAVDNamed: name).frame ?? DeviceFrameAssets.loadAndroidPixelProBezel()
     }
 
     /// Android Studio writes some AVD config keys as `key=value` and others

@@ -510,76 +510,52 @@ private struct AppleDeviceFramePlaceholder: View {
     var body: some View {
         GeometryReader { proxy in
             if family == "iphone-duo-inner" {
-                // iPhone Duo Unfolded Inner Main Display (951:669 book-open ratio)
-                let aspect: CGFloat = 951.0 / 669.0
-                let width = min(proxy.size.width * 0.88, proxy.size.height * 0.78 * aspect)
-                let height = width / aspect
-                let outerR = height * 0.056
-                let innerR = height * 0.044
+                // iPhone Duo Unfolded Inner Main Display (703:985 portrait or 985:703 landscape)
+                let isLandscape = proxy.size.width >= proxy.size.height * 0.92
+                let frameW: CGFloat = isLandscape ? 985.0 : 703.0
+                let frameH: CGFloat = isLandscape ? 703.0 : 985.0
+                let scale = min((proxy.size.width - 12) / frameW, (proxy.size.height - 12) / frameH)
+                let width = frameW * scale
+                let height = frameH * scale
                 ZStack {
-                    RoundedRectangle(cornerRadius: outerR, style: .continuous)
+                    RoundedRectangle(cornerRadius: 55 * scale, style: .continuous)
                         .fill(Color.black)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: outerR, style: .continuous)
-                                .stroke(Color.white.opacity(0.24), lineWidth: 3)
-                        )
-                    RoundedRectangle(cornerRadius: innerR, style: .continuous)
-                        .fill(Color.black.opacity(0.84))
-                        .padding(height * 0.025)
-
-                    // Subtle book-fold center crease & hinge caps
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [.clear, Color.white.opacity(0.10), .clear],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .frame(width: 1.5, height: height * 0.94)
+                    let bezel = DeviceFrameAssets.loadIPhoneDuoInnerBezel()
+                    Image(nsImage: bezel)
+                        .resizable()
+                        .interpolation(.high)
+                        .antialiased(true)
+                        .frame(width: 703 * scale, height: 985 * scale)
+                        .rotationEffect(isLandscape ? .degrees(-90) : .zero)
                 }
                 .frame(width: width, height: height)
                 .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
             } else if family == "iphone-duo-outer" {
-                // iPhone Duo Folded Cover Display (466:678 ratio, sharp left spine, rounded right)
-                let aspect: CGFloat = 466.0 / 678.0
-                let height = min(proxy.size.height * 0.80, (proxy.size.width * 0.82) / aspect)
-                let width = height * aspect
-                let outerShape = UnevenScreenShape(
-                    radii: ScreenCornerRadii(
-                        topLeft: width * 0.022,
-                        topRight: width * 0.11,
-                        bottomRight: width * 0.11,
-                        bottomLeft: width * 0.022
-                    )
-                )
+                // iPhone Duo Folded Cover Display (514:706 genuine Apple phone15.devicechrome)
+                let frameW: CGFloat = 514.0
+                let frameH: CGFloat = 706.0
+                let scale = min((proxy.size.width - 12) / frameW, (proxy.size.height - 12) / frameH)
+                let width = frameW * scale
+                let height = frameH * scale
                 let innerShape = UnevenScreenShape(
                     radii: ScreenCornerRadii(
-                        topLeft: width * 0.010,
-                        topRight: width * 0.088,
-                        bottomRight: width * 0.088,
-                        bottomLeft: width * 0.010
+                        topLeft: 8 * scale,
+                        topRight: 59 * scale,
+                        bottomRight: 59 * scale,
+                        bottomLeft: 8 * scale
                     )
                 )
                 ZStack {
-                    outerShape
-                        .fill(Color.black)
-                        .overlay(outerShape.stroke(Color.white.opacity(0.24), lineWidth: 3))
                     innerShape
-                        .fill(Color.black.opacity(0.84))
-                        .padding(.leading, width * 0.052)
-                        .padding(.trailing, width * 0.032)
-                        .padding(.vertical, width * 0.032)
-                    // Left titanium book-fold hinge spine accent
-                    Rectangle()
-                        .fill(Color.white.opacity(0.14))
-                        .frame(width: max(2, width * 0.014), height: height * 0.94)
-                        .offset(x: -width * 0.482)
-                    // Dynamic Island
-                    Capsule()
                         .fill(Color.black)
-                        .frame(width: width * 0.27, height: height * 0.028)
-                        .offset(x: width * 0.01, y: -height * 0.43)
+                        .frame(width: 466 * scale, height: 678 * scale)
+                        .offset(x: 6 * scale, y: 0)
+                    let bezel = DeviceFrameAssets.loadIPhoneDuoOuterBezel()
+                    Image(nsImage: bezel)
+                        .resizable()
+                        .interpolation(.high)
+                        .antialiased(true)
+                        .frame(width: width, height: height)
                 }
                 .frame(width: width, height: height)
                 .position(x: proxy.size.width / 2, y: proxy.size.height / 2)

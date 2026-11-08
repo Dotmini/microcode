@@ -33,8 +33,8 @@ struct EmbeddedAndroidDeviceView: View {
 
                 AndroidDeviceSurface(
                     image: runtime.embeddedAndroidImage,
-                    officialFrame: runtime.embeddedAndroidFrame ?? DeviceFrameAssets.loadAndroidDeviceBezel(for: runtime.selectedAndroidSkin),
-                    officialMask: runtime.embeddedAndroidMask ?? DeviceFrameAssets.loadAndroidDeviceMask(for: runtime.selectedAndroidSkin),
+                    officialFrame: runtime.embeddedAndroidFrame ?? DeviceFrameAssets.loadAndroidPixelProBezel(),
+                    officialMask: runtime.embeddedAndroidMask ?? DeviceFrameAssets.loadAndroidPixelProMask(),
                     availableSize: proxy.size,
                     runtime: runtime,
                     streamService: streamService,
@@ -44,11 +44,14 @@ struct EmbeddedAndroidDeviceView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(effectiveCanvasColor)
+        .onAppear {
+            runtime.selectDefaultAndroidDeviceIfNeeded()
+        }
     }
 }
 
 /// A native device host for the real Android display with 60 FPS Metal GPU acceleration.
-/// Measurements are dynamically adapted to the selected hardware skin (Samsung Galaxy Note 20 Ultra or Pixel 9 Pro),
+/// Measurements are dynamically adapted from the user's detected Android AVD / SDK skin layout,
 /// keeping the display flush and authentic with chassis, camera punch hole, and buttons.
 private struct AndroidDeviceSurface: View {
     let image: NSImage?
@@ -59,17 +62,17 @@ private struct AndroidDeviceSurface: View {
     @ObservedObject var streamService: AndroidStreamService
     var onHide: (() -> Void)? = nil
 
-    private var skin: AndroidDeviceSkin {
-        runtime.selectedAndroidSkin
+    private var geometry: AndroidSkinGeometry {
+        runtime.activeAndroidSkinGeometry
     }
 
-    private var bodyWidth: CGFloat { skin.outerSize.width }
-    private var bodyHeight: CGFloat { skin.outerSize.height }
-    private var screenWidth: CGFloat { skin.displayRect.width }
-    private var screenHeight: CGFloat { skin.displayRect.height }
-    private var screenX: CGFloat { skin.displayRect.origin.x }
-    private var screenY: CGFloat { skin.displayRect.origin.y }
-    private var cornerRadius: CGFloat { skin.cornerRadius }
+    private var bodyWidth: CGFloat { geometry.outerSize.width }
+    private var bodyHeight: CGFloat { geometry.outerSize.height }
+    private var screenWidth: CGFloat { geometry.displayRect.width }
+    private var screenHeight: CGFloat { geometry.displayRect.height }
+    private var screenX: CGFloat { geometry.displayRect.origin.x }
+    private var screenY: CGFloat { geometry.displayRect.origin.y }
+    private var cornerRadius: CGFloat { geometry.cornerRadius }
 
     private func closePreview() {
         runtime.stopEmbeddedAndroid(shutdownEmulator: true)
@@ -179,13 +182,14 @@ private struct AndroidDeviceSurface: View {
                             .padding(.top, 4)
                         } else {
                             // Clean Idle State (0% CPU until user clicks Start)
+                            let detectedTitle = runtime.selectedAndroidDevice?.name ?? "Android Emulator Preview"
                             Image(systemName: "candybarphone")
                                 .font(.system(size: 28, weight: .light))
                                 .foregroundColor(.white.opacity(0.75))
-                            Text("Android Emulator Preview")
+                            Text(detectedTitle)
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(.white)
-                            Text("Android Emulator preview is currently idle (0% CPU).")
+                            Text("\(detectedTitle) preview is currently idle (0% CPU).")
                                 .font(.system(size: 10.5))
                                 .foregroundColor(.white.opacity(0.65))
                                 .multilineTextAlignment(.center)
@@ -245,7 +249,7 @@ private struct AndroidDeviceSurface: View {
             }
 
             // 4. Genuine Hardware Chassis & Bezel Frame (Always Real, Never Missing)
-            if let frame = officialFrame ?? DeviceFrameAssets.loadAndroidDeviceBezel(for: runtime.selectedAndroidSkin) {
+            if let frame = officialFrame ?? DeviceFrameAssets.loadAndroidPixelProBezel() {
                 Image(nsImage: frame)
                     .resizable()
                     .interpolation(.high)
@@ -255,6 +259,9 @@ private struct AndroidDeviceSurface: View {
         }
         .frame(width: frameWidth, height: frameHeight)
         .shadow(color: .black.opacity(0.40), radius: 18, x: 0, y: 8)
+        .onAppear {
+            runtime.ensureAndroidSkinLoadedIfNeeded()
+        }
     }
 }
 
@@ -332,5 +339,71 @@ private final class AndroidDeviceInputNSView: NSView {
         let y = 1 - point.y / bounds.height
         guard (0...1).contains(x), (0...1).contains(y) else { return nil }
         return CGPoint(x: x, y: y)
+    }
+}
+
+/// Dynamic Android Device & AVD Selector Menu listing ONLY the real Android devices & AVDs detected on the user's Mac.
+struct AndroidDeviceSelectorMenuContent: View {
+    @ObservedObject var runtime = DeviceRuntimeService.shared
+    var autoStartIfActive: Bool = true
+
+    var body: some View {
+        let physicalDevices = runtime.physicalAndroidDevices
+        let emulators = runtime.androidEmulators
+        let activeID = runtime.selectedAndroidDevice?.id
+
+        if !physicalDevices.isEmpty {
+            Section("Connected Android Devices") {
+                ForEach(physicalDevices) { dev in
+                    Button {
+                        Task { await runtime.selectAndroidDevice(dev, autoStartIfActive: autoStartIfActive) }
+                    } label: {
+                        HStack {
+                            Label("\(dev.name) · USB / ADB", systemImage: "cable.connector")
+                            if activeID == dev.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !emulators.isEmpty {
+            Section("Android Emulators (AVDs)") {
+                ForEach(emulators) { avd in
+                    Button {
+                        Task { await runtime.selectAndroidDevice(avd, autoStartIfActive: autoStartIfActive) }
+                    } label: {
+                        HStack {
+                            let stateSuffix = avd.state == "Running" ? " · Running" : ""
+                            Label("\(avd.name) (\(avd.runtime)\(stateSuffix))", systemImage: "candybarphone")
+                            if activeID == avd.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if physicalDevices.isEmpty && emulators.isEmpty {
+            Text("No Android AVD or USB device detected")
+                .foregroundColor(.secondary)
+        }
+
+        Divider()
+
+        Button {
+            Task { await runtime.refreshAndroidDevices() }
+        } label: {
+            Label("Refresh Detected Devices", systemImage: "arrow.clockwise")
+        }
+
+        Button {
+            runtime.showingDeviceRuntimeSheet = true
+        } label: {
+            Label("Manage Devices & Run…", systemImage: "slider.horizontal.3")
+        }
     }
 }

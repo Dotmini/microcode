@@ -1,8 +1,64 @@
 use crate::error::Result;
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use tokio::fs;
+
+/// Deterministic 64-bit FNV-1a `~/.microcode/workspaces/<name>-<12hex>` resolver
+/// matching Swift `WorkspaceStoragePaths.workspaceStateDirectory` and `microcode_core` FFI.
+pub fn isolated_workspace_state_dir(workspace: &Path) -> PathBuf {
+    let home_base = dirs::home_dir()
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let workspaces_root = home_base.join(".microcode").join("workspaces");
+
+    let canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let canonical_str = canonical.to_string_lossy();
+    let clean_str = if canonical_str.len() > 1 && canonical_str.ends_with('/') {
+        &canonical_str[..canonical_str.len() - 1]
+    } else {
+        &canonical_str
+    };
+
+    let mut hash: u64 = 14695981039346656037;
+    for b in clean_str.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+
+    let raw_name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+    let replaced: String = raw_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = replaced.trim_matches(|c| c == '.' || c == '_' || c == '-');
+    let prefix: String = if trimmed.is_empty() {
+        "workspace".to_string()
+    } else {
+        trimmed.chars().take(40).collect()
+    };
+
+    let slug = format!("{}-{:012x}", prefix, hash >> 16);
+    workspaces_root.join(slug)
+}
+
+/// Global `~/.microcode` root directory.
+pub fn global_microcode_dir() -> PathBuf {
+    dirs::home_dir()
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".microcode")
+}
 
 /// A rule scoped to specific file globs or globally active.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -21,23 +77,93 @@ pub struct RuleEngine {
 }
 
 impl RuleEngine {
-    /// Loads all `.md` rule files from the `<workspace>/.microcode/rules/` directory.
+    /// Loads all unified MicroCode rules across:
+    /// 1. Isolated workspace state: `~/.microcode/workspaces/<id>/{rules.md, agent.md, rules/*.{md,mdc}}`
+    /// 2. Explicit repo `.microcode`: `<workspace>/.microcode/{rules.md, agent.md, rules/*.{md,mdc}}`
+    /// 3. Global user rules: `~/.microcode/{rules.md, rules/*.{md,mdc}}`
     pub async fn load_from_workspace(workspace: &Path) -> Result<Self> {
-        let rules_dir = workspace.join(".microcode").join("rules");
         let mut rules = Vec::new();
+        let mut seen_paths = HashSet::new();
 
-        if !rules_dir.exists() {
-            return Ok(Self { rules });
+        let isolated_dir = isolated_workspace_state_dir(workspace);
+        let repo_mc_dir = workspace.join(".microcode");
+        let global_mc_dir = global_microcode_dir();
+
+        let direct_files: [(PathBuf, &str, &str); 5] = [
+            (
+                isolated_dir.join("rules.md"),
+                "Workspace Learned Rules (/learn)",
+                "Persistent workspace rules (~/.microcode)",
+            ),
+            (
+                isolated_dir.join("agent.md"),
+                "Workspace Agent Instructions",
+                "MicroCode workspace agent.md (~/.microcode)",
+            ),
+            (
+                repo_mc_dir.join("rules.md"),
+                "Repository Rules (.microcode/rules.md)",
+                "Committed repository MicroCode rules",
+            ),
+            (
+                repo_mc_dir.join("agent.md"),
+                "Repository Agent Instructions (.microcode/agent.md)",
+                "Committed repository agent instructions",
+            ),
+            (
+                global_mc_dir.join("rules.md"),
+                "Global MicroCode Rules (~/.microcode/rules.md)",
+                "User-wide global MicroCode rules",
+            ),
+        ];
+
+        for (file_path, title, desc) in direct_files {
+            if !file_path.exists() {
+                continue;
+            }
+            let canon = file_path.canonicalize().unwrap_or_else(|_| file_path.clone());
+            if !seen_paths.insert(canon) {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&file_path).await {
+                if !content.trim().is_empty() {
+                    let mut parsed = Self::parse_rule_file(title, &content)?;
+                    if parsed.description.is_none() {
+                        parsed.description = Some(desc.to_string());
+                    }
+                    rules.push(parsed);
+                }
+            }
         }
 
-        let mut entries = fs::read_dir(&rules_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("md") {
-                let file_content = fs::read_to_string(&path).await?;
-                let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("rule");
-                let rule = Self::parse_rule_file(file_stem, &file_content)?;
-                rules.push(rule);
+        let rule_dirs = [
+            isolated_dir.join("rules"),
+            repo_mc_dir.join("rules"),
+            global_mc_dir.join("rules"),
+        ];
+
+        for rules_dir in rule_dirs {
+            if !rules_dir.exists() {
+                continue;
+            }
+            if let Ok(mut entries) = fs::read_dir(&rules_dir).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    if path.is_file() && (ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("mdc")) {
+                        let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                        if !seen_paths.insert(canon) {
+                            continue;
+                        }
+                        if let Ok(file_content) = fs::read_to_string(&path).await {
+                            if !file_content.trim().is_empty() {
+                                let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("rule");
+                                let rule = Self::parse_rule_file(file_stem, &file_content)?;
+                                rules.push(rule);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -253,5 +379,12 @@ This is the content."#;
         assert!(result.contains("### Rule: Rust Rule"));
         assert!(result.contains("Description: Rust formatting"));
         assert!(result.contains("Format with rustfmt"));
+    }
+
+    #[test]
+    fn test_isolated_workspace_state_dir_fnv1a_parity() {
+        let dir = isolated_workspace_state_dir(Path::new("/Users/dotmini/Documents/SX/codetunner-native"));
+        let slug = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        assert_eq!(slug, "codetunner-native-4f5150635371");
     }
 }

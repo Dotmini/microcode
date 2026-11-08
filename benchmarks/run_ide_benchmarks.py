@@ -53,6 +53,47 @@ WINDOW_PROBE = Path("/tmp/window_probe")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
 TRIALS_PER_IDE = 5
+ZED_BENCH_PROFILE = Path("/tmp/bench-zed-profile")
+ZED_BENCH_XDG = ZED_BENCH_PROFILE / "xdg-config"
+
+ZED_BENCH_ENV = {
+    "XDG_CONFIG_HOME": str(ZED_BENCH_XDG),
+    "GEMINI_API_KEY": "benchmark-disabled",
+    "GOOGLE_AI_API_KEY": "benchmark-disabled",
+    "OPENAI_API_KEY": "benchmark-disabled",
+    "OPEN_AI_API_KEY": "benchmark-disabled",
+    "ANTHROPIC_API_KEY": "benchmark-disabled",
+    "DEEPSEEK_API_KEY": "benchmark-disabled",
+    "OPENROUTER_API_KEY": "benchmark-disabled",
+    "MISTRAL_API_KEY": "benchmark-disabled",
+    "CODESTRAL_API_KEY": "benchmark-disabled",
+    "XAI_API_KEY": "benchmark-disabled",
+    "VERCEL_AI_GATEWAY_API_KEY": "benchmark-disabled",
+    "OPENCODE_API_KEY": "benchmark-disabled",
+    "INCEPTION_API_KEY": "benchmark-disabled",
+    "OLLAMA_API_KEY": "benchmark-disabled",
+    "LMSTUDIO_API_KEY": "benchmark-disabled",
+    "LLAMACPP_API_KEY": "benchmark-disabled",
+}
+
+
+def prepare_zed_bench_profile(reset: bool = False) -> None:
+    if reset and ZED_BENCH_PROFILE.exists():
+        shutil.rmtree(ZED_BENCH_PROFILE, ignore_errors=True)
+    settings_payload = json.dumps(
+        {
+            "disable_ai": True,
+            "telemetry": {"diagnostics": False, "metrics": False},
+        },
+        indent=2,
+    ) + "\n"
+    for cfg_dir in (
+        ZED_BENCH_PROFILE,
+        ZED_BENCH_PROFILE / "config",
+        ZED_BENCH_XDG / "zed",
+    ):
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "settings.json").write_text(settings_payload, encoding="utf-8")
 
 
 def run_cmd(cmd: list[str], timeout: float = 20.0, cwd: str | None = None) -> str:
@@ -544,6 +585,8 @@ def benchmark_ide(ide_cfg: dict, workspace_info: dict) -> dict:
     for run_idx in range(total_runs):
         is_warmup = (run_idx == 0)
         terminate_ide_safely(app_path)
+        if ide_cfg.get("id") == "zed":
+            prepare_zed_bench_profile(reset=True)
 
         # Reset APFS atime 24h into the past so APFS VFS immediately records the exact nanosecond
         # the IDE enumerates `ws_dir` and reads `primary_file` without APFS lazy atime coalescing
@@ -556,6 +599,8 @@ def benchmark_ide(ide_cfg: dict, workspace_info: dict) -> dict:
 
         # Launch via macOS LaunchServices (`open -n -a`) with 100% identical workspace_dir + primary_file args
         launch_cmd = ["open", "-n", "-a", str(app_path)]
+        for env_k, env_v in ide_cfg.get("extra_env", {}).items():
+            launch_cmd.extend(["--env", f"{env_k}={env_v}"])
         args = list(ide_cfg.get("extra_args", []))
         if pass_ws:
             args.extend([str(ws_dir), str(primary_file)])
@@ -932,6 +977,8 @@ def main():
             "window_match": "zed",
             "engine": "Native Rust + GPUI",
             "ui_framework": "GPUI (Metal Shaders)",
+            "extra_args": ["--user-data-dir", str(ZED_BENCH_PROFILE)],
+            "extra_env": ZED_BENCH_ENV,
             "pass_workspace": True,
         },
         {
@@ -972,6 +1019,7 @@ def main():
             run_cmd(["defaults", "write", "com.dotmini.microcode", "lastWorkspacePath", old_mc_ws])
         if zed_user_app.exists():
             shutil.rmtree(zed_user_app, ignore_errors=True)
+        shutil.rmtree(ZED_BENCH_PROFILE, ignore_errors=True)
         shutil.rmtree("/tmp/bench-electron-profile", ignore_errors=True)
 
     # Also capture live steady-state multi-process footprint of active Electron Agent IDE (/Applications/Antigravity.app)

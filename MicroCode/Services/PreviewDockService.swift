@@ -634,6 +634,7 @@ public final class PreviewDockService: ObservableObject {
             DeviceRuntimeService.shared.embeddedDockMode = .android
             DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
             IOSDeviceCaptureService.shared.stopCapture()
+            DeviceRuntimeService.shared.selectDefaultAndroidDeviceIfNeeded()
         case .androidPhysical:
             DeviceRuntimeService.shared.embeddedDockMode = .android
             DeviceRuntimeService.shared.stopEmbeddedAndroid()

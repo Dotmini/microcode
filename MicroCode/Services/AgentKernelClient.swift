@@ -13,8 +13,8 @@ final class AgentKernelClient {
 
     private init() {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 0.6
-        configuration.timeoutIntervalForResource = 1.0
+        configuration.timeoutIntervalForRequest = 0.12
+        configuration.timeoutIntervalForResource = 0.20
         configuration.waitsForConnectivity = false
         session = URLSession(configuration: configuration)
     }
@@ -81,7 +81,7 @@ final class AgentKernelClient {
     }
 
     private func post<Body: Encodable, Response: Decodable>(path: String, body: Body) async throws -> Response {
-        if Date().timeIntervalSince(lastUnreachableAt) < 30 {
+        if Date().timeIntervalSince(lastUnreachableAt) < 120 {
             throw AgentKernelClientError.invalidResponse
         }
         let relativePath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

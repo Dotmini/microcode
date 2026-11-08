@@ -64,6 +64,7 @@ struct XcodeEditorSidebar: View {
     @State private var workspaceSearchMatches: [WorkspaceSearchMatch] = []
     @State private var workspaceSearchTask: Task<Void, Never>?
     @State private var workspaceReplaceMessage: String?
+    @ObservedObject private var trafficLights = WindowTrafficLightsController.shared
 
     private var displayedFileTree: Binding<[FileNode]> {
         if filterText.isEmpty && !showRecentOnly {
@@ -79,14 +80,8 @@ struct XcodeEditorSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             navigatorTabBar
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 1)
 
             projectHeaderBar
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 1)
 
             Group {
                 switch selectedTab {
@@ -102,12 +97,9 @@ struct XcodeEditorSidebar: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 1)
             bottomFilterBar
         }
-        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+        .background(Color.clear)
         .onAppear {
             refreshRecents()
             if appState.fileTree.isEmpty && appState.workspaceFolder != nil {
@@ -132,7 +124,7 @@ struct XcodeEditorSidebar: View {
 
     private var navigatorTabBar: some View {
         HStack(spacing: 2) {
-            Spacer().frame(width: 68)
+            Spacer().frame(width: trafficLights.interactiveLeadingInset(windowed: 70, fullScreen: 4))
             ForEach(XcodeNavigatorTab.allCases, id: \.self) { tab in
                 Button {
                     withAnimation(.easeInOut(duration: 0.12)) {
@@ -244,7 +236,6 @@ struct XcodeEditorSidebar: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 30)
-        .background(Color.primary.opacity(0.02))
     }
 
     // MARK: - Project Navigator Content
@@ -256,7 +247,7 @@ struct XcodeEditorSidebar: View {
                 AuthenticFileTree(
                     fileTree: displayedFileTree,
                     revision: appState.fileTreeRevision,
-                    backgroundColor: appState.appTheme.isGlass ? .clear : appState.appTheme.panelBackground,
+                    backgroundColor: (appState.appTheme.isGlass || appState.appTheme.usesDarkGlassSidebar) ? .clear : appState.appTheme.panelBackground,
                     onAction: { action in
                         handleAction(action)
                     }
@@ -1081,7 +1072,6 @@ struct XcodeEditorSidebar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.02))
     }
 
     // MARK: - Actions & Helpers
@@ -1165,7 +1155,12 @@ struct AgenticContextInspector: View {
     @AppStorage("agenticInspectorWidth") private var inspectorWidth: Double = 380
 
     private var maxAllowedInspectorWidth: CGFloat {
-        appState.sidebarVisible ? (selectedTab == .preview ? 860 : 720) : 980
+        let winW = NSApp.keyWindow?.frame.width ?? 1200
+        let sidebarW: CGFloat = appState.sidebarVisible ? 240 : 0
+        let minCenterColumnW: CGFloat = 380
+        let dynamicMax = max(260, winW - sidebarW - minCenterColumnW)
+        let cap: CGFloat = appState.sidebarVisible ? (selectedTab == .preview ? 760 : 640) : 880
+        return min(cap, dynamicMax)
     }
 
     private var effectiveInspectorWidth: CGFloat {

@@ -225,6 +225,7 @@ final class IOSDeviceCaptureService: NSObject, ObservableObject {
     }
     
     func stopCapture() {
+        IOSWirelessStreamService.shared.stop()
         if let session = captureSession {
             captureQueue.async {
                 session.stopRunning()
@@ -237,6 +238,27 @@ final class IOSDeviceCaptureService: NSObject, ObservableObject {
         deviceResolution = .zero
         measuredFPS = 0
         state = .disconnected
+    }
+
+    // MARK: - Wireless (WDA MJPEG) frames
+
+    /// Called by `IOSWirelessStreamService` for every decoded wireless frame.
+    func deliverWirelessFrame(_ pixelBuffer: CVPixelBuffer, size: CGSize) {
+        if state != .streaming {
+            state = .streaming
+            isCapturing = true
+            statusMessage = "Live · Wireless"
+            if connectedDeviceName == nil { connectedDeviceName = IOSDeviceControlService.shared.deviceModelName }
+        }
+        if deviceResolution != size { deviceResolution = size }
+        onFrame?(pixelBuffer, .zero)
+    }
+
+    func wirelessStreamEnded() {
+        guard captureSession == nil else { return }
+        state = .searching
+        isCapturing = false
+        statusMessage = "Wireless stream ended"
     }
     
     /// Monitor for device connect/disconnect

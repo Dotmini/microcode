@@ -49,29 +49,70 @@ public final class PNSGanglionRouter: ObservableObject {
     private var rollingFailureFingerprints: [String] = []
     private let maxFingerprintWindow = 16
     private let fixationThreshold = 3
+    private var pendingManifestSaveTask: Task<Void, Never>?
 
-    private init() {}
+    private nonisolated static var manifestCacheFileURL: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home
+            .appendingPathComponent(".microcode", isDirectory: true)
+            .appendingPathComponent("pns", isDirectory: true)
+            .appendingPathComponent("mcp_manifests_cache.json")
+    }
+
+    private init() {
+        loadPersistedManifests()
+    }
+
+    private func loadPersistedManifests() {
+        let url = Self.manifestCacheFileURL
+        guard let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([String: [MCPClient.MCPToolSchema]].self, from: data),
+              !decoded.isEmpty else {
+            return
+        }
+        cachedServerManifests = decoded
+        for (name, tools) in decoded where !tools.isEmpty {
+            hibernatedServers.insert(name)
+            let sampleDesc = tools.prefix(5).map { "\($0.name) \($0.description)" }.joined(separator: " ")
+            serverTractAssignments[name] = Self.classifyMCPTract(serverName: name, description: sampleDesc)
+        }
+    }
+
+    private func scheduleManifestPersist() {
+        pendingManifestSaveTask?.cancel()
+        let snapshot = cachedServerManifests
+        let targetURL = Self.manifestCacheFileURL
+        pendingManifestSaveTask = Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let dir = targetURL.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: targetURL, options: .atomic)
+            }
+        }
+    }
 
     // MARK: - 1. Task Signature & Nerve Tract Classification
 
     nonisolated public static func classifyTaskCategory(_ text: String) -> String {
         let lower = text.lowercased()
-        if lower.contains("sql") || lower.contains("query") || lower.contains("bigquery") || lower.contains("postgres") || lower.contains("database") || lower.contains("schema") || lower.contains("migration") {
+        if lower.contains("sql") || lower.contains("query") || lower.contains("bigquery") || lower.contains("postgres") || lower.contains("database") || lower.contains("schema") || lower.contains("migration") || lower.contains("ฐานข้อมูล") || lower.contains("ตาราง") || lower.contains("คิวรี") {
             return "data_engineering"
         }
-        if lower.contains("ios") || lower.contains("simulator") || lower.contains("simctl") || lower.contains("android") || lower.contains("adb") || lower.contains("apk") || lower.contains("device") {
+        if lower.contains("ios") || lower.contains("simulator") || lower.contains("simctl") || lower.contains("android") || lower.contains("adb") || lower.contains("apk") || lower.contains("device") || lower.contains("มือถือ") || lower.contains("แอนดรอยด์") || lower.contains("ไอโฟน") || lower.contains("จำลอง") {
             return "mobile_device"
         }
-        if lower.contains("browser") || lower.contains("css") || lower.contains("dom") || lower.contains("devtools") || lower.contains("ui") || lower.contains("layout") || lower.contains("preview") {
+        if lower.contains("browser") || lower.contains("css") || lower.contains("dom") || lower.contains("devtools") || lower.contains("ui") || lower.contains("layout") || lower.contains("preview") || lower.contains("หน้าจอ") || lower.contains("หน้าเว็บ") || lower.contains("พรีวิว") || lower.contains("เบราว์เซอร์") || lower.contains("ปุ่ม") {
             return "ui_visual"
         }
-        if lower.contains("test") || lower.contains("fix") || lower.contains("bug") || lower.contains("crash") || lower.contains("error") || lower.contains("diagnostic") {
+        if lower.contains("test") || lower.contains("fix") || lower.contains("bug") || lower.contains("crash") || lower.contains("error") || lower.contains("diagnostic") || lower.contains("แก้") || lower.contains("บั๊ก") || lower.contains("พัง") || lower.contains("เทส") {
             return "debug_verification"
         }
-        if lower.contains("paper") || lower.contains("arxiv") || lower.contains("protein") || lower.contains("alphafold") || lower.contains("docs") || lower.contains("research") {
+        if lower.contains("paper") || lower.contains("arxiv") || lower.contains("protein") || lower.contains("alphafold") || lower.contains("docs") || lower.contains("research") || lower.contains("วิจัย") || lower.contains("เอกสาร") || lower.contains("โปรตีน") {
             return "research_science"
         }
-        if lower.contains("architect") || lower.contains("design") || lower.contains("refactor") || lower.contains("plan") {
+        if lower.contains("architect") || lower.contains("design") || lower.contains("refactor") || lower.contains("plan") || lower.contains("ออกแบบ") || lower.contains("โครงสร้าง") || lower.contains("วางแผน") {
             return "architecture_refactor"
         }
         return "code_implementation"
@@ -141,25 +182,55 @@ public final class PNSGanglionRouter: ObservableObject {
 
     public func syncManifestsFromExternalMCP() {
         let manager = ExternalMCPManager.shared
+        var didMutateCache = false
         for (name, conn) in manager.connections {
             if !conn.availableTools.isEmpty {
-                cachedServerManifests[name] = conn.availableTools
+                let existingTools = cachedServerManifests[name]
+                let changed = existingTools?.count != conn.availableTools.count ||
+                    existingTools?.map(\.name) != conn.availableTools.map(\.name)
+                if changed {
+                    cachedServerManifests[name] = conn.availableTools
+                    didMutateCache = true
+                }
             }
             if conn.isConnected {
-                hibernatedServers.remove(name)
+                if hibernatedServers.contains(name) {
+                    hibernatedServers.remove(name)
+                }
                 if serverLastImpulseAt[name] == nil {
                     serverLastImpulseAt[name] = Date()
                 }
+            } else if cachedServerManifests[name]?.isEmpty == false {
+                hibernatedServers.insert(name)
             }
             let sampleDesc = (cachedServerManifests[name] ?? conn.availableTools)
                 .prefix(5)
                 .map { "\($0.name) \($0.description)" }
                 .joined(separator: " ")
-            serverTractAssignments[name] = Self.classifyMCPTract(
+            let classified = Self.classifyMCPTract(
                 serverName: name,
                 description: sampleDesc
             )
+            if serverTractAssignments[name] != classified {
+                serverTractAssignments[name] = classified
+            }
         }
+        if didMutateCache {
+            scheduleManifestPersist()
+        }
+    }
+
+    func cacheManifest(serverName: String, tools: [MCPClient.MCPToolSchema], isHibernated: Bool) {
+        guard !tools.isEmpty else { return }
+        cachedServerManifests[serverName] = tools
+        if isHibernated {
+            hibernatedServers.insert(serverName)
+        } else {
+            hibernatedServers.remove(serverName)
+        }
+        let sampleDesc = tools.prefix(5).map { "\($0.name) \($0.description)" }.joined(separator: " ")
+        serverTractAssignments[serverName] = Self.classifyMCPTract(serverName: serverName, description: sampleDesc)
+        scheduleManifestPersist()
     }
 
     public func recordMCPImpulse(serverName: String, tract: PNSNerveTractKind? = nil) {
@@ -191,6 +262,9 @@ public final class PNSGanglionRouter: ObservableObject {
                 newlyHibernated.append(name)
             }
         }
+        if !newlyHibernated.isEmpty {
+            scheduleManifestPersist()
+        }
         return newlyHibernated
     }
 
@@ -207,11 +281,11 @@ public final class PNSGanglionRouter: ObservableObject {
         ]
 
         let rules: [(PNSNerveTractKind, [String], Double)] = [
-            (.mcpCodeAST, ["file", "code", "git", "commit", "symbol", "refactor", "build", "compile", "swift", "rust", "ast", "lsp"], 0.22),
-            (.mcpDataCloud, ["sql", "postgres", "bigquery", "database", "table", "query", "schema", "gcs", "bucket", "firebase", "supabase", "migration", "redis"], 0.35),
-            (.mcpBrowserVisual, ["browser", "chrome", "ui", "css", "html", "preview", "screenshot", "canva", "figma", "flutterflow", "dom", "cookie", "lcp", "web"], 0.35),
-            (.mcpDeviceHardware, ["ios", "android", "simulator", "simctl", "adb", "device", "phone", "ipa", "apk", "aab", "ssh", "runpod", "gpu", "deploy"], 0.38),
-            (.mcpKnowledgeScience, ["docs", "documentation", "gemini", "api", "paper", "arxiv", "pubmed", "protein", "alphafold", "pdb", "slack", "sheet", "slide", "research"], 0.34)
+            (.mcpCodeAST, ["file", "code", "git", "commit", "symbol", "refactor", "build", "compile", "swift", "rust", "ast", "lsp", "โค้ด", "ไฟล์", "คอมไพล์", "รัน", "แก้บั๊ก"], 0.22),
+            (.mcpDataCloud, ["sql", "postgres", "bigquery", "database", "table", "query", "schema", "gcs", "bucket", "firebase", "supabase", "migration", "redis", "ฐานข้อมูล", "ตาราง", "คิวรี", "ข้อมูล"], 0.35),
+            (.mcpBrowserVisual, ["browser", "chrome", "ui", "css", "html", "preview", "screenshot", "canva", "figma", "flutterflow", "dom", "cookie", "lcp", "web", "หน้าเว็บ", "หน้าจอ", "พรีวิว", "เบราว์เซอร์", "ปุ่ม", "ดีไซน์"], 0.35),
+            (.mcpDeviceHardware, ["ios", "android", "simulator", "simctl", "adb", "device", "phone", "ipa", "apk", "aab", "ssh", "runpod", "gpu", "deploy", "มือถือ", "แอนดรอยด์", "ไอโฟน", "จำลอง", "ดีพลอย"], 0.38),
+            (.mcpKnowledgeScience, ["docs", "documentation", "gemini", "api", "paper", "arxiv", "pubmed", "protein", "alphafold", "pdb", "slack", "sheet", "slide", "research", "เอกสาร", "วิจัย", "โปรตีน", "สไลด์", "ชีต"], 0.34)
         ]
 
         for (tract, keywords, boost) in rules {
@@ -261,12 +335,6 @@ public final class PNSGanglionRouter: ObservableObject {
             return []
         }
 
-        if candidatePool.count <= maxTools && candidatePool.allSatisfy({ !$0.isHibernated }) {
-            let allSet = Set(candidatePool.map { "mcp__\($0.serverName)__\($0.tool.name)" })
-            lastActiveSynapticToolsCount = allSet.count
-            return allSet
-        }
-
         // Stage 1: Nerve Tract Activation Gate
         let tractPotentials = computeTractActivations(for: prompt)
         let activeTracts = Set(tractPotentials.filter { $0.value >= 0.28 }.map(\.key))
@@ -296,23 +364,30 @@ public final class PNSGanglionRouter: ObservableObject {
 
             // Modulate by Hebbian Synaptic Weight W_e (Myelination boost / LTD inhibition)
             var synapticMultiplier = 1.0
+            var isMyelinatedEdge = false
             if let lookup = synapseLookup,
                let edge = lookup(taskCategory, entry.tract, fullName, workspacePath) {
                 if edge.isInhibited {
                     synapticMultiplier = 0.20 // Strong LTD inhibition against repeatedly failing tool
                 } else if edge.isMyelinated {
                     synapticMultiplier = 1.45 // Myelinated fast-path boost
+                    isMyelinatedEdge = true
                 } else {
                     synapticMultiplier = 0.65 + 0.70 * edge.weight
                 }
             }
 
-            let finalScore = lexical * (0.55 + tractGain) * synapticMultiplier
+            // Require an actual lexical match in the prompt (or a myelinated project synapse)
+            // so unrelated external MCP servers (e.g. AlloyDB / BigQuery) are not eagerly mounted on unrelated turns.
+            guard lexical > 1.0 || isMyelinatedEdge else { continue }
+
+            let baseAffinity = activeTracts.contains(entry.tract) ? 1.5 : 0.0
+            let finalScore = (lexical + baseAffinity) * (0.55 + tractGain) * synapticMultiplier
             scored.append((fullName, entry.serverName, entry.tract, entry.isHibernated, finalScore))
         }
 
         scored.sort { $0.score > $1.score }
-        let winners = Array(scored.prefix(maxTools))
+        let winners = Array(scored.prefix(maxTools).filter { $0.score >= 5.0 })
 
         // Lazy-awaken any hibernated MCP server whose tool won synaptic activation
         for winner in winners where winner.isHibernated {
@@ -592,10 +667,18 @@ public final class PNSGanglionRouter: ObservableObject {
     // MARK: - 6. Telemetry Builder
 
     public func buildMCPTractTelemetry(myelinatedEdges: [PNSSynapseEdge]) -> [PNSTractTelemetry] {
-        syncManifestsFromExternalMCP()
+        // Pure read-only telemetry builder: NEVER mutate @Published properties here because this is called from View.body!
         let manager = ExternalMCPManager.shared
+        var effectiveAssignments = serverTractAssignments
+        for (name, conn) in manager.connections where effectiveAssignments[name] == nil {
+            let sampleDesc = (cachedServerManifests[name] ?? conn.availableTools)
+                .prefix(5)
+                .map { "\($0.name) \($0.description)" }
+                .joined(separator: " ")
+            effectiveAssignments[name] = Self.classifyMCPTract(serverName: name, description: sampleDesc)
+        }
         return PNSNerveTractKind.allCases.filter(\.isMCPTract).map { tract in
-            let servers = serverTractAssignments.filter { $0.value == tract }.map(\.key).sorted()
+            let servers = effectiveAssignments.filter { $0.value == tract }.map(\.key).sorted()
             var active = 0
             var hibernated = 0
             var latencies: [Int] = []

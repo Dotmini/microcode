@@ -10,6 +10,9 @@
 //
 
 import SwiftUI
+import AppKit
+import PDFKit
+import WebKit
 import UniformTypeIdentifiers
 
 
@@ -417,6 +420,8 @@ final class NotebookCellModel: ObservableObject, Identifiable {
     @Published var versionSnapshots: [CellVersionSnapshot] = []
     @Published var pendingDiffOldContent: String? = nil
     @Published var pendingDiffSource: String = "AI Agent"
+    @Published var customCodeHeight: Double? = nil
+    @Published var isCodeExpandedFull: Bool = false
     
     enum CellType: String, CaseIterable {
         case code = "Code"
@@ -779,7 +784,9 @@ final class NotebookViewModel: ObservableObject {
             }
             cell.isQueued = false
             cell.isExecuting = true
-            cell.clearOutput()
+            if cell.type == .agent {
+                cell.clearOutput()
+            }
             kernelStatus = "Running"
 
             let ok = await performCellExecutionBody(cell, computeTarget: nextItem.target)
@@ -872,10 +879,13 @@ final class NotebookViewModel: ObservableObject {
             return
         }
 
-        // 4. Synchronous state transition so callers & Agent tools observe `isExecuting == true` immediately
+        // 4. Synchronous state transition so callers & Agent tools observe `isExecuting == true` immediately.
+        // Keep prior code-cell output/plots mounted during execution so re-running a cell never collapses & explodes vertically.
         cell.isQueued = false
         cell.isExecuting = true
-        cell.clearOutput()
+        if cell.type == .agent {
+            cell.clearOutput()
+        }
         kernelStatus = "Running"
 
         Task { @MainActor in
@@ -907,32 +917,112 @@ final class NotebookViewModel: ObservableObject {
             return await executeLocalPythonOrProcedureCellAsync(cell)
         }
 
+        let beforeRichSnap = snapshotWorkspaceRichFiles()
+        let ok: Bool
         switch cell.language {
         case .python:
-            return await executeLocalPythonOrProcedureCellAsync(cell)
+            ok = await executeLocalPythonOrProcedureCellAsync(cell)
         case .rust:
-            return await executeLocalRustCellAsync(cell)
+            ok = await executeLocalRustCellAsync(cell)
         case .cpp:
-            return await executeLocalCppCellAsync(cell)
+            ok = await executeLocalCppCellAsync(cell)
         case .objc:
-            return await executeLocalObjcCellAsync(cell)
+            ok = await executeLocalObjcCellAsync(cell)
         case .julia:
-            return await executeLocalJuliaCellAsync(cell)
+            ok = await executeLocalJuliaCellAsync(cell)
         case .go:
-            return await executeLocalGoCellAsync(cell)
+            ok = await executeLocalGoCellAsync(cell)
         case .r:
-            return await executeLocalRCellAsync(cell)
+            ok = await executeLocalRCellAsync(cell)
         case .rmarkdown:
-            return await executeLocalRMarkdownCellAsync(cell)
+            ok = await executeLocalRMarkdownCellAsync(cell)
         case .latex:
-            return await executeLocalLaTeXCellAsync(cell)
+            ok = await executeLocalLaTeXCellAsync(cell)
         case .sql:
-            return await executeLocalSQLCellAsync(cell)
+            ok = await executeLocalSQLCellAsync(cell)
         case .ardium:
-            return await executeLocalArdiumCellAsync(cell)
+            ok = await executeLocalArdiumCellAsync(cell)
         case .java, .csharp:
-            return await executeLocalManagedRuntimeCellAsync(cell)
+            ok = await executeLocalManagedRuntimeCellAsync(cell)
         }
+
+        let newlyWritten = collectChangedWorkspaceRichFiles(since: beforeRichSnap)
+        if !newlyWritten.isEmpty {
+            var merged = cell.outputImages
+            var seenCanonical = Set(merged.map { Self.canonicalRichOutputKey($0) })
+            for u in newlyWritten {
+                let key = Self.canonicalRichOutputKey(u)
+                if !seenCanonical.contains(key) {
+                    seenCanonical.insert(key)
+                    merged.append(u)
+                }
+            }
+            if merged != cell.outputImages {
+                cell.outputImages = merged
+                scheduleAutoSave()
+            }
+        }
+        return ok
+    }
+
+    private static func canonicalRichOutputKey(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private static let richOutputExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "webp", "gif", "svg", "pdf", "md", "markdown", "html", "htm"
+    ]
+
+    private func snapshotWorkspaceRichFiles() -> [String: (TimeInterval, Int64)] {
+        var snap: [String: (TimeInterval, Int64)] = [:]
+        let fm = FileManager.default
+        let candidateDirs = [
+            workingDirectory,
+            workingDirectory.appendingPathComponent("artifacts", isDirectory: true),
+            workingDirectory.appendingPathComponent("figures", isDirectory: true),
+            workingDirectory.appendingPathComponent("outputs", isDirectory: true),
+            workingDirectory.appendingPathComponent("plots", isDirectory: true)
+        ]
+        for dir in candidateDirs {
+            guard let urls = try? fm.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for u in urls {
+                let ext = u.pathExtension.lowercased()
+                guard Self.richOutputExtensions.contains(ext) else { continue }
+                if let vals = try? u.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]),
+                   vals.isRegularFile == true {
+                    let mtime = vals.contentModificationDate?.timeIntervalSince1970 ?? 0
+                    let sz = Int64(vals.fileSize ?? 0)
+                    snap[u.standardizedFileURL.path] = (mtime, sz)
+                }
+            }
+        }
+        return snap
+    }
+
+    private func collectChangedWorkspaceRichFiles(since before: [String: (TimeInterval, Int64)]) -> [URL] {
+        let after = snapshotWorkspaceRichFiles()
+        var changed: [(URL, TimeInterval)] = []
+        for (path, stat) in after where stat.1 > 0 {
+            let fileURL = URL(fileURLWithPath: path)
+            let name = fileURL.lastPathComponent
+            // Auto-captured kernel rich artifacts (`cell_<id>_run<N>_rich*.png`) are already returned
+            // directly in `outcome.imageURLs`; skip them here so they can never be attached twice.
+            if name.hasPrefix("cell_") && (name.contains("_run") || name.contains("_rich") || name.contains("_fig") || name.contains("_rplot_")) {
+                continue
+            }
+            if let prev = before[path] {
+                if prev.0 != stat.0 || prev.1 != stat.1 {
+                    changed.append((fileURL, stat.0))
+                }
+            } else {
+                changed.append((fileURL, stat.0))
+            }
+        }
+        return changed.sorted { $0.1 < $1.1 }.map(\.0)
     }
 
     private func parseEmbeddedImageMarkers(from rawText: String) -> (cleanText: String, images: [URL]) {
@@ -980,10 +1070,17 @@ final class NotebookViewModel: ObservableObject {
             cell.isDataFrame = true
         } else {
             let parsed = parseEmbeddedImageMarkers(from: outputText)
-            var mergedImages = images
-            for img in parsed.images where !mergedImages.contains(img) {
-                mergedImages.append(img)
+            var mergedImages: [URL] = []
+            var seenKeys = Set<String>()
+            for img in (images + parsed.images) {
+                let key = Self.canonicalRichOutputKey(img)
+                if !seenKeys.contains(key) {
+                    seenKeys.insert(key)
+                    mergedImages.append(img)
+                }
             }
+            cell.dataFramePath = nil
+            cell.isDataFrame = false
             cell.output = parsed.cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
             cell.outputImages = mergedImages
             cell.inlineDataFrame = inlineDF
@@ -1133,14 +1230,18 @@ final class NotebookViewModel: ObservableObject {
             try await kernel.start()
 
             let streamBuf = TerminalStreamBuffer()
+            var latestStreamed = ""
             let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { chunk in
                 let snap = streamBuf.appendChunk(chunk)
                 DispatchQueue.main.async {
-                    cell.output = snap
+                    latestStreamed = snap
+                    if !snap.isEmpty {
+                        cell.output = snap
+                    }
                 }
             }
             let dtMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
-            let combined = cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result : cell.output
+            let combined = latestStreamed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? result : latestStreamed
             let hadErr = combined.contains("Traceback") || combined.contains("Error:")
             return finalizeCellExecution(
                 cell: cell,
@@ -1155,7 +1256,7 @@ final class NotebookViewModel: ObservableObject {
             let dtMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
             return finalizeCellExecution(
                 cell: cell,
-                outputText: cell.output + "\n❌ Kernel Error: \(error.localizedDescription)",
+                outputText: "❌ Kernel Error: \(error.localizedDescription)",
                 telemetry: CellExecutionTelemetry(durationMs: dtMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false),
                 hadError: true
             )
@@ -1179,7 +1280,9 @@ final class NotebookViewModel: ObservableObject {
             executionIndex: totalExecutions + 1,
             code: userCode
         ) { liveStream in
-            cell.output = liveStream
+            if !liveStream.isEmpty {
+                cell.output = liveStream
+            }
         }
 
         return finalizeCellExecution(
@@ -1430,27 +1533,40 @@ final class NotebookViewModel: ObservableObject {
     }
 
     private func executeLocalLaTeXCellAsync(_ cell: NotebookCellModel) async -> Bool {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let artifactsDir = workingDirectory.appendingPathComponent("artifacts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
+
         let latexPaths = [
             "/Library/TeX/texbin/pdflatex",
+            "/usr/local/texlive/2026/bin/universal-darwin/pdflatex",
+            "/usr/local/texlive/2025/bin/universal-darwin/pdflatex",
             "/usr/local/texlive/2024/bin/universal-darwin/pdflatex",
             "/usr/local/texlive/2023/bin/universal-darwin/pdflatex",
             "/opt/homebrew/bin/pdflatex",
             "/usr/bin/pdflatex"
         ]
-        guard let latexPath = latexPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+        guard let latexPath = latexPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            // Native built-in TeX rendering fallback when MacTeX/pdflatex is not installed!
+            let previewTexURL = artifactsDir.appendingPathComponent("cell_\(cell.id.uuidString.prefix(8).lowercased()).tex")
+            try? cell.content.write(to: previewTexURL, atomically: true, encoding: .utf8)
+            let dtMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+            let tel = CellExecutionTelemetry(durationMs: dtMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false)
             return finalizeCellExecution(
                 cell: cell,
-                outputText: "❌ LaTeX is not installed. Install MacTeX from https://tug.org/mactex/",
-                hadError: true
+                outputText: "",
+                images: [previewTexURL],
+                telemetry: tel,
+                hadError: false
             )
         }
 
         let uuid = UUID().uuidString.prefix(8)
-        let tempTex = workingDirectory.appendingPathComponent("temp_\(uuid).tex")
-        let tempPdf = workingDirectory.appendingPathComponent("temp_\(uuid).pdf")
+        let tempTex = artifactsDir.appendingPathComponent("latex_\(uuid).tex")
+        let outPdf = artifactsDir.appendingPathComponent("latex_\(uuid).pdf")
         defer {
             for ext in ["aux", "log", "out", "toc", "tex"] {
-                try? FileManager.default.removeItem(at: workingDirectory.appendingPathComponent("temp_\(uuid).\(ext)"))
+                try? FileManager.default.removeItem(at: artifactsDir.appendingPathComponent("latex_\(uuid).\(ext)"))
             }
         }
 
@@ -1459,17 +1575,16 @@ final class NotebookViewModel: ObservableObject {
             let res = try await PolyglotStreamingAndCacheEngine.shared.runStreamingProcess(
                 cellId: cell.id,
                 executableURL: URL(fileURLWithPath: latexPath),
-                arguments: ["-interaction=nonstopmode", "-output-directory=\(workingDirectory.path)", tempTex.path],
+                arguments: ["-interaction=nonstopmode", "-output-directory=\(artifactsDir.path)", tempTex.path],
                 workingDirectory: workingDirectory,
                 environment: buildCellProcessEnvironment(),
                 onStream: nil
             )
             let tel = CellExecutionTelemetry(durationMs: res.durationMs, memoryDeltaBytes: 0, peakRSSBytes: 0, metalAllocatedBytes: 0, isCachedBinary: false)
-            if res.exitCode == 0 && FileManager.default.fileExists(atPath: tempPdf.path) {
-                let summary = "✅ LaTeX compiled successfully!\n📄 PDF: \(tempPdf.lastPathComponent)"
-                return finalizeCellExecution(cell: cell, outputText: summary, images: [tempPdf], telemetry: tel, hadError: false)
+            if res.exitCode == 0 && FileManager.default.fileExists(atPath: outPdf.path) {
+                return finalizeCellExecution(cell: cell, outputText: "", images: [outPdf], telemetry: tel, hadError: false)
             }
-            let logFile = workingDirectory.appendingPathComponent("temp_\(uuid).log")
+            let logFile = artifactsDir.appendingPathComponent("latex_\(uuid).log")
             let logContent = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
             let errorLines = logContent.components(separatedBy: "\n").filter { $0.contains("!") || $0.contains("Error") }
             let errorSummary = errorLines.isEmpty ? res.output : errorLines.joined(separator: "\n")
@@ -2403,12 +2518,14 @@ struct NotebookView: View {
             let effectiveSidebarW: CGFloat = viewModel.showingSidebar
                 ? min(max(180, CGFloat(sidebarWidth)), maxSidebarAllowed)
                 : 0
+            let sidebarHandleW: CGFloat = viewModel.showingSidebar ? 6 : 0
             let minCenterRequired: CGFloat = 430
-            let maxAIPanelAllowed = min(560, max(280, totalWidth - effectiveSidebarW - minCenterRequired))
+            let maxAIPanelAllowed = min(560, max(280, totalWidth - effectiveSidebarW - sidebarHandleW - minCenterRequired))
             let effectiveAIPanelW: CGFloat = showAIPanel
                 ? min(max(280, CGFloat(aiPanelWidth)), maxAIPanelAllowed)
                 : 0
-            let centerWidth = max(320, totalWidth - effectiveSidebarW - effectiveAIPanelW)
+            let aiPanelHandleW: CGFloat = showAIPanel ? 6 : 0
+            let centerWidth = max(320, totalWidth - effectiveSidebarW - sidebarHandleW - effectiveAIPanelW - aiPanelHandleW)
 
             HStack(spacing: 0) {
                 // Sidebar (Resizable & Responsively Clamped)
@@ -2486,7 +2603,7 @@ struct NotebookView: View {
                         // model was reached via a computed property and never
                         // @ObservedObject, so deleting a non-selected cell only
                         // updated on the next unrelated viewModel change → lag).
-                        NotebookCellsList(notebook: notebook, viewModel: viewModel)
+                        NotebookCellsList(notebook: notebook, viewModel: viewModel, availableWidth: centerWidth)
                     } else {
                         VStack(spacing: 16) {
                             ProgressView()
@@ -2498,7 +2615,8 @@ struct NotebookView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .frame(minWidth: 320, maxWidth: .infinity)
+                .frame(width: centerWidth)
+                .clipped()
                 
                 // AI Agent Panel (Right Side — Draggable & Responsively Clamped)
                 if showAIPanel {
@@ -3247,9 +3365,9 @@ struct NotebookView: View {
     }
     
     private func notebookToolbar(availableWidth: CGFloat) -> some View {
-        let isCompact = availableWidth < 760
-        let isUltraCompact = availableWidth < 580
-        let maxTitleWidth: CGFloat = availableWidth > 820 ? 200 : (availableWidth > 640 ? 132 : 92)
+        let isCompact = availableWidth < 820
+        let isUltraCompact = availableWidth < 680
+        let maxTitleWidth: CGFloat = availableWidth > 840 ? 200 : (availableWidth > 680 ? 128 : 84)
 
         return HStack(spacing: isCompact ? 4 : 5.5) {
             // Sidebar toggle
@@ -3661,7 +3779,8 @@ struct NotebookView: View {
             .help("Toggle Notebook Agent Panel")
         }
         .padding(.horizontal, 10)
-        .frame(height: notebookHeaderHeight)
+        .frame(width: availableWidth, height: notebookHeaderHeight)
+        .clipped()
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
@@ -3770,7 +3889,7 @@ struct NotebookView: View {
     // MARK: - Python Environment & Compute Engine Pills
     
     private func pythonVersionPill(isCompact: Bool, isUltraCompact: Bool) -> some View {
-        let maxW: CGFloat = isUltraCompact ? 96 : (isCompact ? 126 : 158)
+        let maxW: CGFloat = isUltraCompact ? 92 : (isCompact ? 120 : 158)
         return Button(action: presentPythonVersionMenu) {
             HStack(spacing: 4.5) {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
@@ -3797,7 +3916,6 @@ struct NotebookView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .fixedSize(horizontal: true, vertical: false)
         .onHover { h in
             hoveredToolbarItem = h ? "py_env" : (hoveredToolbarItem == "py_env" ? nil : hoveredToolbarItem)
         }
@@ -4000,7 +4118,6 @@ struct NotebookView: View {
         menu.addItem(.separator())
         menu.addItem(makeMenuHeader("Autonomous & Analytics"))
         menu.addItem(makeMenuActionItem("AI Agent Cell", icon: "brain.head.profile") { viewModel.addCell(type: .agent) })
-        menu.addItem(makeMenuActionItem("SAS Procedure", icon: "tablecells.fill") { viewModel.addCell(type: .procedure) })
         
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
@@ -4190,14 +4307,14 @@ struct NotebookListItem: View {
             
             Spacer()
             
-            if isHovering {
-                Button(action: onDelete) {
-                    Image(systemName: "xmark.circle")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
+            Button(action: onDelete) {
+                Image(systemName: "xmark.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
+            .buttonStyle(.plain)
+            .opacity(isHovering ? 1 : 0)
+            .allowsHitTesting(isHovering)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -4254,10 +4371,11 @@ struct DataFileRow: View {
                 .background(file.type.color.opacity(0.2))
                 .cornerRadius(3)
             
-            if isHovering {
-                Button(action: onInsertCell) { Image(systemName: "arrow.down.to.line").font(.caption).foregroundColor(.secondary) }
-                    .buttonStyle(.plain).help("Insert loader cell")
-            }
+            Button(action: onInsertCell) { Image(systemName: "arrow.down.to.line").font(.caption).foregroundColor(.secondary) }
+                .buttonStyle(.plain)
+                .help("Insert loader cell")
+                .opacity(isHovering ? 1 : 0)
+                .allowsHitTesting(isHovering)
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
@@ -4291,9 +4409,123 @@ struct DataFileRow: View {
 
 // MARK: - Notebook Cells List (observes NotebookModel for realtime add/delete)
 
+// MARK: - Deterministic Cell Geometry Helper (Zero Layout Shift / Zero Nested Scroll)
+
+private enum NotebookCellGeometry {
+    private struct HeightCacheKey: Hashable {
+        let contentHash: Int
+        let contentByteLen: Int
+        let widthBucket: Int
+        let fontKey: String
+    }
+
+    @MainActor
+    private static let measureComponents: (storage: NSTextStorage, layoutManager: NSLayoutManager, container: NSTextContainer) = {
+        let storage = NSTextStorage()
+        let lm = NSLayoutManager()
+        lm.usesFontLeading = true
+        lm.allowsNonContiguousLayout = false
+        let tc = NSTextContainer(size: NSSize(width: 600, height: CGFloat.greatestFiniteMagnitude))
+        tc.lineFragmentPadding = 5.0
+        tc.widthTracksTextView = false
+        tc.heightTracksTextView = false
+        lm.addTextContainer(tc)
+        storage.addLayoutManager(lm)
+        return (storage, lm, tc)
+    }()
+
+    @MainActor private static var fontCache: [String: (font: NSFont, lineHeight: CGFloat)] = [:]
+    @MainActor private static var heightCache: [HeightCacheKey: CGFloat] = [:]
+
+    @MainActor
+    private static func resolvedFont(fontName: String, fontSize: CGFloat, fontWeight: Int) -> (key: String, font: NSFont, lineHeight: CGFloat) {
+        let key = "\(fontName)|\(Int(fontSize * 10))|\(fontWeight)"
+        if let cached = fontCache[key] {
+            return (key, cached.font, cached.lineHeight)
+        }
+        let weightValue: NSFont.Weight
+        switch fontWeight {
+        case 0: weightValue = .ultraLight
+        case 1: weightValue = .light
+        case 2: weightValue = .regular
+        case 3: weightValue = .medium
+        case 4: weightValue = .semibold
+        case 5: weightValue = .bold
+        default: weightValue = .regular
+        }
+        let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: weightValue)
+        let font = NSFont(name: fontName, size: fontSize) ?? baseFont
+        let lineHeight = max(16, ceil(measureComponents.layoutManager.defaultLineHeight(for: font)))
+        fontCache[key] = (font, lineHeight)
+        return (key, font, lineHeight)
+    }
+
+    @MainActor
+    static func codeEditorHeight(
+        for content: String,
+        fontSize: CGFloat,
+        fontName: String,
+        fontWeight: Int,
+        exactEditorWidth: CGFloat,
+        showLineNumbers: Bool
+    ) -> CGFloat {
+        let resolved = resolvedFont(fontName: fontName, fontSize: fontSize, fontWeight: fontWeight)
+        // Exact horizontal deduction matching `SyntaxHighlightedCodeView`'s `NSTextView.textContainerInset.width * 2`
+        let textInsetDouble: CGFloat = showLineNumbers ? ((EditorLineNumberGutterView.preferredWidth + 5) * 2) : 10
+        let targetContainerWidth = max(120, floor(exactEditorWidth - textInsetDouble))
+        let widthBucket = Int(targetContainerWidth)
+
+        var hasher = Hasher()
+        hasher.combine(content)
+        let cacheKey = HeightCacheKey(
+            contentHash: hasher.finalize(),
+            contentByteLen: content.utf8.count,
+            widthBucket: widthBucket,
+            fontKey: resolved.key
+        )
+        if let cachedHeight = heightCache[cacheKey] {
+            return cachedHeight
+        }
+
+        let normalized = content.utf8.contains(0x0D)
+            ? content.replacingOccurrences(of: "\r\n", with: "\n")
+            : content
+
+        let comps = measureComponents
+        comps.container.containerSize = NSSize(width: CGFloat(widthBucket), height: .greatestFiniteMagnitude)
+
+        let usedHeight: CGFloat
+        if normalized.isEmpty {
+            usedHeight = resolved.lineHeight
+        } else {
+            comps.storage.setAttributedString(
+                NSAttributedString(
+                    string: normalized,
+                    attributes: [.font: resolved.font, .ligature: 0]
+                )
+            )
+            comps.layoutManager.ensureLayout(for: comps.container)
+            var rect = comps.layoutManager.usedRect(for: comps.container)
+            if normalized.hasSuffix("\n") && comps.layoutManager.extraLineFragmentTextContainer == nil {
+                rect.size.height += resolved.lineHeight
+            }
+            usedHeight = max(resolved.lineHeight, ceil(rect.height))
+        }
+
+        // +28 covers NSTextView textContainerInset.height * 2 (16pt) + bottom breathing room (12pt)
+        let finalHeight = max(92, usedHeight + 28)
+        if heightCache.count > 512 {
+            heightCache.removeAll(keepingCapacity: true)
+        }
+        heightCache[cacheKey] = finalHeight
+        return finalHeight
+    }
+}
+
 struct NotebookCellsList: View {
     @ObservedObject var notebook: NotebookModel
     @ObservedObject var viewModel: NotebookViewModel
+    var availableWidth: CGFloat = 760
     @ObservedObject private var sharedMemory = SharedMemoryService.shared
     @EnvironmentObject var appState: AppState
 
@@ -4314,12 +4546,15 @@ struct NotebookCellsList: View {
         )
         let liveVars = sharedMemory.activeVariables(for: notebook.id)
 
-        ScrollView {
-            LazyVStack(spacing: 12) {
+        let lockedWidth = max(320, floor(availableWidth))
+
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(spacing: 12) {
                 ForEach(notebook.cells) { cell in
                     NotebookCellView(
                         cell: cell,
                         isSelected: viewModel.selectedCellId == cell.id,
+                        availableWidth: lockedWidth,
                         dagInfo: dagGraph[cell.id],
                         liveVariables: liveVars,
                         isAppMode: viewModel.isAppPresentationMode,
@@ -4359,12 +4594,6 @@ struct NotebookCellsList: View {
                                 .background(controlBackground).cornerRadius(8)
                         }
                         .buttonStyle(.plain)
-                        Button(action: { viewModel.addCell(type: .procedure) }) {
-                            HStack { Image(systemName: "tablecells.fill"); Text("Procedure") }
-                                .padding(.horizontal, 16).padding(.vertical, 8)
-                                .background(controlBackground).cornerRadius(8)
-                        }
-                        .buttonStyle(.plain)
                         Button(action: { viewModel.addCell(type: .agent) }) {
                             HStack(spacing: 6) {
                                 Image(systemName: "brain.head.profile")
@@ -4384,8 +4613,10 @@ struct NotebookCellsList: View {
                     .padding(.vertical, 20)
                 }
             }
-            .padding()
+            .padding(.vertical, 16)
+            .frame(width: lockedWidth)
         }
+        .frame(width: lockedWidth)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
     }
 }
@@ -4396,6 +4627,7 @@ struct NotebookCellView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var cell: NotebookCellModel
     let isSelected: Bool
+    var availableWidth: CGFloat = 760
     var dagInfo: CellDAGNodeInfo? = nil
     var liveVariables: [KernelVariableInfo] = []
     var isAppMode: Bool = false
@@ -4410,7 +4642,25 @@ struct NotebookCellView: View {
     @State private var isHovering = false
     @State private var showTagEditor = false
     @State private var tagDraft = ""
-    @State private var codeHeight: CGFloat = 80
+
+    /// Deterministic locked card width (`availableWidth - 32pt`, leaving exact 16pt horizontal margins)
+    private var cardWidth: CGFloat {
+        max(280, floor(availableWidth - 32))
+    }
+
+    private let leftGutterWidth: CGFloat = 46
+
+    private var mainColumnWidth: CGFloat {
+        max(216, cardWidth - leftGutterWidth - 8)
+    }
+
+    private var codeEditorWidth: CGFloat {
+        max(200, mainColumnWidth - 8)
+    }
+
+    private var richOutputMaxWidth: CGFloat {
+        isAppMode ? max(240, cardWidth - 20) : max(196, mainColumnWidth - 16)
+    }
     
     private var panelBackground: Color {
         appState.appTheme.isGlass ? Color.white.opacity(0.05) : Color(nsColor: appState.appTheme.panelBackground)
@@ -4484,13 +4734,14 @@ struct NotebookCellView: View {
                 forceRenderedOnly: true
             )
             .padding(.vertical, 4)
+            .frame(width: cardWidth, alignment: .leading)
+            .clipped()
             .background(cellCardBackground)
             .cornerRadius(10)
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(cellBorderColor, lineWidth: 0.8)
+                    .strokeBorder(cellBorderColor, lineWidth: 0.8)
             )
-            .padding(.horizontal, 16)
         } else if hasVisualOutput {
             VStack(alignment: .leading, spacing: 8) {
                 if !paramSpecs.isEmpty {
@@ -4514,13 +4765,14 @@ struct NotebookCellView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
             }
+            .frame(width: cardWidth, alignment: .leading)
+            .clipped()
             .background(cellCardBackground)
             .cornerRadius(10)
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(cellBorderColor, lineWidth: 0.8)
+                    .strokeBorder(cellBorderColor, lineWidth: 0.8)
             )
-            .padding(.horizontal, 16)
         }
     }
 
@@ -4598,39 +4850,39 @@ struct NotebookCellView: View {
 
                 Spacer(minLength: 6)
 
-                if isHovering || isSelected {
-                    HStack(spacing: 5) {
-                        Button(action: onMoveUp) {
-                            Image(systemName: "arrow.up")
-                                .frame(width: 20, height: 20)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Move Cell Up")
-
-                        Button(action: onMoveDown) {
-                            Image(systemName: "arrow.down")
-                                .frame(width: 20, height: 20)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Move Cell Down")
-
-                        Button(action: { cell.isCollapsed.toggle() }) {
-                            Image(systemName: cell.isCollapsed ? "chevron.down" : "chevron.up")
-                                .frame(width: 20, height: 20)
-                        }
-                        .buttonStyle(.plain)
-                        .help(cell.isCollapsed ? "Expand Cell" : "Collapse Cell")
-
-                        Button(action: onDelete) {
-                            Image(systemName: "trash")
-                                .frame(width: 20, height: 20)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Delete Cell")
+                HStack(spacing: 5) {
+                    Button(action: onMoveUp) {
+                        Image(systemName: "arrow.up")
+                            .frame(width: 20, height: 20)
                     }
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .buttonStyle(.plain)
+                    .help("Move Cell Up")
+
+                    Button(action: onMoveDown) {
+                        Image(systemName: "arrow.down")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Move Cell Down")
+
+                    Button(action: { cell.isCollapsed.toggle() }) {
+                        Image(systemName: cell.isCollapsed ? "chevron.down" : "chevron.up")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .help(cell.isCollapsed ? "Expand Cell" : "Collapse Cell")
+
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete Cell")
                 }
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(.secondary)
+                .opacity(isHovering || isSelected ? 1 : 0)
+                .allowsHitTesting(isHovering || isSelected)
 
                 // Always-visible Send / Stop button
                 if cell.isExecuting {
@@ -4704,21 +4956,23 @@ struct NotebookCellView: View {
                 .padding(.vertical, 10)
             }
         }
+        .frame(width: cardWidth, alignment: .leading)
+        .clipped()
         .background(cellCardBackground)
         .cornerRadius(10)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(
+                .strokeBorder(
                     isSelected
                         ? Color.accentColor.opacity(0.85)
                         : Color.primary.opacity(isDark ? 0.12 : 0.09),
-                    lineWidth: isSelected ? 1.5 : 1
+                    lineWidth: 1
                 )
         )
-        .padding(.horizontal, 16)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
+        .transaction { $0.animation = nil }
     }
 
     private var standardNotebookCellCard: some View {
@@ -4728,6 +4982,7 @@ struct NotebookCellView: View {
                 Text(executionLabel)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
                     .frame(width: 40)
                 
                 // Play Button
@@ -4740,10 +4995,10 @@ struct NotebookCellView: View {
                 .buttonStyle(.plain)
                 .disabled(cell.type != .code && cell.type != .agent && cell.type != .procedure)
             }
-            .frame(width: 50)
+            .frame(width: leftGutterWidth)
             .padding(.top, 12)
             
-            // Main Cell Content - All same background color
+            // Main Cell Content — Locked to `mainColumnWidth` so outputs/telemetry NEVER expand the card
             VStack(alignment: .leading, spacing: 0) {
                 // Cell Header
                 cellHeader
@@ -4763,6 +5018,8 @@ struct NotebookCellView: View {
                                 cell.pendingDiffOldContent = nil
                             }
                         )
+                        .frame(maxWidth: mainColumnWidth, alignment: .leading)
+                        .clipped()
                     }
 
                     if cell.type == .code {
@@ -4781,12 +5038,12 @@ struct NotebookCellView: View {
                                 )
                                 if shouldAutoRun { onRun() }
                             }
+                            .frame(maxWidth: mainColumnWidth, alignment: .leading)
+                            .clipped()
                         }
                     }
 
-                    if cell.type == .procedure {
-                        SASProcedureView(cell: cell, onRun: onRun)
-                    } else if cell.type == .markdown {
+                    if cell.type == .markdown {
                         RichMarkdownCellView(
                             text: Binding(
                                 get: { cell.content },
@@ -4796,6 +5053,8 @@ struct NotebookCellView: View {
                             isDark: appState.appTheme.isDark,
                             forceRenderedOnly: false
                         )
+                        .frame(width: mainColumnWidth, alignment: .leading)
+                        .clipped()
                     } else if cell.type == .agent {
                         // Theme-Native Inline Agent Prompt Composer
                         VStack(alignment: .leading, spacing: 6) {
@@ -4830,20 +5089,25 @@ struct NotebookCellView: View {
                             .cornerRadius(7)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 7)
-                                    .stroke(Color.primary.opacity(appState.appTheme.isDark ? 0.10 : 0.08), lineWidth: 1)
+                                    .strokeBorder(Color.primary.opacity(appState.appTheme.isDark ? 0.10 : 0.08), lineWidth: 1)
                             )
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
+                        .frame(width: mainColumnWidth, alignment: .leading)
                     } else {
-                        // Code Editor - height matches line count exactly
-                        // Zero-allocation UTF8 scan instead of components(separatedBy:)
-                        let lineCount = max(1, cell.content.utf8.reduce(1) { $0 + ($1 == 0x0A ? 1 : 0) })
-                        let lineHeight: CGFloat = 20  // line height for 13pt monospaced font
-                        let calculatedHeight = CGFloat(lineCount) * lineHeight + 16  // +16 for padding
-                        
-                        // Use appTheme rawValue directly — ThemeManager.setActiveTheme resolves
-                        // "system" to dark/light automatically based on macOS appearance.
+                        // Deterministic, rock-steady Code Cell:
+                        // - Locked `codeEditorWidth` & synchronous TextKit 1 height (0.0pt shift on hover/click/Run)
+                        // - Internal NSScrollView scrolling disabled (`isScrollEnabled: false`)
+                        let effectiveCodeHeight = NotebookCellGeometry.codeEditorHeight(
+                            for: cell.content,
+                            fontSize: appState.cellFontSize,
+                            fontName: appState.cellFontName,
+                            fontWeight: appState.cellFontWeight,
+                            exactEditorWidth: codeEditorWidth,
+                            showLineNumbers: appState.showLineNumbers
+                        )
+
                         SyntaxHighlightedCodeView(
                             text: Binding(
                                 get: { cell.content },
@@ -4855,14 +5119,15 @@ struct NotebookCellView: View {
                             themeName: appState.appTheme.rawValue,
                             fontName: appState.cellFontName,
                             fontWeight: appState.cellFontWeight,
+                            isScrollEnabled: false,
                             isTransparent: true,
                             showLineNumbers: appState.showLineNumbers,
                             editorID: "cell-\(cell.id.uuidString)"
                         )
-                        .frame(height: max(50, min(calculatedHeight, 500)))
+                        .frame(width: codeEditorWidth, height: effectiveCodeHeight)
                         .cornerRadius(4)
-                        .padding(4)
-
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 4)
                     }
                     
                     // Output Section
@@ -4872,25 +5137,29 @@ struct NotebookCellView: View {
                             .padding(.horizontal, 8)
                         
                         cellRichOutputsContent
+                            .opacity(cell.isExecuting && cell.type != .agent ? 0.65 : 1.0)
                             .padding(8)
                     }
                 }
             }
-            .cornerRadius(6) 
-            .padding(.horizontal, 4)
+            .frame(width: mainColumnWidth, alignment: .leading)
+            .clipped()
+            .padding(.trailing, 8)
             .padding(.bottom, 8)
         }
+        .frame(width: cardWidth, alignment: .leading)
+        .clipped()
         .background(cellCardBackground)
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(isSelected ? Color.accentColor : cellBorderColor, lineWidth: isSelected ? 2 : 1)
+                .strokeBorder(isSelected ? Color.accentColor.opacity(0.9) : cellBorderColor, lineWidth: 1)
         )
         .shadow(color: appState.appTheme.isGlass ? Color.black.opacity(0.05) : Color.clear, radius: 4, x: 0, y: 2)
-        .padding(.horizontal, 16)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
+        .transaction { $0.animation = nil }
     }
 
     @ViewBuilder
@@ -4903,12 +5172,15 @@ struct NotebookCellView: View {
                     isDark: appState.appTheme.isDark,
                     onCreateSQLQueryCell: onGenerateCode
                 )
+                .frame(width: richOutputMaxWidth, alignment: .leading)
+                .clipped()
             }
 
             // Legacy file-backed DataFrame Output
             if let dfPath = cell.dataFramePath, cell.isDataFrame, cell.inlineDataFrame == nil {
                 DataFrameView(rawPath: dfPath, onGenerateCode: onGenerateCode)
-                    .frame(height: 300)
+                    .frame(width: richOutputMaxWidth, height: 300)
+                    .clipped()
             }
 
             if cell.type == .agent {
@@ -4956,107 +5228,68 @@ struct NotebookCellView: View {
                     || cell.output.contains("CUDA out of memory")
                 if hasError && !isAppMode {
                     CellSelfHealingBanner(cell: cell, onRun: onRun)
+                        .frame(width: richOutputMaxWidth, alignment: .leading)
+                        .clipped()
                 }
 
                 VirtualizedCellOutputLogView(
                     output: cell.output,
                     hasError: hasError
                 )
+                .frame(width: richOutputMaxWidth, alignment: .leading)
+                .clipped()
             }
 
-            // Image Output (Retina matplotlib, PIL, PDF, HTML — cached via NotebookImageCache)
+            // Universal Rich Outputs: Retina Graphs/Images, Inline PDF Reader, Rich Markdown/TeX Preview, & Interactive HTML/Plotly
             if !cell.outputImages.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(cell.outputImages, id: \.self) { imageURL in
-                            if imageURL.pathExtension.lowercased() == "pdf" {
-                                Button(action: { NSWorkspace.shared.open(imageURL) }) {
-                                    VStack(spacing: 8) {
-                                        Image(systemName: "doc.text.fill")
-                                            .font(.largeTitle)
-                                            .foregroundColor(.red)
-                                        Text("Open PDF")
-                                            .font(.caption)
-                                            .foregroundColor(.primary)
-                                    }
-                                    .frame(width: 120, height: 120)
-                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
-                                    .cornerRadius(8)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                            } else if imageURL.pathExtension.lowercased() == "html" {
-                                Button(action: { NSWorkspace.shared.open(imageURL) }) {
-                                    VStack(spacing: 8) {
-                                        Image(systemName: "safari.fill")
-                                            .font(.largeTitle)
-                                            .foregroundColor(.blue)
-                                        Text("View Report")
-                                            .font(.caption)
-                                            .foregroundColor(.primary)
-                                    }
-                                    .frame(width: 120, height: 120)
-                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
-                                    .cornerRadius(8)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                            } else if let nsImage = NotebookImageCache.shared.image(for: imageURL) {
-                                VStack(spacing: 4) {
-                                    Image(nsImage: nsImage)
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fit)
-                                        .frame(maxHeight: 320)
-                                        .cornerRadius(8)
-                                        .shadow(radius: 2)
-                                        .onTapGesture {
-                                            NSWorkspace.shared.open(imageURL)
-                                        }
-
-                                    Text(imageURL.lastPathComponent)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                                .contextMenu {
-                                    Button("Save Image...") {
-                                        let panel = NSSavePanel()
-                                        panel.allowedContentTypes = [.png]
-                                        panel.nameFieldStringValue = imageURL.lastPathComponent
-                                        if panel.runModal() == .OK, let url = panel.url {
-                                            try? FileManager.default.copyItem(at: imageURL, to: url)
-                                        }
-                                    }
-                                    Button("Copy Image") {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.writeObjects([nsImage])
-                                    }
-                                }
-                            }
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(cell.outputImages, id: \.self) { richURL in
+                        let ext = richURL.pathExtension.lowercased()
+                        if ext == "pdf" {
+                            CellInlinePDFPreviewCard(url: richURL, isDark: appState.appTheme.isDark)
+                                .frame(width: richOutputMaxWidth, alignment: .leading)
+                                .clipped()
+                        } else if ext == "md" || ext == "markdown" || ext == "tex" {
+                            CellInlineMarkdownPreviewCard(url: richURL, isDark: appState.appTheme.isDark)
+                                .frame(width: richOutputMaxWidth, alignment: .leading)
+                                .clipped()
+                        } else if ext == "html" || ext == "htm" {
+                            CellInlineHTMLPreviewCard(url: richURL, isDark: appState.appTheme.isDark)
+                                .frame(width: richOutputMaxWidth, alignment: .leading)
+                                .clipped()
+                        } else {
+                            CellInlineGraphImageCard(
+                                url: richURL,
+                                isDark: appState.appTheme.isDark,
+                                maxContentWidth: richOutputMaxWidth
+                            )
+                            .frame(width: richOutputMaxWidth, alignment: .leading)
+                            .clipped()
                         }
                     }
                 }
             }
         }
+        .frame(width: richOutputMaxWidth, alignment: .leading)
+        .clipped()
     }
     
     private var cellHeader: some View {
-        HStack(spacing: 6) {
-            // Cell Type Badge
-            Text(cell.type.rawValue)
-                .font(.system(size: 9, weight: .medium))
-                .lineLimit(1)
-                .fixedSize()
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(cellTypeColor.opacity(0.16))
-                .foregroundColor(cellTypeColor)
-                .cornerRadius(4)
+        let isCompactHeader = mainColumnWidth < 560
+
+        return HStack(spacing: 5) {
+            // Cell Type Badge (omitted for `.code` because the language pill already communicates it)
+            if cell.type != .code {
+                Text(cell.type.rawValue)
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(cellTypeColor.opacity(0.16))
+                    .foregroundColor(cellTypeColor)
+                    .cornerRadius(4)
+            }
             
             // Language Badge (for code cells)
             if cell.type == .code {
@@ -5092,7 +5325,7 @@ struct NotebookCellView: View {
                 .buttonStyle(.plain)
                 .fixedSize()
                 
-                // Per-Cell Heterogeneous Compute Target Chip
+                // Per-Cell Heterogeneous Compute Target Chip (compact icon when default, explicit label when overridden)
                 Menu {
                     Button {
                         cell.computeTargetOverride = nil
@@ -5118,10 +5351,12 @@ struct NotebookCellView: View {
                     let current = cell.computeTargetOverride ?? appState.currentComputeTarget
                     HStack(spacing: 3) {
                         Image(systemName: cell.computeTargetOverride != nil ? current.icon : "arrow.triangle.branch")
-                            .font(.system(size: 8))
-                        Text(cell.computeTargetOverride != nil ? current.displayName : "Default")
-                            .font(.system(size: 9, weight: .medium))
-                            .lineLimit(1)
+                            .font(.system(size: 8.5))
+                        if cell.computeTargetOverride != nil || !isCompactHeader {
+                            Text(cell.computeTargetOverride != nil ? current.displayName : "Default")
+                                .font(.system(size: 9, weight: .medium))
+                                .lineLimit(1)
+                        }
                     }
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
@@ -5148,7 +5383,7 @@ struct NotebookCellView: View {
                         set: { cell.aiSelection = $0 }
                     ),
                     showRoleSelector: cell.agentExecutionMode,
-                    maxWidth: 215,
+                    maxWidth: min(200, mainColumnWidth * 0.42),
                     compact: true,
                     minimalChrome: true
                 )
@@ -5162,11 +5397,14 @@ struct NotebookCellView: View {
                 HStack(spacing: 3) {
                     Image(systemName: "tag\(cell.tag.isEmpty ? "" : ".fill")")
                         .font(.system(size: 9))
-                    Text(cell.tag.isEmpty ? "Tag" : cell.tag)
-                        .font(.system(size: 9, weight: .medium))
-                        .lineLimit(1)
+                    if !cell.tag.isEmpty || !isCompactHeader {
+                        Text(cell.tag.isEmpty ? "Tag" : cell.tag)
+                            .font(.system(size: 9, weight: .medium))
+                            .lineLimit(1)
+                            .frame(maxWidth: 64)
+                    }
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 5.5)
                 .padding(.vertical, 2)
                 .background((cell.tag.isEmpty ? Color.secondary : Color.accentColor).opacity(0.18))
                 .foregroundColor(cell.tag.isEmpty ? .secondary : .accentColor)
@@ -5342,61 +5580,135 @@ struct NotebookCellView: View {
                 .frame(width: 24, height: 24)
             }
 
-            // DAG Lineage: Stale Upstream Indicator & 1-Click Run Downstream
-            if let dag = dagInfo {
-                if dag.isStaleFromUpstream {
-                    Button(action: onRun) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
-                                .font(.system(size: 8.5, weight: .semibold))
+            // Overflow-proof Post-Run Badges (DAG Lineage + Telemetry + Time-Travel History)
+            // Uses `ViewThatFits(in: .horizontal)` so pressing Run NEVER widens `cellHeader` beyond `mainColumnWidth`.
+            ViewThatFits(in: .horizontal) {
+                // Tier 1: Full telemetry (Duration + RAM Delta + Metal) + DAG + History
+                HStack(spacing: 5) {
+                    cellHeaderDAGBadges(compact: false)
+                    cellHeaderTelemetryPill(includeMemoryAndMetal: true)
+                    CellVersionHistoryButton(snapshots: cell.versionSnapshots) { snap in
+                        cell.content = snap.content
+                        cell.pendingDiffOldContent = nil
+                    }
+                }
+
+                // Tier 2: Compact telemetry (Duration only) + compact DAG + History
+                HStack(spacing: 4) {
+                    cellHeaderDAGBadges(compact: true)
+                    cellHeaderTelemetryPill(includeMemoryAndMetal: false)
+                    CellVersionHistoryButton(snapshots: cell.versionSnapshots) { snap in
+                        cell.content = snap.content
+                        cell.pendingDiffOldContent = nil
+                    }
+                }
+
+                // Tier 3: Ultra-compact duration-only pill
+                cellHeaderTelemetryPill(includeMemoryAndMetal: false)
+
+                // Tier 4: Empty fallback on extreme narrow widths (< 240pt)
+                EmptyView()
+            }
+            
+            Spacer(minLength: 2)
+            
+            HStack(spacing: 7) {
+                Button(action: onMoveUp) {
+                    Image(systemName: "arrow.up")
+                }
+                .buttonStyle(.plain)
+                .help("Move Cell Up")
+                
+                Button(action: onMoveDown) {
+                    Image(systemName: "arrow.down")
+                }
+                .buttonStyle(.plain)
+                .help("Move Cell Down")
+                
+                Button(action: { cell.isCollapsed.toggle() }) {
+                    Image(systemName: cell.isCollapsed ? "chevron.down" : "chevron.up")
+                }
+                .buttonStyle(.plain)
+                .help(cell.isCollapsed ? "Expand Cell" : "Collapse Cell")
+                
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Delete Cell")
+            }
+            .font(.system(size: 11))
+            .fixedSize()
+            .opacity(isHovering || isSelected ? 1 : 0)
+            .allowsHitTesting(isHovering || isSelected)
+        }
+        .padding(.horizontal, 8)
+        .frame(width: mainColumnWidth, height: 28)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func cellHeaderDAGBadges(compact: Bool) -> some View {
+        if let dag = dagInfo {
+            if dag.isStaleFromUpstream {
+                Button(action: onRun) {
+                    HStack(spacing: 2.5) {
+                        Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                            .font(.system(size: 8.5, weight: .semibold))
+                        if !compact {
                             Text("Stale")
                                 .font(.system(size: 9, weight: .semibold))
                         }
-                        .foregroundColor(.orange)
-                        .padding(.horizontal, 5.5)
-                        .padding(.vertical, 2)
-                        .background(Color.orange.opacity(0.15))
-                        .cornerRadius(4)
                     }
-                    .buttonStyle(.plain)
-                    .fixedSize()
-                    .help("Upstream cell (\(dag.upstreamCellNumbers.map { "#\($0)" }.joined(separator: ", "))) updated \(dag.referencedUpstreamSymbols.joined(separator: ", ")). Click to re-run.")
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.15))
+                    .cornerRadius(4)
                 }
-
-                if !dag.downstreamCellIds.isEmpty {
-                    Button(action: { onRunDownstream?() ?? onRun() }) {
-                        HStack(spacing: 2.5) {
-                            Image(systemName: "arrow.turn.right.down")
-                                .font(.system(size: 8, weight: .semibold))
-                            Text("\(dag.downstreamCellIds.count)")
-                                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        }
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.06))
-                        .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
-                    .fixedSize()
-                    .help("Run this cell + \(dag.downstreamCellIds.count) downstream dependent cell(s)")
-                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help("Upstream cell (\(dag.upstreamCellNumbers.map { "#\($0)" }.joined(separator: ", "))) updated \(dag.referencedUpstreamSymbols.joined(separator: ", ")). Click to re-run.")
             }
 
-            // Per-Cell Execution Telemetry Pill (Duration, RAM Delta, Metal GPU, Binary Cache)
-            if let tel = cell.telemetry {
-                HStack(spacing: 4) {
-                    Image(systemName: tel.isCachedBinary ? "bolt.fill" : "timer")
-                        .font(.system(size: 8))
-                        .foregroundColor(tel.isCachedBinary ? .green : .secondary)
-                    if tel.isCachedBinary {
-                        Text("Cached")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundColor(.green)
+            if !dag.downstreamCellIds.isEmpty {
+                Button(action: { onRunDownstream?() ?? onRun() }) {
+                    HStack(spacing: 2.5) {
+                        Image(systemName: "arrow.turn.right.down")
+                            .font(.system(size: 8, weight: .semibold))
+                        Text("\(dag.downstreamCellIds.count)")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
                     }
-                    Text(tel.formattedDuration)
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundColor(tel.isCachedBinary ? .green : .secondary)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 4.5)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help("Run this cell + \(dag.downstreamCellIds.count) downstream dependent cell(s)")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func cellHeaderTelemetryPill(includeMemoryAndMetal: Bool) -> some View {
+        if let tel = cell.telemetry {
+            HStack(spacing: 3.5) {
+                Image(systemName: tel.isCachedBinary ? "bolt.fill" : "timer")
+                    .font(.system(size: 8))
+                    .foregroundColor(tel.isCachedBinary ? .green : .secondary)
+                if tel.isCachedBinary && includeMemoryAndMetal {
+                    Text("Cached")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.green)
+                }
+                Text(tel.formattedDuration)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(tel.isCachedBinary ? .green : .secondary)
+                if includeMemoryAndMetal {
                     if let memDelta = tel.formattedMemoryDelta {
                         Text("· \(memDelta)")
                             .font(.system(size: 8.5, design: .monospaced))
@@ -5408,49 +5720,13 @@ struct NotebookCellView: View {
                             .foregroundColor(.purple)
                     }
                 }
-                .padding(.horizontal, 5.5)
-                .padding(.vertical, 2)
-                .background((tel.isCachedBinary ? Color.green : Color.primary).opacity(0.065))
-                .cornerRadius(4)
-                .fixedSize()
             }
-
-            // Per-Cell Time-Travel Snapshot History
-            CellVersionHistoryButton(snapshots: cell.versionSnapshots) { snap in
-                cell.content = snap.content
-                cell.pendingDiffOldContent = nil
-            }
-            
-            Spacer()
-            
-            if isHovering || isSelected {
-                HStack(spacing: 8) {
-                    Button(action: onMoveUp) {
-                        Image(systemName: "arrow.up")
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: onMoveDown) {
-                        Image(systemName: "arrow.down")
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: { cell.isCollapsed.toggle() }) {
-                        Image(systemName: cell.isCollapsed ? "chevron.down" : "chevron.up")
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: onDelete) {
-                        Image(systemName: "trash")
-                            .foregroundColor(.red)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .font(.system(size: 11))
-            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background((tel.isCachedBinary ? Color.green : Color.primary).opacity(0.065))
+            .cornerRadius(4)
+            .fixedSize()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
     }
     
     private var executionLabel: String {
@@ -5483,28 +5759,32 @@ struct CellSelfHealingBanner: View {
     @State private var showCopied = false
     
     var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 5) {
+        HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                Text("Cell Error")
+                    .foregroundColor(.orange)
+                Text("Error")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.primary)
+                    .lineLimit(1)
             }
+            .fixedSize()
             
             if isFixing {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     ProgressView()
                         .scaleEffect(0.5)
                         .frame(width: 12, height: 12)
                     Text(fixStatus)
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
             
-            Spacer()
+            Spacer(minLength: 4)
             
             // Colab One-Click Resolvers
             if cell.output.contains("Colab") || cell.output.contains("Google Colab") {
@@ -5512,60 +5792,45 @@ struct CellSelfHealingBanner: View {
                     cell.computeTargetOverride = .localCPU
                     onRun()
                 } label: {
-                    HStack(spacing: 3.5) {
+                    HStack(spacing: 3) {
                         Image(systemName: "laptopcomputer")
                             .font(.system(size: 9))
-                        Text("Run on Local Mac")
+                        Text("Local Mac")
                     }
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.white)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, 7)
                     .padding(.vertical, 3.5)
                     .background(Color.accentColor)
                     .cornerRadius(4.5)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .help("Execute this cell immediately on your local Mac processor")
-                
-                Button {
-                    NotificationCenter.default.post(name: NSNotification.Name("MicroCodeOpenColabSheet"), object: nil)
-                } label: {
-                    HStack(spacing: 3.5) {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 9))
-                        Text("Connect Colab")
-                    }
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 7.5)
-                    .padding(.vertical, 3.5)
-                    .background(Color.primary.opacity(0.08))
-                    .cornerRadius(4.5)
-                }
-                .buttonStyle(.plain)
             }
             
-            // 1. AI Agent Auto-Fix Button (Monochrome / Theme-matching, zero AppKit bezel)
+            // 1. AI Agent Auto-Fix Button
             Button {
                 triggerAgentAutoFix()
             } label: {
-                HStack(spacing: 4) {
+                HStack(spacing: 3.5) {
                     Image(systemName: "bolt.badge.automatic.fill")
                         .font(.system(size: 10))
-                    Text("Agent Auto-Fix")
+                    Text("Auto-Fix")
                 }
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(.primary)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 7.5)
                 .padding(.vertical, 3.5)
                 .background(Color.primary.opacity(0.09))
                 .cornerRadius(4.5)
                 .overlay(
                     RoundedRectangle(cornerRadius: 4.5)
-                        .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
+                        .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.8)
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .disabled(isFixing)
             .help("MicroCode AI Agent repairs and re-runs this cell automatically")
             
@@ -5573,19 +5838,20 @@ struct CellSelfHealingBanner: View {
             Button {
                 openInAgentChat()
             } label: {
-                HStack(spacing: 3.5) {
+                HStack(spacing: 3) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 9))
-                    Text("Ask Agent")
+                    Text("Ask")
                 }
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
-                .padding(.horizontal, 7.5)
+                .padding(.horizontal, 6.5)
                 .padding(.vertical, 3.5)
                 .background(Color.primary.opacity(0.06))
                 .cornerRadius(4.5)
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .disabled(isFixing)
             .help("Switch to MicroCode AI Agent to interactively debug and fix this error")
             
@@ -5596,28 +5862,27 @@ struct CellSelfHealingBanner: View {
                 showCopied = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { showCopied = false }
             } label: {
-                HStack(spacing: 3.5) {
-                    Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 9))
-                    Text(showCopied ? "Copied" : "Copy")
-                }
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(showCopied ? .green : .secondary)
-                .padding(.horizontal, 7.5)
-                .padding(.vertical, 3.5)
-                .background(Color.primary.opacity(0.06))
-                .cornerRadius(4.5)
+                Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(showCopied ? .green : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4.5)
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .disabled(isFixing)
+            .help("Copy Error Traceback")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+        .frame(maxWidth: .infinity)
         .background(Color.primary.opacity(0.04))
         .cornerRadius(6)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
         )
     }
     
@@ -6298,5 +6563,621 @@ struct NotebookVerticalResizeHandle: View {
                     onDrag(value.translation.width, true)
                 }
         )
+    }
+}
+
+// MARK: - Universal Inline Rich Output Cards for Cell Mode (Graphs/Images, PDF, Markdown/TeX, HTML/Plotly)
+
+struct CellInlineGraphImageCard: View {
+    let url: URL
+    let isDark: Bool
+    var maxContentWidth: CGFloat = 680
+
+    @State private var isExpanded: Bool = false
+    @State private var showZoomSheet: Bool = false
+    @State private var copied: Bool = false
+    @State private var customHeight: CGFloat? = nil
+
+    private var isAutoGeneratedArtifact: Bool {
+        let name = url.lastPathComponent
+        return name.hasPrefix("cell_") && (name.contains("_rich") || name.contains("_fig") || name.contains("_rplot_"))
+    }
+
+    var body: some View {
+        let nsImage = NotebookImageCache.shared.image(for: url)
+        let isSVG = url.pathExtension.lowercased() == "svg"
+        let isCompactHeader = maxContentWidth < 500
+
+        VStack(alignment: .leading, spacing: 0) {
+            // Subtle Action Header (compact-aware so it never widens narrow cells)
+            HStack(spacing: 6) {
+                Image(systemName: isAutoGeneratedArtifact ? "chart.xyaxis.line" : "photo")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(.accentColor)
+
+                Text(isAutoGeneratedArtifact ? "Plot Output" : url.lastPathComponent)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.primary.opacity(0.88))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if !isCompactHeader, let img = nsImage, img.size.width > 0 {
+                    Text("\(Int(img.size.width))×\(Int(img.size.height))")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                if nsImage != nil {
+                    Button(action: { showZoomSheet = true }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "plus.magnifyingglass")
+                                .font(.system(size: 9.5))
+                            if !isCompactHeader {
+                                Text("Zoom")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                        }
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, isCompactHeader ? 5 : 6)
+                        .padding(.vertical, 2.5)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Zoom Plot")
+                }
+
+                Button(action: {
+                    if customHeight != nil {
+                        customHeight = nil
+                        isExpanded = false
+                    } else {
+                        isExpanded.toggle()
+                    }
+                }) {
+                    Image(systemName: (isExpanded || customHeight != nil) ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help(customHeight != nil ? "Reset Height" : (isExpanded ? "Fit Height" : "Expand Full Size"))
+
+                if let img = nsImage {
+                    Button(action: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.writeObjects([img])
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 9.5))
+                            if !isCompactHeader {
+                                Text(copied ? "Copied" : "Copy")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                        }
+                        .foregroundColor(copied ? .green : .secondary)
+                        .padding(.horizontal, isCompactHeader ? 5 : 6)
+                        .padding(.vertical, 2.5)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy Image")
+                }
+
+                Button(action: saveAs) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Save As…")
+
+                Button(action: { NSWorkspace.shared.open(url) }) {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Open in Preview")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(maxWidth: maxContentWidth)
+            .background(Color.primary.opacity(isDark ? 0.045 : 0.03))
+
+            Divider().opacity(0.5)
+
+            if let img = nsImage {
+                let availW = max(160, maxContentWidth - 16)
+                let maxH: CGFloat = customHeight ?? (isExpanded ? 860 : 380)
+                let imgW = max(1, img.size.width)
+                let imgH = max(1, img.size.height)
+                let scale = min(availW / imgW, maxH / imgH, 1.0)
+                let fittedW = max(60, floor(imgW * scale))
+                let fittedH = max(48, floor(imgH * scale))
+
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    Image(nsImage: img)
+                        .interpolation(.high)
+                        .resizable()
+                        .frame(width: fittedW, height: fittedH)
+                    Spacer(minLength: 0)
+                }
+                .padding(8)
+                .frame(width: maxContentWidth)
+                .background(Color.white.opacity(isDark ? 0.02 : 0.5))
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    showZoomSheet = true
+                }
+            } else if isSVG {
+                let svgH: CGFloat = isExpanded ? 680 : 360
+                CellInlineWebFileView(url: url)
+                    .frame(width: maxContentWidth, height: svgH)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.richtext")
+                        .foregroundColor(.secondary)
+                    Text(url.lastPathComponent)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                    Spacer()
+                    Button("Open File") { NSWorkspace.shared.open(url) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+                .padding(12)
+                .frame(width: maxContentWidth)
+            }
+        }
+        .frame(width: maxContentWidth, alignment: .leading)
+        .clipped()
+        .background(Color.primary.opacity(isDark ? 0.025 : 0.015))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.primary.opacity(isDark ? 0.11 : 0.09), lineWidth: 1)
+        )
+        .sheet(isPresented: $showZoomSheet) {
+            if let img = nsImage {
+                CellGraphZoomLightboxSheet(image: img, url: url)
+            }
+        }
+    }
+
+    private func saveAs() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = url.lastPathComponent
+        if panel.runModal() == .OK, let dest = panel.url {
+            try? FileManager.default.removeItem(at: dest)
+            try? FileManager.default.copyItem(at: url, to: dest)
+        }
+    }
+}
+
+private struct CellGraphZoomLightboxSheet: View {
+    let image: NSImage
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var zoom: CGFloat = 1.0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "chart.xyaxis.line")
+                    .foregroundColor(.accentColor)
+                Text(url.lastPathComponent)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button(action: { zoom = max(0.4, zoom - 0.25) }) {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .buttonStyle(.plain)
+                Text("\(Int(zoom * 100))%")
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 48)
+                Button(action: { zoom = min(4.0, zoom + 0.25) }) {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .buttonStyle(.plain)
+                Button("Fit") { zoom = 1.0 }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Open in Preview") { NSWorkspace.shared.open(url) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+            .padding(12)
+
+            Divider()
+
+            ScrollView([.horizontal, .vertical]) {
+                Image(nsImage: image)
+                    .interpolation(.high)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(
+                        width: max(680, min(image.size.width, 1180)) * zoom,
+                        height: max(460, min(image.size.height, 780)) * zoom
+                    )
+                    .padding(20)
+            }
+            .frame(minWidth: 860, minHeight: 580)
+        }
+    }
+}
+
+struct CellInlinePDFPreviewCard: View {
+    let url: URL
+    let isDark: Bool
+
+    @State private var isContinuous: Bool = true
+    @State private var isExpanded: Bool = false
+    @State private var customHeight: CGFloat? = nil
+    @State private var reloadToken = UUID()
+
+    private var pageCount: Int {
+        PDFDocument(url: url)?.pageCount ?? 0
+    }
+
+    var body: some View {
+        let effectiveH: CGFloat = customHeight ?? (isExpanded ? 760 : 440)
+
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.richtext.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.red)
+
+                Text(url.lastPathComponent)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+
+                if pageCount > 0 {
+                    Text("\(pageCount) \(pageCount == 1 ? "page" : "pages")")
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+
+                Button(action: { isContinuous.toggle() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: isContinuous ? "scroll" : "book.closed")
+                            .font(.system(size: 9.5))
+                        Text(isContinuous ? "Continuous" : "Single Page")
+                            .font(.system(size: 10))
+                    }
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button(action: {
+                    if customHeight != nil {
+                        customHeight = nil
+                        isExpanded = false
+                    } else {
+                        isExpanded.toggle()
+                    }
+                }) {
+                    Image(systemName: (isExpanded || customHeight != nil) ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+
+                Button("Open in Preview") {
+                    NSWorkspace.shared.open(url)
+                }
+                .font(.system(size: 10, weight: .medium))
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(Color.accentColor.opacity(0.12))
+                .cornerRadius(4)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(isDark ? 0.045 : 0.03))
+
+            Divider().opacity(0.5)
+
+            PDFKitContainerView(url: url, isContinuous: isContinuous, reloadToken: reloadToken)
+                .frame(maxWidth: .infinity)
+                .frame(height: effectiveH)
+        }
+        .background(Color.primary.opacity(isDark ? 0.025 : 0.015))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(isDark ? 0.11 : 0.09), lineWidth: 1)
+        )
+    }
+}
+
+struct CellInlineMarkdownPreviewCard: View {
+    let url: URL
+    let isDark: Bool
+
+    @State private var showSource: Bool = false
+    @State private var copied: Bool = false
+
+    private var isAutoGeneratedArtifact: Bool {
+        let name = url.lastPathComponent
+        return name.hasPrefix("cell_") && (name.contains("_rich") || name.hasSuffix(".tex"))
+    }
+
+    private var rawContent: String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
+    private var normalizedMarkdown: String {
+        let ext = url.pathExtension.lowercased()
+        var src = rawContent
+        if ext == "tex" {
+            // Convert standalone LaTeX document syntax into Markdown + $$...$$ blocks for native inline preview
+            if let docStart = src.range(of: "\\begin{document}") {
+                src = String(src[docStart.upperBound...])
+            }
+            if let docEnd = src.range(of: "\\end{document}") {
+                src = String(src[..<docEnd.lowerBound])
+            }
+            src = src.replacingOccurrences(of: #"\\section\*?\{([^}]*)\}"#, with: "## $1", options: .regularExpression)
+            src = src.replacingOccurrences(of: #"\\subsection\*?\{([^}]*)\}"#, with: "### $1", options: .regularExpression)
+            src = src.replacingOccurrences(of: #"\\subsubsection\*?\{([^}]*)\}"#, with: "#### $1", options: .regularExpression)
+            src = src.replacingOccurrences(of: #"\\textbf\{([^}]*)\}"#, with: "**$1**", options: .regularExpression)
+            src = src.replacingOccurrences(of: #"\\textit\{([^}]*)\}"#, with: "*$1*", options: .regularExpression)
+        }
+        // Resolve relative images in Markdown against the file's parent directory
+        if src.contains("![") {
+            let parent = url.deletingLastPathComponent()
+            if let regex = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#) {
+                let ns = src as NSString
+                let matches = regex.matches(in: src, range: NSRange(location: 0, length: ns.length))
+                for m in matches.reversed() where m.numberOfRanges >= 3 {
+                    let alt = ns.substring(with: m.range(at: 1))
+                    let target = ns.substring(with: m.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !target.hasPrefix("http://") && !target.hasPrefix("https://") && !target.hasPrefix("file://") && !target.hasPrefix("/") {
+                        let resolved = parent.appendingPathComponent(target)
+                        if FileManager.default.fileExists(atPath: resolved.path) {
+                            src = (src as NSString).replacingCharacters(in: m.range, with: "![\(alt)](\(resolved.path))")
+                        }
+                    }
+                }
+            }
+        }
+        return src
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: url.pathExtension.lowercased() == "tex" ? "function" : "doc.text.magnifyingglass")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(.accentColor)
+
+                Text(isAutoGeneratedArtifact
+                     ? (url.pathExtension.lowercased() == "tex" ? "LaTeX Preview" : "Markdown & TeX Preview")
+                     : url.lastPathComponent)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+
+                Spacer()
+
+                Button(action: { showSource.toggle() }) {
+                    Text(showSource ? "Rendered Preview" : "Source")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(showSource ? .accentColor : .secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+
+                Button(action: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(rawContent, forType: .string)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                }) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(copied ? .green : .secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+
+                if !isAutoGeneratedArtifact {
+                    Button(action: { NSWorkspace.shared.open(url) }) {
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .padding(4)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(isDark ? 0.045 : 0.03))
+
+            Divider().opacity(0.5)
+
+            if showSource {
+                Text(rawContent)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(12)
+            } else {
+                RenderedMarkdownDocumentView(markdown: normalizedMarkdown)
+                    .padding(12)
+            }
+        }
+        .background(Color.primary.opacity(isDark ? 0.025 : 0.015))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(isDark ? 0.11 : 0.09), lineWidth: 1)
+        )
+    }
+}
+
+struct CellInlineHTMLPreviewCard: View {
+    let url: URL
+    let isDark: Bool
+
+    @State private var isExpanded: Bool = false
+    @State private var customHeight: CGFloat? = nil
+    @State private var reloadToken = UUID()
+
+    private var isAutoGeneratedArtifact: Bool {
+        let name = url.lastPathComponent
+        return name.hasPrefix("cell_") && name.contains("_rich")
+    }
+
+    var body: some View {
+        let effectiveH: CGFloat = customHeight ?? (isExpanded ? 740 : 420)
+
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "globe")
+                    .font(.system(size: 11))
+                    .foregroundColor(.blue)
+
+                Text(isAutoGeneratedArtifact ? "Interactive Plot / HTML Output" : url.lastPathComponent)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+
+                Spacer()
+
+                Button(action: { reloadToken = UUID() }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Reload")
+
+                Button(action: {
+                    if customHeight != nil {
+                        customHeight = nil
+                        isExpanded = false
+                    } else {
+                        isExpanded.toggle()
+                    }
+                }) {
+                    Image(systemName: (isExpanded || customHeight != nil) ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+
+                Button("Open in Browser") {
+                    NSWorkspace.shared.open(url)
+                }
+                .font(.system(size: 10, weight: .medium))
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(Color.accentColor.opacity(0.12))
+                .cornerRadius(4)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(isDark ? 0.045 : 0.03))
+
+            Divider().opacity(0.5)
+
+            CellInlineWebFileView(url: url, reloadToken: reloadToken)
+                .frame(maxWidth: .infinity)
+                .frame(height: effectiveH)
+        }
+        .background(Color.primary.opacity(isDark ? 0.025 : 0.015))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(isDark ? 0.11 : 0.09), lineWidth: 1)
+        )
+    }
+}
+
+struct CellInlineWebFileView: NSViewRepresentable {
+    let url: URL
+    var reloadToken: UUID = UUID()
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        context.coordinator.loadedURL = url
+        context.coordinator.reloadToken = reloadToken
+        let accessRoot = url.deletingLastPathComponent().deletingLastPathComponent()
+        webView.loadFileURL(url, allowingReadAccessTo: accessRoot)
+        return webView
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        if context.coordinator.loadedURL != url || context.coordinator.reloadToken != reloadToken {
+            context.coordinator.loadedURL = url
+            context.coordinator.reloadToken = reloadToken
+            let accessRoot = url.deletingLastPathComponent().deletingLastPathComponent()
+            nsView.loadFileURL(url, allowingReadAccessTo: accessRoot)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        var loadedURL: URL?
+        var reloadToken: UUID = UUID()
     }
 }

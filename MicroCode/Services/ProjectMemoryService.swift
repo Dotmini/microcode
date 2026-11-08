@@ -51,6 +51,9 @@ class ProjectMemoryService: ObservableObject {
         let updated = existing.hasSuffix("\n") ? "\(existing)- \(cleanRule)\n" : "\(existing)\n- \(cleanRule)\n"
         try? updated.write(to: rulesURL, atomically: true, encoding: .utf8)
         readMemoryFile()
+        if !targetWorkspace.isEmpty {
+            MultiPlatformRulesEngine.shared.refresh(workspaceRoot: targetWorkspace)
+        }
         return rulesURL.path
     }
     
@@ -72,14 +75,20 @@ class ProjectMemoryService: ObservableObject {
             }
         }
 
-        // Also load isolated ~/.microcode/workspaces/<id>/rules.md so /learn rules work without polluting Git repos
-        let isolatedRulesURL = WorkspaceStoragePaths.managedStateFile(named: "rules.md", workspacePath: workspace)
-        if fm.fileExists(atPath: isolatedRulesURL.path),
-           let content = try? String(contentsOf: isolatedRulesURL, encoding: .utf8) {
-            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                let capped = String(trimmed.prefix(8000))
-                combinedSections.append("### ~/.microcode/workspaces/rules.md\n\(capped)")
+        // Also load isolated ~/.microcode/workspaces/<id>/{rules.md,agent.md} and global ~/.microcode/rules.md
+        let isolatedCandidates: [(url: URL, label: String)] = [
+            (WorkspaceStoragePaths.managedStateFile(named: "rules.md", workspacePath: workspace), "~/.microcode/workspaces/rules.md"),
+            (WorkspaceStoragePaths.managedStateFile(named: "agent.md", workspacePath: workspace), "~/.microcode/workspaces/agent.md"),
+            (WorkspaceStoragePaths.microcodeHomeDirectory.appendingPathComponent("rules.md"), "~/.microcode/rules.md")
+        ]
+        for candidate in isolatedCandidates {
+            if fm.fileExists(atPath: candidate.url.path),
+               let content = try? String(contentsOf: candidate.url, encoding: .utf8) {
+                let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    let capped = String(trimmed.prefix(8000))
+                    combinedSections.append("### \(candidate.label)\n\(capped)")
+                }
             }
         }
         

@@ -22,6 +22,7 @@ enum ToolTier: CaseIterable {
     case science
     case multimodal
     case studio
+    case embedded
     case mcp
 }
 
@@ -40,19 +41,58 @@ struct ToolScope {
         var tiers: Set<ToolTier> = [.core, .navigation, .editing, .planning, .lsp, .mcp]
         let lower = prompt.lowercased()
         
-        if domain == .science || lower.contains("pdb") || lower.contains("alphafold") || lower.contains("protein") || lower.contains("fasta") || lower.contains("mmcif") {
+        let scienceHits = ["pdb", "alphafold", "protein", "fasta", "mmcif", "chembl", "molecule", "โปรตีน", "โมเลกุล", "ชีว", "เคมี"]
+        if domain == .science || scienceHits.contains(where: { lower.contains($0) }) {
             tiers.insert(.science)
         }
-        if hasMobilePreview || lower.contains("preview") || lower.contains("browser") || lower.contains("simulator") || lower.contains("emulator") || lower.contains("screenshot") || lower.contains("inspect") || lower.contains("device") {
+        
+        let deviceAndWebHits = [
+            "preview", "browser", "simulator", "emulator", "screenshot", "inspect", "device",
+            "webapp", "frontend", "localhost", "127.0.0.1", "http://", "https://", "dom", "css", "html",
+            "ui", "ux", "layout", "button", "modal", "navbar", "sidebar", "vite", "next", "react", "vue",
+            "android", "ios", "adb", "simctl",
+            "หน้าเว็บ", "หน้าจอ", "พรีวิว", "เปิดเว็บ", "เบราว์เซอร์", "บราวเซอร์", "มือถือ", "จำลอง",
+            "แอนดรอยด์", "ไอโฟน", "เช็คหน้า", "ดูหน้า", "ปุ่ม", "แสดงผล", "ดีไซน์", "บัง", "เพี้ยน", "คลิก"
+        ]
+        if hasMobilePreview || deviceAndWebHits.contains(where: { lower.contains($0) }) {
             tiers.insert(.device)
         }
-        if lower.contains("playground") || lower.contains("cell") || lower.contains("notebook") || lower.contains("ardium") || lower.contains(".ar ") || lower.hasSuffix(".ar") {
+        
+        let executionHits = [
+            "playground", "cell", "notebook", "ardium", ".ar ", ".mic", "ipynb", "matplotlib", "pandas",
+            "เซลล์", "สมุดโน้ต", "โน้ตบุ๊ก", "รันโค้ด", "พล็อต", "กราฟ"
+        ]
+        if executionHits.contains(where: { lower.contains($0) }) || lower.hasSuffix(".ar") || lower.hasSuffix(".mic") {
             tiers.insert(.execution)
         }
-        if hasMediaAttachments || lower.contains("image") || lower.contains("video") || lower.contains("music") || lower.contains("audio") || lower.contains("pdf") || lower.contains("voice") || lower.contains(" picture") || lower.contains("รูป") || lower.contains("วิดีโอ") || lower.contains("เพลง") {
+        
+        let multimodalHits = [
+            "image", "video", "music", "audio", "pdf", "docx", "xlsx", "pptx", "csv", "voice", "picture",
+            "รูป", "ภาพ", "สกรีนช็อต", "แคปจอ", "วิดีโอ", "เพลง", "เสียง", "เอกสาร", "ไฟล์แนบ"
+        ]
+        if hasMediaAttachments || multimodalHits.contains(where: { lower.contains($0) }) {
             tiers.insert(.multimodal)
         }
-        if lower.contains("database") || lower.contains("sql") || lower.contains("sqlite") || lower.contains("postgres") || lower.contains("api_studio") || lower.contains("database_studio") || lower.contains("postman") || lower.contains("graphql") {
+        
+        let studioHits = [
+            "database", "sql", "sqlite", "postgres", "mysql", "supabase", "prisma", "drizzle", "migration",
+            "api_studio", "database_studio", "postman", "graphql", "endpoint", "webhook", "rest api", "curl",
+            "ฐานข้อมูล", "ตาราง", "คิวรี", "ยิง api", "เทส api", "เช็ค api", "หลังบ้าน"
+        ]
+        if studioHits.contains(where: { lower.contains($0) }) {
+            tiers.insert(.studio)
+        }
+        
+        let embeddedHits = [
+            "arduino", "esp32", "stm32", "rp2040", "pico", "firmware", "serial", "uart", "baud", "flash",
+            "platformio", "arduino-cli", "iot", "embedded", "gpio", "บอร์ด", "ไมโครคอนโทรลเลอร์", "เซนเซอร์", "แฟลช"
+        ]
+        if embeddedHits.contains(where: { lower.contains($0) }) {
+            tiers.insert(.embedded)
+        }
+        
+        if complexity >= .complex {
+            tiers.insert(.device)
             tiers.insert(.studio)
         }
         
@@ -61,10 +101,12 @@ struct ToolScope {
     
     static let toolTierMap: [String: ToolTier] = [
         // Core
+        "attachment_read": .core,
         "file_read": .core, "file_write": .core, "replace_in_file": .core,
         "multi_replace_in_file": .core, "apply_patch": .core,
         "grep_search": .core, "codebase_search": .core, "shell": .core, "git_status": .core,
         "skill_engine": .core, "pns_nervous_system": .core,
+        "preview_control": .core, "ide_browser": .core,
         // MCP & Orchestration
         "mcp_orchestrator": .mcp,
         // Navigation
@@ -85,12 +127,29 @@ struct ToolScope {
         "get_diagnostics": .lsp, "lsp_diagnostics": .lsp, "lsp_hover": .lsp,
         "lsp_definition": .lsp, "lsp_completions": .lsp,
         "lsp_status": .lsp,
-        // Device & Preview
-        "device_runtime": .device, "preview_control": .device,
-        "visual_regression": .device, "ide_browser": .device,
+        // Device, Preview & GUI/ADB Local MCP
+        "device_runtime": .device,
+        "visual_regression": .device,
+        "computer_use": .device,
+        "mcp__local__computer_use_observe": .device,
+        "mcp__local__computer_use_act": .device,
+        "mcp__local__computer_use_batch": .device,
+        "mcp__local__computer_use_windows": .device,
+        "mcp__local__computer_use_inspect": .device,
+        "mcp__local__computer_use_click": .device,
+        "mcp__local__computer_use_type": .device,
+        "mcp__local__computer_use_shortcut": .device,
+        "mcp__local__computer_use_capture": .device,
+        "mcp__local__computer_use_live_test": .device,
+        "mcp__local__adb_execute": .device,
         // Execution (Playground / Cell / Ardium)
         "playground_run": .execution, "cell_run": .execution,
+        "cell_list": .execution, "cell_read": .execution,
+        "cell_create": .execution, "cell_update": .execution, "cell_delete": .execution,
         "ardium_run": .execution,
+        "mcp__local__ardium_compile": .execution,
+        "mcp__local__ardium_test": .execution,
+        "mcp__local__ardium_diagnose": .execution,
         // Science
         "science_inspect": .science, "alphafold_validate": .science,
         "alphafold_input_validate": .science,
@@ -99,6 +158,10 @@ struct ToolScope {
         "generate_music": .multimodal, "inspect_image": .multimodal,
         "extract_pdf": .multimodal, "voice_coding": .multimodal,
         // Studio
-        "api_studio": .studio, "database_studio": .studio
+        "api_studio": .studio, "database_studio": .studio,
+        // Embedded / HIL
+        "embedded_list_hardware": .embedded, "embedded_compile": .embedded,
+        "embedded_flash": .embedded, "embedded_serial_capture": .embedded,
+        "embedded_serial_send": .embedded, "embedded_decode_crash": .embedded
     ]
 }

@@ -40,6 +40,7 @@ struct PhoneCompanionSettingsView: View {
             companion.appState = appState
             companion.refreshNetworkAddresses()
             companion.startServerIfNeeded()
+            companion.regenerateQRCode()
         }
     }
     

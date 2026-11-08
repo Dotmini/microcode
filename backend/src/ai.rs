@@ -395,6 +395,14 @@ impl AIProvider for OpenAIProvider {
                     AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
+        } else if let Some(ref custom_base) = config.proxy_base_url.as_ref().filter(|s| !s.trim().is_empty()) {
+            let endpoint = resolve_byok_openai_endpoint(custom_base);
+            let api_key = if config.api_key.trim().is_empty() {
+                env::var("OPENAI_API_KEY").unwrap_or_else(|_| "byok-custom-tunnel".to_string())
+            } else {
+                config.api_key.trim().to_string()
+            };
+            (endpoint, format!("Bearer {}", api_key))
         } else {
             let api_key = if config.api_key.is_empty() {
                 env::var("OPENAI_API_KEY").map_err(|_| {
@@ -520,6 +528,14 @@ impl AIProvider for OpenAIProvider {
                     AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
+        } else if let Some(ref custom_base) = config.proxy_base_url.as_ref().filter(|s| !s.trim().is_empty()) {
+            let endpoint = resolve_byok_openai_endpoint(custom_base);
+            let api_key = if config.api_key.trim().is_empty() {
+                env::var("OPENAI_API_KEY").unwrap_or_else(|_| "byok-custom-tunnel".to_string())
+            } else {
+                config.api_key.trim().to_string()
+            };
+            (endpoint, format!("Bearer {}", api_key))
         } else {
             let api_key = if config.api_key.is_empty() {
                 env::var("OPENAI_API_KEY").map_err(|_| {
@@ -660,6 +676,14 @@ impl AIProvider for ClaudeProvider {
                     AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
+        } else if let Some(ref custom_base) = config.proxy_base_url.as_ref().filter(|s| !s.trim().is_empty()) {
+            let endpoint = resolve_byok_claude_endpoint(custom_base);
+            let api_key = if config.api_key.trim().is_empty() {
+                env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "byok-custom-tunnel".to_string())
+            } else {
+                config.api_key.trim().to_string()
+            };
+            (endpoint, api_key)
         } else {
             let api_key = if config.api_key.is_empty() {
                 env::var("ANTHROPIC_API_KEY").map_err(|_| {
@@ -783,6 +807,14 @@ impl AIProvider for ClaudeProvider {
                     AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
+        } else if let Some(ref custom_base) = config.proxy_base_url.as_ref().filter(|s| !s.trim().is_empty()) {
+            let endpoint = resolve_byok_claude_endpoint(custom_base);
+            let api_key = if config.api_key.trim().is_empty() {
+                env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "byok-custom-tunnel".to_string())
+            } else {
+                config.api_key.trim().to_string()
+            };
+            (endpoint, api_key)
         } else {
             let api_key = if config.api_key.is_empty() {
                 env::var("ANTHROPIC_API_KEY").map_err(|_| {
@@ -1800,7 +1832,7 @@ pub fn get_provider(provider_name: &str) -> Result<Box<dyn AIProvider>> {
 
     match provider_name.to_lowercase().as_str() {
         "gemini" => Ok(Box::new(GeminiProvider::new())),
-        "openai" => Ok(Box::new(OpenAIProvider::new())),
+        "openai" | "custom" | "cloudflare" | "openai-compatible" => Ok(Box::new(OpenAIProvider::new())),
         "anthropic" | "claude" => Ok(Box::new(ClaudeProvider::new())),
         "deepseek" => Ok(Box::new(DeepSeekProvider::new())),
         "glm" | "zhipu" => Ok(Box::new(GLMProvider::new())),
@@ -2150,4 +2182,42 @@ fn cloud_chat_endpoint(config: &AIConfig) -> Result<String> {
     }
     let base = base.trim_end_matches('/');
     Ok(if base.ends_with("/chat/completions") { base.to_string() } else { format!("{base}/chat/completions") })
+}
+
+fn resolve_byok_openai_endpoint(raw: &str) -> String {
+    let mut trimmed = raw.trim().trim_end_matches('/').to_string();
+    if !trimmed.contains("://") {
+        trimmed = format!("https://{}", trimmed);
+    }
+    if trimmed.ends_with("/chat/completions") {
+        return trimmed;
+    }
+    if trimmed.ends_with("/v1") || trimmed.contains("/v1/") || trimmed.ends_with("/v4") {
+        return format!("{}/chat/completions", trimmed);
+    }
+    if let Ok(parsed) = reqwest::Url::parse(&trimmed) {
+        if parsed.path().is_empty() || parsed.path() == "/" {
+            return format!("{}/v1/chat/completions", trimmed);
+        }
+    }
+    format!("{}/chat/completions", trimmed)
+}
+
+fn resolve_byok_claude_endpoint(raw: &str) -> String {
+    let mut trimmed = raw.trim().trim_end_matches('/').to_string();
+    if !trimmed.contains("://") {
+        trimmed = format!("https://{}", trimmed);
+    }
+    if trimmed.ends_with("/messages") {
+        return trimmed;
+    }
+    if trimmed.ends_with("/v1") {
+        return format!("{}/messages", trimmed);
+    }
+    if let Ok(parsed) = reqwest::Url::parse(&trimmed) {
+        if parsed.path().is_empty() || parsed.path() == "/" {
+            return format!("{}/v1/messages", trimmed);
+        }
+    }
+    format!("{}/messages", trimmed)
 }

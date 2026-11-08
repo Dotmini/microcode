@@ -60,18 +60,10 @@ struct MainToolbar: View {
                 .help("Build & Run Project (⌘B)")
                 
                 ToolbarButton(icon: "safari.fill", color: .cyan) {
-                    appState.editorMode = .browser
-                    var port = "3000"
-                    switch appState.currentProjectType {
-                    case .php: port = "8000"
-                    case .java, .go: port = "8080"
-                    case .dotnet: port = "5000"
-                    case .nodejs: port = "5173" // Vite default
-                    default: port = "3000"
-                    }
-                    // Wait a slight moment for the browser view to mount if it wasn't already
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        NotificationCenter.default.post(name: .browserNavigate, object: "http://localhost:\(port)")
+                    appState.showPreviewInspector(tab: "web")
+                    IDEBrowserAutomationService.shared.scanActivePorts()
+                    if let url = IDEBrowserAutomationService.shared.resolveBestWebAppURL() {
+                        DeviceRuntimeService.shared.targetWebURL = url
                     }
                 }
                 .help("Live Preview (Web App)")
@@ -120,22 +112,6 @@ struct MainToolbar: View {
                 
                 Divider().frame(height: 16).padding(.horizontal, 6)
                 
-                // AI & Code Tools
-                ToolbarButton(icon: "wand.and.stars") {
-                    appState.showingRefactorProWindow = true
-                }
-                .help("AI Refactor (⌘R)")
-                
-                ToolbarButton(icon: "arrow.up.left.and.arrow.down.right") {
-                    appState.showingExpandCodeWindow = true
-                }
-                .help("Expand Code")
-                
-                ToolbarButton(icon: "text.alignleft") {
-                    appState.showingFormatCodeWindow = true
-                }
-                .help("Format Code (⌘⇧F)")
-                
                 ToolbarButton(icon: "brain.head.profile", isActive: appState.aiChatVisible || appState.editorMode == .aiAgent, color: (appState.aiChatVisible || appState.editorMode == .aiAgent) ? .purple : .primary) {
                     // Cursor-style: Toggle inline panel instead of switching mode
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -180,22 +156,12 @@ struct MainToolbar: View {
                 }
                 .help("Scenario Mode")
                 
-                ToolbarButton(icon: "paintbrush.pointed", isActive: appState.editorMode == .design, color: appState.editorMode == .design ? .pink : .primary) {
-                    appState.toggleEditorMode(.design)
-                }
-                .help("UI Design (Figma-like)")
-                
                 ToolbarButton(icon: "network", isActive: appState.editorMode == .remoteX, color: appState.editorMode == .remoteX ? .cyan : .primary) {
                     appState.toggleEditorMode(.remoteX)
                 }
                 .help("Remote X")
                 
                 Divider().frame(height: 16).padding(.horizontal, 6)
-                
-                ToolbarButton(icon: "cube.box", color: .blue) {
-                    appState.showingDotnetProject = true
-                }
-                .help(".NET Project")
                 
                 ToolbarButton(icon: "brain", color: .purple) {
                     appState.showingAITrainer = true
@@ -284,34 +250,34 @@ struct ToolbarButton: View {
 struct NavigatorView: View {
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
+    var showsToolbar: Bool = true
     var onOpenFile: (() -> Void)? = nil
     
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
-            HStack(spacing: 8) {
-                Image(systemName: "folder")
-                    .foregroundColor(.secondary)
-                    .font(.system(size: 12))
-                
-                Text(appState.workspaceFolder?.lastPathComponent ?? "No Folder")
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                
-                Spacer()
-                
-                Button(action: { appState.openFolder() }) {
-                    Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 11))
+            if showsToolbar {
+                // Toolbar
+                HStack(spacing: 8) {
+                    Image(systemName: "folder")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 12))
+                    
+                    Text(appState.workspaceFolder?.lastPathComponent ?? "No Folder")
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    
+                    Spacer()
+                    
+                    Button(action: { appState.openFolder() }) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Open Folder")
                 }
-                .buttonStyle(.borderless)
-                .help("Open Folder")
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
-            
-            Divider()
             
             // Search
             HStack(spacing: 6) {
@@ -332,10 +298,10 @@ struct NavigatorView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.compat(nsColor: .textBackgroundColor).opacity(0.5))
+            .background(Color.primary.opacity(0.055))
             .cornerRadius(6)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
             
             // File Tree
             if appState.workspaceFolder != nil {
@@ -344,7 +310,7 @@ struct NavigatorView: View {
                     fileTree: $appState.fileTree,
                     revision: appState.fileTreeRevision,
                     searchQuery: searchText,
-                    backgroundColor: appState.appTheme.isGlass ? .clear : appState.appTheme.panelBackground,
+                    backgroundColor: (appState.appTheme.isGlass || appState.appTheme.usesDarkGlassSidebar) ? .clear : appState.appTheme.panelBackground,
                     onAction: { action in
                         handleAction(action)
                     }
@@ -365,15 +331,13 @@ struct NavigatorView: View {
                 EmptyNavigatorView()
             }
         }
-        .background(
-            Group {
-                if appState.appTheme.isGlass {
-                    VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
-                } else {
-                    Color(nsColor: appState.appTheme.panelBackground)
-                }
+        .background {
+            if showsToolbar {
+                SidebarAdaptiveBackground()
+            } else {
+                Color.clear
             }
-        )
+        }
     }
     
     private func handleAction(_ action: FileTreeAction) {
@@ -391,6 +355,7 @@ struct NavigatorView: View {
             Task { @MainActor in await appState.renameFile(at: node.path, to: newName) }
         case .delete(let node):
              try? FileManager.default.trashItem(at: URL(fileURLWithPath: node.path), resultingItemURL: nil)
+             CollaborationService.shared.notifyLocalFileSystemEvent(op: "delete", path: node.path)
              Task { @MainActor in await appState.refreshFileTree() }
         }
     }
@@ -679,8 +644,6 @@ struct EditorArea: View {
                     .onAppear { CrashReporter.shared.breadcrumb("EditorArea -> PlaygroundView") }
             case .remoteX:
                 RemoteXView()
-            case .design:
-                DesignWorkbenchView()
             case .embedded:
                 EmbeddedStudioView()
                     .environmentObject(appState)
@@ -1235,6 +1198,7 @@ struct CodeEditor: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var collab = CollaborationService.shared
     @State private var text: String
+    @State private var loadedFileID: UUID
     @State private var updateTask: Task<Void, Never>? = nil
     @State private var markdownRenderMode: Bool = true
     @State private var showInlineCmdK: Bool = false
@@ -1249,9 +1213,23 @@ struct CodeEditor: View {
         return lowerLang == "markdown" || lowerName.hasSuffix(".md") || lowerName.hasSuffix(".markdown")
     }
 
+    /// Prevents SwiftUI's first render pass on tab switches from feeding the previous tab's
+    /// `@State text` buffer into `SyntaxHighlightedCodeView` paired with the new tab's `fileURL`
+    /// and `enableHighlighting` flags before `.onChange(of: file.id)` fires.
+    private var effectiveTextBinding: Binding<String> {
+        Binding(
+            get: { loadedFileID == file.id ? text : file.content },
+            set: { newValue in
+                loadedFileID = file.id
+                text = newValue
+            }
+        )
+    }
+
     init(file: CodeFile) {
         self.file = file
         self._text = State(initialValue: file.content)
+        self._loadedFileID = State(initialValue: file.id)
     }
     
     var body: some View {
@@ -1273,37 +1251,57 @@ struct CodeEditor: View {
                 Spacer()
                 
                 if collab.currentSession != nil {
-                    let relPath = collab.normalizeRelativePath(file.path)
-                    let filePeers = collab.participants.filter {
-                        $0.isOnline && $0.userId != collab.localUserId &&
-                        collab.normalizeRelativePath($0.cursorPosition?.filePath ?? "") == relPath
-                    }
-                    Button(action: { appState.showingCollaborationView = true }) {
+                    let filePeers = collab.remoteCollaborators(inFilePath: file.path)
+                    if !filePeers.isEmpty {
                         HStack(spacing: 5) {
-                            Circle()
-                                .fill(Color.green.opacity(0.85))
-                                .frame(width: 5.5, height: 5.5)
-                            if let firstPeer = filePeers.first {
-                                Text("\(firstPeer.displayName) · Ln \(firstPeer.cursorPosition?.line ?? 1)")
-                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                    .foregroundColor(.primary.opacity(0.85))
-                            } else {
-                                Text("Session · \(collab.participants.filter(\.isOnline).count) online")
+                            ForEach(Array(filePeers.prefix(3))) { peer in
+                                let peerColor = CollaborationColorHelper.swiftUIColor(fromHex: peer.color)
+                                Button {
+                                    Task { await collab.jumpToParticipant(peer) }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Circle()
+                                            .fill(peerColor)
+                                            .frame(width: 6, height: 6)
+                                        Text("\(peer.displayName) · \(peer.cursorPosition?.isTyping == true ? "กำลังแก้ " : "")Ln \(peer.cursorPosition?.line ?? 1)")
+                                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                            .foregroundColor(peerColor)
+                                    }
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(peerColor.opacity(0.14))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(peerColor.opacity(0.45), lineWidth: 1)
+                                    )
+                                    .cornerRadius(4)
+                                }
+                                .buttonStyle(.plain)
+                                .help("คลิกเพื่อกระโดดไปยังบรรทัดที่ \(peer.displayName) กำลังแก้")
+                            }
+                        }
+                    } else {
+                        Button(action: { appState.showingCollaborationView = true }) {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Color.green.opacity(0.85))
+                                    .frame(width: 5.5, height: 5.5)
+                                Text("Session · \(collab.onlineParticipants().count) online")
                                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                                     .foregroundColor(.secondary)
                             }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.05))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                            )
+                            .cornerRadius(4)
                         }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.05))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-                        )
-                        .cornerRadius(4)
+                        .buttonStyle(.plain)
+                        .help("Active Team Collaboration Session")
                     }
-                    .buttonStyle(.plain)
-                    .help("Active Team Collaboration Session")
                 }
                 
                 if !activeLineBlameSummary.isEmpty {
@@ -1521,7 +1519,7 @@ struct CodeEditor: View {
             if isMarkdownFile && markdownRenderMode {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        RenderedMarkdownDocumentView(markdown: text)
+                        RenderedMarkdownDocumentView(markdown: effectiveTextBinding.wrappedValue)
                             .padding(24)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1531,7 +1529,7 @@ struct CodeEditor: View {
             } else {
                 ZStack(alignment: .topLeading) {
                     SyntaxHighlightedCodeView(
-                        text: $text,
+                        text: effectiveTextBinding,
                         language: file.language,
                         fontSize: appState.fontSize,
                         isDark: appState.appTheme.isDark,
@@ -1558,7 +1556,10 @@ struct CodeEditor: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear { text = file.content }
+        .onAppear {
+            loadedFileID = file.id
+            text = file.content
+        }
         .onReceive(NotificationCenter.default.publisher(for: EditorLineNumberGutterView.activeLineGitBlameNotification)) { notif in
             guard let info = notif.userInfo,
                   let blamedFile = info["file"] as? String,
@@ -1567,12 +1568,17 @@ struct CodeEditor: View {
             activeLineBlameSummary = summary
         }
         .onChange(of: file.id) { _ in
+            updateTask?.cancel()
+            loadedFileID = file.id
             text = file.content
             activeLineBlameSummary = ""
             appState.dismissCompletions()
         }
         .onChange(of: file.content) { newContent in
-            if newContent != text { text = newContent }
+            if loadedFileID != file.id || newContent != text {
+                loadedFileID = file.id
+                text = newContent
+            }
         }
         .onChange(of: text) { newValue in
             guard !file.isReadOnly else { return }

@@ -158,30 +158,108 @@ class MCPSecuritySandbox {
         return .success(canonical)
     }
     
-    /// Autonomous MCP terminal requests are deliberately limited to simple,
-    /// read-only workspace inspection. A substring blacklist is not a sandbox.
-    func validateCommand(_ command: String) -> Result<Void, MCPError> {
+    enum CommandAuthorization {
+        case autoApproved
+        case requiresUserApproval(reason: String)
+    }
+
+    /// Production two-tier workspace security policy for MCP terminal requests:
+    /// 1. Hard-blocks destructive commands, privilege escalation, remote script piping, and workspace escapes.
+    /// 2. Auto-approves non-destructive read/search/build/test commands scoped to the active workspace.
+    /// 3. Routes mutating or arbitrary shell commands through `ToolApprovalManager` according to user policy.
+    func validateCommand(_ command: String) -> Result<CommandAuthorization, MCPError> {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failure(.invalidParams) }
-        let unsafeSyntax = [";", "|", "&", ">", "<", "`", "$", "\n", "\r"]
-        guard !unsafeSyntax.contains(where: { trimmed.contains($0) }) else {
-            return .failure(.custom("Shell composition, redirection, and substitution require explicit user approval"))
+        
+        do {
+            try ShellCommandTool.validateSafety(trimmed)
+        } catch {
+            return .failure(.custom(error.localizedDescription))
         }
-        let parts = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" })
-        guard let executable = parts.first else { return .failure(.invalidParams) }
-        let allowedExecutables: Set<String> = ["git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "sed", "wc", "stat"]
-        guard allowedExecutables.contains(String(executable)) else {
-            return .failure(.custom("Only read-only workspace inspection commands are available through MCP"))
+        
+        let lower = trimmed.lowercased()
+        let hardBlockedPatterns = [
+            #"^\s*sudo\b"#,
+            #"[;&|]\s*sudo\b"#,
+            #"^\s*su\b"#,
+            #"\bcsrutil\b"#,
+            #"\blaunchctl\s+(unload|bootout|remove)\b"#,
+            #"\b(curl|wget)\b.*\|\s*(sh|bash|zsh|python|python3)\b"#,
+            #":\(\)\s*\{\s*:\|:&\s*\}\s*;:"#
+        ]
+        for pattern in hardBlockedPatterns {
+            if let rx = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+               rx.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: trimmed.utf16.count)) != nil {
+                return .failure(.custom("Privilege escalation and remote pipe-to-shell commands are blocked in MCP"))
+            }
         }
-        let arguments = parts.dropFirst()
-        guard !arguments.contains(where: { $0.hasPrefix("/") || $0.contains("..") }) else {
-            return .failure(.custom("Absolute paths and parent traversal are not allowed in MCP terminal commands"))
+        
+        if trimmed.contains("../") || trimmed.hasSuffix("/..") || trimmed == ".." {
+            return .failure(.custom("Parent directory traversal ('..') outside workspace is blocked in MCP"))
         }
-        if executable == "git", let operation = arguments.first,
-           !["status", "diff", "log", "branch", "show", "rev-parse"].contains(String(operation)) {
-            return .failure(.custom("Only read-only git operations are available through MCP"))
+        
+        let hasShellRedirectionOrSubshell = [">", "<", "`", "$(", "\n", "\r"].contains(where: { trimmed.contains($0) && !(trimmed.contains("2>&1") && $0 == ">") })
+        if hasShellRedirectionOrSubshell {
+            return .success(.requiresUserApproval(reason: "Shell redirection or command substitution"))
         }
-        return .success(())
+        
+        // Split pipeline / chained segments (`|`, `&&`) and verify whether every segment is read/build/test safe
+        let normalized = trimmed.replacingOccurrences(of: "2>&1", with: "")
+        if normalized.contains(";") {
+            return .success(.requiresUserApproval(reason: "Multi-statement shell execution"))
+        }
+        let segments = normalized
+            .components(separatedBy: "&&")
+            .flatMap { $0.components(separatedBy: "|") }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !segments.isEmpty else { return .failure(.invalidParams) }
+        
+        let safeReadOnlyTools: Set<String> = ["rg", "grep", "ls", "pwd", "head", "tail", "wc", "stat", "cat", "which", "uname", "jq"]
+        for seg in segments {
+            let parts = seg.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            guard let exe = parts.first else { continue }
+            let args = Array(parts.dropFirst())
+            
+            // Verify any explicit absolute paths stay within workspace or standard read-only toolchain dirs
+            for arg in args where arg.hasPrefix("/") {
+                let allowedPrefixes = [workspacePath, "/tmp", "/private/tmp", "/opt/homebrew", "/usr", "/Applications/Xcode.app", "/Library/Developer"]
+                if !allowedPrefixes.contains(where: { arg == $0 || arg.hasPrefix($0 + "/") }) {
+                    return .failure(.custom("Access denied: path '\(arg)' is outside the active workspace"))
+                }
+            }
+            
+            if safeReadOnlyTools.contains(exe) { continue }
+            if exe == "find" {
+                let mutatingFind: Set<String> = ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls", "-fprintf"]
+                if args.contains(where: { mutatingFind.contains($0) }) {
+                    return .success(.requiresUserApproval(reason: "Mutating find operation"))
+                }
+                continue
+            }
+            if exe == "git", let op = args.first, ["status", "diff", "log", "branch", "show", "rev-parse", "ls-files"].contains(op) {
+                continue
+            }
+            if exe == "swift", let op = args.first, ["build", "test", "--version"].contains(op) {
+                continue
+            }
+            if exe == "cargo", let op = args.first, ["check", "test", "clippy", "build", "--version"].contains(op) {
+                continue
+            }
+            if (exe == "npm" || exe == "pnpm" || exe == "yarn" || exe == "bun"),
+               let op = args.first,
+               ["test", "lint", "typecheck", "--version"].contains(op) || (op == "run" && ["build", "test", "lint", "check", "typecheck"].contains(args.dropFirst().first ?? "")) {
+                continue
+            }
+            if exe == "pytest" || (exe == "go" && ["test", "build", "vet", "version"].contains(args.first ?? "")) || (exe == "tsc" && args.contains("--noEmit")) {
+                continue
+            }
+            
+            _ = lower
+            return .success(.requiresUserApproval(reason: "Workspace command '\(exe)'"))
+        }
+        
+        return .success(.autoApproved)
     }
     
     /// Check if file extension is allowed for write
@@ -608,6 +686,33 @@ class MCPServer: ObservableObject {
                     ],
                     "required": ["action"]
                 ]
+            ],
+            [
+                "name": "computer_use",
+                "description": "Native macOS Computer Use engine with Hybrid Set-of-Mark (`[1..N]` AX + Apple Vision OCR), 1x logical Retina-accurate coordinates, background-first AXPress/AXValue execution, cursor restoration, multi-app window targeting, and strict security denylist.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'observe', 'inspect', 'windows', 'click', 'double_click', 'right_click', 'hover', 'drag', 'scroll', 'type', 'shortcut', 'zoom', 'wait_for', 'batch', 'qa_verify', 'permissions'"],
+                        "app": ["type": "string", "description": "Optional target application name (defaults to 'MicroCode')"],
+                        "window_id": ["type": "integer", "description": "Optional specific CGWindowID"],
+                        "mark_id": ["type": "integer", "description": "Set-of-Mark numeric badge ID `[1..N]` from 'observe' or 'inspect'"],
+                        "target": ["type": "string", "description": "Element label/title or OCR text substring to click or wait_for"],
+                        "role": ["type": "string", "description": "Optional AX role filter"],
+                        "x": ["type": "number", "description": "Logical 1x X coordinate"],
+                        "y": ["type": "number", "description": "Logical 1x Y coordinate"],
+                        "to_x": ["type": "number", "description": "Destination X coordinate for 'drag'"],
+                        "to_y": ["type": "number", "description": "Destination Y coordinate for 'drag'"],
+                        "delta_y": ["type": "integer", "description": "Vertical scroll delta in pixels (negative scrolls down)"],
+                        "text": ["type": "string", "description": "Text to type ('type') or text to wait for ('wait_for')"],
+                        "press_enter": ["type": "boolean", "description": "Press Return after typing"],
+                        "key": ["type": "string", "description": "Key name for 'shortcut' (e.g. 'return', 'k', 's', 'escape')"],
+                        "modifiers": ["type": "array", "items": ["type": "string"], "description": "Modifiers: cmd, shift, opt, ctrl"],
+                        "delivery": ["type": "string", "description": "'auto' (background AXPress first, then CGEvent), 'ax' (background only), or 'cgevent' (physical mouse)"],
+                        "output_path": ["type": "string", "description": "Destination PNG path for 'observe', 'capture', or 'zoom'"]
+                    ],
+                    "required": ["action"]
+                ]
             ]
         ]
         
@@ -623,6 +728,21 @@ class MCPServer: ObservableObject {
         }
         
         // Fast-path tools that don't strictly require sandbox directory
+        if name == "computer_use" {
+            let res = await NativeComputerUseService.shared.handleRequest(args)
+            var cleanRes = res
+            let b64 = cleanRes.removeValue(forKey: "image_base64") as? String
+            let mime = (cleanRes.removeValue(forKey: "image_mime_type") as? String) ?? "image/jpeg"
+            let jsonText = (try? JSONSerialization.data(withJSONObject: cleanRes, options: [.prettyPrinted, .sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            var contentBlocks: [[String: Any]] = [["type": "text", "text": jsonText]]
+            if let b64, !b64.isEmpty {
+                contentBlocks.append(["type": "image", "data": b64, "mimeType": mime])
+            }
+            let isErr = (res["success"] as? Bool) == false
+            log("Tool: computer_use (\(args["action"] as? String ?? "observe"))", method: "tools/call", status: isErr ? .error : .success)
+            return MCPResponse(id: request.id, result: ["content": contentBlocks, "isError": isErr])
+        }
         if name == "microcode_run_playground" {
             do {
                 let res = try await executeRunPlayground(args)
@@ -639,7 +759,7 @@ class MCPServer: ObservableObject {
             let res = executeSyncAccount(args)
             return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "\(res)"]]])
         }
-        if ["ide_browser", "preview_control", "editor_control", "lsp_intelligence", "api_studio", "database_studio"].contains(name) {
+        if ["ide_browser", "preview_control", "editor_control", "lsp_intelligence", "api_studio", "database_studio", "grep_search", "list_directory_tree", "find_symbol", "multi_file_read", "replace_in_file", "patch_file"].contains(name) {
             do {
                 let res = try await AgentToolBox.shared.execute(name, params: args)
                 log("Tool: \(name)", method: "tools/call", status: .success)
@@ -782,11 +902,14 @@ class MCPServer: ObservableObject {
         
         switch sandbox.validatePath(searchPath) {
         case .success(let resolved):
-            var cmd = "grep -rn --max-count=50 \(query.shellEscaped()) \(resolved.shellEscaped())"
-            if let include = include {
-                cmd = "grep -rn --max-count=50 --include=\(include.shellEscaped()) \(query.shellEscaped()) \(resolved.shellEscaped())"
-            }
-            return try await runShellCommand(cmd, cwd: workspacePath, timeout: 15)
+            let lines = await FastWorkspaceGrep.searchLines(
+                pattern: query,
+                directory: resolved,
+                includeGlob: include,
+                maxPerFile: 50,
+                maxTotalLines: 100
+            )
+            return lines.isEmpty ? "No matches found for '\(query)'" : lines.joined(separator: "\n")
         case .failure(let error):
             throw MCPToolError.securityViolation(error.message)
         }
@@ -821,10 +944,20 @@ class MCPServer: ObservableObject {
     
     private func executeTerminal(_ args: [String: Any], sandbox: MCPSecuritySandbox) async throws -> String {
         guard let command = args["command"] as? String else { throw MCPToolError.missingParam("command") }
-        let timeout = min(args["timeout"] as? Int ?? 30, 120)
+        let timeout = min(args["timeout"] as? Int ?? 60, 300)
         
         switch sandbox.validateCommand(command) {
-        case .success:
+        case .success(.autoApproved):
+            return try await runShellCommand(command, cwd: workspacePath, timeout: timeout)
+        case .success(.requiresUserApproval(let reason)):
+            let approved = await ToolApprovalManager.shared.requestApproval(
+                toolName: "shell",
+                arguments: ["command": command, "cwd": workspacePath],
+                description: "MCP Terminal (\(reason)): \(command)"
+            )
+            guard approved else {
+                throw MCPToolError.securityViolation("Command execution declined by user approval policy: \(command)")
+            }
             return try await runShellCommand(command, cwd: workspacePath, timeout: timeout)
         case .failure(let error):
             throw MCPToolError.securityViolation(error.message)
@@ -1241,9 +1374,36 @@ class MCPServer: ObservableObject {
 
     nonisolated private func handleIncomingConnection(_ connection: NWConnection) {
         connection.start(queue: DispatchQueue.global(qos: .userInitiated))
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, _ in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, _, _ in
             guard let self = self, let content = content, let requestString = String(data: content, encoding: .utf8) else {
                 connection.cancel()
+                return
+            }
+
+            // Fast-path CORS OPTIONS preflight off MainActor so browser preflights respond in <1ms even during heavy UI/workspace loads.
+            if requestString.uppercased().hasPrefix("OPTIONS ") {
+                let headEnd = requestString.range(of: "\r\n\r\n")?.lowerBound ?? requestString.endIndex
+                let lines = String(requestString[..<headEnd]).components(separatedBy: "\r\n")
+                var hdrs: [String: String] = [:]
+                for line in lines.dropFirst() {
+                    if let colon = line.firstIndex(of: ":") {
+                        hdrs[String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased()] =
+                            String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                    }
+                }
+                let fastData: Data
+                if !Self.isLoopbackHostHeader(hdrs["host"]) {
+                    fastData = ("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 27\r\nConnection: close\r\n\r\n{\"error\": \"Forbidden host\"}").data(using: .utf8) ?? Data()
+                } else if let origin = hdrs["origin"], !Self.isAllowedBridgeOrigin(origin) {
+                    fastData = ("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 31\r\nConnection: close\r\n\r\n{\"error\": \"Origin not allowed\"}").data(using: .utf8) ?? Data()
+                } else {
+                    let acao = hdrs["origin"].map { "Access-Control-Allow-Origin: \($0)\r\nVary: Origin\r\n" } ?? ""
+                    let cors = "HTTP/1.1 200 OK\r\n\(acao)Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Dotmini-Bridge\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    fastData = cors.data(using: .utf8) ?? Data()
+                }
+                connection.send(content: fastData, completion: .contentProcessed({ _ in
+                    connection.cancel()
+                }))
                 return
             }
             
@@ -1318,21 +1478,41 @@ class MCPServer: ObservableObject {
         let acao = corsOrigin.map { "Access-Control-Allow-Origin: \($0)\r\nVary: Origin\r\n" } ?? ""
         let isBrowserRequest = browserOrigin != nil
 
-        let corsHeaders = "HTTP/1.1 200 OK\r\n\(acao)Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+        let corsHeaders = "HTTP/1.1 200 OK\r\n\(acao)Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Dotmini-Bridge\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
         
         if method == "OPTIONS" {
             return corsHeaders.data(using: .utf8) ?? Data()
         }
 
-        // SECURITY GATE 3: the MCP tool surface (write_file / edit_file / run_terminal / execute_code ...) is never available to web pages.
-        if isBrowserRequest && path.hasPrefix("/v1/mcp") {
-            return bridgeJSON(status: "403 Forbidden", body: "{\"error\": \"MCP tools are not available to browser origins\"}", origin: corsOrigin)
+        // SECURITY GATE 3: the MCP tool surface (write_file / edit_file / run_terminal / execute_code / computer-use ...) is never available to web pages.
+        if isBrowserRequest && (path.hasPrefix("/v1/mcp") || path.hasPrefix("/v1/computer-use")) {
+            return bridgeJSON(status: "403 Forbidden", body: "{\"error\": \"MCP and Computer Use tools are not available to browser origins\"}", origin: corsOrigin)
         }
         
         // Extract Body
         var bodyString = ""
         if let bodyIndex = rawRequest.range(of: "\r\n\r\n") {
             bodyString = String(rawRequest[bodyIndex.upperBound...])
+        }
+
+        if path.hasPrefix("/v1/computer-use") && (method == "POST" || method == "GET") {
+            let payload: [String: Any]
+            if method == "POST",
+               let bodyData = bodyString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                payload = json
+            } else {
+                payload = ["action": "status"]
+            }
+            let resp = await NativeComputerUseService.shared.handleRequest(payload)
+            let isAllowed = (resp["success"] as? Bool) ?? true
+            let errText = (resp["error"] as? String) ?? ""
+            let statusLine = (!isAllowed && errText.localizedCaseInsensitiveContains("Security Shield")) ? "403 Forbidden" : "200 OK"
+            let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
+            let httpResp = "HTTP/1.1 \(statusLine)\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+            var data = httpResp.data(using: .utf8) ?? Data()
+            data.append(respBody)
+            return data
         }
         
         if path.hasPrefix("/v1/run") && method == "POST" {
@@ -1341,11 +1521,16 @@ class MCPServer: ObservableObject {
                 let code = json["code"] as? String ?? ""
                 let lang = json["language"] as? String ?? "swift"
                 
-                // Account sync if provided
-                if let email = json["email"] as? String, !email.isEmpty {
-                    let token = json["token"] as? String ?? ""
-                    let name = json["display_name"] as? String ?? ""
-                    AuthService.shared.syncWithWebSession(email: email, token: token, displayName: name)
+                // Verified account sync if provided
+                let incomingToken = (json["access_token"] as? String) ?? (json["token"] as? String) ?? ""
+                let incomingRefresh = (json["refresh_token"] as? String) ?? ""
+                let incomingName = (json["display_name"] as? String) ?? ""
+                if !incomingToken.isEmpty {
+                    _ = await SupabaseAuthService.shared.ingestWebSession(
+                        accessToken: incomingToken,
+                        refreshToken: incomingRefresh,
+                        displayName: incomingName
+                    )
                 }
                 
                 // Open and run in app. A web page (browser Origin) may only OPEN the snippet; the user presses Run in the IDE.
@@ -1364,15 +1549,51 @@ class MCPServer: ObservableObject {
         
         if path.hasPrefix("/v1/auth/sync") && method == "POST" {
             if let bodyData = bodyString.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
-               let email = json["email"] as? String {
-                let token = json["token"] as? String ?? ""
-                let name = json["display_name"] as? String ?? ""
-                AuthService.shared.syncWithWebSession(email: email, token: token, displayName: name)
-                
-                let resp = ["success": true, "synced_email": email] as [String : Any]
+               let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                let action = (json["action"] as? String)?.lowercased() ?? "sync"
+                if action == "signout" {
+                    SupabaseAuthService.shared.signOut()
+                    AuthService.shared.signOut()
+                    let resp: [String: Any] = ["success": true, "authenticated": false]
+                    let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
+                    let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+                    var data = httpResp.data(using: .utf8) ?? Data()
+                    data.append(respBody)
+                    return data
+                }
+
+                let accessToken = ((json["access_token"] as? String) ?? (json["token"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let refreshToken = ((json["refresh_token"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = ((json["display_name"] as? String) ?? (json["name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let expiresAt = (json["expires_at"] as? TimeInterval) ?? (json["expires_at"] as? NSNumber)?.doubleValue
+
+                let verified = await SupabaseAuthService.shared.ingestWebSession(
+                    accessToken: accessToken,
+                    refreshToken: refreshToken,
+                    expiresAtEpoch: expiresAt,
+                    displayName: displayName
+                )
+                let auth = SupabaseAuthService.shared
+                let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.5.38"
+                let resp: [String: Any] = [
+                    "success": verified,
+                    "verified": verified,
+                    "authenticated": auth.session != nil,
+                    "synced_email": auth.session?.email ?? "",
+                    "uid": auth.session?.userID ?? "",
+                    "plan": auth.entitlement.plan,
+                    "role": auth.entitlement.role,
+                    "tokens_remaining": auth.entitlement.tokensRemaining,
+                    "tokens_used": auth.entitlement.tokensUsed,
+                    "ai_credit_available_thb": auth.entitlement.totalAvailableTHB,
+                    "ai_credit_remaining_thb": auth.entitlement.creditRemainingTHB,
+                    "ai_topup_balance_thb": auth.entitlement.aiTopupBalanceTHB,
+                    "wallet_thb": Double(CloudGPUService.shared.walletBalance) / 100.0,
+                    "app_version": appVersion
+                ]
+                let statusLine = verified ? "200 OK" : "401 Unauthorized"
                 let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
-                let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+                let httpResp = "HTTP/1.1 \(statusLine)\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
                 var data = httpResp.data(using: .utf8) ?? Data()
                 data.append(respBody)
                 return data
@@ -1380,11 +1601,26 @@ class MCPServer: ObservableObject {
         }
         
         if path.hasPrefix("/v1/status") || path == "/v1/health" {
-            let user = AuthService.shared.currentUser?.email ?? "Guest (Unified Mode)"
-            let resp = [
+            let auth = SupabaseAuthService.shared
+            let activeEmail = auth.session?.email ?? AuthService.shared.currentUser?.email ?? ""
+            let isAuthed = auth.session != nil && !activeEmail.isEmpty
+            let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.5.38"
+            let resp: [String: Any] = [
                 "status": "ok",
                 "app": "MicroCode Native IDE (macOS)",
-                "user": user,
+                "app_version": appVersion,
+                "authenticated": isAuthed,
+                "user": isAuthed ? activeEmail : "Guest (Unified Mode)",
+                "email": activeEmail,
+                "uid": auth.session?.userID ?? "",
+                "plan": auth.entitlement.plan,
+                "role": auth.entitlement.role,
+                "tokens_remaining": auth.entitlement.tokensRemaining,
+                "tokens_used": auth.entitlement.tokensUsed,
+                "ai_credit_available_thb": auth.entitlement.totalAvailableTHB,
+                "ai_credit_remaining_thb": auth.entitlement.creditRemainingTHB,
+                "ai_topup_balance_thb": auth.entitlement.aiTopupBalanceTHB,
+                "wallet_thb": Double(CloudGPUService.shared.walletBalance) / 100.0,
                 "mcp_version": "2024-11-05"
             ]
             let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()

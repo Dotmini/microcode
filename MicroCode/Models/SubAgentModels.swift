@@ -234,6 +234,44 @@ public struct AgentSquadPreset: Identifiable, Codable, Hashable, Equatable {
     public static var builtInPresets: [AgentSquadPreset] {
         [
             AgentSquadPreset(
+                id: "squad_acp_dream_team",
+                name: "ACP Dream Team: Claude Code + Codex + AGY",
+                subtitle: "Claude Code (Lead/Architect) • OpenAI Codex (Backend) • AGY/Gemini (Frontend & Live Preview QA)",
+                icon: "bolt.shield.fill",
+                isBuiltIn: true,
+                ceoEndpoint: AgentModelEndpoint(authSource: .acpCLI, provider: "anthropic", model: "claude-opus-4-6"),
+                subordinates: [
+                    AgentSquadMemberSpec(
+                        id: "sub_arch_acp",
+                        typeName: "architect",
+                        roleTitle: "Principal Systems Architect (Claude Code)",
+                        endpoint: AgentModelEndpoint(authSource: .acpCLI, provider: "anthropic", model: "claude-sonnet-4-6"),
+                        isEnabled: true
+                    ),
+                    AgentSquadMemberSpec(
+                        id: "sub_fe_acp",
+                        typeName: "frontend_engineer",
+                        roleTitle: "Frontend & Live Preview Specialist (AGY/Gemini)",
+                        endpoint: AgentModelEndpoint(authSource: .acpCLI, provider: "gemini", model: "gemini-2.5-pro"),
+                        isEnabled: true
+                    ),
+                    AgentSquadMemberSpec(
+                        id: "sub_be_acp",
+                        typeName: "backend_engineer",
+                        roleTitle: "Backend & Systems Engineer (OpenAI Codex)",
+                        endpoint: AgentModelEndpoint(authSource: .acpCLI, provider: "openai", model: "gpt-5.4"),
+                        isEnabled: true
+                    ),
+                    AgentSquadMemberSpec(
+                        id: "sub_qa_acp",
+                        typeName: "test_runner",
+                        roleTitle: "Live Preview & Verification QA (AGY/Gemini)",
+                        endpoint: AgentModelEndpoint(authSource: .acpCLI, provider: "gemini", model: "gemini-2.5-flash"),
+                        isEnabled: true
+                    )
+                ]
+            ),
+            AgentSquadPreset(
                 id: "squad_titan_claude_gemini_deepseek",
                 name: "Claude + Gemini + DeepSeek",
                 subtitle: "Claude (Lead) • Gemini (Frontend/UI) • DeepSeek (Backend/Core) • Claude (QA)",

@@ -1,408 +1,297 @@
 #!/usr/bin/env python3
 """
-Dotmini MicroCode Computer Use Engine
-=====================================
-Proprietary macOS automation and live test engine designed for MicroCode Native.
-Features:
-  - 100% Computer Use UI automation
-  - High-precision Accessibility Tree inspection (AXUIElement)
-  - Hardware-level mouse movement and click emulation (CoreGraphics CGEvent)
-  - Native keyboard text entry and modifier shortcuts (CGEvent Unicode & Keycodes)
-  - Real-time window-specific high-resolution screen capture
-  - End-to-end automated scenario verification for Cell Mode & Notebooks
+Dotmini MicroCode Native Computer Use Client (Zero PyObjC Dependency)
+=====================================================================
+Routes all macOS Computer Use operations to MicroCode's compiled Swift engine
+(`NativeComputerUseService` on `http://127.0.0.1:18888/v1/computer-use`).
+
+Why Native Swift instead of PyObjC (`Quartz` / `ApplicationServices`)?
+  - Works out-of-the-box on Python 3.12 / 3.13 / 3.14+ with zero pip dependencies
+  - Hybrid Set-of-Mark (`[1..N]`) combining AXUIElement + In-Process AppKit NSView + Apple Vision ANE OCR
+  - 1x Logical Coordinate Normalization (`.nominalResolution`) eliminating Retina 2x click drift
+  - Background-first `AXPress` / `AXValue` execution (no mouse hijack when AX supports press)
+  - Cursor restoration after physical `CGEvent` fallback
+  - Hard-blocked security denylist (SecurityAgent, Keychain, Password Managers, System Settings)
 
 Copyright © 2024-2026 Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)
 """
 
+import json
 import os
+import subprocess
 import sys
 import time
-import json
-import subprocess
-from typing import Dict, List, Optional, Tuple, Any
+import urllib.error
+import urllib.request
+from typing import Any, Dict, List, Optional
 
-import Quartz
-from Quartz.CoreGraphics import (
-    CGEventCreate,
-    CGEventGetLocation,
-    CGEventCreateMouseEvent,
-    CGEventPost,
-    kCGHIDEventTap,
-    kCGEventMouseMoved,
-    kCGEventLeftMouseDown,
-    kCGEventLeftMouseUp,
-    kCGMouseButtonLeft,
-    CGPoint,
-    CGEventCreateKeyboardEvent,
-    CGEventSetFlags,
-    CGEventKeyboardSetUnicodeString,
-    kCGEventFlagMaskCommand,
-    kCGEventFlagMaskShift,
-    kCGEventFlagMaskAlternate,
-    kCGEventFlagMaskControl,
-)
-from ApplicationServices import (
-    AXUIElementCreateApplication,
-    AXUIElementCopyAttributeValue,
-    kAXWindowsAttribute,
-    kAXChildrenAttribute,
-    kAXTitleAttribute,
-    kAXRoleAttribute,
-    kAXDescriptionAttribute,
-    kAXValueAttribute,
-    kAXPositionAttribute,
-    kAXSizeAttribute,
-    AXValueGetValue,
-    kAXValueCGPointType,
-    kAXValueCGSizeType,
-)
 
-# Standard macOS Virtual Keycodes
-KEYCODES = {
-    "return": 36,
-    "enter": 36,
-    "tab": 48,
-    "space": 49,
-    "delete": 51,
-    "escape": 53,
-    "command": 55,
-    "shift": 56,
-    "capslock": 57,
-    "option": 58,
-    "control": 59,
-    "left": 123,
-    "right": 124,
-    "down": 125,
-    "up": 126,
-    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
-    "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
-    "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
-    "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29,
-    "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "l": 37,
-    "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44,
-    "n": 45, "m": 46, ".": 47, "`": 50,
-}
+NATIVE_ENDPOINT = os.environ.get(
+    "MICROCODE_COMPUTER_USE_URL", "http://127.0.0.1:18888/v1/computer-use"
+)
 
 
 class MicroCodeComputerUse:
-    def __init__(self, auto_launch: bool = True):
-        self.pid, self.window_id, self.bounds = self._find_window()
-        if not self.pid and auto_launch and os.path.exists("/Applications/MicroCode.app"):
-            subprocess.Popen(["open", "-a", "/Applications/MicroCode.app"])
-            for _ in range(20):
-                time.sleep(0.3)
-                self.pid, self.window_id, self.bounds = self._find_window()
-                if self.pid and self.window_id:
-                    break
-        if not self.pid:
-            raise RuntimeError("MicroCode process is not running!")
+    def __init__(self, app: Optional[str] = None, auto_launch: bool = True):
+        self.app = app
+        if auto_launch and not self._is_bridge_alive():
+            app_bundle = "/Applications/MicroCode.app"
+            if os.path.exists(app_bundle):
+                subprocess.Popen(["open", "-g", "-a", app_bundle])
+                for _ in range(25):
+                    time.sleep(0.25)
+                    if self._is_bridge_alive():
+                        break
 
-    def _find_window(self) -> Tuple[Optional[int], Optional[int], Optional[Dict[str, float]]]:
-        """Find MicroCode process PID and CGWindow info."""
+    def _is_bridge_alive(self) -> bool:
         try:
-            pid_str = subprocess.check_output(["pgrep", "-x", "MicroCode"]).decode().strip().split("\n")[0]
-            pid = int(pid_str)
+            req = urllib.request.Request(
+                "http://127.0.0.1:18888/v1/health",
+                headers={"Accept": "application/json"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                return resp.status == 200
         except Exception:
+            return False
+
+    def call_native(self, payload: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
+        body = dict(payload)
+        if self.app and "app" not in body:
+            body["app"] = self.app
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            NATIVE_ENDPOINT,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
             try:
-                pid_str = subprocess.check_output(["pgrep", "-f", "MicroCode.app/Contents/MacOS/MicroCode"]).decode().strip().split("\n")[0]
-                pid = int(pid_str)
+                parsed = json.loads(err_body)
+                if isinstance(parsed, dict):
+                    return parsed
             except Exception:
-                return None, None, None
+                pass
+            return {"success": False, "error": f"HTTP {e.code}: {err_body}"}
+        except Exception as e:
+            return self._cli_fallback(body, str(e))
 
-        window_id = None
-        bounds = None
-        candidates = []
-        windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
-        for idx, w in enumerate(windows):
-            owner = w.get("kCGWindowOwnerName", "")
-            owner_pid = w.get("kCGWindowOwnerPID", 0)
-            layer = w.get("kCGWindowLayer", 0)
-            if ("MicroCode" in owner or owner_pid == pid) and layer == 0:
-                wid = w.get("kCGWindowNumber")
-                b = w.get("kCGWindowBounds", {})
-                w_w = float(b.get("Width", 0))
-                w_h = float(b.get("Height", 0))
-                if w_w < 200 or w_h < 200:
-                    continue
-                is_main = 1 if (w_w >= 400 and w_h >= 300) else 0
-                candidates.append((is_main, -idx, w_w * w_h, wid, {
-                    "x": float(b.get("X", 0)),
-                    "y": float(b.get("Y", 0)),
-                    "width": w_w,
-                    "height": w_h,
-                }))
-
-        if not candidates:
-            return pid, None, None
-
-        candidates.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
-        _, _, _, window_id, bounds = candidates[0]
-        return pid, window_id, bounds
-
-    def inspect_elements(self, max_depth: int = 16) -> List[Dict[str, Any]]:
-        """Recursively query the AXUIElement tree of all active MicroCode windows, sheets, and popovers."""
-        app_ax = AXUIElementCreateApplication(self.pid)
-        _, windows = AXUIElementCopyAttributeValue(app_ax, kAXWindowsAttribute, None)
-        if not windows:
-            return []
-
-        results = []
-
-        def traverse(elem, depth):
-            if depth > max_depth:
-                return
-            _, role = AXUIElementCopyAttributeValue(elem, kAXRoleAttribute, None)
-            _, title = AXUIElementCopyAttributeValue(elem, kAXTitleAttribute, None)
-            _, desc = AXUIElementCopyAttributeValue(elem, kAXDescriptionAttribute, None)
-            _, val = AXUIElementCopyAttributeValue(elem, kAXValueAttribute, None)
-            _, pos_val = AXUIElementCopyAttributeValue(elem, kAXPositionAttribute, None)
-            _, size_val = AXUIElementCopyAttributeValue(elem, kAXSizeAttribute, None)
-
-            pos = None
-            size = None
-            center = None
-            if pos_val:
-                ok, pt = AXValueGetValue(pos_val, kAXValueCGPointType, None)
-                if ok:
-                    pos = {"x": round(pt.x, 1), "y": round(pt.y, 1)}
-            if size_val:
-                ok, sz = AXValueGetValue(size_val, kAXValueCGSizeType, None)
-                if ok:
-                    size = {"width": round(sz.width, 1), "height": round(sz.height, 1)}
-
-            if pos and size and size["width"] > 0 and size["height"] > 0:
-                center = {
-                    "x": round(pos["x"] + size["width"] / 2.0, 1),
-                    "y": round(pos["y"] + size["height"] / 2.0, 1),
-                }
-
-            val_str = str(val or "").strip() if isinstance(val, (str, int, float)) else ""
-            label = (title or desc or val_str or "").strip()
-            if label or (role and any(k in str(role) for k in ["Button", "Text", "Cell", "Menu", "PopUp", "Tab", "CheckBox", "Radio"])):
-                results.append({
-                    "role": str(role or ""),
-                    "title": str(title or ""),
-                    "description": str(desc or ""),
-                    "value": val_str,
-                    "label": label,
-                    "position": pos,
-                    "size": size,
-                    "center": center,
-                })
-
-            _, children = AXUIElementCopyAttributeValue(elem, kAXChildrenAttribute, None)
-            if children:
-                for c in children:
-                    traverse(c, depth + 1)
-
-        for w in windows:
-            traverse(w, 0)
-        return results
-
-    def find_element(self, query: str, role: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Find an interactive element matching label or role."""
-        elements = self.inspect_elements()
-        query_clean = query.lower().strip()
-
-        # 1. Exact match on title or description
-        for el in elements:
-            if role and role.lower() not in el["role"].lower():
-                continue
-            if el["label"].lower() == query_clean:
-                return el
-
-        # 2. Substring match
-        for el in elements:
-            if role and role.lower() not in el["role"].lower():
-                continue
-            if query_clean in el["label"].lower():
-                return el
-
-        return None
-
-    def mouse_move(self, target_x: float, target_y: float, steps: int = 12, duration: float = 0.18):
-        """Smoothly moves cursor to target coordinate mimicking human movement."""
-        ev = CGEventCreate(None)
-        cur = CGEventGetLocation(ev)
-        start_x, start_y = cur.x, cur.y
-
-        for i in range(1, steps + 1):
-            t = i / steps
-            ease = 1 - (1 - t) ** 3  # Ease out cubic
-            x = start_x + (target_x - start_x) * ease
-            y = start_y + (target_y - start_y) * ease
-            move_ev = CGEventCreateMouseEvent(None, kCGEventMouseMoved, CGPoint(x, y), 0)
-            CGEventPost(kCGHIDEventTap, move_ev)
-            time.sleep(duration / steps)
-
-    def mouse_click(self, x: float, y: float, click_count: int = 1):
-        """Move to position and send native physical left click."""
-        self.mouse_move(x, y)
-        time.sleep(0.04)
-
-        for i in range(1, click_count + 1):
-            pt = CGPoint(x, y)
-            down = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, pt, kCGMouseButtonLeft)
-            up = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, pt, kCGMouseButtonLeft)
-            
-            # Set click state for double click
-            Quartz.CGEventSetIntegerValueField(down, Quartz.kCGMouseEventClickState, i)
-            Quartz.CGEventSetIntegerValueField(up, Quartz.kCGMouseEventClickState, i)
-
-            CGEventPost(kCGHIDEventTap, down)
-            time.sleep(0.05)
-            CGEventPost(kCGHIDEventTap, up)
-            if i < click_count:
-                time.sleep(0.08)
-
-    def click_element(self, query: str, role: Optional[str] = None, click_count: int = 1) -> Dict[str, Any]:
-        """Find an element and click its center point."""
-        try:
-            from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
-            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(self.pid)
-            if app:
-                app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
-                time.sleep(0.08)
-        except Exception:
-            pass
-
-        el = self.find_element(query, role=role)
-        if not el:
-            raise ValueError(f"UI Element matching '{query}' not found in MicroCode window!")
-        if not el.get("center"):
-            raise ValueError(f"UI Element '{query}' has no valid coordinates on screen!")
-
-        cx = el["center"]["x"]
-        cy = el["center"]["y"]
-        self.mouse_click(cx, cy, click_count=click_count)
+    def _cli_fallback(self, payload: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        """Minimal stdlib CLI fallback when MicroCode.app HTTP server is offline."""
+        action = str(payload.get("action", "observe")).lower()
+        if action in ("capture", "observe"):
+            out_path = payload.get("output_path") or "/tmp/microcode_screenshot.png"
+            res = subprocess.run(["screencapture", "-x", out_path], capture_output=True)
+            return {
+                "success": res.returncode == 0 and os.path.exists(out_path),
+                "path": out_path,
+                "capture_method": "screencapture_cli_fallback",
+                "bridge_offline_reason": reason,
+            }
         return {
-            "success": True,
-            "element": el["label"],
-            "role": el["role"],
-            "clicked_at": {"x": cx, "y": cy}
+            "success": False,
+            "error": f"MicroCode native Computer Use bridge on 127.0.0.1:18888 is unreachable ({reason}). Launch MicroCode.app first.",
         }
 
-    def type_text(self, text: str, delay: float = 0.015, press_enter: bool = False):
-        """Type text into focused editor/cell with realistic typing cadence."""
-        for char in text:
-            # Create keyboard event with Unicode character
-            down = CGEventCreateKeyboardEvent(None, 0, True)
-            CGEventKeyboardSetUnicodeString(down, 1, char)
-            CGEventPost(kCGHIDEventTap, down)
-            time.sleep(0.005)
-            up = CGEventCreateKeyboardEvent(None, 0, False)
-            CGEventKeyboardSetUnicodeString(up, 1, char)
-            CGEventPost(kCGHIDEventTap, up)
-            time.sleep(delay)
+    # --- High-level Set-of-Mark & Multimodal Operations ---
 
-        if press_enter:
-            time.sleep(0.05)
-            self.send_shortcut([], "return")
+    def list_windows(self, app: Optional[str] = None) -> Dict[str, Any]:
+        return self.call_native({"action": "windows", "app": app or self.app})
 
-    def send_shortcut(self, modifiers: List[str], key: str):
-        """Trigger native macOS shortcut (e.g. ['cmd'], 'return' or ['cmd'], 'k')."""
-        key_clean = key.lower().strip()
-        keycode = KEYCODES.get(key_clean)
-        if keycode is None:
-            raise ValueError(f"Unknown key name '{key}'")
+    def observe(
+        self,
+        app: Optional[str] = None,
+        window_id: Optional[int] = None,
+        set_of_mark: bool = True,
+        output_path: Optional[str] = None,
+        include_image: bool = True,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "action": "observe",
+            "set_of_mark": set_of_mark,
+            "include_image": include_image,
+        }
+        if app or self.app:
+            payload["app"] = app or self.app
+        if window_id is not None:
+            payload["window_id"] = int(window_id)
+        if output_path:
+            payload["output_path"] = output_path
+        return self.call_native(payload)
 
-        flags = 0
-        for mod in modifiers:
-            m = mod.lower().strip()
-            if m in ["cmd", "command"]:
-                flags |= kCGEventFlagMaskCommand
-            elif m == "shift":
-                flags |= kCGEventFlagMaskShift
-            elif m in ["alt", "option"]:
-                flags |= kCGEventFlagMaskAlternate
-            elif m in ["ctrl", "control"]:
-                flags |= kCGEventFlagMaskControl
+    def act(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return self.call_native(params)
 
-        down = CGEventCreateKeyboardEvent(None, keycode, True)
-        if flags:
-            CGEventSetFlags(down, flags)
-        CGEventPost(kCGHIDEventTap, down)
-        time.sleep(0.05)
+    def batch(self, steps: List[Dict[str, Any]], app: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"action": "batch", "steps": steps}
+        if app or self.app:
+            payload["app"] = app or self.app
+        return self.call_native(payload, timeout=60.0)
 
-        up = CGEventCreateKeyboardEvent(None, keycode, False)
-        if flags:
-            CGEventSetFlags(up, flags)
-        CGEventPost(kCGHIDEventTap, up)
-        time.sleep(0.05)
+    def qa_verify(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(params)
+        payload["action"] = "qa_verify"
+        return self.call_native(payload, timeout=60.0)
 
-    def capture_screenshot(self, output_path: str) -> str:
-        """Capture the exact MicroCode window into an artifact PNG."""
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        cmd = ["screencapture", "-l", str(self.window_id), output_path]
-        subprocess.check_call(cmd)
-        return output_path
+    # --- Backward-Compatible Legacy API (`inspect`, `click`, `type`, `shortcut`, `capture`) ---
 
+    def inspect_elements(
+        self,
+        query: Optional[str] = None,
+        role: Optional[str] = None,
+        app: Optional[str] = None,
+        window_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        payload: Dict[str, Any] = {"action": "inspect"}
+        if query:
+            payload["query"] = query
+        if role:
+            payload["role"] = role
+        if app or self.app:
+            payload["app"] = app or self.app
+        if window_id is not None:
+            payload["window_id"] = int(window_id)
+        res = self.call_native(payload)
+        if not res.get("success", False) and "error" in res:
+            raise RuntimeError(res["error"])
+        return res.get("elements", [])
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: computer_use_engine.py <inspect|click|type|shortcut|capture|run_test> [args...]")
-        sys.exit(1)
+    def click_element(
+        self,
+        query: Optional[str] = None,
+        role: Optional[str] = None,
+        click_count: int = 1,
+        mark_id: Optional[int] = None,
+        delivery: str = "auto",
+        app: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "action": "double_click" if click_count == 2 else "click",
+            "click_count": click_count,
+            "delivery": delivery,
+        }
+        if mark_id is not None:
+            payload["mark_id"] = int(mark_id)
+        if query:
+            payload["target"] = query
+        if role:
+            payload["role"] = role
+        if app or self.app:
+            payload["app"] = app or self.app
+        res = self.call_native(payload)
+        if not res.get("success", False):
+            raise RuntimeError(res.get("error", f"Failed to click '{query or mark_id}'"))
+        return res
 
-    cmd = sys.argv[1]
-    engine = MicroCodeComputerUse()
+    def mouse_click(
+        self,
+        x: float,
+        y: float,
+        click_count: int = 1,
+        button: str = "left",
+        window_relative: bool = False,
+        restore_cursor: bool = True,
+        app: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "action": "right_click" if button == "right" else ("double_click" if click_count == 2 else "click"),
+            "x": float(x),
+            "y": float(y),
+            "click_count": int(click_count),
+            "button": button,
+            "window_relative": bool(window_relative),
+            "restore_cursor": bool(restore_cursor),
+        }
+        if app or self.app:
+            payload["app"] = app or self.app
+        res = self.call_native(payload)
+        if not res.get("success", False):
+            raise RuntimeError(res.get("error", f"Failed to click at ({x}, {y})"))
+        return res
 
-    if cmd == "inspect":
-        elements = engine.inspect_elements()
-        print(json.dumps(elements, indent=2))
+    def type_text(
+        self,
+        text: str,
+        press_enter: bool = False,
+        mark_id: Optional[int] = None,
+        mode: str = "auto",
+        app: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "action": "type",
+            "text": text,
+            "press_enter": bool(press_enter),
+            "mode": mode,
+        }
+        if mark_id is not None:
+            payload["mark_id"] = int(mark_id)
+        if app or self.app:
+            payload["app"] = app or self.app
+        res = self.call_native(payload)
+        if not res.get("success", False):
+            raise RuntimeError(res.get("error", "Failed to type text"))
+        return res
 
-    elif cmd == "click":
-        target = sys.argv[2]
-        res = engine.click_element(target)
-        print(json.dumps(res, indent=2))
+    def send_shortcut(
+        self,
+        modifiers: List[str],
+        key: str,
+        app: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "action": "shortcut",
+            "modifiers": modifiers,
+            "key": key,
+        }
+        if app or self.app:
+            payload["app"] = app or self.app
+        res = self.call_native(payload)
+        if not res.get("success", False):
+            raise RuntimeError(res.get("error", f"Failed to send shortcut {modifiers}+{key}"))
+        return res
 
-    elif cmd == "type":
-        text = sys.argv[2]
-        press_enter = "--enter" in sys.argv
-        engine.type_text(text, press_enter=press_enter)
-        print(json.dumps({"success": True, "typed": text}))
+    def capture_screenshot(
+        self,
+        output_path: str = "/tmp/microcode_screenshot.png",
+        set_of_mark: bool = False,
+        app: Optional[str] = None,
+    ) -> str:
+        res = self.observe(
+            app=app,
+            set_of_mark=set_of_mark,
+            output_path=output_path,
+            include_image=False,
+        )
+        if not res.get("success", False):
+            raise RuntimeError(res.get("error", "Screenshot capture failed"))
+        return res.get("path", output_path)
 
-    elif cmd == "shortcut":
-        mods = [m for m in sys.argv[2:-1]]
-        key = sys.argv[-1]
-        engine.send_shortcut(mods, key)
-        print(json.dumps({"success": True, "shortcut": f"{'+'.join(mods)}+{key}"}))
-
-    elif cmd == "capture":
-        dest = sys.argv[2] if len(sys.argv) > 2 else "/tmp/microcode_capture.png"
-        path = engine.capture_screenshot(dest)
-        print(json.dumps({"success": True, "path": path}))
-
-    elif cmd == "run_test":
-        print("🚀 Running full live Computer Use test on MicroCode...")
-        art_dir = "/Users/dotmini/.gemini/antigravity/brain/197fe973-60a3-4cf1-b2bf-10645e78f063"
-        s0 = engine.capture_screenshot(f"{art_dir}/live_step0_initial.png")
-        print(f"✓ Step 0: Captured initial state -> {s0}")
-
-        print("🖱️ Step 1: Locating and clicking 'Clear Outputs' button...")
-        engine.click_element("Clear Outputs")
-        time.sleep(1.0)
-        s1 = engine.capture_screenshot(f"{art_dir}/live_step1_cleared.png")
-        print(f"✓ Step 1: Outputs cleared -> {s1}")
-
-        print("🖱️ Step 2: Locating and clicking 'Play' button to execute Python code...")
-        try:
-            engine.click_element("Play")
-        except Exception as e:
-            print(f"  Note on Play button ({e}), falling back to Cmd+Return...")
-            engine.send_shortcut(["cmd"], "return")
-
-        print("⏳ Step 3: Waiting for Python kernel & Seaborn execution...")
-        time.sleep(3.5)
-        s2 = engine.capture_screenshot(f"{art_dir}/live_step2_executed.png")
-        print(f"✓ Step 3: Execution finished & charts re-rendered -> {s2}")
-
-        print(json.dumps({
-            "status": "success",
-            "initial": s0,
-            "cleared": s1,
-            "executed": s2
-        }, indent=2))
+    def run_live_notebook_scenario(self, artifact_dir: str = "/tmp") -> Dict[str, Any]:
+        return self.qa_verify({"app": self.app or "MicroCode"})
 
 
 if __name__ == "__main__":
-    main()
+    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+    engine = MicroCodeComputerUse(auto_launch=False)
+    if action == "inspect":
+        query = sys.argv[2] if len(sys.argv) > 2 else None
+        print(json.dumps(engine.inspect_elements(query=query), indent=2, ensure_ascii=False))
+    elif action == "observe":
+        out = sys.argv[2] if len(sys.argv) > 2 else "/tmp/microcode_som.png"
+        print(json.dumps(engine.observe(output_path=out, include_image=False), indent=2, ensure_ascii=False))
+    elif action == "windows":
+        print(json.dumps(engine.list_windows(), indent=2, ensure_ascii=False))
+    elif action == "click":
+        target = sys.argv[2]
+        print(json.dumps(engine.click_element(target), indent=2, ensure_ascii=False))
+    elif action == "capture":
+        out = sys.argv[2] if len(sys.argv) > 2 else "/tmp/microcode_live.png"
+        print(json.dumps({"path": engine.capture_screenshot(out)}, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(engine.call_native({"action": action}), indent=2, ensure_ascii=False))

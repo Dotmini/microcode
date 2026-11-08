@@ -127,108 +127,108 @@ class ProjectManager: ObservableObject {
     @Published var buildConfiguration: BuildConfiguration = .debug
     @Published var buildParser = XcodeBuildParser()
     
+    private let schemeCacheLock = NSLock()
+    private var xcodeSchemeCache: [String: String] = [:]
+    private static let gradleMemorySafeFlags = [
+        "--no-daemon",
+        "-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m"
+    ]
+    
     private init() {}
     
     // MARK: - Project Detection
     
     func detectProjectType(at path: URL) -> ProjectType {
         let fileManager = FileManager.default
+        var isDir: ObjCBool = false
+        if fileManager.fileExists(atPath: path.path, isDirectory: &isDir), !isDir.boolValue {
+            let ext = path.pathExtension.lowercased()
+            if ext == "xcodeproj" || ext == "xcworkspace" { return .xcode }
+        }
+        if path.pathExtension.lowercased() == "xcodeproj" || path.pathExtension.lowercased() == "xcworkspace" {
+            return .xcode
+        }
+
         let contents = (try? fileManager.contentsOfDirectory(atPath: path.path)) ?? []
-        
-        // Check for specific project files
-        for file in contents {
-            let lowercased = file.lowercased()
-            
-            // Xcode
-            if lowercased.hasSuffix(".xcodeproj") || lowercased.hasSuffix(".xcworkspace") {
-                return .xcode
-            }
-            
-            // Android
-            if lowercased == "build.gradle" || lowercased == "build.gradle.kts" {
-                if contents.contains("settings.gradle") || contents.contains("settings.gradle.kts") {
-                    return .android
+        let lowerSet = Set(contents.map { $0.lowercased() })
+
+        // 1. Xcode (.xcworkspace / .xcodeproj) — validate container so broken stubs gracefully fall back to Package.swift
+        if resolveXcodeContainerPath(in: path.path, contents: contents) != nil {
+            return .xcode
+        }
+
+        // 2. Flutter
+        if lowerSet.contains("pubspec.yaml") && (lowerSet.contains("lib") || lowerSet.contains("android") || lowerSet.contains("ios")) {
+            return .flutter
+        }
+
+        // 3. Android vs Kotlin Gradle
+        if lowerSet.contains("build.gradle") || lowerSet.contains("build.gradle.kts") {
+            let hasSettings = lowerSet.contains("settings.gradle") || lowerSet.contains("settings.gradle.kts")
+            let hasAndroidAppManifest = fileManager.fileExists(atPath: path.appendingPathComponent("app/src/main/AndroidManifest.xml").path)
+                || fileManager.fileExists(atPath: path.appendingPathComponent("src/main/AndroidManifest.xml").path)
+            let hasAndroidDirOrMarker: Bool = {
+                if hasAndroidAppManifest || lowerSet.contains("local.properties") { return true }
+                for gradleFile in ["build.gradle", "build.gradle.kts", "app/build.gradle", "app/build.gradle.kts"] {
+                    if let text = try? String(contentsOf: path.appendingPathComponent(gradleFile), encoding: .utf8),
+                       text.contains("com.android") || text.contains("android {") || text.contains("libs.plugins.android") {
+                        return true
+                    }
                 }
+                return false
+            }()
+            if hasAndroidDirOrMarker || (hasSettings && lowerSet.contains("app")) {
+                return .android
             }
-            
-            // Flutter
-            if lowercased == "pubspec.yaml" {
-                if contents.contains("lib") || contents.contains("android") || contents.contains("ios") {
-                    return .flutter
-                }
-            }
-            
-            // .NET
-            if lowercased.hasSuffix(".csproj") || lowercased.hasSuffix(".fsproj") || lowercased.hasSuffix(".sln") {
-                return .dotnet
-            }
-            
-            // Java (Maven or standalone)
-            if lowercased == "pom.xml" {
-                return .java
-            }
-            
-            // Kotlin
-            if lowercased == "build.gradle.kts" && !contents.contains("android") {
+            if lowerSet.contains("build.gradle.kts") && !lowerSet.contains("android") {
                 return .kotlin
             }
-            
-            // Ruby
-            if lowercased == "gemfile" || lowercased == "rakefile" {
-                return .ruby
-            }
-            
-            // Python
-            if lowercased == "requirements.txt" || lowercased == "setup.py" || lowercased == "pyproject.toml" {
-                return .python
-            }
-            
-            // Node.js
-            if lowercased == "package.json" {
-                return .nodejs
-            }
-            
-            // Go
-            if lowercased == "go.mod" {
-                return .go
-            }
-            
-            // Rust
-            if lowercased == "cargo.toml" {
-                return .rust
-            }
-            
-            // Swift Package
-            if lowercased == "package.swift" {
-                return .swift
-            }
-            
-            // CMake
-            if lowercased == "cmakelists.txt" {
-                return .cmake
-            }
-            
-            // Makefile
-            if lowercased == "makefile" {
-                return .makefile
-            }
-            
-            // PHP
-            if lowercased == "composer.json" || lowercased == "index.php" {
-                return .php
-            }
-            
-            // WASM
-            if lowercased.hasSuffix(".wasm") || lowercased == "wasm-pack.toml" {
-                return .wasm
-            }
-            
-            // Ardium
-            if lowercased.hasSuffix(".ar") || lowercased == "ardium.json" {
-                return .ardium
+            if hasSettings {
+                return .android
             }
         }
-        
+
+        // 4. Swift Package (coexists gracefully behind valid .xcodeproj/.xcworkspace)
+        if lowerSet.contains("package.swift") {
+            return .swift
+        }
+
+        // 5. .NET
+        if contents.contains(where: {
+            let l = $0.lowercased()
+            return l.hasSuffix(".sln") || l.hasSuffix(".csproj") || l.hasSuffix(".fsproj")
+        }) {
+            return .dotnet
+        }
+
+        // 6. Rust / Go / Java
+        if lowerSet.contains("cargo.toml") { return .rust }
+        if lowerSet.contains("go.mod") { return .go }
+        if lowerSet.contains("pom.xml") { return .java }
+
+        // 7. Node.js / Python / Ruby / PHP
+        if lowerSet.contains("package.json") { return .nodejs }
+        if lowerSet.contains("pyproject.toml") || lowerSet.contains("requirements.txt") || lowerSet.contains("setup.py") {
+            return .python
+        }
+        if lowerSet.contains("gemfile") || lowerSet.contains("rakefile") { return .ruby }
+        if lowerSet.contains("composer.json") || lowerSet.contains("index.php") { return .php }
+
+        // 8. WASM / Ardium / CMake / Makefile
+        if lowerSet.contains("wasm-pack.toml") || contents.contains(where: { $0.lowercased().hasSuffix(".wasm") }) {
+            return .wasm
+        }
+        if lowerSet.contains("ardium.json") || contents.contains(where: { $0.lowercased().hasSuffix(".ar") }) {
+            return .ardium
+        }
+        if lowerSet.contains("cmakelists.txt") { return .cmake }
+        if lowerSet.contains("makefile") { return .makefile }
+
+        // Fallback single-script Python root detection
+        if lowerSet.contains("main.py") || lowerSet.contains("app.py") || lowerSet.contains("run.py") || lowerSet.contains("manage.py") {
+            return .python
+        }
+
         return .unknown
     }
     
@@ -239,18 +239,27 @@ class ProjectManager: ObservableObject {
         
         switch projectType {
         case .xcode:
-            var actualProjectPath = projectPath
-            var schemeName = URL(fileURLWithPath: projectPath).deletingPathExtension().lastPathComponent
-            
-            // If projectPath is directory, check for .xcodeproj or .xcworkspace inside
-            if !projectPath.hasSuffix(".xcodeproj") && !projectPath.hasSuffix(".xcworkspace") {
-                if let sub = try? FileManager.default.contentsOfDirectory(atPath: projectPath),
-                   let xcodeFile = sub.first(where: { $0.hasSuffix(".xcodeproj") || $0.hasSuffix(".xcworkspace") }) {
-                    actualProjectPath = (projectPath as NSString).appendingPathComponent(xcodeFile)
-                    schemeName = URL(fileURLWithPath: xcodeFile).deletingPathExtension().lastPathComponent
-                }
+            let workspaceRootPath: String
+            let resolvedContainer: String?
+            if projectPath.hasSuffix(".xcodeproj") || projectPath.hasSuffix(".xcworkspace") {
+                workspaceRootPath = (projectPath as NSString).deletingLastPathComponent
+                resolvedContainer = projectPath
+            } else {
+                workspaceRootPath = projectPath
+                let sub = (try? FileManager.default.contentsOfDirectory(atPath: projectPath)) ?? []
+                resolvedContainer = resolveXcodeContainerPath(in: projectPath, contents: sub)
             }
-            
+
+            guard let actualProjectPath = resolvedContainer else {
+                // Graceful Package.swift coexistence fallback if no Xcode container is present
+                let pkgSwift = (workspaceRootPath as NSString).appendingPathComponent("Package.swift")
+                if FileManager.default.fileExists(atPath: pkgSwift) {
+                    return getBuildCommand(for: .swift, action: action, config: config, projectPath: workspaceRootPath)
+                }
+                return nil
+            }
+
+            let schemeName = resolveXcodeScheme(containerPath: actualProjectPath, workspaceRootPath: workspaceRootPath)
             let isWorkspace = actualProjectPath.hasSuffix(".xcworkspace")
             let projFlag = isWorkspace ? "-workspace" : "-project"
             
@@ -268,15 +277,16 @@ class ProjectManager: ObservableObject {
             }
             
         case .android:
+            let gradleExec = resolveGradleExecutable(at: projectPath)
             switch action {
             case .build:
-                return ("./gradlew", [isDebug ? "assembleDebug" : "assembleRelease"])
+                return (gradleExec, [isDebug ? "assembleDebug" : "assembleRelease"] + Self.gradleMemorySafeFlags)
             case .run:
-                return ("./gradlew", ["installDebug"])
+                return (gradleExec, ["installDebug"] + Self.gradleMemorySafeFlags)
             case .clean:
-                return ("./gradlew", ["clean"])
+                return (gradleExec, ["clean"] + Self.gradleMemorySafeFlags)
             case .test:
-                return ("./gradlew", ["test"])
+                return (gradleExec, ["test"] + Self.gradleMemorySafeFlags)
             default:
                 return nil
             }
@@ -314,15 +324,16 @@ class ProjectManager: ObservableObject {
             }
             
         case .kotlin:
+            let gradleExec = resolveGradleExecutable(at: projectPath)
             switch action {
             case .build:
-                return ("./gradlew", ["build"])
+                return (gradleExec, ["build"] + Self.gradleMemorySafeFlags)
             case .run:
-                return ("./gradlew", ["run"])
+                return (gradleExec, ["run"] + Self.gradleMemorySafeFlags)
             case .clean:
-                return ("./gradlew", ["clean"])
+                return (gradleExec, ["clean"] + Self.gradleMemorySafeFlags)
             case .test:
-                return ("./gradlew", ["test"])
+                return (gradleExec, ["test"] + Self.gradleMemorySafeFlags)
             default:
                 return nil
             }
@@ -358,11 +369,15 @@ class ProjectManager: ObservableObject {
         case .python:
             switch action {
             case .run:
-                return ("python3", ["main.py"])
+                return ("python3", [resolvePythonEntryScript(at: projectPath)])
             case .test:
                 return ("python3", ["-m", "pytest"])
             case .install:
-                return ("pip3", ["install", "-r", "requirements.txt"])
+                let reqPath = (projectPath as NSString).appendingPathComponent("requirements.txt")
+                if FileManager.default.fileExists(atPath: reqPath) {
+                    return ("pip3", ["install", "-r", "requirements.txt"])
+                }
+                return ("pip3", ["install", "-e", "."])
             default:
                 return nil
             }
@@ -480,14 +495,16 @@ class ProjectManager: ObservableObject {
             }
             
         case .ardium:
+            let arCompiler = resolveArdiumExecutable()
+            let arEntry = resolveArdiumEntryFile(at: projectPath)
             switch action {
             case .build:
-                // Use default main.ar if not specified, or just build the directory
-                return ("/usr/local/bin/ar", ["build", "main.ar"])
+                // Use default main.ar if present, or fallback to first .ar file in root
+                return (arCompiler, ["build", arEntry])
             case .run:
-                return ("/usr/local/bin/ar", ["run", "main.ar"])
+                return (arCompiler, ["run", arEntry])
             case .test:
-                return ("/usr/local/bin/ar", ["test", "."])
+                return (arCompiler, ["test", "."])
             default:
                 return nil
             }
@@ -531,7 +548,12 @@ class ProjectManager: ObservableObject {
         }
     }
     
-    func execute(action: ProjectAction, projectPath: URL, completion: @escaping (Bool, String) -> Void) {
+    func execute(
+        action: ProjectAction,
+        projectPath: URL,
+        onOutput: ((String) -> Void)? = nil,
+        completion: @escaping (Bool, String) -> Void
+    ) {
         guard !isRunning else {
             completion(false, "A process is already running")
             return
@@ -546,13 +568,10 @@ class ProjectManager: ObservableObject {
         var command = baseCommand
         let buildRoot = externalBuildRoot(for: projectPath)
         if let buildRoot {
-            switch projectType {
-            case .xcode:
+            if command.executable == "xcodebuild" {
                 command.arguments += ["-derivedDataPath", buildRoot.appendingPathComponent("derived-data").path]
-            case .swift:
+            } else if command.executable == "swift" {
                 command.arguments += ["--scratch-path", buildRoot.appendingPathComponent("swiftpm").path]
-            default:
-                break
             }
         }
         
@@ -560,40 +579,71 @@ class ProjectManager: ObservableObject {
             buildParser.clear()
         }
         
+        let developerPath = buildDeveloperPath()
+        let resolvedExecutable = findExecutable(command.executable, projectPath: projectPath, developerPath: developerPath)
+
         isRunning = true
-        output = "[\(projectType.rawValue)] \(action.rawValue)...\n"
-        output += "$ \(command.executable) \(command.arguments.joined(separator: " "))\n\n"
+        let initialBanner = "[\(projectType.rawValue)] \(action.rawValue)...\n$ \(command.executable) \(command.arguments.joined(separator: " "))\n\n"
+        output = initialBanner
+        onOutput?(initialBanner)
         
         let process = Process()
         process.currentDirectoryURL = projectPath
-        process.executableURL = URL(fileURLWithPath: findExecutable(command.executable))
+        process.executableURL = URL(fileURLWithPath: resolvedExecutable)
         process.arguments = command.arguments
 
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = developerPath
         if let buildRoot {
-            var environment = ProcessInfo.processInfo.environment
             environment["CARGO_HOME"] = buildRoot.deletingLastPathComponent().appendingPathComponent("cargo-home").path
             environment["CARGO_TARGET_DIR"] = buildRoot.deletingLastPathComponent().appendingPathComponent("cargo-target").path
             environment["RUSTUP_HOME"] = buildRoot.deletingLastPathComponent().appendingPathComponent("rustup-home").path
-            process.environment = environment
         }
+        process.environment = environment
         
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
         
+        let readHandle = pipe.fileHandleForReading
         var lineBuffer = ""
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        readHandle.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
                 return
             }
-            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                DispatchQueue.main.async {
-                    self?.output += text
-                    
+            let text = String(decoding: data, as: UTF8.self)
+            guard !text.isEmpty else { return }
+            DispatchQueue.main.async {
+                self?.output += text
+                onOutput?(text)
+                
+                if projectType == .xcode {
+                    lineBuffer += text
+                    var lines = lineBuffer.components(separatedBy: "\n")
+                    if let last = lines.popLast() {
+                        lineBuffer = last
+                    } else {
+                        lineBuffer = ""
+                    }
+                    for line in lines {
+                        self?.buildParser.parseLine(line)
+                    }
+                }
+            }
+        }
+        
+        process.terminationHandler = { [weak self] proc in
+            readHandle.readabilityHandler = nil
+            let trailingData = readHandle.readDataToEndOfFile()
+            let trailingText = trailingData.isEmpty ? "" : String(decoding: trailingData, as: UTF8.self)
+            DispatchQueue.main.async {
+                if !trailingText.isEmpty {
+                    self?.output += trailingText
+                    onOutput?(trailingText)
                     if projectType == .xcode {
-                        lineBuffer += text
+                        lineBuffer += trailingText
                         var lines = lineBuffer.components(separatedBy: "\n")
                         if let last = lines.popLast() {
                             lineBuffer = last
@@ -605,11 +655,7 @@ class ProjectManager: ObservableObject {
                         }
                     }
                 }
-            }
-        }
-        
-        process.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async {
+
                 self?.isRunning = false
                 self?.currentProcess = nil
                 
@@ -619,7 +665,9 @@ class ProjectManager: ObservableObject {
                 }
                 
                 let success = proc.terminationStatus == 0
-                self?.output += "\n\(success ? "✅" : "❌") \(action.rawValue) \(success ? "succeeded" : "failed") (exit code: \(proc.terminationStatus))\n"
+                let summaryLine = "\n\(success ? "✅" : "❌") \(action.rawValue) \(success ? "succeeded" : "failed") (exit code: \(proc.terminationStatus))\n"
+                self?.output += summaryLine
+                onOutput?(summaryLine)
                 completion(success, self?.output ?? "")
             }
         }
@@ -628,8 +676,11 @@ class ProjectManager: ObservableObject {
             try process.run()
             currentProcess = process
         } catch {
+            readHandle.readabilityHandler = nil
             isRunning = false
-            output += "❌ Failed to start: \(error.localizedDescription)\n"
+            let failLine = "❌ Failed to start '\(command.executable)': \(error.localizedDescription)\n"
+            output += failLine
+            onOutput?(failLine)
             completion(false, output)
         }
     }
@@ -642,23 +693,403 @@ class ProjectManager: ObservableObject {
     }
     
     // MARK: - Helpers
-    
-    private func findExecutable(_ name: String) -> String {
-        // Common executable paths
-        let paths = [
-            "/opt/homebrew/bin/\(name)",
-            "/usr/local/bin/\(name)",
-            "/usr/bin/\(name)",
-            "/bin/\(name)",
-            name
+
+    private func buildDeveloperPath() -> String {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+
+        var candidateDirs: [String] = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/go/bin",
+            "\(home)/.bun/bin",
+            "\(home)/.dotnet",
+            "\(home)/.local/bin",
+            "\(home)/Library/Android/sdk/platform-tools",
+            "\(home)/Library/Android/sdk/cmdline-tools/latest/bin",
+            "\(home)/development/flutter/bin",
+            "\(home)/flutter/bin",
+            "\(home)/.pub-cache/bin",
+            "\(home)/.ardium/bin"
         ]
-        
-        for path in paths {
-            if FileManager.default.fileExists(atPath: path) {
-                return path
+
+        // Include newest ~/.nvm/versions/node/*/bin directory if present
+        let nvmVersionsDir = "\(home)/.nvm/versions/node"
+        if let versions = try? fm.contentsOfDirectory(atPath: nvmVersionsDir) {
+            let sortedNewestFirst = versions.sorted {
+                $0.localizedStandardCompare($1) == .orderedDescending
+            }
+            if let newest = sortedNewestFirst.first(where: {
+                fm.fileExists(atPath: "\(nvmVersionsDir)/\($0)/bin")
+            }) {
+                candidateDirs.insert("\(nvmVersionsDir)/\(newest)/bin", at: 3)
             }
         }
-        
+
+        candidateDirs.append(contentsOf: ["/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+
+        if let existingPath = ProcessInfo.processInfo.environment["PATH"], !existingPath.isEmpty {
+            for entry in existingPath.split(separator: ":").map(String.init) where !entry.isEmpty {
+                candidateDirs.append(entry)
+            }
+        }
+
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for dir in candidateDirs where !dir.isEmpty {
+            if seen.insert(dir).inserted {
+                ordered.append(dir)
+            }
+        }
+        return ordered.joined(separator: ":")
+    }
+    
+    private func findExecutable(_ name: String, projectPath: URL? = nil, developerPath: String? = nil) -> String {
+        let fm = FileManager.default
+
+        // 1. Project-relative paths such as ./gradlew or ./vendor/bin/phpunit
+        if name.hasPrefix("./") || (!name.hasPrefix("/") && name.contains("/")) {
+            if let projectPath {
+                let relative = name.hasPrefix("./") ? String(name.dropFirst(2)) : name
+                let resolved = projectPath.appendingPathComponent(relative).standardizedFileURL.path
+                if fm.fileExists(atPath: resolved) {
+                    if !fm.isExecutableFile(atPath: resolved) && relative == "gradlew" {
+                        ensureExecutablePermission(at: resolved)
+                    }
+                    return resolved
+                }
+            }
+            return name
+        }
+
+        // 2. Explicit absolute path
+        if name.hasPrefix("/") {
+            if fm.fileExists(atPath: name) {
+                return name
+            }
+            // Do not fall back from Ardium compiler to /usr/bin/ar static archiver
+            if name.hasSuffix("/ar") {
+                return resolveArdiumExecutable()
+            }
+        }
+
+        // 3. Search across enriched developer PATH
+        let pathString = developerPath ?? buildDeveloperPath()
+        for dir in pathString.split(separator: ":").map(String.init) where !dir.isEmpty {
+            let candidate = (dir as NSString).appendingPathComponent(name)
+            if fm.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+
+        for dir in pathString.split(separator: ":").map(String.init) where !dir.isEmpty {
+            let candidate = (dir as NSString).appendingPathComponent(name)
+            if fm.fileExists(atPath: candidate) {
+                return candidate
+            }
+        }
+
         return name
+    }
+
+    private func ensureExecutablePermission(at path: String) {
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfItem(atPath: path),
+           let perms = attrs[.posixPermissions] as? NSNumber {
+            let updated = perms.uint16Value | 0o755
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: updated)], ofItemAtPath: path)
+        } else {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        }
+    }
+
+    private func resolveGradleExecutable(at projectPath: String) -> String {
+        let fm = FileManager.default
+        let gradlewPath = (projectPath as NSString).appendingPathComponent("gradlew")
+        if fm.fileExists(atPath: gradlewPath) {
+            if !fm.isExecutableFile(atPath: gradlewPath) {
+                ensureExecutablePermission(at: gradlewPath)
+            }
+            return "./gradlew"
+        }
+        return "gradle"
+    }
+
+    private func resolvePythonEntryScript(at projectPath: String) -> String {
+        let fm = FileManager.default
+        for preferred in ["main.py", "app.py", "run.py", "manage.py"] {
+            let candidate = (projectPath as NSString).appendingPathComponent(preferred)
+            if fm.fileExists(atPath: candidate) {
+                return preferred
+            }
+        }
+        let contents = (try? fm.contentsOfDirectory(atPath: projectPath)) ?? []
+        let pyFiles = contents.filter { $0.lowercased().hasSuffix(".py") }.sorted()
+        let ignored = Set(["setup.py", "conftest.py", "__init__.py"])
+        if let firstAppPy = pyFiles.first(where: { !ignored.contains($0.lowercased()) }) {
+            return firstAppPy
+        }
+        return pyFiles.first ?? "main.py"
+    }
+
+    private func resolveArdiumExecutable() -> String {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        let candidates = [
+            "/opt/homebrew/bin/ar",
+            "/usr/local/bin/ar",
+            "\(home)/.ardium/bin/ar"
+        ]
+        for path in candidates where fm.isExecutableFile(atPath: path) {
+            return path
+        }
+        return "/opt/homebrew/bin/ar"
+    }
+
+    private func resolveArdiumEntryFile(at projectPath: String) -> String {
+        let fm = FileManager.default
+        let mainPath = (projectPath as NSString).appendingPathComponent("main.ar")
+        if fm.fileExists(atPath: mainPath) {
+            return "main.ar"
+        }
+        let contents = (try? fm.contentsOfDirectory(atPath: projectPath)) ?? []
+        if let firstAr = contents.filter({ $0.lowercased().hasSuffix(".ar") }).sorted().first {
+            return firstAr
+        }
+        return "main.ar"
+    }
+
+    private func resolveXcodeContainerPath(in directoryPath: String, contents: [String]) -> String? {
+        let fm = FileManager.default
+        let folderName = URL(fileURLWithPath: directoryPath).lastPathComponent.lowercased()
+
+        let workspaces = contents
+            .filter { $0.lowercased().hasSuffix(".xcworkspace") && $0.lowercased() != "project.xcworkspace" }
+            .filter {
+                let full = (directoryPath as NSString).appendingPathComponent($0)
+                return fm.fileExists(atPath: (full as NSString).appendingPathComponent("contents.xcworkspacedata"))
+                    || fm.fileExists(atPath: full)
+            }
+            .sorted { lhs, rhs in
+                let lMatch = URL(fileURLWithPath: lhs).deletingPathExtension().lastPathComponent.lowercased() == folderName
+                let rMatch = URL(fileURLWithPath: rhs).deletingPathExtension().lastPathComponent.lowercased() == folderName
+                if lMatch != rMatch { return lMatch }
+                return lhs.localizedStandardCompare(rhs) == .orderedAscending
+            }
+
+        if let ws = workspaces.first {
+            return (directoryPath as NSString).appendingPathComponent(ws)
+        }
+
+        let projects = contents
+            .filter { $0.lowercased().hasSuffix(".xcodeproj") }
+            .filter {
+                let full = (directoryPath as NSString).appendingPathComponent($0)
+                return fm.fileExists(atPath: (full as NSString).appendingPathComponent("project.pbxproj"))
+            }
+            .sorted { lhs, rhs in
+                let lMatch = URL(fileURLWithPath: lhs).deletingPathExtension().lastPathComponent.lowercased() == folderName
+                let rMatch = URL(fileURLWithPath: rhs).deletingPathExtension().lastPathComponent.lowercased() == folderName
+                if lMatch != rMatch { return lMatch }
+                return lhs.localizedStandardCompare(rhs) == .orderedAscending
+            }
+
+        if let proj = projects.first {
+            return (directoryPath as NSString).appendingPathComponent(proj)
+        }
+
+        return nil
+    }
+
+    private func resolveXcodeScheme(containerPath: String, workspaceRootPath: String) -> String {
+        schemeCacheLock.lock()
+        if let cached = xcodeSchemeCache[containerPath] {
+            schemeCacheLock.unlock()
+            return cached
+        }
+        schemeCacheLock.unlock()
+
+        let containerName = URL(fileURLWithPath: containerPath).deletingPathExtension().lastPathComponent
+        let folderName = URL(fileURLWithPath: workspaceRootPath).lastPathComponent
+
+        // 1. Fast disk scan of shared & user .xcscheme files inside the container
+        var diskSchemes = collectSchemeFiles(inContainer: containerPath)
+
+        // If container is an .xcworkspace without schemes directly inside it, scan sibling .xcodeproj containers
+        if diskSchemes.isEmpty && containerPath.lowercased().hasSuffix(".xcworkspace") {
+            let siblings = (try? FileManager.default.contentsOfDirectory(atPath: workspaceRootPath)) ?? []
+            for item in siblings.sorted() where item.lowercased().hasSuffix(".xcodeproj") {
+                let projPath = (workspaceRootPath as NSString).appendingPathComponent(item)
+                diskSchemes.append(contentsOf: collectSchemeFiles(inContainer: projPath))
+            }
+        }
+
+        if let chosen = selectPreferredScheme(from: diskSchemes, containerName: containerName, folderName: folderName) {
+            cacheXcodeScheme(chosen, for: containerPath)
+            return chosen
+        }
+
+        // 2. Query `xcodebuild -list -json` with a short timeout for Xcode auto-generated schemes
+        if let listed = queryXcodebuildSchemes(containerPath: containerPath, workspaceRootPath: workspaceRootPath),
+           let chosen = selectPreferredScheme(from: listed, containerName: containerName, folderName: folderName) {
+            cacheXcodeScheme(chosen, for: containerPath)
+            return chosen
+        }
+
+        // 3. Parse PBXNativeTarget names from project.pbxproj if available
+        let pbxprojCandidates: [String] = {
+            if containerPath.lowercased().hasSuffix(".xcodeproj") {
+                return [(containerPath as NSString).appendingPathComponent("project.pbxproj")]
+            }
+            let siblings = (try? FileManager.default.contentsOfDirectory(atPath: workspaceRootPath)) ?? []
+            return siblings
+                .filter { $0.lowercased().hasSuffix(".xcodeproj") }
+                .map { ((workspaceRootPath as NSString).appendingPathComponent($0) as NSString).appendingPathComponent("project.pbxproj") }
+        }()
+
+        for pbxPath in pbxprojCandidates {
+            if let text = try? String(contentsOfFile: pbxPath, encoding: .utf8) {
+                let targets = parsePBXNativeTargets(from: text)
+                if let chosen = selectPreferredScheme(from: targets, containerName: containerName, folderName: folderName) {
+                    cacheXcodeScheme(chosen, for: containerPath)
+                    return chosen
+                }
+            }
+        }
+
+        return containerName
+    }
+
+    private func cacheXcodeScheme(_ scheme: String, for containerPath: String) {
+        schemeCacheLock.lock()
+        xcodeSchemeCache[containerPath] = scheme
+        schemeCacheLock.unlock()
+    }
+
+    private func collectSchemeFiles(inContainer containerPath: String) -> [String] {
+        let fm = FileManager.default
+        var found: [String] = []
+
+        // Shared schemes
+        let sharedDir = (containerPath as NSString).appendingPathComponent("xcshareddata/xcschemes")
+        if let items = try? fm.contentsOfDirectory(atPath: sharedDir) {
+            for item in items.sorted() where item.hasSuffix(".xcscheme") {
+                found.append(URL(fileURLWithPath: item).deletingPathExtension().lastPathComponent)
+            }
+        }
+
+        // User-specific schemes
+        let userDataDir = (containerPath as NSString).appendingPathComponent("xcuserdata")
+        if let userDirs = try? fm.contentsOfDirectory(atPath: userDataDir) {
+            for userDir in userDirs.sorted() where userDir.hasSuffix(".xcuserdatad") {
+                let schemesDir = ((userDataDir as NSString).appendingPathComponent(userDir) as NSString)
+                    .appendingPathComponent("xcschemes")
+                if let items = try? fm.contentsOfDirectory(atPath: schemesDir) {
+                    for item in items.sorted() where item.hasSuffix(".xcscheme") {
+                        let name = URL(fileURLWithPath: item).deletingPathExtension().lastPathComponent
+                        if !found.contains(name) {
+                            found.append(name)
+                        }
+                    }
+                }
+            }
+        }
+
+        return found
+    }
+
+    private func selectPreferredScheme(from candidates: [String], containerName: String, folderName: String) -> String? {
+        let cleaned = candidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return nil }
+
+        let nonPods = cleaned.filter { !$0.hasPrefix("Pods-") && $0 != "Pods" }
+        let pool = nonPods.isEmpty ? cleaned : nonPods
+        let nonTests = pool.filter {
+            let lower = $0.lowercased()
+            return !lower.hasSuffix("tests") && !lower.hasSuffix("uitests")
+        }
+        let primaryPool = nonTests.isEmpty ? pool : nonTests
+
+        if let exactContainer = primaryPool.first(where: { $0.caseInsensitiveCompare(containerName) == .orderedSame }) {
+            return exactContainer
+        }
+        if let exactFolder = primaryPool.first(where: { $0.caseInsensitiveCompare(folderName) == .orderedSame }) {
+            return exactFolder
+        }
+        return primaryPool.first
+    }
+
+    private func queryXcodebuildSchemes(containerPath: String, workspaceRootPath: String) -> [String]? {
+        let xcodebuildPath = "/usr/bin/xcodebuild"
+        guard FileManager.default.isExecutableFile(atPath: xcodebuildPath) else { return nil }
+
+        let isWorkspace = containerPath.lowercased().hasSuffix(".xcworkspace")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: xcodebuildPath)
+        proc.arguments = [isWorkspace ? "-workspace" : "-project", containerPath, "-list", "-json"]
+        proc.currentDirectoryURL = URL(fileURLWithPath: workspaceRootPath)
+
+        let outPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = FileHandle.nullDevice
+
+        let done = DispatchSemaphore(value: 0)
+        var collectedData = Data()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            collectedData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            done.signal()
+        }
+
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+
+        let waitResult = done.wait(timeout: .now() + 3.5)
+        if waitResult == .timedOut {
+            if proc.isRunning { proc.terminate() }
+            return nil
+        }
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0,
+              let json = try? JSONSerialization.jsonObject(with: collectedData) as? [String: Any] else {
+            return nil
+        }
+
+        if let ws = json["workspace"] as? [String: Any],
+           let schemes = ws["schemes"] as? [String], !schemes.isEmpty {
+            return schemes
+        }
+        if let proj = json["project"] as? [String: Any] {
+            if let schemes = proj["schemes"] as? [String], !schemes.isEmpty {
+                return schemes
+            }
+            if let targets = proj["targets"] as? [String], !targets.isEmpty {
+                return targets
+            }
+        }
+        return nil
+    }
+
+    private func parsePBXNativeTargets(from pbxprojText: String) -> [String] {
+        let pattern = #"isa\s*=\s*PBXNativeTarget;[^}]*?\bname\s*=\s*"?([^";\r\n]+)"?\s*;"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return [] }
+        let nsRange = NSRange(pbxprojText.startIndex..<pbxprojText.endIndex, in: pbxprojText)
+        var results: [String] = []
+        for match in regex.matches(in: pbxprojText, options: [], range: nsRange) {
+            if let range = Range(match.range(at: 1), in: pbxprojText) {
+                let targetName = String(pbxprojText[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !targetName.isEmpty && !results.contains(targetName) {
+                    results.append(targetName)
+                }
+            }
+        }
+        return results
     }
 }

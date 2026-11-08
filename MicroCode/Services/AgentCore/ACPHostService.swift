@@ -10,6 +10,49 @@ import Foundation
 import SwiftUI
 import Combine
 
+// MARK: - ACP Managed Terminal (ACP v1 `terminal/*` Bidirectional Support)
+
+final class ACPManagedTerminal {
+    let id: String
+    let process: Process
+    let pipe: Pipe
+    private let lock = NSLock()
+    private var buffer: String = ""
+
+    init(id: String, process: Process, pipe: Pipe) {
+        self.id = id
+        self.process = process
+        self.pipe = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
+            self?.appendOutput(chunk)
+        }
+    }
+
+    private func appendOutput(_ text: String) {
+        lock.lock()
+        buffer += text
+        if buffer.count > 200_000 {
+            buffer = String(buffer.suffix(150_000))
+        }
+        lock.unlock()
+    }
+
+    func currentOutput() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer
+    }
+
+    func stop() {
+        pipe.fileHandleForReading.readabilityHandler = nil
+        if process.isRunning {
+            process.terminate()
+        }
+    }
+}
+
 // MARK: - ACP Agent Session
 
 /// Represents an active connection to an external coding agent
@@ -33,6 +76,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private var ndjsonParser = ACPNDJSONParser()
     private var timer: Timer?
     private var taskStartTime: Date?
+    private var managedTerminals: [String: ACPManagedTerminal] = [:]
     
     /// Continuation for streaming events to async consumers
     private var eventContinuation: AsyncStream<ACPStreamEvent>.Continuation?
@@ -101,6 +145,10 @@ class ACPAgentSession: ObservableObject, Identifiable {
     /// Terminate background process resources without closing the async continuation
     private func terminateCurrentProcess() {
         processGeneration = UUID()
+        for term in managedTerminals.values {
+            term.stop()
+        }
+        managedTerminals.removeAll()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         if let proc = process, proc.isRunning {
@@ -225,6 +273,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         self.activeTurnUsesAGYBridge = useAGYBridge
         if config.type == .agy || useAGYBridge {
             Self.sanitizeAGYMCPConfigsIfNeeded()
+            ACPMCPBridgeBuilder.ensureAGYMCPBridgeRegistered(workspacePath: workspacePath)
         }
         let generation = processGeneration
         
@@ -555,6 +604,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         // 9Router Smart Gateway proxy injection for external CLI harnesses when enabled
         let routeHarnessesVia9Router = UserDefaults.standard.bool(forKey: "use9RouterForHarnesses")
         if routeHarnessesVia9Router {
+            LocalSubscriptionGatewayService.shared.startIfNeeded()
             let routerBase = (UserDefaults.standard.string(forKey: "9router_base_url") ?? "http://127.0.0.1:20128/v1")
                 .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let routerRoot = routerBase.hasSuffix("/v1") ? String(routerBase.dropLast(3)) : routerBase
@@ -599,7 +649,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         // Build arguments based on agent type (CLI fallback mode)
         switch effectiveType {
         case .claudeCode:
-            process.arguments = buildClaudeCodeArgs(task: task, model: self.model)
+            process.arguments = buildClaudeCodeArgs(task: task, model: self.model, workspacePath: workspacePath)
         case .agy:
             process.arguments = buildAGYArgs(task: task, model: self.model, extraArgs: safeExtraArgs)
         case .openCode:
@@ -607,7 +657,8 @@ class ACPAgentSession: ObservableObject, Identifiable {
         case .codexEngine:
             process.arguments = CodexProcessArguments.build(
                 task: task, model: self.model, sessionID: sessionId,
-                permissionMode: config.permissionMode, extra: safeExtraArgs
+                permissionMode: config.permissionMode, extra: safeExtraArgs,
+                workspacePath: workspacePath
             )
         case .geminiCLI:
             var args = ["-p", task, "--output-format", "stream-json", "--yolo"]
@@ -666,14 +717,20 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
     }
     
-    /// Build Claude Code CLI arguments
-    private func buildClaudeCodeArgs(task: String, model: String? = nil) -> [String] {
+    /// Build Claude Code CLI arguments (with automatic MicroCode IDE MCP Superpower Bridge)
+    private func buildClaudeCodeArgs(task: String, model: String? = nil, workspacePath: String? = nil) -> [String] {
         var args = [
             "-p", task,
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose"
         ]
+        
+        if let ws = workspacePath, !ws.isEmpty,
+           !config.arguments.contains("--mcp-config"),
+           let bridgePath = ACPMCPBridgeBuilder.writeClaudeMCPConfigFile(workspacePath: ws) {
+            args += ["--mcp-config", bridgePath]
+        }
         
         var resolvedModelAlias: String? = nil
         if let rawModel = model?.trimmingCharacters(in: .whitespacesAndNewlines), !rawModel.isEmpty {
@@ -1222,6 +1279,90 @@ class ACPAgentSession: ObservableObject, Identifiable {
                     writeJsonRpc(ACPStandardJsonRpcParser.buildPermissionResponse(requestId: reqId, optionId: allowId))
                     return
                 }
+                
+            case "terminal/create":
+                let cmd = (params["command"] as? String) ?? "/bin/zsh"
+                let cmdArgs = (params["args"] as? [String]) ?? []
+                let cwd = (params["cwd"] as? String).map { resolveWorkspacePath($0) }
+                    ?? (activeWorkspacePath.isEmpty ? FileManager.default.currentDirectoryPath : activeWorkspacePath)
+                let termId = "term_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)
+                let proc = Process()
+                let pipe = Pipe()
+                if cmd.hasPrefix("/") {
+                    proc.executableURL = URL(fileURLWithPath: cmd)
+                    proc.arguments = cmdArgs
+                } else {
+                    proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                    let fullLine = ([cmd] + cmdArgs).joined(separator: " ")
+                    proc.arguments = ["-lc", fullLine]
+                }
+                proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
+                proc.standardOutput = pipe
+                proc.standardError = pipe
+                var env = ProcessInfo.processInfo.environment
+                if let envArr = params["env"] as? [[String: Any]] {
+                    for entry in envArr {
+                        if let k = entry["name"] as? String, let v = entry["value"] as? String {
+                            env[k] = v
+                        }
+                    }
+                }
+                proc.environment = env
+                do {
+                    try proc.run()
+                    managedTerminals[String(termId)] = ACPManagedTerminal(id: String(termId), process: proc, pipe: pipe)
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": ["terminalId": String(termId)]])
+                } catch {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32000, "message": error.localizedDescription]])
+                }
+                return
+
+            case "terminal/output":
+                guard let termId = params["terminalId"] as? String,
+                      let term = managedTerminals[termId] else {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32602, "message": "Unknown terminalId"]])
+                    return
+                }
+                var res: [String: Any] = [
+                    "output": term.currentOutput(),
+                    "truncated": false
+                ]
+                if !term.process.isRunning {
+                    res["exitStatus"] = ["exitCode": Int(term.process.terminationStatus)]
+                }
+                writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": res])
+                return
+
+            case "terminal/wait_for_exit":
+                guard let termId = params["terminalId"] as? String,
+                      let term = managedTerminals[termId] else {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32602, "message": "Unknown terminalId"]])
+                    return
+                }
+                let proc = term.process
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    proc.waitUntilExit()
+                    let code = Int(proc.terminationStatus)
+                    DispatchQueue.main.async {
+                        self?.writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": ["exitCode": code]])
+                    }
+                }
+                return
+
+            case "terminal/kill":
+                if let termId = params["terminalId"] as? String, let term = managedTerminals[termId] {
+                    term.stop()
+                }
+                writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": [:] as [String: Any]])
+                return
+
+            case "terminal/release":
+                if let termId = params["terminalId"] as? String, let term = managedTerminals.removeValue(forKey: termId) {
+                    term.stop()
+                }
+                writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": [:] as [String: Any]])
+                return
+
             default:
                 break
             }

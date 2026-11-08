@@ -16,14 +16,8 @@ struct InlineSubAgentCard: View {
                 ZStack {
                     if subagent.state == .running {
                         Circle()
-                            .fill(Color.primary.opacity(0.1))
+                            .fill(Color.accentColor.opacity(0.16))
                             .frame(width: 20, height: 20)
-                            .scaleEffect(isPulsing ? 1.3 : 1.0)
-                            .opacity(isPulsing ? 0 : 0.5)
-                            .animation(
-                                Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: false),
-                                value: isPulsing
-                            )
                     }
                     
                     Image(systemName: subagent.state.statusIcon)

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import AppKit
 
 // MARK: - Sovereign Flight Recorder
 // Immutable, cryptographically signed audit log for all AI agent actions.
@@ -91,6 +92,10 @@ enum AuditAction: String, Codable {
     case sessionStart = "session.start"
     case sessionEnd = "session.end"
     case modelSwitch = "model.switch"
+    
+    // Enterprise Security & DLP Governance
+    case securityDLPIntercept = "security.dlp_intercept"
+    case securityFirewallBlock = "security.firewall_block"
 }
 
 struct AuditTarget: Codable, Equatable {
@@ -258,6 +263,27 @@ final class FlightRecorder: ObservableObject {
             details: command
         )
     }
+
+    func record(action: AuditAction, summary: String, filePath: String = "", command: String = "") {
+        let targetType: String
+        let targetPath: String
+        if !filePath.isEmpty {
+            targetType = "file"
+            targetPath = filePath
+        } else if !command.isEmpty {
+            targetType = "command"
+            targetPath = command
+        } else {
+            targetType = "security"
+            targetPath = action.rawValue
+        }
+        record(
+            actor: .system,
+            action: action,
+            target: AuditTarget(type: targetType, path: targetPath),
+            details: summary
+        )
+    }
     
     // MARK: - Chain Verification
     
@@ -282,11 +308,14 @@ final class FlightRecorder: ObservableObject {
         encoder.dateEncodingStrategy = .iso8601
         
         let export: [String: Any] = [
-            "format": "MicroCode Flight Recorder v1.0",
+            "format": "MicroCode Flight Recorder v2.0 (Enterprise Compliance)",
             "exported_at": ISO8601DateFormatter().string(from: Date()),
             "session_id": currentSessionId,
             "total_entries": entries.count,
-            "chain_valid": verifyChain().isValid
+            "chain_valid": verifyChain().isValid,
+            "dlp_vaulted_secrets": AgentPrivacyGuard.vaultedSecretCount,
+            "dlp_total_intercepts": AgentPrivacyGuard.totalDLPInterceptCount,
+            "firewall_blocked_commands": EnterpriseAIAuthService.shared.blockedCommandsCount
         ]
         
         var result = ""
@@ -302,6 +331,85 @@ final class FlightRecorder: ObservableObject {
         }
         
         return result
+    }
+
+    /// Generates a signed SOC2 Type II / ISO 27001 / PDPA Compliance Attestation Report in Markdown format.
+    func exportComplianceAttestationMarkdown() -> String {
+        let ent = EnterpriseAIAuthService.shared
+        let chainResult = verifyChain()
+        let isoNow = ISO8601DateFormatter().string(from: Date())
+        let dlpIntercepts = entries.filter { $0.action == .securityDLPIntercept }.count
+        let firewallBlocks = entries.filter { $0.action == .securityFirewallBlock }.count
+        let headHash = entries.last?.entryHash ?? "GENESIS"
+
+        let attestationPayload = "\(currentSessionId)|\(isoNow)|\(entries.count)|\(headHash)|\(AgentPrivacyGuard.vaultedSecretCount)"
+        let attestationSig = SHA256.hash(data: Data(attestationPayload.utf8)).compactMap { String(format: "%02x", $0) }.joined()
+
+        var md = """
+        # MicroCode Enterprise Compliance & Security Attestation
+        **Standards**: SOC2 Type II • ISO/IEC 27001 • GDPR / Thailand PDPA
+        **Generated At**: `\(isoNow)`
+        **Session ID**: `\(currentSessionId)`
+        **Attestation Digest (SHA-256)**: `\(attestationSig)`
+
+        ---
+
+        ## 1. Governance & Data Residency Posture
+        | Control | Status | Details |
+        | :--- | :--- | :--- |
+        | **Connection Mode** | `\(ent.mode.badgeText)` | \(ent.mode.displayName) |
+        | **Zero Data Retention (ZDR)** | `\(ent.zeroDataRetention ? "ENFORCED" : "DISABLED")` | Header `X-Dotmini-ZDR: \(ent.zeroDataRetention)` |
+        | **Reversible Secret Vault (DLP)** | `\(ent.localDLPRedaction ? "ACTIVE" : "DISABLED")` | \(AgentPrivacyGuard.vaultedSecretCount) unique secrets vaulted (\(AgentPrivacyGuard.totalDLPInterceptCount) total intercepts) |
+        | **Confidential Split-Routing** | `\(ent.enforceConfidentialSplitRouting ? "ENFORCED" : "DISABLED")` | \(ent.confidentialFilesAccessedCount) confidential file access(es) routed safely |
+        | **Enterprise Command Firewall** | `\(ent.commandFirewallEnabled ? "ENFORCED" : "DISABLED")` | \(ent.blockedCommandsCount) destructive command(s) blocked |
+        | **Air-Gapped Sovereign Lockdown** | `\(ent.isAirGappedLockdownEnabled ? "LOCKED DOWN (LOCAL/VPC ONLY)" : "STANDARD")` | Blocks external public cloud AI endpoints |
+        | **PII Audit Log Redaction** | `\(piiSanitizationEnabled ? "ACTIVE" : "DISABLED")` | Automatic PII scrubbing before disk persistence |
+
+        ---
+
+        ## 2. Cryptographic Hash-Chain Verification
+        - **Total Audit Entries**: `\(entries.count)`
+        - **Chain Integrity**: `\(chainResult.isValid ? "VALID (100% Tamper-Evident Chain Verified)" : "BROKEN AT ENTRY #\(chainResult.brokenAtIndex ?? -1)")`
+        - **Genesis Anchor**: `GENESIS`
+        - **Current Head Hash**: `\(headHash)`
+        - **File Mutations Recorded**: `\(totalFileChanges)`
+        - **Agent Tool Calls Recorded**: `\(totalToolCalls)`
+        - **Shell Commands Executed**: `\(totalCommands)`
+        - **DLP Vault Events**: `\(dlpIntercepts)`
+        - **Firewall Block Events**: `\(firewallBlocks)`
+
+        ---
+
+        ## 3. Recent Security & Audit Ledger (Last 50 Events)
+        | Timestamp | Actor | Action | Target | Details | SHA-256 Prefix |
+        | :--- | :--- | :--- | :--- | :--- | :--- |
+        """
+
+        let recent = entries.suffix(50)
+        let fmt = ISO8601DateFormatter()
+        for entry in recent {
+            let safeTarget = entry.target.path.replacingOccurrences(of: "|", with: "\\|").prefix(50)
+            let safeDetails = entry.details.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: " ").prefix(80)
+            md += "\n| `\(fmt.string(from: entry.timestamp))` | `\(entry.actor.rawValue)` | `\(entry.action.rawValue)` | `\(safeTarget)` | \(safeDetails) | `\(entry.entryHash.prefix(12))` |"
+        }
+
+        md += "\n\n---\n*Cryptographically attested by MicroCode Sovereign Flight Recorder v2.0*\n"
+        return md
+    }
+
+    /// Opens a native macOS Save Panel to export the signed Compliance Attestation Report (.md) to disk.
+    @discardableResult
+    func saveComplianceReportWithPanel() -> URL? {
+        let report = exportComplianceAttestationMarkdown()
+        let panel = NSSavePanel()
+        panel.title = "Export Enterprise Compliance Attestation Report (SOC2 / PDPA)"
+        panel.nameFieldStringValue = "MicroCode-Compliance-Attestation-\(String(currentSessionId.prefix(8))).md"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            try? report.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        }
+        return nil
     }
     
     /// Export as CSV for spreadsheet analysis

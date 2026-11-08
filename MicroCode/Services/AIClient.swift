@@ -15,6 +15,7 @@
 import Foundation
 import Combine
 import AppKit
+import ImageIO
 import PDFKit
 import AVFoundation
 import CoreGraphics
@@ -46,25 +47,79 @@ enum StreamableAIProvider: String, CaseIterable {
     case glm = "glm"
     case copilot = "copilot"
     case aipass = "aipass"
+    case custom = "custom"
     case local = "local"
     
     /// Dotmini Cloud proxy URL (license key route — hides real API keys)
     static var cloudProxyURL: String {
-        UserDefaults.standard.string(forKey: "dotminiProxyURL")
-            ?? "https://api.dotmini.net/v1"
+        if let custom = UserDefaults.standard.string(forKey: "dotminiProxyURL"),
+           !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return custom.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return "https://microcode.dotmini.net/v1"
+    }
+
+    static func isDotminiCloudProxy(_ urlString: String) -> Bool {
+        let clean = urlString.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        let configured = Self.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        return clean == configured
+            || clean == "https://microcode.dotmini.net/v1"
+            || clean == "https://api.dotmini.net/v1"
+            || clean == "https://microai.dotmini.net/v1"
     }
     
     /// Base URL when routing through Dotmini Cloud proxy
     var cloudBaseURL: String {
         switch self {
         case .local: return LocalLLMService.cachedEndpoint
-        case .ninerouter: return directBaseURL
+        case .ninerouter, .custom: return directBaseURL
         default: return Self.cloudProxyURL
         }
     }
-    
-    /// Base URL when user provides their own API key (direct to provider)
-    var directBaseURL: String {
+
+    /// Normalizes a user-configured BYOK custom Base URL (e.g. Cloudflare Tunnel `https://xxx.trycloudflare.com/v1`,
+    /// custom OpenAI proxy, or custom Anthropic/Claude endpoint). Strictly isolated from Local/LAN LLM.
+    static func normalizeByokBaseURL(_ raw: String, for providerId: String) -> String? {
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if !trimmed.contains("://") {
+            trimmed = "https://\(trimmed)"
+        }
+        while trimmed.hasSuffix("/") {
+            trimmed.removeLast()
+        }
+        for suffix in ["/chat/completions", "/messages", "/models"] {
+            if trimmed.lowercased().hasSuffix(suffix) {
+                trimmed = String(trimmed.dropLast(suffix.count))
+                break
+            }
+        }
+        if let comps = URLComponents(string: trimmed),
+           let host = comps.host, !host.isEmpty {
+            let path = comps.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if path.isEmpty && providerId.lowercased() != "perplexity" && providerId.lowercased() != "aipass" && providerId.lowercased() != "copilot" {
+                let defaultSuffix = (providerId.lowercased() == "gemini") ? "/v1beta" : "/v1"
+                trimmed += defaultSuffix
+            }
+        }
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func customByokBaseURL(for providerId: String) -> String? {
+        let key = "byok_base_url_\(providerId.lowercased())"
+        guard let saved = UserDefaults.standard.string(forKey: key) else { return nil }
+        return normalizeByokBaseURL(saved, for: providerId)
+    }
+
+    static func hasCustomByokBaseURL(for providerId: String) -> Bool {
+        guard let custom = customByokBaseURL(for: providerId), !custom.isEmpty else { return false }
+        if let prov = StreamableAIProvider(rawValue: providerId.lowercased()), prov != .custom {
+            return custom.lowercased() != prov.defaultOfficialBaseURL.lowercased()
+        }
+        return true
+    }
+
+    var defaultOfficialBaseURL: String {
         switch self {
         case .omni: return "https://api.dotmini.net/v1"
         case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
@@ -90,8 +145,17 @@ enum StreamableAIProvider: String, CaseIterable {
         case .glm: return "https://api.z.ai/api/paas/v4"
         case .copilot: return "https://api.githubcopilot.com"
         case .aipass: return "https://de.aipass.net"
+        case .custom: return "https://api.openai.com/v1"
         case .local: return LocalLLMService.cachedEndpoint
         }
+    }
+    
+    /// Base URL when user provides their own API key (direct to provider or custom BYOK Base URL / Cloudflare Tunnel)
+    var directBaseURL: String {
+        if self != .local, let custom = Self.customByokBaseURL(for: self.rawValue) {
+            return custom
+        }
+        return defaultOfficialBaseURL
     }
     
     var defaultModel: String {
@@ -136,6 +200,9 @@ enum StreamableAIProvider: String, CaseIterable {
         case .local: return LocalLLMService.cachedModel
         case .copilot: return "auto"
         case .aipass: return "gemini-2.5-flash"
+        case .custom:
+            let saved = UserDefaults.standard.string(forKey: "byok_custom_model_custom")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return saved.isEmpty ? "gpt-4.1" : saved
         }
     }
     
@@ -144,7 +211,7 @@ enum StreamableAIProvider: String, CaseIterable {
         switch self {
         case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
              .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
-             .grok, .qwen, .glm, .copilot, .local:
+             .grok, .qwen, .glm, .copilot, .custom, .local:
             return true
         case .gemini, .anthropic, .aipass:
             return false
@@ -154,8 +221,8 @@ enum StreamableAIProvider: String, CaseIterable {
     /// Whether this provider requires an API key
     var requiresAPIKey: Bool {
         switch self {
-        case .local, .ninerouter: return false
-        default: return true
+        case .local, .ninerouter, .custom: return false
+        default: return !Self.hasCustomByokBaseURL(for: self.rawValue)
         }
     }
     
@@ -220,47 +287,328 @@ enum StreamableAIProvider: String, CaseIterable {
         if isLocalEndpoint(lowerURL) { return .local }
         return detect(from: model)
     }
+
+    /// Returns true when the provider + model natively accepts inline multimodal image bytes (`inlineData` / `image_url`).
+    /// Text-only models return false so `UniversalAttachmentEngine` automatically enriches images with Apple Vision OCR.
+    func supportsNativeImageInput(model: String) -> Bool {
+        let m = model.lowercased()
+        switch self {
+        case .gemini, .openai, .anthropic, .grok, .copilot, .aipass, .tokenme, .perch, .openrouter, .ninerouter, .omni, .glm, .kimi, .custom:
+            return true
+        case .qwen:
+            return m.contains("vl") || m.contains("qvq") || m.contains("omni") || m.contains("qwen3") || m.contains("qwen2.5")
+        case .mistral:
+            return m.contains("pixtral") || m.contains("mistral-medium") || m.contains("mistral-small-3") || m.contains("mistral-large")
+        case .groq, .together, .fireworks, .nvidia, .minimax:
+            return m.contains("vision") || m.contains("vl") || m.contains("llama-4") || m.contains("pixtral") || m.contains("gemma-3")
+        case .local:
+            return m.contains("vl") || m.contains("vision") || m.contains("llava") || m.contains("gemma3") || m.contains("gemma-3") || m.contains("pixtral") || m.contains("minicpm-v")
+        case .deepseek, .typhoon, .cerebras, .perplexity:
+            return false
+        }
+    }
 }
 
 // MARK: - Attachments
 
 struct AIAttachment: Identifiable {
-    let id = UUID()
-    let name: String
-    let data: Data
-    let type: AttachmentType
-    
+    private static let thumbnailCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 256
+        return cache
+    }()
+
+    static func makeFastThumbnail(from url: URL, maxPixelSize: Int = 72) -> NSImage? {
+        let srcOpts: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, srcOpts as CFDictionary) else { return nil }
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    static func makeFastThumbnail(from data: Data, maxPixelSize: Int = 72) -> NSImage? {
+        guard !data.isEmpty else { return nil }
+        let srcOpts: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let src = CGImageSourceCreateWithData(data as CFData, srcOpts as CFDictionary) else { return nil }
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
     enum AttachmentType: Equatable {
         case image(format: String)
         case text
         case pdf
     }
-    
+
+    enum SemanticCategory: String, Equatable, Codable, Sendable {
+        case image
+        case pdf
+        case wordDoc
+        case spreadsheet
+        case presentation
+        case richDocument
+        case notebook
+        case database
+        case dataFile
+        case audio
+        case video
+        case archive
+        case folder
+        case codeOrText
+        case binary
+    }
+
+    let id: UUID
+    let name: String
+    let data: Data
+    let type: AttachmentType
+    var sourceURL: URL?
+    var stagedPath: String?
+    var extractedTextCachePath: String?
+    var extractedFullText: String?
+    var subtitleBadge: String?
+    var metricsSummary: String?
+    var extractionStatus: String?
+    var extractionWarning: String?
+    var normalizedVisionData: Data?
+    var normalizedVisionMimeType: String?
+    var nativeMediaMimeType: String?
+    var fileSizeBytes: Int64?
+    var semanticCategory: SemanticCategory
+    var isPasswordProtected: Bool
+    var includeInlineTextInProviderPayload: Bool
+    var previewThumbnail: NSImage?
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        data: Data,
+        type: AttachmentType,
+        sourceURL: URL? = nil,
+        stagedPath: String? = nil,
+        extractedTextCachePath: String? = nil,
+        extractedFullText: String? = nil,
+        subtitleBadge: String? = nil,
+        metricsSummary: String? = nil,
+        extractionStatus: String? = nil,
+        extractionWarning: String? = nil,
+        normalizedVisionData: Data? = nil,
+        normalizedVisionMimeType: String? = nil,
+        nativeMediaMimeType: String? = nil,
+        fileSizeBytes: Int64? = nil,
+        semanticCategory: SemanticCategory? = nil,
+        isPasswordProtected: Bool = false,
+        includeInlineTextInProviderPayload: Bool = true,
+        previewThumbnail: NSImage? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.data = data
+        self.type = type
+        self.sourceURL = sourceURL
+        self.stagedPath = stagedPath
+        self.extractedTextCachePath = extractedTextCachePath
+        self.extractedFullText = extractedFullText
+        self.subtitleBadge = subtitleBadge
+        self.metricsSummary = metricsSummary
+        self.extractionStatus = extractionStatus
+        self.extractionWarning = extractionWarning
+        self.normalizedVisionData = normalizedVisionData
+        self.normalizedVisionMimeType = normalizedVisionMimeType
+        self.nativeMediaMimeType = nativeMediaMimeType
+        self.fileSizeBytes = fileSizeBytes
+        if let semanticCategory {
+            self.semanticCategory = semanticCategory
+        } else {
+            switch type {
+            case .image: self.semanticCategory = .image
+            case .pdf: self.semanticCategory = .pdf
+            case .text: self.semanticCategory = .codeOrText
+            }
+        }
+        self.isPasswordProtected = isPasswordProtected
+        self.includeInlineTextInProviderPayload = includeInlineTextInProviderPayload
+        self.previewThumbnail = previewThumbnail
+        if let previewThumbnail {
+            Self.thumbnailCache.setObject(previewThumbnail, forKey: id.uuidString as NSString)
+        }
+    }
+
     var base64String: String { data.base64EncodedString() }
-    var textContent: String? { String(data: data, encoding: .utf8) }
-    
-    /// Cached or dynamically generated NSImage for visual thumbnails
-    var nsImage: NSImage? {
-        if case .image = type {
-            return NSImage(data: data)
+
+    /// Universal Vision-ready image bytes (transcoded to JPEG/PNG when source is HEIC/TIFF/BMP/SVG/ICNS or >2048px)
+    var effectiveVisionData: Data {
+        if let norm = normalizedVisionData, !norm.isEmpty {
+            return norm
+        }
+        return data
+    }
+
+    /// Universal API-safe Vision MIME type (`image/jpeg`, `image/png`, `image/gif`, `image/webp`)
+    var effectiveVisionMimeType: String {
+        if let mime = normalizedVisionMimeType?.lowercased(),
+           ["image/jpeg", "image/png", "image/gif", "image/webp"].contains(mime) {
+            return mime
+        }
+        if case .image(let fmt) = type {
+            let lower = fmt.lowercased()
+            if lower == "jpg" || lower == "jpeg" { return "image/jpeg" }
+            if lower == "png" { return "image/png" }
+            if lower == "gif" { return "image/gif" }
+            if lower == "webp" { return "image/webp" }
+        }
+        return "image/png"
+    }
+
+    var effectiveVisionBase64: String {
+        effectiveVisionData.base64EncodedString()
+    }
+
+    /// Loads raw binary payload up to `maxBytes` from memory or staged disk vault without holding giant buffers permanently in RAM.
+    func loadRawBinaryData(maxBytes: Int) -> Data? {
+        if !data.isEmpty {
+            return data.count <= maxBytes ? data : nil
+        }
+        let candidates = [stagedPath, sourceURL?.path].compactMap { $0 }
+        let fm = FileManager.default
+        for candidate in candidates {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: candidate, isDirectory: &isDir), !isDir.boolValue else { continue }
+            let size = ((try? fm.attributesOfItem(atPath: candidate)[.size]) as? NSNumber)?.intValue ?? 0
+            guard size > 0 && size <= maxBytes else { continue }
+            if let mapped = try? Data(contentsOf: URL(fileURLWithPath: candidate), options: .mappedIfSafe) {
+                return mapped
+            }
+        }
+        return nil
+    }
+
+    /// Grounded extracted text across any format (falls back to cached `.extracted.txt` or smart text decoding)
+    var groundedExtractedText: String {
+        if let full = extractedFullText, !full.isEmpty {
+            return full
+        }
+        if let cachePath = extractedTextCachePath,
+           let cached = try? String(contentsOfFile: cachePath, encoding: .utf8),
+           !cached.isEmpty {
+            return cached
+        }
+        if case .pdf = type {
+            let pdfTxt = pdfExtractedText
+            if !pdfTxt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return pdfTxt
+            }
+            if let warn = extractionWarning, !warn.isEmpty {
+                return "[PDF Warning (\(name)): \(warn)]"
+            }
+            return "[PDF '\(name)': No selectable digital text layer]"
+        }
+        if !data.isEmpty, let decoded = UniversalAttachmentEngine.decodeTextSmart(data)?.text, !decoded.isEmpty {
+            return decoded
+        }
+        if let warn = extractionWarning, !warn.isEmpty {
+            return "[Attachment Warning (\(name)): \(warn)]"
+        }
+        return "[Attachment '\(name)' (\(formattedSize)) — staged at \(stagedPath ?? sourceURL?.path ?? "memory")]"
+    }
+
+    var textContent: String? {
+        if let full = extractedFullText, !full.isEmpty {
+            return full
+        }
+        if let cachePath = extractedTextCachePath,
+           let cached = try? String(contentsOfFile: cachePath, encoding: .utf8),
+           !cached.isEmpty {
+            return cached
+        }
+        if !data.isEmpty {
+            return UniversalAttachmentEngine.decodeTextSmart(data)?.text ?? String(data: data, encoding: .utf8)
         }
         return nil
     }
     
+    /// O(1) cached downsampled NSImage for visual thumbnails (never re-decodes multi-MB PNGs on SwiftUI redraws)
+    var nsImage: NSImage? {
+        if let previewThumbnail {
+            return previewThumbnail
+        }
+        let cacheKey = id.uuidString as NSString
+        if let cached = Self.thumbnailCache.object(forKey: cacheKey) {
+            return cached
+        }
+        var generated: NSImage? = nil
+        if case .image = type {
+            if let norm = normalizedVisionData, !norm.isEmpty {
+                generated = Self.makeFastThumbnail(from: norm) ?? NSImage(data: norm)
+            } else if !data.isEmpty {
+                generated = Self.makeFastThumbnail(from: data) ?? NSImage(data: data)
+            } else if let staged = stagedPath {
+                generated = Self.makeFastThumbnail(from: URL(fileURLWithPath: staged))
+            } else if let src = sourceURL {
+                generated = Self.makeFastThumbnail(from: src)
+            }
+        } else if semanticCategory == .video, let norm = normalizedVisionData, !norm.isEmpty {
+            generated = Self.makeFastThumbnail(from: norm) ?? NSImage(data: norm)
+        }
+        if let generated {
+            Self.thumbnailCache.setObject(generated, forKey: cacheKey)
+        }
+        return generated
+    }
+    
     /// Human-friendly formatted file size (e.g. "42 KB", "1.4 MB")
     var formattedSize: String {
-        ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+        let bytes = fileSizeBytes ?? Int64(data.count)
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
     
     /// Page count if attachment is a PDF
     var pdfPageCount: Int {
-        guard case .pdf = type, let doc = PDFDocument(data: data) else { return 0 }
-        return doc.pageCount
+        guard case .pdf = type else { return 0 }
+        if !data.isEmpty, let doc = PDFDocument(data: data) {
+            return doc.pageCount
+        }
+        if let staged = stagedPath, let doc = PDFDocument(url: URL(fileURLWithPath: staged)) {
+            return doc.pageCount
+        }
+        if let src = sourceURL, let doc = PDFDocument(url: src) {
+            return doc.pageCount
+        }
+        return 0
     }
     
     /// Extracted plain text across all pages if attachment is a PDF
     var pdfExtractedText: String {
-        guard case .pdf = type, let doc = PDFDocument(data: data) else { return "" }
+        if let full = extractedFullText, !full.isEmpty {
+            return full
+        }
+        if let cachePath = extractedTextCachePath,
+           let cached = try? String(contentsOfFile: cachePath, encoding: .utf8),
+           !cached.isEmpty {
+            return cached
+        }
+        guard case .pdf = type else { return "" }
+        let doc: PDFDocument? = {
+            if !data.isEmpty { return PDFDocument(data: data) }
+            if let staged = stagedPath { return PDFDocument(url: URL(fileURLWithPath: staged)) }
+            if let src = sourceURL { return PDFDocument(url: src) }
+            return nil
+        }()
+        guard let doc else { return "" }
+        if doc.isLocked && !doc.unlock(withPassword: "") {
+            return "[LOCKED PDF WARNING: '\(name)' is password-protected and cannot be read without a password.]"
+        }
         var result = ""
         for i in 0..<doc.pageCount {
             if let page = doc.page(at: i), let pageText = page.string {
@@ -485,17 +833,55 @@ enum AIStructuredTurnCodec {
 
 // MARK: - Streaming Client
 
+final class AIStreamContext: @unchecked Sendable {
+    @TaskLocal static var current: AIStreamContext?
+    var streamedText: String = ""
+    var pendingTokens: String = ""
+    var lastDeliveryUptime: TimeInterval = 0
+}
+
 @MainActor
 final class AIClient: ObservableObject {
     static let shared = AIClient()
     
     @Published var isStreaming: Bool = false
-    @Published var currentStreamedText: String = ""
+    @Published var activeStreamCount: Int = 0
+    private var _legacyStreamedText: String = ""
+    var currentStreamedText: String {
+        get { AIStreamContext.current?.streamedText ?? _legacyStreamedText }
+        set {
+            if let ctx = AIStreamContext.current {
+                ctx.streamedText = newValue
+            }
+            _legacyStreamedText = newValue
+        }
+    }
     
     private var streamTask: Task<Void, Never>?
+    private var streamTasksByKey: [String: Task<Void, Never>] = [:]
     private let requestTimeout: TimeInterval = 180
-    private var pendingStreamTokens: String = ""
-    private var lastStreamDeliveryUptime: TimeInterval = 0
+    private var _legacyPendingStreamTokens: String = ""
+    private var pendingStreamTokens: String {
+        get { AIStreamContext.current?.pendingTokens ?? _legacyPendingStreamTokens }
+        set {
+            if let ctx = AIStreamContext.current {
+                ctx.pendingTokens = newValue
+            } else {
+                _legacyPendingStreamTokens = newValue
+            }
+        }
+    }
+    private var _legacyLastStreamDeliveryUptime: TimeInterval = 0
+    private var lastStreamDeliveryUptime: TimeInterval {
+        get { AIStreamContext.current?.lastDeliveryUptime ?? _legacyLastStreamDeliveryUptime }
+        set {
+            if let ctx = AIStreamContext.current {
+                ctx.lastDeliveryUptime = newValue
+            } else {
+                _legacyLastStreamDeliveryUptime = newValue
+            }
+        }
+    }
     private let streamFlushInterval: TimeInterval = 0.016 // ~60fps target for smooth text render
     
     private func appendStreamToken(_ token: String, onToken: @escaping (String) -> Void) {
@@ -563,12 +949,30 @@ final class AIClient: ObservableObject {
     private func normalizeModelName(_ model: String, provider: StreamableAIProvider, baseURL: String) -> String {
         var trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
+            let customSaved = UserDefaults.standard.string(forKey: "byok_custom_model_\(provider.rawValue)")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !customSaved.isEmpty {
+                return customSaved
+            }
             return provider.defaultModel
         }
         if provider == .local || StreamableAIProvider.isLocalEndpoint(baseURL) {
+            if let sep = trimmed.range(of: "||") {
+                let sub = String(trimmed[sep.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sub.isEmpty {
+                    trimmed = sub
+                }
+            }
             let lowerLocal = trimmed.lowercased()
-            if lowerLocal.isEmpty || lowerLocal == "local" || lowerLocal == "local-model" {
-                return StreamableAIProvider.local.defaultModel
+            if lowerLocal.isEmpty || lowerLocal == "local" || lowerLocal == "local-model" || lowerLocal == "auto" {
+                return LocalLLMService.resolveRoute(forModel: trimmed, preferredEndpoint: baseURL).model
+            }
+            return trimmed
+        }
+        // When user configured a custom BYOK Base URL / Cloudflare Tunnel, preserve their exact model ID
+        if provider == .custom || StreamableAIProvider.hasCustomByokBaseURL(for: provider.rawValue) || baseURL.lowercased().contains("trycloudflare.com") {
+            let customSaved = UserDefaults.standard.string(forKey: "byok_custom_model_\(provider.rawValue)")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if trimmed.lowercased() == provider.rawValue || trimmed == "custom-model" {
+                return !customSaved.isEmpty ? customSaved : provider.defaultModel
             }
             return trimmed
         }
@@ -581,10 +985,32 @@ final class AIClient: ObservableObject {
             }
         }
         let lower = trimmed.lowercased()
+        if StreamableAIProvider.isDotminiCloudProxy(baseURL) {
+            if lower == "omni-o1x-pro" || lower == "omni" || lower == "omni-max" {
+                return "deepseek-chat"
+            } else if lower == "omni-o1x-lite" {
+                return "omni-mini"
+            }
+        }
         if lower == provider.rawValue {
             return provider.defaultModel
         } else if provider == .glm && (lower == "glm" || lower == "glm-4-flash") {
             return "glm-5.3-flash"
+        }
+
+        // Official OpenAI REST API (`api.openai.com`) remapping for Codex-only internal model slugs
+        if baseURL.contains("api.openai.com") {
+            let codexOnlySlugs: Set<String> = ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-reserve", "gpt-6-astra"]
+            if codexOnlySlugs.contains(lower) || lower.hasPrefix("gpt-6") || lower.hasPrefix("gpt-5.6") {
+                return "gpt-4.1"
+            }
+        }
+
+        // Official Google Gemini REST API (`generativelanguage.googleapis.com`) remapping for CodeAssist-only slugs
+        if baseURL.contains("generativelanguage.googleapis.com") {
+            if lower.contains("argon") || lower.contains("3.8") || lower.contains("3.7") || lower.contains("3.6") || lower.contains("3.5") || lower == "gemini-3-flash" {
+                return "gemini-2.5-flash"
+            }
         }
         
         // GitHub Copilot API uses dot-separated model IDs (`claude-sonnet-5.5`, `claude-opus-5.5`, `claude-fable-5.1`)
@@ -670,11 +1096,14 @@ final class AIClient: ObservableObject {
         if SubscriptionAuthManager.isCorruptedToken(trimmed) || trimmed.hasPrefix("cli-oauth:") {
             return false
         }
+        if provider == .custom || StreamableAIProvider.hasCustomByokBaseURL(for: provider.rawValue) {
+            return !trimmed.hasPrefix("{")
+        }
         switch provider {
         case .gemini:
             return trimmed.hasPrefix("AIzaSy")
         case .anthropic:
-            return trimmed.hasPrefix("sk-ant-api")
+            return trimmed.hasPrefix("sk-ant-") || (!trimmed.isEmpty && !trimmed.hasPrefix("{"))
         case .openai:
             return trimmed.hasPrefix("sk-") && !trimmed.hasPrefix("sk-ant-")
         case .deepseek:
@@ -683,7 +1112,7 @@ final class AIClient: ObservableObject {
             return false
         case .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
              .cerebras, .together, .fireworks, .minimax, .nvidia,
-             .copilot, .aipass, .glm, .grok, .qwen, .local:
+             .copilot, .aipass, .glm, .grok, .qwen, .custom, .local:
             return !trimmed.isEmpty && !trimmed.hasPrefix("{")
         }
     }
@@ -695,37 +1124,206 @@ final class AIClient: ObservableObject {
     private func sanitizeToolSchemaForGemini(_ tool: [String: Any]) -> [String: Any] {
         var result = tool
         if var parameters = result["parameters"] as? [String: Any] {
-            parameters = sanitizeSchemaObject(parameters)
+            let rootDefs = (parameters["$defs"] as? [String: Any]) ?? (parameters["definitions"] as? [String: Any]) ?? [:]
+            parameters = sanitizeSchemaObject(parameters, ensureObjectRoot: true, rootDefs: rootDefs, depth: 0)
             result["parameters"] = parameters
+        } else {
+            result["parameters"] = ["type": "object", "properties": [String: Any]()]
         }
         return result
     }
     
-    private func sanitizeSchemaObject(_ schema: [String: Any]) -> [String: Any] {
+    private func sanitizeSchemaObject(
+        _ schema: [String: Any],
+        ensureObjectRoot: Bool = false,
+        rootDefs: [String: Any] = [:],
+        depth: Int = 0
+    ) -> [String: Any] {
+        if depth > 8 {
+            return ["type": "string"]
+        }
         var s = schema
-        // Remove keys not supported by Gemini's schema
-        s.removeValue(forKey: "additionalProperties")
-        s.removeValue(forKey: "default")
-        
-        // Fix array types missing "items"
-        if let type = s["type"] as? String, type == "array" {
-            if s["items"] == nil {
-                s["items"] = ["type": "string"]
-            } else if var items = s["items"] as? [String: Any] {
-                items = sanitizeSchemaObject(items)
-                s["items"] = items
+
+        // Resolve local JSON Schema $ref ("#/$defs/Foo" or "#/definitions/Foo") before stripping metadata
+        if let refStr = s["$ref"] as? String {
+            s.removeValue(forKey: "$ref")
+            let refName = refStr.components(separatedBy: "/").last ?? ""
+            if !refName.isEmpty, let targetDef = rootDefs[refName] as? [String: Any] {
+                var merged = targetDef
+                for (k, v) in s { merged[k] = v }
+                s = merged
             }
         }
         
-        // Recursively fix properties
+        // Normalize JSON Schema union type arrays such as ["string", "null"] -> "string" + nullable
+        if let typeArray = s["type"] as? [Any] {
+            let stringTypes = typeArray.compactMap { $0 as? String }
+            if let primary = stringTypes.first(where: { $0.lowercased() != "null" }) {
+                s["type"] = primary.lowercased()
+                if stringTypes.contains(where: { $0.lowercased() == "null" }) {
+                    s["nullable"] = true
+                }
+            } else {
+                s["type"] = "string"
+            }
+        } else if let typeStr = s["type"] as? String {
+            let lowerType = typeStr.lowercased()
+            let validTypes: Set<String> = ["string", "number", "integer", "boolean", "array", "object"]
+            s["type"] = validTypes.contains(lowerType) ? lowerType : "string"
+        }
+        
+        // Collapse nullable anyOf / oneOf into primary branch for strict Gemini Schema proto
+        for unionKey in ["anyOf", "oneOf"] {
+            if let branches = s[unionKey] as? [[String: Any]], !branches.isEmpty {
+                let nonNullBranches = branches.filter { ($0["type"] as? String)?.lowercased() != "null" }
+                s.removeValue(forKey: unionKey)
+                if let firstBranch = nonNullBranches.first {
+                    let cleanBranch = sanitizeSchemaObject(firstBranch, rootDefs: rootDefs, depth: depth + 1)
+                    for (k, v) in cleanBranch where s[k] == nil {
+                        s[k] = v
+                    }
+                    if nonNullBranches.count < branches.count {
+                        s["nullable"] = true
+                    }
+                }
+            }
+        }
+        
+        if ensureObjectRoot && s["type"] == nil {
+            s["type"] = "object"
+        }
+        if s["type"] == nil {
+            s["type"] = (s["properties"] != nil) ? "object" : "string"
+        }
+        
+        let resolvedType = (s["type"] as? String) ?? "string"
+        
+        // Gemini Schema proto only allows `enum` on string types with string elements
+        if resolvedType == "string", let rawEnum = s["enum"] as? [Any] {
+            let strEnum = rawEnum.compactMap { "\($0)" }.filter { !$0.isEmpty }
+            if strEnum.isEmpty {
+                s.removeValue(forKey: "enum")
+            } else {
+                s["enum"] = strEnum
+            }
+        } else {
+            s.removeValue(forKey: "enum")
+        }
+        
+        // Fix array types missing "items"
+        if resolvedType == "array" {
+            if let items = s["items"] as? [String: Any] {
+                s["items"] = sanitizeSchemaObject(items, rootDefs: rootDefs, depth: depth + 1)
+            } else {
+                s["items"] = ["type": "string"]
+            }
+        } else {
+            s.removeValue(forKey: "items")
+        }
+        
+        // Recursively fix properties and validate `required` keys
+        if resolvedType == "object" {
+            if var properties = s["properties"] as? [String: Any] {
+                for (key, value) in properties {
+                    if let prop = value as? [String: Any] {
+                        properties[key] = sanitizeSchemaObject(prop, rootDefs: rootDefs, depth: depth + 1)
+                    } else {
+                        properties[key] = ["type": "string"]
+                    }
+                }
+                s["properties"] = properties
+                if let req = s["required"] as? [Any] {
+                    let validReq = req.compactMap { $0 as? String }.filter { properties[$0] != nil }
+                    if validReq.isEmpty {
+                        s.removeValue(forKey: "required")
+                    } else {
+                        s["required"] = validReq
+                    }
+                } else {
+                    s.removeValue(forKey: "required")
+                }
+            } else {
+                s["properties"] = [String: Any]()
+                s.removeValue(forKey: "required")
+            }
+        } else {
+            s.removeValue(forKey: "properties")
+            s.removeValue(forKey: "required")
+        }
+
+        // Strict Protobuf JSON whitelist for Google Gemini / CodeAssist `v1internal` Schema proto:
+        // Strips `x-google-enum-descriptions`, `readOnly`, `format`, `additionalProperties`, `$defs`, etc.
+        let allowedGeminiKeys: Set<String> = [
+            "type", "description", "nullable", "enum", "items", "properties", "required"
+        ]
+        for key in Array(s.keys) where !allowedGeminiKeys.contains(key) {
+            s.removeValue(forKey: key)
+        }
+        
+        return s
+    }
+
+    /// Sanitizes a tool definition for OpenAI, Anthropic, Codex, DeepSeek, and Dotmini Cloud Gateway.
+    /// Preserves rich nested MCP JSON Schema fields (`items`, `enum`, nested `properties`, `anyOf`/`oneOf`)
+    /// while guaranteeing strict spec invariants (every `array` has `items`, `object` has `properties`,
+    /// union `type` arrays are normalized, and `required` only names defined properties).
+    private func sanitizeToolSchemaForStandardJSONSchema(_ tool: [String: Any]) -> [String: Any] {
+        var result = tool
+        let rawParams = (result["parameters"] as? [String: Any]) ?? ["type": "object", "properties": [String: Any]()]
+        result["parameters"] = sanitizeStandardJSONSchemaNode(rawParams, isRoot: true)
+        return result
+    }
+
+    private func sanitizeStandardJSONSchemaNode(_ schema: [String: Any], isRoot: Bool = false) -> [String: Any] {
+        var s = schema
+        s.removeValue(forKey: "$schema")
+        s.removeValue(forKey: "$id")
+        
+        if let typeArray = s["type"] as? [Any] {
+            let stringTypes = typeArray.compactMap { $0 as? String }
+            s["type"] = stringTypes.first(where: { $0.lowercased() != "null" }) ?? "string"
+        }
+        
+        if isRoot {
+            s["type"] = "object"
+        } else if s["type"] == nil && s["anyOf"] == nil && s["oneOf"] == nil && s["allOf"] == nil {
+            if s["properties"] != nil {
+                s["type"] = "object"
+            } else if s["items"] != nil {
+                s["type"] = "array"
+            } else {
+                s["type"] = "string"
+            }
+        }
+        
+        if let type = s["type"] as? String, type == "array" {
+            if let items = s["items"] as? [String: Any] {
+                s["items"] = sanitizeStandardJSONSchemaNode(items)
+            } else {
+                s["items"] = ["type": "string"]
+            }
+        }
+        
+        for combinator in ["anyOf", "oneOf", "allOf"] {
+            if let branches = s[combinator] as? [[String: Any]] {
+                s[combinator] = branches.map { sanitizeStandardJSONSchemaNode($0) }
+            }
+        }
+        
         if var properties = s["properties"] as? [String: Any] {
-            for (key, value) in properties {
-                if var prop = value as? [String: Any] {
-                    prop = sanitizeSchemaObject(prop)
-                    properties[key] = prop
+            for (key, val) in properties {
+                if let propDict = val as? [String: Any] {
+                    properties[key] = sanitizeStandardJSONSchemaNode(propDict)
                 }
             }
             s["properties"] = properties
+            if let req = s["required"] as? [Any] {
+                let validReq = req.compactMap { $0 as? String }.filter { properties[$0] != nil }
+                s["required"] = validReq
+            }
+        } else if (s["type"] as? String) == "object" {
+            s["properties"] = [String: Any]()
+            s.removeValue(forKey: "required")
         }
         
         return s
@@ -856,39 +1454,48 @@ final class AIClient: ObservableObject {
                   SubscriptionAuthManager.shared.isConnected(.tokenme),
                   SubscriptionProviderType.tokenme.modelInfos.contains(where: { $0.modelID.caseInsensitiveCompare(model) == .orderedSame }) {
             provider = .tokenme
-        } else if provider == .omni && !useDotminiEnterprise {
+        } else if provider == .omni && !useDotminiEnterprise && rawKeyMode != "cloud" {
             let detected = StreamableAIProvider.detect(from: model)
             if detected != .omni {
                 provider = detected
-            } else if rawKeyMode != "cloud" {
-                if rawKeyMode == "subscription",
-                   let subStr = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"),
-                   let subType = SubscriptionProviderType(rawValue: subStr),
-                   let mapped = StreamableAIProvider(rawValue: subType.aiProviderID) {
-                    provider = mapped
-                } else {
-                    provider = .gemini
-                }
+            } else if rawKeyMode == "subscription",
+                      let subStr = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"),
+                      let subType = SubscriptionProviderType(rawValue: subStr),
+                      let mapped = StreamableAIProvider(rawValue: subType.aiProviderID) {
+                provider = mapped
+            } else {
+                provider = .gemini
             }
         }
-        let keyMode: String = {
-            if rawKeyMode == "cloud" && provider != .omni && !useDotminiEnterprise {
-                let hasDirect = !AIModelCatalog.resolveKey(provider.rawValue).isEmpty || !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                if !hasDirect && SubscriptionAuthManager.shared.hasAnyConnected {
-                    return "subscription"
-                }
-                return "direct"
-            }
-            return rawKeyMode
-        }()
+        let keyMode = rawKeyMode
         var actualKey: String = ""
         var baseURL: String = provider.directBaseURL
         let useVertexGemini = (ent.mode == .geminiVertex && provider == .gemini)
         let useCustomGateway = (ent.mode == .customGateway && !ent.customGatewayBaseURL.isEmpty)
+
+        // Enterprise Air-Gapped Sovereign Lockdown enforcement
+        if ent.isAirGappedLockdownEnabled && provider != .local && keyMode != "local" && !useCustomGateway {
+            if LocalLLMService.shared.detectedServers.contains(where: { $0.isOnline }) {
+                provider = .local
+            } else {
+                onError("🛡️ Air-Gapped Sovereign Lockdown is active: External cloud AI endpoints are blocked. Start Local LLM or configure an internal VPC Gateway.")
+                return
+            }
+        }
+        // Enterprise Confidential Split-Routing (routes turns that read .env / keys to Local LLM or Enterprise ZDR Gateway)
+        if ent.confidentialTurnActive && ent.enforceConfidentialSplitRouting &&
+           provider != .local && keyMode != "local" && !useCustomGateway && !useVertexGemini && !useDotminiEnterprise {
+            if LocalLLMService.shared.detectedServers.contains(where: { $0.isOnline }) {
+                provider = .local
+            }
+        }
         
+        var resolvedLocalRoute: (endpoint: String, apiKey: String, model: String, serverLabel: String)?
         if provider == .local || keyMode == "local" {
-            baseURL = LocalLLMService.cachedEndpoint
-            actualKey = LocalLLMService.resolveAPIKey(forEndpoint: baseURL)
+            let route = LocalLLMService.resolveRoute(forModel: model)
+            resolvedLocalRoute = route
+            baseURL = route.endpoint
+            actualKey = route.apiKey
         } else if useVertexGemini {
             actualKey = "vertex_enterprise"
             baseURL = "vertex://\(ent.vertexLocation)/\(ent.vertexProjectId)"
@@ -954,6 +1561,20 @@ final class AIClient: ObservableObject {
                 actualKey = Self.resolveAiPassSessionCookie(primary: aipassToken)
                 baseURL = StreamableAIProvider.aipass.directBaseURL
                 provider = .aipass
+            } else if provider == .anthropic,
+                      let cliBin = SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .claude) {
+                let engineKind = URL(fileURLWithPath: cliBin).lastPathComponent == "agy" ? "agy" : "claude"
+                actualKey = "cli_bridge"
+                baseURL = "cli://\(engineKind):\(cliBin)"
+            } else if provider == .gemini,
+                      let cliBin = SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .gemini) {
+                let engineKind = URL(fileURLWithPath: cliBin).lastPathComponent == "agy" ? "agy" : "gemini"
+                actualKey = "cli_bridge"
+                baseURL = "cli://\(engineKind):\(cliBin)"
+            } else if provider == .openai,
+                      let cliBin = SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .chatgpt) {
+                actualKey = "cli_bridge"
+                baseURL = "cli://codex:\(cliBin)"
             } else {
                 let message = "No active subscription session or API key found for \(provider.rawValue). Connect in Settings → AI Provider → Subscription, or add a Direct API Key."
                 onError(message)
@@ -961,27 +1582,23 @@ final class AIClient: ObservableObject {
             }
         } else if keyMode == "direct" {
             // ━━━ BYOK (DIRECT) MODE ━━━
-            // Uses ONLY user's own API keys — no cloud proxy, no subscription
+            // Uses ONLY user's own API keys & configured BYOK Base URL (including Cloudflare Tunnel / custom endpoints)
+            // Strictly separated from Subscription OAuth and Local/LAN LLM
             let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedKey = AIModelCatalog.resolveKey(provider.rawValue)
-            
+            let hasCustomURL = (provider == .custom) || StreamableAIProvider.hasCustomByokBaseURL(for: provider.rawValue)
+
             if provider == .aipass {
                 actualKey = Self.resolveAiPassSessionCookie(primary: !passedKey.isEmpty ? passedKey : resolvedKey)
                 baseURL = StreamableAIProvider.aipass.directBaseURL
-            } else if !passedKey.isEmpty && Self.isValidDirectAPIKey(passedKey, for: provider) {
-                actualKey = passedKey
-            } else if !resolvedKey.isEmpty && Self.isValidDirectAPIKey(resolvedKey, for: provider) {
-                actualKey = resolvedKey
-            } else if provider == .openai, let codexCreds = Self.loadCodexOAuthCredentials(fallbackToken: "") {
-                actualKey = codexCreds.accessToken
-                baseURL = "https://chatgpt.com/backend-api/codex"
-            } else if provider == .anthropic, let codeAssistCreds = Self.loadGoogleCodeAssistCredentials(fallbackToken: "") {
-                actualKey = codeAssistCreds.refreshToken
-                baseURL = "https://daily-cloudcode-pa.googleapis.com/v1internal"
             } else {
-                actualKey = !passedKey.isEmpty ? passedKey : resolvedKey
-            }
-            if baseURL != "https://chatgpt.com/backend-api/codex" && !baseURL.contains("cloudcode-pa.googleapis.com") {
+                let candidateKey = !passedKey.isEmpty ? passedKey : resolvedKey
+                if candidateKey.isEmpty && hasCustomURL {
+                    // Allow passwordless Cloudflare Tunnel / Custom OpenAI-compatible endpoints in BYOK
+                    actualKey = "byok-custom-tunnel"
+                } else {
+                    actualKey = candidateKey
+                }
                 baseURL = provider.directBaseURL
             }
             
@@ -994,7 +1611,7 @@ final class AIClient: ObservableObject {
             baseURL = provider.cloudBaseURL
         }
         
-        if actualKey.isEmpty && provider != .local && provider != .omni && !useVertexGemini && !useCustomGateway {
+        if actualKey.isEmpty && provider != .local && !useVertexGemini && !useCustomGateway {
             switch keyMode {
             case "subscription":
                 onError("No subscription session found for \(provider.rawValue). Go to Settings → AI Provider → Subscription to connect.")
@@ -1002,124 +1619,199 @@ final class AIClient: ObservableObject {
             case "direct":
                 onError("API key missing for \(provider.rawValue). Go to Settings → AI Provider → BYOK to add your key.")
                 return
+            case "cloud":
+                if SupabaseAuthService.shared.session == nil && DotminiPlatformKeyService.shared.authorizationToken == nil {
+                    onError("Dotmini Cloud requires signing in. Sign in via Settings → Account & License or on microcode.dotmini.net (auto-syncs seamlessly).")
+                    return
+                }
             default:
-                // In cloud mode, requests route to Dotmini Cloud via X-Dotmini-Product and X-Dotmini-License
                 break
             }
         }
 
-        isStreaming = true
-        currentStreamedText = ""
-        pendingStreamTokens = ""
-        lastStreamDeliveryUptime = 0
-        
+        let callerChatId = AgentExecutionContext.chatId
+        let taskKey = callerChatId ?? UUID().uuidString
         let trimmedHistory = boundedHistory(conversationHistory)
-        let resolvedModel = normalizeModelName(model, provider: provider, baseURL: baseURL)
-        
-        streamTask = Task {
-            let requestKey: String
-            if useDotminiEnterprise {
-                if !ent.dotminiEnterpriseKey.isEmpty {
-                    requestKey = ent.dotminiEnterpriseKey
-                } else if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
-                    requestKey = platformKey
-                } else {
-                    requestKey = actualKey
+        let initialResolvedModel = resolvedLocalRoute?.model ?? normalizeModelName(model, provider: provider, baseURL: baseURL)
+
+        isStreaming = true
+        let task = Task {
+            let streamCtx = AIStreamContext()
+            await AIStreamContext.$current.withValue(streamCtx) {
+                defer {
+                    self.streamTasksByKey.removeValue(forKey: taskKey)
+                    self.activeStreamCount = self.streamTasksByKey.count
+                    self.isStreaming = !self.streamTasksByKey.isEmpty
                 }
-            } else if keyMode == "cloud" && baseURL == provider.cloudBaseURL && provider != .local {
-                if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
-                    requestKey = platformKey
-                } else if SupabaseAuthService.shared.session != nil {
-                    guard let refreshed = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded() else {
-                        onError("Could not refresh your Dotmini session. Check your connection or sign in again.")
-                        self.isStreaming = false
-                        return
-                    }
-                    requestKey = refreshed
-                } else {
-                    requestKey = actualKey
-                }
-            } else {
-                requestKey = actualKey
-            }
-            var retryCount = 0
-            let maxRetries = 3
-            
-            while retryCount <= maxRetries {
-                if retryCount > 0 {
-                    self.currentStreamedText = ""
-                    self.pendingStreamTokens = ""
-                }
-                do {
-                    if useVertexGemini {
-                        try await streamGemini(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    } else if provider == .aipass || baseURL.contains("de.aipass.net") {
-                        try await streamAiPass(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, sessionCookie: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    } else if baseURL == "https://chatgpt.com/backend-api/codex" {
-                        try await streamCodexResponses(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, accessToken: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    } else if baseURL.contains("cloudcode-pa.googleapis.com") {
-                        try await streamGoogleCodeAssist(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, refreshToken: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    } else if useDotminiEnterprise || useCustomGateway || baseURL == provider.cloudBaseURL || baseURL == StreamableAIProvider.copilot.directBaseURL {
-                        // Cloud-routed requests (Dotmini Cloud Enterprise, Dotmini Cloud, Custom Gateway, or GitHub Copilot) use OpenAI-compatible gateway
-                        try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                var activeBaseURL = baseURL
+                var activeModel = initialResolvedModel
+                var failedLocalEndpoints: Set<String> = []
+                var requestKey: String
+                if useDotminiEnterprise {
+                    if !ent.dotminiEnterpriseKey.isEmpty {
+                        requestKey = ent.dotminiEnterpriseKey
+                    } else if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
+                        requestKey = platformKey
                     } else {
-                        // Direct / Subscription mode with native provider endpoints
-                        switch provider {
-                        case .aipass:
-                            try await streamAiPass(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, sessionCookie: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        case .gemini:
-                            let lower = resolvedModel.lowercased()
-                            if !lower.contains("gemini") && !lower.contains("gemma") {
-                                let fallback = StreamableAIProvider.detect(from: resolvedModel)
-                                if fallback != .gemini {
-                                    try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: fallback.directBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                                } else {
-                                    try await streamGemini(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                                }
-                            } else {
-                                try await streamGemini(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                            }
-                        case .anthropic:
-                            try await streamAnthropic(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
-                             .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
-                             .grok, .qwen, .glm, .copilot, .local:
-                            try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        requestKey = actualKey
+                    }
+                } else if keyMode == "cloud" && activeBaseURL == provider.cloudBaseURL && provider != .local {
+                    if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
+                        requestKey = platformKey
+                    } else if SupabaseAuthService.shared.session != nil {
+                        guard let refreshed = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded() else {
+                            onError("Could not refresh your Dotmini session. Check your connection or sign in again.")
+                            return
+                        }
+                        requestKey = refreshed
+                    } else {
+                        requestKey = actualKey
+                    }
+                } else {
+                    requestKey = actualKey
+                }
+                let resolvedAttachments = attachments.isEmpty
+                    ? []
+                    : await UniversalAttachmentEngine.shared.ensureIngested(attachments, chatId: callerChatId)
+                var retryCount = 0
+                let maxRetries = 3
+                
+                while retryCount <= maxRetries {
+                    if retryCount > 0 {
+                        self.currentStreamedText = ""
+                        self.pendingStreamTokens = ""
+                    }
+                    let isLocalCall = (provider == .local || keyMode == "local")
+                    let trackedLocalEndpoint = activeBaseURL
+                    if isLocalCall {
+                        LocalLLMService.beginInFlight(endpoint: trackedLocalEndpoint)
+                    }
+                    defer {
+                        if isLocalCall {
+                            LocalLLMService.endInFlight(endpoint: trackedLocalEndpoint)
                         }
                     }
-                    
-                    self.flushPendingStreamTokens(onToken: onToken)
-                    onComplete(self.currentStreamedText)
-                    self.isStreaming = false
-                    return // Success
-                    
-                } catch let error as NSError {
-                    if Task.isCancelled || error.code == NSURLErrorCancelled {
-                        onError("Generation stopped by user.")
-                        self.isStreaming = false
+                    do {
+                        if activeBaseURL.hasPrefix("cli://") {
+                            try await streamHeadlessCLISubscription(
+                                cliURI: activeBaseURL,
+                                prompt: safePrompt,
+                                systemPrompt: systemPrompt,
+                                conversationHistory: trimmedHistory,
+                                model: activeModel,
+                                tools: tools,
+                                onToken: onToken,
+                                onToolCall: onToolCall
+                            )
+                        } else if useVertexGemini {
+                            try await streamGemini(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        } else if provider == .aipass || activeBaseURL.contains("de.aipass.net") {
+                            try await streamAiPass(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, sessionCookie: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        } else if activeBaseURL == "https://chatgpt.com/backend-api/codex" {
+                            try await streamCodexResponses(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, accessToken: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        } else if activeBaseURL.contains("cloudcode-pa.googleapis.com") {
+                            try await streamGoogleCodeAssist(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, refreshToken: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        } else if useDotminiEnterprise || useCustomGateway || activeBaseURL == provider.cloudBaseURL || activeBaseURL == StreamableAIProvider.copilot.directBaseURL {
+                            // Cloud-routed requests (Dotmini Cloud Enterprise, Dotmini Cloud, Custom Gateway, or GitHub Copilot) use OpenAI-compatible gateway
+                            try await streamOpenAI(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, apiKey: requestKey, baseURL: activeBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        } else {
+                            // Direct / Subscription mode with native provider endpoints
+                            switch provider {
+                            case .aipass:
+                                try await streamAiPass(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, sessionCookie: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            case .gemini:
+                                let lower = activeModel.lowercased()
+                                if !lower.contains("gemini") && !lower.contains("gemma") {
+                                    let fallback = StreamableAIProvider.detect(from: activeModel)
+                                    if fallback != .gemini {
+                                        try await streamOpenAI(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, apiKey: requestKey, baseURL: fallback.directBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                    } else {
+                                        try await streamGemini(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                    }
+                                } else {
+                                    try await streamGemini(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                }
+                            case .anthropic:
+                                try await streamAnthropic(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
+                                 .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
+                                 .grok, .qwen, .glm, .copilot, .custom, .local:
+                                try await streamOpenAI(prompt: safePrompt, attachments: resolvedAttachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: activeModel, apiKey: requestKey, baseURL: activeBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            }
+                        }
+                        
+                        self.flushPendingStreamTokens(onToken: onToken)
+                        onComplete(self.currentStreamedText)
+                        return // Success
+                        
+                    } catch let error as NSError {
+                        if Task.isCancelled || error.code == NSURLErrorCancelled {
+                            onError("Generation stopped by user.")
+                            return
+                        }
+                        // Multi-Node Local LLM Pool Failover: if a Local LLM server fails, fail over to the next connected node in the pool
+                        if isLocalCall && retryCount < maxRetries {
+                            failedLocalEndpoints.insert(activeBaseURL.lowercased())
+                            let nextRoute = LocalLLMService.resolveRoute(
+                                forModel: model,
+                                excludingEndpoints: failedLocalEndpoints
+                            )
+                            if !failedLocalEndpoints.contains(nextRoute.endpoint.lowercased()) &&
+                               nextRoute.endpoint.lowercased() != activeBaseURL.lowercased() {
+                                activeBaseURL = nextRoute.endpoint
+                                activeModel = nextRoute.model
+                                requestKey = nextRoute.apiKey
+                                retryCount += 1
+                                continue
+                            }
+                        }
+                        // Rotate Multi-Account Subscription Ring immediately on 429 / 529 quota exhaustion
+                        if keyMode == "subscription" && (error.code == 429 || error.code == 529) {
+                            if let subType = Self.mapToSubscriptionProvider(provider),
+                               let nextHealthy = SubscriptionAuthManager.shared.markRateLimited(provider: subType, tokenOrAccountId: requestKey),
+                               nextHealthy.sessionToken != requestKey,
+                               retryCount < maxRetries {
+                                retryCount += 1
+                                try? await Task.sleep(nanoseconds: 250_000_000)
+                                continue
+                            }
+                        }
+                        // Retry on transient errors
+                        let transientCodes: Set<Int> = [429, 503, -1001, -1004, -1005, -1009]
+                        if transientCodes.contains(error.code) && retryCount < maxRetries {
+                            retryCount += 1
+                            let delay = UInt64(pow(2.0, Double(retryCount))) * 1_000_000_000
+                            try? await Task.sleep(nanoseconds: delay)
+                            continue
+                        }
+                        
+                        onError(self.parseErrorMessage(error))
                         return
                     }
-                    // Retry on transient errors
-                    let transientCodes: Set<Int> = [429, 503, -1001, -1004, -1005, -1009]
-                    if transientCodes.contains(error.code) && retryCount < maxRetries {
-                        retryCount += 1
-                        let delay = UInt64(pow(2.0, Double(retryCount))) * 1_000_000_000
-                        try? await Task.sleep(nanoseconds: delay)
-                        continue
-                    }
-                    
-                    onError(self.parseErrorMessage(error))
-                    self.isStreaming = false
-                    return
                 }
             }
         }
+        streamTask = task
+        streamTasksByKey[taskKey] = task
+        activeStreamCount = streamTasksByKey.count
     }
     
-    func cancelStream() {
-        streamTask?.cancel()
-        pendingStreamTokens = ""
-        isStreaming = false
+    func cancelStream(forChatId chatId: String? = nil) {
+        if let targetKey = chatId ?? AgentExecutionContext.chatId {
+            streamTasksByKey[targetKey]?.cancel()
+            streamTasksByKey.removeValue(forKey: targetKey)
+            activeStreamCount = streamTasksByKey.count
+            isStreaming = !streamTasksByKey.isEmpty
+        } else {
+            streamTask?.cancel()
+            for (_, t) in streamTasksByKey {
+                t.cancel()
+            }
+            streamTasksByKey.removeAll()
+            activeStreamCount = 0
+            pendingStreamTokens = ""
+            isStreaming = false
+        }
     }
     
     // MARK: - Codex ChatGPT Subscription OAuth Support
@@ -1300,22 +1992,61 @@ final class AIClient: ObservableObject {
         }
         
         var finalUserPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inlineTextAttachments = attachments.filter { $0.includeInlineTextInProviderPayload }
+        if !inlineTextAttachments.isEmpty {
+            let groundedPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
+                attachments: inlineTextAttachments,
+                maxInlineChars: 80_000
+            )
+            if !groundedPackage.isEmpty {
+                finalUserPrompt = finalUserPrompt.isEmpty ? groundedPackage : (finalUserPrompt + "\n\n" + groundedPackage)
+            }
+        }
+        var codexImageItems: [[String: Any]] = []
+        var inlineBinaryBytesUsed = 0
+        let maxCodexBinaryBytes = 16_000_000
         for attachment in attachments {
-            switch attachment.type {
-            case .text:
-                if let t = attachment.textContent {
-                    finalUserPrompt += "\n\n[File: \(attachment.name)]\n\(t)\n[/File]"
+            if case .image = attachment.type {
+                let vData = attachment.effectiveVisionData
+                let vMime = attachment.effectiveVisionMimeType
+                if !vData.isEmpty && vData.count <= 10_000_000 && (inlineBinaryBytesUsed + vData.count) <= maxCodexBinaryBytes {
+                    codexImageItems.append([
+                        "type": "input_image",
+                        "image_url": "data:\(vMime);base64,\(vData.base64EncodedString())"
+                    ])
+                    inlineBinaryBytesUsed += vData.count
                 }
-            case .pdf:
-                let pdfText = attachment.pdfExtractedText
-                finalUserPrompt += "\n\n[Document: \(attachment.name)]\n\(pdfText)\n[/Document]"
-            case .image:
-                let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
-                finalUserPrompt += "\n\n\(visionResult.formattedSummary)"
+            } else if attachment.semanticCategory == .video,
+                      let kf = attachment.normalizedVisionData,
+                      !kf.isEmpty,
+                      kf.count <= 10_000_000,
+                      (inlineBinaryBytesUsed + kf.count) <= maxCodexBinaryBytes {
+                let kfMime = attachment.normalizedVisionMimeType ?? "image/jpeg"
+                codexImageItems.append([
+                    "type": "input_image",
+                    "image_url": "data:\(kfMime);base64,\(kf.base64EncodedString())"
+                ])
+                inlineBinaryBytesUsed += kf.count
             }
         }
         if finalUserPrompt.isEmpty { finalUserPrompt = "Continue." }
-        appendTurn(role: "user", content: finalUserPrompt)
+        if !codexImageItems.isEmpty && AIStructuredTurnCodec.decode(finalUserPrompt) == nil {
+            activeCallIds.removeAll()
+            inputItems.append([
+                "type": "message",
+                "role": "user",
+                "content": [["type": "input_text", "text": finalUserPrompt]] + codexImageItems
+            ])
+        } else {
+            appendTurn(role: "user", content: finalUserPrompt)
+            if !codexImageItems.isEmpty {
+                inputItems.append([
+                    "type": "message",
+                    "role": "user",
+                    "content": codexImageItems
+                ])
+            }
+        }
         
         let instructions = (systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? systemPrompt!
@@ -1330,7 +2061,8 @@ final class AIClient: ObservableObject {
         ]
         
         if let tools = tools, !tools.isEmpty {
-            let formattedTools: [[String: Any]] = tools.compactMap { t in
+            let formattedTools: [[String: Any]] = tools.compactMap { rawTool in
+                let t = sanitizeToolSchemaForStandardJSONSchema(rawTool)
                 guard let name = t["name"] as? String else { return nil }
                 var item: [String: Any] = [
                     "type": "function",
@@ -1467,39 +2199,47 @@ final class AIClient: ObservableObject {
                   SubscriptionAuthManager.shared.isConnected(.tokenme),
                   SubscriptionProviderType.tokenme.modelInfos.contains(where: { $0.modelID.caseInsensitiveCompare(model) == .orderedSame }) {
             provider = .tokenme
-        } else if provider == .omni && !useDotminiEnterprise {
+        } else if provider == .omni && !useDotminiEnterprise && rawKeyMode != "cloud" {
             let detected = StreamableAIProvider.detect(from: model)
             if detected != .omni {
                 provider = detected
-            } else if rawKeyMode != "cloud" {
-                if rawKeyMode == "subscription",
-                   let subStr = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"),
-                   let subType = SubscriptionProviderType(rawValue: subStr),
-                   let mapped = StreamableAIProvider(rawValue: subType.aiProviderID) {
-                    provider = mapped
-                } else {
-                    provider = .gemini
-                }
+            } else if rawKeyMode == "subscription",
+                      let subStr = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"),
+                      let subType = SubscriptionProviderType(rawValue: subStr),
+                      let mapped = StreamableAIProvider(rawValue: subType.aiProviderID) {
+                provider = mapped
+            } else {
+                provider = .gemini
             }
         }
-        let keyMode: String = {
-            if rawKeyMode == "cloud" && provider != .omni && !useDotminiEnterprise {
-                let hasDirect = !AIModelCatalog.resolveKey(provider.rawValue).isEmpty || !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                if !hasDirect && SubscriptionAuthManager.shared.hasAnyConnected {
-                    return "subscription"
-                }
-                return "direct"
-            }
-            return rawKeyMode
-        }()
+        let keyMode = rawKeyMode
         let actualKey: String
         let baseURL: String
         let useVertexGemini = (ent.mode == .geminiVertex && provider == .gemini)
         let useCustomGateway = (ent.mode == .customGateway && !ent.customGatewayBaseURL.isEmpty)
+
+        if ent.isAirGappedLockdownEnabled && provider != .local && keyMode != "local" && !useCustomGateway {
+            if LocalLLMService.shared.detectedServers.contains(where: { $0.isOnline }) {
+                provider = .local
+            } else {
+                throw NSError(domain: "EnterpriseSecurity", code: 403, userInfo: [
+                    NSLocalizedDescriptionKey: "🛡️ Air-Gapped Sovereign Lockdown is active: External cloud AI endpoints are blocked. Start Local LLM or configure an internal VPC Gateway."
+                ])
+            }
+        }
+        if ent.confidentialTurnActive && ent.enforceConfidentialSplitRouting &&
+           provider != .local && keyMode != "local" && !useCustomGateway && !useVertexGemini && !useDotminiEnterprise {
+            if LocalLLMService.shared.detectedServers.contains(where: { $0.isOnline }) {
+                provider = .local
+            }
+        }
         
+        var resolvedLocalRoute: (endpoint: String, apiKey: String, model: String, serverLabel: String)?
         if provider == .local {
-            actualKey = ""
-            baseURL = provider.directBaseURL
+            let route = LocalLLMService.resolveRoute(forModel: model)
+            resolvedLocalRoute = route
+            actualKey = route.apiKey
+            baseURL = route.endpoint
         } else if useVertexGemini {
             actualKey = "vertex_enterprise"
             baseURL = "vertex://\(ent.vertexLocation)/\(ent.vertexProjectId)"
@@ -1563,6 +2303,20 @@ final class AIClient: ObservableObject {
                 actualKey = Self.resolveAiPassSessionCookie(primary: aipassToken)
                 baseURL = StreamableAIProvider.aipass.directBaseURL
                 provider = .aipass
+            } else if provider == .anthropic,
+                      let cliBin = SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .claude) {
+                let engineKind = URL(fileURLWithPath: cliBin).lastPathComponent == "agy" ? "agy" : "claude"
+                actualKey = "cli_bridge"
+                baseURL = "cli://\(engineKind):\(cliBin)"
+            } else if provider == .gemini,
+                      let cliBin = SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .gemini) {
+                let engineKind = URL(fileURLWithPath: cliBin).lastPathComponent == "agy" ? "agy" : "gemini"
+                actualKey = "cli_bridge"
+                baseURL = "cli://\(engineKind):\(cliBin)"
+            } else if provider == .openai,
+                      let cliBin = SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .chatgpt) {
+                actualKey = "cli_bridge"
+                baseURL = "cli://codex:\(cliBin)"
             } else {
                 throw NSError(domain: "AIClient", code: 401, userInfo: [NSLocalizedDescriptionKey: "No active subscription or API key found for \(provider.rawValue)."])
             }
@@ -1571,30 +2325,14 @@ final class AIClient: ObservableObject {
             let specificKey = AIModelCatalog.resolveKey(provider.rawValue)
             let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
             let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasCustomURL = (provider == .custom) || StreamableAIProvider.hasCustomByokBaseURL(for: provider.rawValue)
             
             if provider == .aipass {
                 actualKey = Self.resolveAiPassSessionCookie(primary: !specificKey.isEmpty ? specificKey : passedKey)
                 baseURL = StreamableAIProvider.aipass.directBaseURL
-            } else if !specificKey.isEmpty && Self.isValidDirectAPIKey(specificKey, for: provider) {
-                actualKey = specificKey
-                baseURL = provider.directBaseURL
-            } else if !passedKey.isEmpty && Self.isValidDirectAPIKey(passedKey, for: provider) {
-                actualKey = passedKey
-                baseURL = provider.directBaseURL
-            } else if provider == .anthropic, let codeAssistCreds = Self.loadGoogleCodeAssistCredentials(fallbackToken: "") {
-                actualKey = codeAssistCreds.refreshToken
-                baseURL = "https://daily-cloudcode-pa.googleapis.com/v1internal"
-            } else if !specificKey.isEmpty {
-                actualKey = specificKey
-                baseURL = provider.directBaseURL
-            } else if !passedKey.isEmpty {
-                actualKey = passedKey
-                baseURL = provider.directBaseURL
-            } else if !legacyKey.isEmpty {
-                actualKey = legacyKey
-                baseURL = provider.directBaseURL
             } else {
-                actualKey = ""
+                let candidateKey = !specificKey.isEmpty ? specificKey : (!passedKey.isEmpty ? passedKey : legacyKey)
+                actualKey = (candidateKey.isEmpty && hasCustomURL) ? "byok-custom-tunnel" : candidateKey
                 baseURL = provider.directBaseURL
             }
             
@@ -1606,99 +2344,144 @@ final class AIClient: ObservableObject {
             baseURL = provider.cloudBaseURL
         }
         
-        let resolvedModel = normalizeModelName(model, provider: provider, baseURL: baseURL)
-        
-        if useVertexGemini {
-            return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, tools: tools)
-        } else if provider == .aipass || baseURL.contains("de.aipass.net") {
-            var history: [(role: String, content: String)] = []
-            for msg in messages {
-                let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
-                let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
-                if !content.isEmpty { history.append((role: role, content: content)) }
-            }
-            let prompt = history.popLast()?.content ?? "Continue."
-            var fullText = ""
-            var calls: [AIToolCall] = []
-            try await streamAiPass(
-                prompt: prompt,
-                attachments: [],
-                systemPrompt: systemPrompt,
-                conversationHistory: history,
-                model: resolvedModel,
-                sessionCookie: actualKey,
-                tools: tools,
-                onToken: { fullText += $0 },
-                onToolCall: { calls.append($0) }
-            )
-            return (text: fullText, toolCalls: calls)
-        } else if baseURL == "https://chatgpt.com/backend-api/codex" {
-            var history: [(role: String, content: String)] = []
-            for msg in messages {
-                let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
-                let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
-                if !content.isEmpty { history.append((role: role, content: content)) }
-            }
-            let prompt = history.popLast()?.content ?? "Continue."
-            var fullText = ""
-            var calls: [AIToolCall] = []
-            try await streamCodexResponses(
-                prompt: prompt,
-                attachments: [],
-                systemPrompt: systemPrompt,
-                conversationHistory: history,
-                model: resolvedModel,
-                accessToken: actualKey,
-                tools: tools,
-                onToken: { fullText += $0 },
-                onToolCall: { calls.append($0) }
-            )
-            return (text: fullText, toolCalls: calls)
-        } else if baseURL.contains("cloudcode-pa.googleapis.com") {
-            var history: [(role: String, content: String)] = []
-            for msg in messages {
-                let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
-                let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
-                if !content.isEmpty { history.append((role: role, content: content)) }
-            }
-            let prompt = history.popLast()?.content ?? "Continue."
-            var fullText = ""
-            var calls: [AIToolCall] = []
-            try await streamGoogleCodeAssist(
-                prompt: prompt,
-                attachments: [],
-                systemPrompt: systemPrompt,
-                conversationHistory: history,
-                model: resolvedModel,
-                refreshToken: actualKey,
-                tools: tools,
-                onToken: { fullText += $0 },
-                onToolCall: { calls.append($0) }
-            )
-            return (text: fullText, toolCalls: calls)
-        } else if useDotminiEnterprise || useCustomGateway || baseURL == provider.cloudBaseURL || baseURL == StreamableAIProvider.copilot.directBaseURL {
-            // Cloud, Dotmini Enterprise, Custom Gateway, and Copilot use OpenAI-compatible transport
-            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools)
-        } else {
-            // Direct/Subscription mode → use native protocols
-            switch provider {
-            case .gemini:
-                let lower = resolvedModel.lowercased()
-                if !lower.contains("gemini") && !lower.contains("gemma") {
-                    let fallback = StreamableAIProvider.detect(from: resolvedModel)
-                    if fallback != .gemini {
-                        return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: fallback.directBaseURL, tools: tools)
-                    }
+        let resolvedModel = resolvedLocalRoute?.model ?? normalizeModelName(model, provider: provider, baseURL: baseURL)
+        let streamCtx = AIStreamContext()
+        return try await AIStreamContext.$current.withValue(streamCtx) {
+            if baseURL.hasPrefix("cli://") {
+                var history: [(role: String, content: String)] = []
+                for msg in messages {
+                    let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
+                    let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
+                    if !content.isEmpty { history.append((role: role, content: content)) }
                 }
+                let prompt = history.popLast()?.content ?? "Continue."
+                var fullText = ""
+                var calls: [AIToolCall] = []
+                pendingStreamTokens = ""
+                try await streamHeadlessCLISubscription(
+                    cliURI: baseURL,
+                    prompt: prompt,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: history,
+                    model: resolvedModel,
+                    tools: tools,
+                    onToken: { fullText += $0 },
+                    onToolCall: { calls.append($0) }
+                )
+                flushPendingStreamTokens(onToken: { fullText += $0 })
+                return (text: fullText, toolCalls: calls)
+            } else if useVertexGemini {
                 return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, tools: tools)
-            case .anthropic:
-                return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, tools: tools)
-            case .aipass:
-                return (text: "", toolCalls: [])
-            case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
-                 .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
-                 .grok, .qwen, .glm, .copilot, .local:
+            } else if provider == .aipass || baseURL.contains("de.aipass.net") {
+                var history: [(role: String, content: String)] = []
+                for msg in messages {
+                    let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
+                    let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
+                    if !content.isEmpty { history.append((role: role, content: content)) }
+                }
+                let prompt = history.popLast()?.content ?? "Continue."
+                var fullText = ""
+                var calls: [AIToolCall] = []
+                pendingStreamTokens = ""
+                try await streamAiPass(
+                    prompt: prompt,
+                    attachments: [],
+                    systemPrompt: systemPrompt,
+                    conversationHistory: history,
+                    model: resolvedModel,
+                    sessionCookie: actualKey,
+                    tools: tools,
+                    onToken: { fullText += $0 },
+                    onToolCall: { calls.append($0) }
+                )
+                flushPendingStreamTokens(onToken: { fullText += $0 })
+                return (text: fullText, toolCalls: calls)
+            } else if baseURL == "https://chatgpt.com/backend-api/codex" {
+                var history: [(role: String, content: String)] = []
+                for msg in messages {
+                    let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
+                    let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
+                    if !content.isEmpty { history.append((role: role, content: content)) }
+                }
+                let prompt = history.popLast()?.content ?? "Continue."
+                var fullText = ""
+                var calls: [AIToolCall] = []
+                pendingStreamTokens = ""
+                try await streamCodexResponses(
+                    prompt: prompt,
+                    attachments: [],
+                    systemPrompt: systemPrompt,
+                    conversationHistory: history,
+                    model: resolvedModel,
+                    accessToken: actualKey,
+                    tools: tools,
+                    onToken: { fullText += $0 },
+                    onToolCall: { calls.append($0) }
+                )
+                flushPendingStreamTokens(onToken: { fullText += $0 })
+                return (text: fullText, toolCalls: calls)
+            } else if baseURL.contains("cloudcode-pa.googleapis.com") {
+                var history: [(role: String, content: String)] = []
+                for msg in messages {
+                    let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
+                    let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
+                    if !content.isEmpty { history.append((role: role, content: content)) }
+                }
+                let prompt = history.popLast()?.content ?? "Continue."
+                var fullText = ""
+                var calls: [AIToolCall] = []
+                pendingStreamTokens = ""
+                try await streamGoogleCodeAssist(
+                    prompt: prompt,
+                    attachments: [],
+                    systemPrompt: systemPrompt,
+                    conversationHistory: history,
+                    model: resolvedModel,
+                    refreshToken: actualKey,
+                    tools: tools,
+                    onToken: { fullText += $0 },
+                    onToolCall: { calls.append($0) }
+                )
+                flushPendingStreamTokens(onToken: { fullText += $0 })
+                return (text: fullText, toolCalls: calls)
+            } else if useDotminiEnterprise || useCustomGateway || baseURL == provider.cloudBaseURL || baseURL == StreamableAIProvider.copilot.directBaseURL {
+                // Cloud, Dotmini Enterprise, Custom Gateway, and Copilot use OpenAI-compatible transport
                 return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools)
+            } else {
+                // Direct/Subscription mode → use native protocols
+                switch provider {
+                case .gemini:
+                    let lower = resolvedModel.lowercased()
+                    if !lower.contains("gemini") && !lower.contains("gemma") {
+                        let fallback = StreamableAIProvider.detect(from: resolvedModel)
+                        if fallback != .gemini {
+                            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: fallback.directBaseURL, tools: tools)
+                        }
+                    }
+                    return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, tools: tools)
+                case .anthropic:
+                    return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, tools: tools)
+                case .aipass:
+                    return (text: "", toolCalls: [])
+                case .local:
+                    LocalLLMService.beginInFlight(endpoint: baseURL)
+                    defer { LocalLLMService.endInFlight(endpoint: baseURL) }
+                    do {
+                        return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools)
+                    } catch {
+                        let nextRoute = LocalLLMService.resolveRoute(forModel: model, excludingEndpoints: [baseURL.lowercased()])
+                        if nextRoute.endpoint.lowercased() != baseURL.lowercased() {
+                            LocalLLMService.beginInFlight(endpoint: nextRoute.endpoint)
+                            defer { LocalLLMService.endInFlight(endpoint: nextRoute.endpoint) }
+                            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: nextRoute.model, apiKey: nextRoute.apiKey, baseURL: nextRoute.endpoint, tools: tools)
+                        }
+                        throw error
+                    }
+                case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch,
+                     .tokenme, .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
+                     .grok, .qwen, .glm, .copilot, .custom:
+                    return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools)
+                }
             }
         }
     }
@@ -1748,7 +2531,9 @@ final class AIClient: ObservableObject {
         switch error.code {
         case 402:
             if keyMode == "cloud" {
-                return "Payment required: Your Dotmini Cloud credit balance is insufficient or requires top-up. Check Settings → Wallet."
+                return hasServerDetail
+                    ? "Cloud AI Credit Exhausted (HTTP 402): \(serverDetail)"
+                    : "Payment required: Your Dotmini Cloud AI Credit Pool is exhausted (฿0.00 left). Top up Cloud AI Credit or upgrade your plan in Settings → Account & License (Cloud AI Credit is separate from GPU Compute Wallet)."
             } else {
                 return hasServerDetail ? "External provider API returned HTTP 402: \(serverDetail)" : "External provider API returned HTTP 402 (Insufficient balance or quota on your external provider account)."
             }
@@ -1826,8 +2611,8 @@ final class AIClient: ObservableObject {
             if !EnterpriseAIAuthService.shared.vertexProjectId.isEmpty {
                 request.setValue(EnterpriseAIAuthService.shared.vertexProjectId, forHTTPHeaderField: "x-goog-user-project")
             }
-        } else if baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
-            request.setValue("microcode", forHTTPHeaderField: "X-Dotmini-Product")
+        } else if StreamableAIProvider.isDotminiCloudProxy(baseURL) {
+            request.setValue("macos", forHTTPHeaderField: "X-MicroCode-Client")
         }
         EnterpriseAIAuthService.shared.applyEnterpriseHeaders(to: &request)
         
@@ -1922,16 +2707,55 @@ final class AIClient: ObservableObject {
             }
         }
         
+        let geminiInlineTextAttachments = attachments.filter { $0.includeInlineTextInProviderPayload }
+        if !geminiInlineTextAttachments.isEmpty {
+            let groundedPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
+                attachments: geminiInlineTextAttachments,
+                maxInlineChars: 80_000
+            )
+            if !groundedPackage.isEmpty {
+                userParts.append(["text": "\n" + groundedPackage + "\n"])
+            }
+        }
+
+        var geminiInlineBytesUsed = 0
+        let maxGeminiInlineBytes = 18_000_000
+        let supportedGeminiMediaMimes: Set<String> = [
+            "audio/mp3", "audio/wav", "audio/mp4", "audio/aac", "audio/flac", "audio/ogg",
+            "video/mp4", "video/quicktime", "video/webm"
+        ]
         for attachment in attachments {
             switch attachment.type {
-            case .image(let format):
-                userParts.append(["inlineData": ["mimeType": "image/\(format)", "data": attachment.base64String]])
-            case .text:
-                if let text = attachment.textContent {
-                    userParts.append(["text": "\n[File: \(attachment.name)]\n\(text)\n[/File]\n"])
+            case .image:
+                let vData = attachment.effectiveVisionData
+                let vMime = attachment.effectiveVisionMimeType
+                if !vData.isEmpty && (geminiInlineBytesUsed + vData.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": vMime, "data": vData.base64EncodedString()]])
+                    geminiInlineBytesUsed += vData.count
                 }
             case .pdf:
-                userParts.append(["inlineData": ["mimeType": "application/pdf", "data": attachment.base64String]])
+                if !attachment.isPasswordProtected,
+                   let pdfData = attachment.loadRawBinaryData(maxBytes: 15_000_000),
+                   !pdfData.isEmpty,
+                   (geminiInlineBytesUsed + pdfData.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": "application/pdf", "data": pdfData.base64EncodedString()]])
+                    geminiInlineBytesUsed += pdfData.count
+                }
+            case .text:
+                if let mediaMime = attachment.nativeMediaMimeType,
+                   supportedGeminiMediaMimes.contains(mediaMime),
+                   let mediaData = attachment.loadRawBinaryData(maxBytes: 14_000_000),
+                   !mediaData.isEmpty,
+                   (geminiInlineBytesUsed + mediaData.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": mediaMime, "data": mediaData.base64EncodedString()]])
+                    geminiInlineBytesUsed += mediaData.count
+                } else if attachment.semanticCategory == .video,
+                          let kf = attachment.normalizedVisionData,
+                          !kf.isEmpty,
+                          (geminiInlineBytesUsed + kf.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": attachment.normalizedVisionMimeType ?? "image/jpeg", "data": kf.base64EncodedString()]])
+                    geminiInlineBytesUsed += kf.count
+                }
             }
         }
         
@@ -2425,16 +3249,55 @@ final class AIClient: ObservableObject {
             }
         }
         
+        let geminiInlineTextAttachments = attachments.filter { $0.includeInlineTextInProviderPayload }
+        if !geminiInlineTextAttachments.isEmpty {
+            let groundedPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
+                attachments: geminiInlineTextAttachments,
+                maxInlineChars: 80_000
+            )
+            if !groundedPackage.isEmpty {
+                userParts.append(["text": "\n" + groundedPackage + "\n"])
+            }
+        }
+
+        var geminiInlineBytesUsed = 0
+        let maxGeminiInlineBytes = 18_000_000
+        let supportedGeminiMediaMimes: Set<String> = [
+            "audio/mp3", "audio/wav", "audio/mp4", "audio/aac", "audio/flac", "audio/ogg",
+            "video/mp4", "video/quicktime", "video/webm"
+        ]
         for attachment in attachments {
             switch attachment.type {
-            case .image(let format):
-                userParts.append(["inlineData": ["mimeType": "image/\(format)", "data": attachment.base64String]])
-            case .text:
-                if let text = attachment.textContent {
-                    userParts.append(["text": "\n[File: \(attachment.name)]\n\(text)\n[/File]\n"])
+            case .image:
+                let vData = attachment.effectiveVisionData
+                let vMime = attachment.effectiveVisionMimeType
+                if !vData.isEmpty && (geminiInlineBytesUsed + vData.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": vMime, "data": vData.base64EncodedString()]])
+                    geminiInlineBytesUsed += vData.count
                 }
             case .pdf:
-                userParts.append(["inlineData": ["mimeType": "application/pdf", "data": attachment.base64String]])
+                if !attachment.isPasswordProtected,
+                   let pdfData = attachment.loadRawBinaryData(maxBytes: 15_000_000),
+                   !pdfData.isEmpty,
+                   (geminiInlineBytesUsed + pdfData.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": "application/pdf", "data": pdfData.base64EncodedString()]])
+                    geminiInlineBytesUsed += pdfData.count
+                }
+            case .text:
+                if let mediaMime = attachment.nativeMediaMimeType,
+                   supportedGeminiMediaMimes.contains(mediaMime),
+                   let mediaData = attachment.loadRawBinaryData(maxBytes: 14_000_000),
+                   !mediaData.isEmpty,
+                   (geminiInlineBytesUsed + mediaData.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": mediaMime, "data": mediaData.base64EncodedString()]])
+                    geminiInlineBytesUsed += mediaData.count
+                } else if attachment.semanticCategory == .video,
+                          let kf = attachment.normalizedVisionData,
+                          !kf.isEmpty,
+                          (geminiInlineBytesUsed + kf.count) <= maxGeminiInlineBytes {
+                    userParts.append(["inlineData": ["mimeType": attachment.normalizedVisionMimeType ?? "image/jpeg", "data": kf.base64EncodedString()]])
+                    geminiInlineBytesUsed += kf.count
+                }
             }
         }
         
@@ -2682,9 +3545,17 @@ final class AIClient: ObservableObject {
     
     private func isVisionCapableModel(_ model: String) -> Bool {
         let m = model.lowercased()
-        if m.contains("gpt-4o") || m.contains("gpt-4-turbo") || m.contains("vision") ||
-           m.contains("gemini") || m.contains("claude-3") || m.contains("omni") ||
-           m.contains("llava") || m.contains("vl") || m.contains("4o") {
+        if m.contains("o1-mini") || m.contains("o3-mini") {
+            return false
+        }
+        if m.contains("gpt-4o") || m.contains("gpt-4-turbo") || m.contains("gpt-4.1") ||
+           m.contains("gpt-4.5") || m.contains("gpt-5") || m.contains("gpt-6") ||
+           m.hasPrefix("o1") || m.hasPrefix("o3") || m.hasPrefix("o4") ||
+           m.contains("/o1") || m.contains("/o3") || m.contains("/o4") ||
+           m.contains("vision") || m.contains("gemini") || m.contains("gemma-3") ||
+           m.contains("gemma-4") || m.contains("claude") || m.contains("omni") ||
+           m.contains("llava") || m.contains("pixtral") || m.contains("kimi") ||
+           m.contains("grok") || m.contains("vl") || m.contains("4o") {
             return true
         }
         return false
@@ -2692,7 +3563,7 @@ final class AIClient: ObservableObject {
     
     // MARK: - OpenAI/DeepSeek Streaming
     
-    private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?, maxTokensOverride: Int? = nil, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
+    private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?, maxTokensOverride: Int? = nil, omitToolChoice: Bool = false, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
         guard let url = URL(string: "\(baseURL)/chat/completions") else {
             throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for openai"])
         }
@@ -2700,17 +3571,19 @@ final class AIClient: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let isCloudProxy = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let isCloudProxy = StreamableAIProvider.isDotminiCloudProxy(baseURL)
         let isCopilot = baseURL.contains("githubcopilot.com")
         if isCloudProxy {
-            request.setValue("microcode", forHTTPHeaderField: "X-Dotmini-Product")
+            let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.5.38"
+            request.setValue("MicroCode/\(appVersion) (macOS)", forHTTPHeaderField: "User-Agent")
+            request.setValue("macos", forHTTPHeaderField: "X-MicroCode-Client")
+            request.setValue("Agent", forHTTPHeaderField: "X-MicroCode-Feature")
+            request.setValue("Dotmini Cloud", forHTTPHeaderField: "X-MicroCode-AI-Provider")
             let dotminiLicense = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
             if !dotminiLicense.isEmpty {
                 request.setValue(dotminiLicense, forHTTPHeaderField: "X-Dotmini-License")
             }
-            let isJWT = apiKey.components(separatedBy: ".").count >= 3
-            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-") || EnterpriseAIAuthService.shared.mode == .dotminiEnterprise
-            if (isJWT || isPlatformKey) && !apiKey.isEmpty {
+            if !apiKey.isEmpty {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
         } else if isCopilot {
@@ -2794,38 +3667,62 @@ final class AIClient: ObservableObject {
             appendOpenAITurn(role: msg.role, content: msg.content)
         }
         
-        if attachments.isEmpty {
-            let safePrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Continue." : prompt
+        var combinedUserPrompt = prompt
+        let inlineTextAttachments = attachments.filter { $0.includeInlineTextInProviderPayload }
+        if !inlineTextAttachments.isEmpty {
+            let groundedPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
+                attachments: inlineTextAttachments,
+                maxInlineChars: 80_000
+            )
+            if !groundedPackage.isEmpty {
+                combinedUserPrompt = combinedUserPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? groundedPackage
+                    : (combinedUserPrompt + "\n\n" + groundedPackage)
+            }
+        }
+
+        let isVision = isVisionCapableModel(model)
+        var visionImageParts: [[String: Any]] = []
+        if isVision && !attachments.isEmpty {
+            var inlineBinaryBytesUsed = 0
+            let maxOpenAIBinaryBytes = 18_000_000
+            for attachment in attachments {
+                if case .image = attachment.type {
+                    let vData = attachment.effectiveVisionData
+                    let vMime = attachment.effectiveVisionMimeType
+                    if !vData.isEmpty && vData.count <= 12_000_000 && (inlineBinaryBytesUsed + vData.count) <= maxOpenAIBinaryBytes {
+                        visionImageParts.append([
+                            "type": "image_url",
+                            "image_url": ["url": "data:\(vMime);base64,\(vData.base64EncodedString())"]
+                        ])
+                        inlineBinaryBytesUsed += vData.count
+                    }
+                } else if attachment.semanticCategory == .video,
+                          let kf = attachment.normalizedVisionData,
+                          !kf.isEmpty,
+                          kf.count <= 12_000_000,
+                          (inlineBinaryBytesUsed + kf.count) <= maxOpenAIBinaryBytes {
+                    let kfMime = attachment.normalizedVisionMimeType ?? "image/jpeg"
+                    visionImageParts.append([
+                        "type": "image_url",
+                        "image_url": ["url": "data:\(kfMime);base64,\(kf.base64EncodedString())"]
+                    ])
+                    inlineBinaryBytesUsed += kf.count
+                }
+            }
+        }
+
+        if visionImageParts.isEmpty {
+            let safePrompt = combinedUserPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? (attachments.isEmpty ? "Continue." : "Analyze attachment.")
+                : combinedUserPrompt
             appendOpenAITurn(role: "user", content: safePrompt)
         } else {
             activeAssistantToolCallIds.removeAll()
-            var contentArray: [[String: Any]] = [["type": "text", "text": prompt.isEmpty ? "Analyze attachment." : prompt]]
-            let isVision = isVisionCapableModel(model)
-            
-            for attachment in attachments {
-                switch attachment.type {
-                case .image(let format):
-                    // 1. Run local Apple Neural Engine OCR & Vision extraction
-                    let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
-                    
-                    if isVision {
-                        // Send native image_url to vision-capable models
-                        contentArray.append(["type": "image_url", "image_url": ["url": "data:image/\(format);base64,\(attachment.base64String)"]])
-                        if !visionResult.extractedText.isEmpty {
-                            contentArray.append(["type": "text", "text": "\n[Apple Neural Vision OCR Aid]:\n\(visionResult.extractedText)\n"])
-                        }
-                    } else {
-                        // Text-only LLM bridge: Provide full structural vision & OCR breakdown
-                        contentArray.append(["type": "text", "text": "\n\(visionResult.formattedSummary)\n"])
-                    }
-                case .text:
-                    if let text = attachment.textContent { contentArray.append(["type": "text", "text": "\n[File: \(attachment.name)]\n\(text)\n"]) }
-                case .pdf:
-                    let pdfText = attachment.pdfExtractedText
-                    let preview = pdfText.isEmpty ? "[Empty or Scanned PDF]" : pdfText
-                    contentArray.append(["type": "text", "text": "\n[Document: \(attachment.name) (\(attachment.pdfPageCount) pages)]\n\(preview)\n[/Document]\n"])
-                }
-            }
+            let textLead = combinedUserPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "Analyze attachment."
+                : combinedUserPrompt
+            let contentArray: [[String: Any]] = [["type": "text", "text": textLead]] + visionImageParts
             messages.append(["role": "user", "content": contentArray])
         }
         
@@ -2853,8 +3750,9 @@ final class AIClient: ObservableObject {
         }
         
         if let tools = tools, !tools.isEmpty, !baseURL.contains("perplexity.ai") {
-            body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
-            if !isReasoningNoTemp {
+            let sanitizedTools = tools.map { sanitizeToolSchemaForStandardJSONSchema($0) }
+            body["tools"] = sanitizedTools.map { ["type": "function", "function": $0] as [String: Any] }
+            if !isReasoningNoTemp && !omitToolChoice {
                 body["tool_choice"] = "auto"
             }
         }
@@ -2890,6 +3788,8 @@ final class AIClient: ObservableObject {
                 // or for Typhoon on quota/rate-limit/outage (402/429/503) mapped to `typhoon2.5-qwen3-30b`.
                 // Never mask 401/403/404 auth or model errors on explicit BYOK endpoints with an unrelated Gemini/DeepSeek model.
                 let isExplicitThirdPartyEndpoint = StreamableAIProvider.isLocalEndpoint(baseURL) ||
+                    (UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct") == "direct" ||
+                    baseURL.contains("trycloudflare.com") ||
                     baseURL.contains("tokenme.limited") ||
                     baseURL.contains("opentyphoon.ai") ||
                     baseURL.contains("openrouter.ai") ||
@@ -3021,8 +3921,38 @@ final class AIClient: ObservableObject {
                 )
                 return
             }
-            if (code == 400 || code == 422), let tools = tools, !tools.isEmpty, lowerErrText.contains("tool") {
-                NSLog("⚠️ [streamOpenAI] HTTP %d tool-choice unsupported on %@ (%@) — retrying without server-side tools", code, effectiveModel, baseURL)
+            if (code == 400 || code == 422),
+               let tools = tools,
+               !tools.isEmpty,
+               !omitToolChoice,
+               (lowerErrText.contains("tool_choice") || lowerErrText.contains("tool choice")) {
+                NSLog("⚠️ [streamOpenAI] HTTP %d tool_choice parameter rejected on %@ (%@) — retrying with tools preserved and tool_choice omitted", code, effectiveModel, baseURL)
+                try await streamOpenAI(
+                    prompt: prompt,
+                    attachments: attachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: model,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    tools: tools,
+                    maxTokensOverride: maxTokensOverride,
+                    omitToolChoice: true,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
+            }
+            let modelExplicitlyLacksToolSupport =
+                lowerErrText.contains("does not support tool") ||
+                lowerErrText.contains("doesn't support tool") ||
+                lowerErrText.contains("tools are not supported") ||
+                lowerErrText.contains("tool calling is not supported") ||
+                lowerErrText.contains("tool use is not supported") ||
+                lowerErrText.contains("function calling is not supported") ||
+                lowerErrText.contains("functions are not supported")
+            if (code == 400 || code == 422), let tools = tools, !tools.isEmpty, modelExplicitlyLacksToolSupport {
+                NSLog("⚠️ [streamOpenAI] HTTP %d model explicitly lacks native tool calling on %@ (%@) — retrying without server-side tools", code, effectiveModel, baseURL)
                 try await streamOpenAI(
                     prompt: prompt,
                     attachments: attachments,
@@ -3032,6 +3962,26 @@ final class AIClient: ObservableObject {
                     apiKey: apiKey,
                     baseURL: baseURL,
                     tools: nil,
+                    maxTokensOverride: maxTokensOverride,
+                    omitToolChoice: true,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
+            }
+            if isCloudProxy,
+               (code == 400 || code == 404 || code == 429 || code == 500 || code == 502 || code == 503),
+               effectiveModel != "deepseek-chat" {
+                NSLog("⚠️ [streamOpenAI] Dotmini Cloud HTTP %d on %@ — transparently retrying on deepseek-chat", code, effectiveModel)
+                try await streamOpenAI(
+                    prompt: prompt,
+                    attachments: attachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: "deepseek-chat",
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    tools: tools,
                     maxTokensOverride: maxTokensOverride,
                     onToken: onToken,
                     onToolCall: onToolCall
@@ -3185,6 +4135,11 @@ final class AIClient: ObservableObject {
                 onToolCall?(call)
             }
         }
+        if isCloudProxy {
+            Task { @MainActor in
+                await SupabaseAuthService.shared.refreshEntitlement()
+            }
+        }
     }
     
     // MARK: - Anthropic Streaming
@@ -3282,24 +4237,66 @@ final class AIClient: ObservableObject {
         
         var messageContent: [[String: Any]] = []
         let isVision = isVisionCapableModel(model)
-        
+        var anthropicBinaryBytesUsed = 0
+        let maxAnthropicBinaryBytes = 18_000_000
+
         for attachment in attachments {
-            if case .image(let format) = attachment.type {
-                let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
-                if isVision {
-                    messageContent.append(["type": "image", "source": ["type": "base64", "media_type": "image/\(format)", "data": attachment.base64String]])
-                    if !visionResult.extractedText.isEmpty {
-                        messageContent.append(["type": "text", "text": "[Apple Neural Vision OCR Aid]:\n\(visionResult.extractedText)"])
-                    }
-                } else {
-                    messageContent.append(["type": "text", "text": visionResult.formattedSummary])
+            if case .image = attachment.type {
+                let vData = attachment.effectiveVisionData
+                let vMime = attachment.effectiveVisionMimeType
+                if isVision && !vData.isEmpty && vData.count <= 5_000_000 && (anthropicBinaryBytesUsed + vData.count) <= maxAnthropicBinaryBytes {
+                    messageContent.append([
+                        "type": "image",
+                        "source": [
+                            "type": "base64",
+                            "media_type": vMime,
+                            "data": vData.base64EncodedString()
+                        ]
+                    ])
+                    anthropicBinaryBytesUsed += vData.count
                 }
             } else if case .pdf = attachment.type {
-                let pdfText = attachment.pdfExtractedText
-                let preview = pdfText.isEmpty ? "[Empty or Scanned PDF]" : pdfText
-                messageContent.append(["type": "text", "text": "Document: \(attachment.name) (\(attachment.pdfPageCount) pages)\n\(preview)\n"])
-            } else if case .text = attachment.type, let text = attachment.textContent {
-                messageContent.append(["type": "text", "text": "File: \(attachment.name)\n\(text)"])
+                if !attachment.isPasswordProtected,
+                   let pdfData = attachment.loadRawBinaryData(maxBytes: 15_000_000),
+                   !pdfData.isEmpty,
+                   (anthropicBinaryBytesUsed + pdfData.count) <= maxAnthropicBinaryBytes {
+                    messageContent.append([
+                        "type": "document",
+                        "source": [
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdfData.base64EncodedString()
+                        ]
+                    ])
+                    anthropicBinaryBytesUsed += pdfData.count
+                }
+            } else if attachment.semanticCategory == .video,
+                      isVision,
+                      let kf = attachment.normalizedVisionData,
+                      !kf.isEmpty,
+                      kf.count <= 5_000_000,
+                      (anthropicBinaryBytesUsed + kf.count) <= maxAnthropicBinaryBytes {
+                let kfMime = attachment.normalizedVisionMimeType ?? "image/jpeg"
+                messageContent.append([
+                    "type": "image",
+                    "source": [
+                        "type": "base64",
+                        "media_type": kfMime,
+                        "data": kf.base64EncodedString()
+                    ]
+                ])
+                anthropicBinaryBytesUsed += kf.count
+            }
+        }
+
+        let anthropicInlineTextAttachments = attachments.filter { $0.includeInlineTextInProviderPayload }
+        if !anthropicInlineTextAttachments.isEmpty {
+            let groundedPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
+                attachments: anthropicInlineTextAttachments,
+                maxInlineChars: 80_000
+            )
+            if !groundedPackage.isEmpty {
+                messageContent.append(["type": "text", "text": groundedPackage])
             }
         }
         let safePrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Continue." : prompt
@@ -3339,11 +4336,12 @@ final class AIClient: ObservableObject {
         // Anthropic Tools with Prompt Caching on last tool
         if let tools = tools, !tools.isEmpty {
             var formattedTools: [[String: Any]] = []
-            for (idx, tool) in tools.enumerated() {
+            for (idx, rawTool) in tools.enumerated() {
+                let tool = sanitizeToolSchemaForStandardJSONSchema(rawTool)
                 var toolDict: [String: Any] = [
                     "name": tool["name"] ?? "",
                     "description": tool["description"] ?? "",
-                    "input_schema": tool["parameters"] ?? [:]
+                    "input_schema": tool["parameters"] ?? ["type": "object", "properties": [String: Any]()]
                 ]
                 if idx == tools.count - 1 {
                     toolDict["cache_control"] = ["type": "ephemeral"]
@@ -3358,6 +4356,22 @@ final class AIClient: ObservableObject {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if (code == 404 || code == 405 || code == 400) && !baseURL.contains("api.anthropic.com") {
+                NSLog("⚠️ [streamAnthropic] Custom Anthropic Base URL (%@) returned HTTP %d on /messages — retrying with OpenAI-compatible /chat/completions", baseURL, code)
+                try await streamOpenAI(
+                    prompt: prompt,
+                    attachments: attachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: effectiveModel,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    tools: tools,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
+            }
             var errBody = ""
             for try await line in bytes.lines {
                 errBody += line
@@ -3592,17 +4606,19 @@ final class AIClient: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let isCloudProxy = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let isCloudProxy = StreamableAIProvider.isDotminiCloudProxy(baseURL)
         let isCopilot = baseURL.contains("githubcopilot.com")
         if isCloudProxy {
-            request.setValue("microcode", forHTTPHeaderField: "X-Dotmini-Product")
+            let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.5.38"
+            request.setValue("MicroCode/\(appVersion) (macOS)", forHTTPHeaderField: "User-Agent")
+            request.setValue("macos", forHTTPHeaderField: "X-MicroCode-Client")
+            request.setValue("Agent", forHTTPHeaderField: "X-MicroCode-Feature")
+            request.setValue("Dotmini Cloud", forHTTPHeaderField: "X-MicroCode-AI-Provider")
             let dotminiLicense = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
             if !dotminiLicense.isEmpty {
                 request.setValue(dotminiLicense, forHTTPHeaderField: "X-Dotmini-License")
             }
-            let isJWT = apiKey.components(separatedBy: ".").count >= 3
-            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-") || EnterpriseAIAuthService.shared.mode == .dotminiEnterprise
-            if (isJWT || isPlatformKey) && !apiKey.isEmpty {
+            if !apiKey.isEmpty {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
         } else if isCopilot {
@@ -3651,7 +4667,8 @@ final class AIClient: ObservableObject {
             body["max_tokens"] = requestedMaxTokens
         }
         if let tools = tools, !tools.isEmpty, !baseURL.contains("perplexity.ai") {
-            body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
+            let sanitizedTools = tools.map { sanitizeToolSchemaForStandardJSONSchema($0) }
+            body["tools"] = sanitizedTools.map { ["type": "function", "function": $0] as [String: Any] }
         }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
@@ -3677,6 +4694,12 @@ final class AIClient: ObservableObject {
             if (httpResponse.statusCode == 400 || httpResponse.statusCode == 422),
                let tools = tools, !tools.isEmpty, lowerRaw.contains("tool") {
                 return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, baseURL: baseURL, tools: nil, maxTokensOverride: maxTokensOverride)
+            }
+            if isCloudProxy,
+               (httpResponse.statusCode == 400 || httpResponse.statusCode == 404 || httpResponse.statusCode == 429 || httpResponse.statusCode == 500 || httpResponse.statusCode == 502 || httpResponse.statusCode == 503),
+               effectiveModel != "deepseek-chat" {
+                NSLog("⚠️ [syncOpenAI] Dotmini Cloud HTTP %d on %@ — transparently retrying on deepseek-chat", httpResponse.statusCode, effectiveModel)
+                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: "deepseek-chat", apiKey: apiKey, baseURL: baseURL, tools: tools, maxTokensOverride: maxTokensOverride)
             }
             let errorText = Self.extractOpenAICompatibleErrorMessage(from: raw)
                 ?? (raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : String(raw.prefix(400)))
@@ -3799,11 +4822,12 @@ final class AIClient: ObservableObject {
         // Inject tools with Prompt Caching on the last tool
         if let tools = tools, !tools.isEmpty {
             var formattedTools: [[String: Any]] = []
-            for (idx, tool) in tools.enumerated() {
+            for (idx, rawTool) in tools.enumerated() {
+                let tool = sanitizeToolSchemaForStandardJSONSchema(rawTool)
                 var toolDict: [String: Any] = [
                     "name": tool["name"] ?? "",
                     "description": tool["description"] ?? "",
-                    "input_schema": tool["parameters"] ?? [:]
+                    "input_schema": tool["parameters"] ?? ["type": "object", "properties": [String: Any]()]
                 ]
                 if idx == tools.count - 1 {
                     toolDict["cache_control"] = ["type": "ephemeral"]
@@ -3821,6 +4845,9 @@ final class AIClient: ObservableObject {
         }
         
         guard httpResponse.statusCode == 200 else {
+            if (httpResponse.statusCode == 404 || httpResponse.statusCode == 405 || httpResponse.statusCode == 400) && !baseURL.contains("api.anthropic.com") {
+                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: effectiveModel, apiKey: apiKey, baseURL: baseURL, tools: tools)
+            }
             let raw = String(data: data, encoding: .utf8) ?? ""
             let errorText = Self.extractOpenAICompatibleErrorMessage(from: raw)
                 ?? (raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : String(raw.prefix(400)))
@@ -4791,9 +5818,11 @@ final class AIClient: ObservableObject {
             "modelId": targetModel,
             "aspectRatio": aspectRatio
         ]
-        if let firstImg = attachments.first(where: { if case .image = $0.type { return true }; return false }),
-           case .image(let fmt) = firstImg.type {
-            jobBody["imageUrl"] = "data:image/\(fmt);base64,\(firstImg.base64String)"
+        if let firstImg = attachments.first(where: { if case .image = $0.type { return true }; return false }) {
+            let vData = firstImg.effectiveVisionData
+            if !vData.isEmpty {
+                jobBody["imageUrl"] = "data:\(firstImg.effectiveVisionMimeType);base64,\(vData.base64EncodedString())"
+            }
         }
         jobReq.httpBody = try JSONSerialization.data(withJSONObject: jobBody)
 
@@ -4935,9 +5964,12 @@ final class AIClient: ObservableObject {
             // If user attached a reference image (Image-to-Video), use it directly or generate a keyframe scene via TH-AI Passport Free-Credit Nano Banana (`gemini-2.5-flash-image`), then render H.264 MP4
             var keyframeURL: URL? = nil
             if let refImg = attachments.first(where: { if case .image = $0.type { return true }; return false }) {
-                let tmpURL = Self.generatedMediaOutputDirectory().appendingPathComponent("ref_\(Int(Date().timeIntervalSince1970))_\(refImg.name)")
-                if (try? refImg.data.write(to: tmpURL)) != nil {
-                    keyframeURL = tmpURL
+                let rawBytes = refImg.effectiveVisionData
+                if !rawBytes.isEmpty {
+                    let tmpURL = Self.generatedMediaOutputDirectory().appendingPathComponent("ref_\(Int(Date().timeIntervalSince1970))_\(refImg.name)")
+                    if (try? rawBytes.write(to: tmpURL)) != nil {
+                        keyframeURL = tmpURL
+                    }
                 }
             }
             if keyframeURL == nil {
@@ -4998,7 +6030,7 @@ final class AIClient: ObservableObject {
                 // with a concise instruction block instead of 45 verbose XML tool schemas.
                 systemParts.append("""
                 You are MicroCode AI Assistant inside MicroCode macOS IDE. Respond accurately and directly in the user's language (Thai or English).
-                If you need to inspect or edit workspace files or run commands, emit `<tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>` using tools: `file_read`, `file_write`, `replace_in_file`, `list_directory_tree`, `grep_search`, `shell`, `generate_image`, `generate_video`, `generate_music`. For general questions, writing, or legal/policy drafting, answer directly right away without calling tools.
+                If you need to inspect attached documents/sheets/pages, workspace files, or run commands, emit `<tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>` using tools: `attachment_read`, `file_read`, `file_write`, `replace_in_file`, `list_directory_tree`, `grep_search`, `shell`, `generate_image`, `generate_video`, `generate_music`. For general questions, writing, or legal/policy drafting, answer directly right away without calling tools.
                 """)
             } else {
                 if let tools = tools, !tools.isEmpty {
@@ -5074,19 +6106,16 @@ final class AIClient: ObservableObject {
             if cleanTitleSeed == "MicroCode Agent Session" && !finalUserText.hasPrefix("<tool_response") {
                 cleanTitleSeed = String(finalUserText.prefix(100))
             }
-            for attachment in attachments {
-                switch attachment.type {
-                case .text:
-                    if let textContent = attachment.textContent {
-                        finalUserText += "\n\n--- File: \(attachment.name) ---\n\(textContent)"
-                    }
-                case .pdf:
-                    let pdfText = attachment.pdfExtractedText
-                    if !pdfText.isEmpty {
-                        finalUserText += "\n\n--- PDF: \(attachment.name) ---\n\(pdfText)"
-                    }
-                case .image:
-                    break
+            let aipassInlineTextAttachments = attachments.filter { $0.includeInlineTextInProviderPayload }
+            if !aipassInlineTextAttachments.isEmpty {
+                let groundedPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
+                    attachments: aipassInlineTextAttachments,
+                    maxInlineChars: 28_000
+                )
+                if !groundedPackage.isEmpty {
+                    finalUserText = finalUserText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? groundedPackage
+                        : (finalUserText + "\n\n" + groundedPackage)
                 }
             }
             if hasTools && !finalUserText.contains("<tool_response") {
@@ -5185,14 +6214,37 @@ final class AIClient: ObservableObject {
                 ]
             ]
             if idx == mergedTurns.count - 1 && turn.role == "user" {
+                var aipassImageBytesUsed = 0
+                let maxAiPassImageBytes = 8_000_000
+                var attachedImageCount = 0
                 for attachment in attachments {
-                    if case .image(let fmt) = attachment.type {
+                    if attachedImageCount >= 8 { break }
+                    if case .image = attachment.type {
+                        let vData = attachment.effectiveVisionData
+                        let vMime = attachment.effectiveVisionMimeType
+                        if !vData.isEmpty && (aipassImageBytesUsed + vData.count) <= maxAiPassImageBytes {
+                            parts.append([
+                                "type": "file",
+                                "mediaType": vMime,
+                                "url": "data:\(vMime);base64,\(vData.base64EncodedString())",
+                                "filename": attachment.name
+                            ])
+                            aipassImageBytesUsed += vData.count
+                            attachedImageCount += 1
+                        }
+                    } else if attachment.semanticCategory == .video,
+                              let kf = attachment.normalizedVisionData,
+                              !kf.isEmpty,
+                              (aipassImageBytesUsed + kf.count) <= maxAiPassImageBytes {
+                        let kfMime = attachment.normalizedVisionMimeType ?? "image/jpeg"
                         parts.append([
                             "type": "file",
-                            "mediaType": "image/\(fmt)",
-                            "url": "data:image/\(fmt);base64,\(attachment.base64String)",
-                            "filename": attachment.name
+                            "mediaType": kfMime,
+                            "url": "data:\(kfMime);base64,\(kf.base64EncodedString())",
+                            "filename": "\(attachment.name)_keyframe.jpg"
                         ])
+                        aipassImageBytesUsed += kf.count
+                        attachedImageCount += 1
                     }
                 }
             }
@@ -5517,6 +6569,181 @@ final class AIClient: ObservableObject {
             return (URL(fileURLWithPath: filePath), collectedMarkdown.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         throw NSError(domain: "AiPassMedia", code: -1, userInfo: [NSLocalizedDescriptionKey: "Media generation completed without a saved file path."])
+    }
+
+    static func mapToSubscriptionProvider(_ provider: StreamableAIProvider) -> SubscriptionProviderType? {
+        switch provider {
+        case .aipass: return .aipass
+        case .openai: return .chatgpt
+        case .anthropic: return .claude
+        case .gemini: return .gemini
+        case .deepseek: return .deepseek
+        case .copilot: return .copilot
+        case .glm: return .glm
+        case .openrouter: return .openrouter
+        case .groq: return .groq
+        case .mistral: return .mistral
+        case .kimi: return .kimi
+        case .perplexity: return .perplexity
+        case .perch: return .perch
+        case .tokenme: return .tokenme
+        case .typhoon: return .typhoon
+        case .qwen: return .qwen
+        case .grok: return .grok
+        case .cerebras: return .cerebras
+        case .together: return .together
+        case .fireworks: return .fireworks
+        case .minimax: return .minimax
+        case .nvidia: return .nvidia
+        default: return nil
+        }
+    }
+
+    /// Streams completions and `<tool_call>` XML calls through an authenticated local CLI subscription (`claude`, `agy`, `codex`, `gemini`) with zero per-token API charges.
+    func streamHeadlessCLISubscription(
+        cliURI: String,
+        prompt: String,
+        systemPrompt: String?,
+        conversationHistory: [(role: String, content: String)],
+        model: String,
+        tools: [[String: Any]]?,
+        onToken: @escaping (String) -> Void,
+        onToolCall: ((AIToolCall) -> Void)?
+    ) async throws {
+        // cliURI format: "cli://<kind>:<absolute_binary_path>"
+        let rawRest = String(cliURI.dropFirst("cli://".count))
+        guard let colonIdx = rawRest.firstIndex(of: ":") else {
+            throw NSError(domain: "CLIBridge", code: 400, userInfo: [NSLocalizedDescriptionKey: "Malformed CLI bridge URI: \(cliURI)"])
+        }
+        let kind = String(rawRest[..<colonIdx])
+        let binaryPath = String(rawRest[rawRest.index(after: colonIdx)...])
+        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
+            throw NSError(domain: "CLIBridge", code: 404, userInfo: [NSLocalizedDescriptionKey: "CLI binary not found at \(binaryPath)"])
+        }
+
+        // Assemble compact multi-turn transcript + MicroCode XML tool protocol when client-side tools are supplied
+        var blocks: [String] = []
+        if let sys = systemPrompt, !sys.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append("<system_instructions>\n\(sys)\n</system_instructions>")
+        }
+        if let tools, !tools.isEmpty, onToolCall != nil {
+            blocks.append(Self.buildAiPassToolSystemInstruction(tools))
+        }
+        if !conversationHistory.isEmpty {
+            let recent = conversationHistory.suffix(12)
+            let formatted = recent.map { "[\($0.role.uppercased())]: \($0.content)" }.joined(separator: "\n\n")
+            blocks.append("<conversation_history>\n\(formatted)\n</conversation_history>")
+        }
+        blocks.append(prompt)
+        let fullPrompt = blocks.joined(separator: "\n\n")
+
+        let args: [String]
+        switch kind {
+        case "claude":
+            let lower = model.lowercased()
+            let alias = lower.contains("opus") ? "opus" : (lower.contains("haiku") ? "haiku" : "sonnet")
+            args = ["-p", fullPrompt, "--tools", "", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--model", alias]
+        case "agy":
+            let slug = ACPAgentSession.normalizeAGYModel(model)
+            args = ["--output-format", "stream-json", "--disable-slash-commands", "--dangerously-skip-permissions", "--model", slug, "--print=\(fullPrompt)"]
+        case "gemini":
+            var gArgs = ["-p", fullPrompt, "--output-format", "stream-json", "--yolo"]
+            if let gm = ACPAgentSession.sanitizeGeminiCLIModel(model) {
+                gArgs += ["-m", gm]
+            }
+            args = gArgs
+        case "codex":
+            args = ["exec", "--json", "--skip-git-repo-check", fullPrompt]
+        default:
+            args = ["-p", fullPrompt]
+        }
+
+        let wsPath = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot ?? FileManager.default.currentDirectoryPath }
+        let collected: (text: String, stderr: String, exitCode: Int32) = try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+                proc.executableURL = URL(fileURLWithPath: binaryPath)
+                proc.arguments = args
+                proc.currentDirectoryURL = URL(fileURLWithPath: wsPath)
+                proc.standardOutput = outPipe
+                proc.standardError = errPipe
+
+                var env = ProcessInfo.processInfo.environment
+                let home = FileManager.default.homeDirectoryForCurrentUser.path
+                let extraPath = "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:\(home)/.bun/bin:\(home)/.npm-global/bin:/usr/bin:/bin"
+                env["PATH"] = "\(extraPath):\(env["PATH"] ?? "")"
+                env.removeValue(forKey: "CLAUDECODE")
+                env.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
+                env.removeValue(forKey: "MICROCODE_LOCAL_API_TOKEN")
+                proc.environment = env
+
+                var ndjson = ACPNDJSONParser()
+                var fullOut = ""
+                var receivedDelta = false
+
+                outPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let chunk = handle.availableData
+                    guard !chunk.isEmpty else { return }
+                    let objs = ndjson.feed(chunk)
+                    if objs.isEmpty, let plain = String(data: chunk, encoding: .utf8), !plain.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") {
+                        fullOut += plain
+                        DispatchQueue.main.async { onToken(plain) }
+                        return
+                    }
+                    for json in objs {
+                        let frameType = json["type"] as? String ?? ""
+                        var events: [ACPStreamEvent] = []
+                        if kind == "claude" {
+                            events = ClaudeCodeStreamParser.parseAll(json, includeAssistantTextAndThinking: !receivedDelta)
+                            if frameType == "stream_event" {
+                                if events.contains(where: { if case .text(let t) = $0, !t.isEmpty { return true }; return false }) {
+                                    receivedDelta = true
+                                }
+                            }
+                        } else if kind == "agy" {
+                            if let ev = AGYStreamParser.parse(json) { events = [ev] }
+                        } else if kind == "codex" {
+                            if let ev = CodexStreamParser.parse(json) { events = [ev] }
+                        } else {
+                            if let ev = GeminiCLIStreamParser.parse(json) ?? AGYStreamParser.parse(json) { events = [ev] }
+                        }
+                        for ev in events {
+                            if case .text(let t) = ev, !t.isEmpty {
+                                fullOut += t
+                                DispatchQueue.main.async { onToken(t) }
+                            }
+                        }
+                    }
+                }
+
+                do {
+                    try proc.run()
+                    proc.waitUntilExit()
+                    outPipe.fileHandleForReading.readabilityHandler = nil
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errStr = String(data: errData, encoding: .utf8) ?? ""
+                    continuation.resume(returning: (fullOut, errStr, proc.terminationStatus))
+                } catch {
+                    outPipe.fileHandleForReading.readabilityHandler = nil
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+
+        if collected.exitCode != 0 && collected.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let lowerErr = collected.stderr.lowercased()
+            let code = (lowerErr.contains("rate limit") || lowerErr.contains("429") || lowerErr.contains("quota") || lowerErr.contains("limit reached")) ? 429 : 500
+            throw NSError(domain: "CLIBridge", code: code, userInfo: [NSLocalizedDescriptionKey: collected.stderr.isEmpty ? "\(kind) CLI exited with code \(collected.exitCode)" : String(collected.stderr.prefix(400))])
+        }
+
+        if let onToolCall, tools != nil {
+            let extracted = Self.extractAiPassToolCalls(from: collected.text)
+            for tc in extracted {
+                onToolCall(tc)
+            }
+        }
     }
 
     private static func deleteAiPassTemporaryConversation(conversationId: String, cookieHeader: String) {

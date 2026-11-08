@@ -68,6 +68,7 @@ struct PairedLLMEndpoint: Codable, Identifiable, Equatable {
 // MARK: - Local LLM Server Type
 
 enum LocalLLMServerType: String, CaseIterable, Identifiable {
+    case macLLM = "macLLM"
     case nineRouter = "9Router"
     case liteLLM = "LiteLLM"
     case mlx = "Apple MLX"
@@ -85,6 +86,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
 
     var defaultPorts: [Int] {
         switch self {
+        case .macLLM: return [11436]
         case .nineRouter: return [20128]
         case .liteLLM: return [4000]
         case .mlx: return [8080, 8081, 10240]
@@ -113,6 +115,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
 
     var brandKey: String {
         switch self {
+        case .macLLM: return "vllm"
         case .nineRouter: return "9router"
         case .liteLLM: return "litellm"
         case .lmStudio: return "lmstudio"
@@ -123,6 +126,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .macLLM: return "cpu.fill"
         case .nineRouter: return "point.3.connected.trianglepath.dotted"
         case .liteLLM: return "network"
         case .mlx: return "applelogo"
@@ -140,6 +144,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
 
     var color: String {
         switch self {
+        case .macLLM: return "cyan"
         case .nineRouter: return "orange"
         case .liteLLM: return "indigo"
         case .mlx: return "gray"
@@ -158,6 +163,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
     /// Intrinsic inference engine efficiency weight for Best-Perf scoring on Apple Silicon / GPU nodes
     var enginePerfBonus: Int {
         switch self {
+        case .macLLM: return 18
         case .mlx: return 14
         case .llamaCpp: return 12
         case .vllm: return 13
@@ -545,9 +551,27 @@ class LocalLLMService: ObservableObject {
 
     @Published var scanLANEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(scanLANEnabled, forKey: "microcode.localLLM.scanLAN")
+            UserDefaults.standard.set(scanLANEnabled, forKey: "microcode.localLLM.scanLAN.v2")
+            if scanLANEnabled {
+                startBonjourDiscovery()
+            }
         }
     }
+
+    private var cachedDynamicLocalPorts: [Int] = []
+    private var lastDynamicPortScanAt: Date = .distantPast
+    private var lastIntegratedServerSignature: String = ""
+
+    /// Servers explicitly unchecked by the user. By default, EVERY online unlocked server is connected simultaneously in the Multi-Node Pool!
+    @Published var disabledPoolServerKeys: Set<String> = [] {
+        didSet {
+            UserDefaults.standard.set(Array(disabledPoolServerKeys), forKey: "microcode.localLLM.disabledPoolKeys.v1")
+            syncPoolSnapshot()
+        }
+    }
+
+    /// Live active request count per server endpoint for real-time UI badges and Least-Loaded routing
+    @Published private(set) var activeRequestsByEndpoint: [String: Int] = [:]
 
     nonisolated(unsafe) static var cachedEndpoint: String = "http://127.0.0.1:1234/v1"
     nonisolated(unsafe) static var cachedModel: String = "local-model"
@@ -555,6 +579,9 @@ class LocalLLMService: ObservableObject {
 
     nonisolated private static let authMapLock = NSLock()
     nonisolated(unsafe) private static var endpointAPIKeyMap: [String: String] = [:]
+    nonisolated(unsafe) private static var inFlightByEndpoint: [String: Int] = [:]
+    nonisolated(unsafe) private static var roundRobinCounter: Int = 0
+    nonisolated(unsafe) private static var pooledServersSnapshot: [DetectedLLMServer] = []
 
     /// Thread-safe API key resolution for `AIClient` even when callers only set `cachedEndpoint`.
     nonisolated static func resolveAPIKey(forEndpoint endpoint: String) -> String {
@@ -577,6 +604,144 @@ class LocalLLMService: ObservableObject {
             endpointAPIKeyMap.removeValue(forKey: clean)
         }
         authMapLock.unlock()
+    }
+
+    nonisolated static func beginInFlight(endpoint: String) {
+        let clean = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        authMapLock.lock()
+        let next = (inFlightByEndpoint[clean] ?? 0) + 1
+        inFlightByEndpoint[clean] = next
+        let snapshot = inFlightByEndpoint
+        authMapLock.unlock()
+        Task { @MainActor in
+            LocalLLMService.shared.activeRequestsByEndpoint = snapshot
+        }
+    }
+
+    nonisolated static func endInFlight(endpoint: String) {
+        let clean = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        authMapLock.lock()
+        let current = inFlightByEndpoint[clean] ?? 0
+        if current <= 1 {
+            inFlightByEndpoint.removeValue(forKey: clean)
+        } else {
+            inFlightByEndpoint[clean] = current - 1
+        }
+        let snapshot = inFlightByEndpoint
+        authMapLock.unlock()
+        Task { @MainActor in
+            LocalLLMService.shared.activeRequestsByEndpoint = snapshot
+        }
+    }
+
+    nonisolated static func inFlightCount(forEndpoint endpoint: String) -> Int {
+        let clean = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        authMapLock.lock()
+        defer { authMapLock.unlock() }
+        return inFlightByEndpoint[clean] ?? 0
+    }
+
+    /// Resolves the optimal connected Local LLM server and model for a request.
+    /// Supports:
+    /// 1) Explicit server-scoped model IDs (`<endpoint>||<modelId>`) so multiple models on different servers can be used simultaneously.
+    /// 2) Multi-Node Auto-Pool (`auto-pool` / `local-pool` / `local-model`) or shared model names across multiple servers,
+    ///    distributing concurrent requests to the server with the fewest in-flight requests and highest performance score.
+    nonisolated static func resolveRoute(
+        forModel rawModel: String,
+        preferredEndpoint: String? = nil,
+        excludingEndpoints: Set<String> = []
+    ) -> (endpoint: String, apiKey: String, model: String, serverLabel: String) {
+        let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        var explicitEndpoint = preferredEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var targetModelId = trimmed
+
+        if trimmed.contains("||") {
+            let parts = trimmed.components(separatedBy: "||")
+            if parts.count >= 2 {
+                explicitEndpoint = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                targetModelId = parts.dropFirst().joined(separator: "||").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        let excludedLower = Set(excludingEndpoints.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() })
+
+        authMapLock.lock()
+        let pool = pooledServersSnapshot.filter { srv in
+            let epLower = srv.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+            return srv.isOnline && !srv.requiresAuthToUnlock && !excludedLower.contains(epLower)
+        }
+        let inFlight = inFlightByEndpoint
+        roundRobinCounter &+= 1
+        let rr = roundRobinCounter
+        authMapLock.unlock()
+
+        // 1. If an explicit endpoint was specified (e.g. from `endpoint||modelId`), match that server first
+        if let exp = explicitEndpoint, !exp.isEmpty {
+            let expLower = exp.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+            if let matchedSrv = pool.first(where: { $0.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() == expLower }) {
+                let modelToUse: String
+                if targetModelId.isEmpty || targetModelId == "local-model" || targetModelId == "auto-pool" {
+                    modelToUse = matchedSrv.models.first(where: \.isWarmLoaded)?.id ?? matchedSrv.models.first?.id ?? cachedModel
+                } else {
+                    modelToUse = matchedSrv.models.first(where: { $0.id.caseInsensitiveCompare(targetModelId) == .orderedSame })?.id ?? targetModelId
+                }
+                return (matchedSrv.endpoint, matchedSrv.apiKey ?? resolveAPIKey(forEndpoint: matchedSrv.endpoint), modelToUse, matchedSrv.displayName)
+            }
+        }
+
+        let isGenericPoolRequest = targetModelId.isEmpty ||
+            targetModelId.lowercased() == "local" ||
+            targetModelId.lowercased() == "local-model" ||
+            targetModelId.lowercased() == "auto-pool" ||
+            targetModelId.lowercased() == "local-pool"
+
+        // 2. Find all connected servers in the pool that host `targetModelId` (or any non-empty server for generic pool requests)
+        var candidates: [DetectedLLMServer] = []
+        if !isGenericPoolRequest {
+            candidates = pool.filter { srv in
+                srv.models.contains { $0.id.caseInsensitiveCompare(targetModelId) == .orderedSame }
+            }
+        }
+        if candidates.isEmpty {
+            candidates = pool.filter { !$0.models.isEmpty }
+        }
+        if candidates.isEmpty {
+            candidates = pool
+        }
+
+        if !candidates.isEmpty {
+            // Sort by: (1) Lowest active in-flight requests (Load Balancing across nodes!), (2) Highest perfScore, (3) Round-robin tie-breaker
+            let sorted = candidates.enumerated().sorted { lhs, rhs in
+                let epA = lhs.element.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+                let epB = rhs.element.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+                let loadA = inFlight[epA] ?? 0
+                let loadB = inFlight[epB] ?? 0
+                if loadA != loadB {
+                    return loadA < loadB
+                }
+                if abs(lhs.element.perfScore - rhs.element.perfScore) > 5 {
+                    return lhs.element.perfScore > rhs.element.perfScore
+                }
+                return ((lhs.offset + rr) % candidates.count) < ((rhs.offset + rr) % candidates.count)
+            }
+            let chosen = sorted.first!.element
+            let resolvedModel: String
+            if let exact = chosen.models.first(where: { $0.id.caseInsensitiveCompare(targetModelId) == .orderedSame }) {
+                resolvedModel = exact.id
+            } else if isGenericPoolRequest {
+                resolvedModel = chosen.models.first(where: \.isWarmLoaded)?.id ?? chosen.models.first?.id ?? cachedModel
+            } else if !chosen.models.isEmpty && !pool.contains(where: { $0.models.contains(where: { $0.id.caseInsensitiveCompare(targetModelId) == .orderedSame }) }) {
+                // Target model was from a previous server or generic; use chosen server's best model if targetModelId isn't on any server
+                resolvedModel = chosen.models.first(where: \.isWarmLoaded)?.id ?? chosen.models.first?.id ?? targetModelId
+            } else {
+                resolvedModel = targetModelId
+            }
+            return (chosen.endpoint, chosen.apiKey ?? resolveAPIKey(forEndpoint: chosen.endpoint), resolvedModel, chosen.displayName)
+        }
+
+        let fallbackEp = explicitEndpoint ?? cachedEndpoint
+        let fallbackModel = targetModelId.isEmpty ? cachedModel : targetModelId
+        return (fallbackEp, resolveAPIKey(forEndpoint: fallbackEp), fallbackModel, "Local LLM")
     }
 
     /// Cached benchmark speeds across rescans keyed by server deduplicationKey
@@ -610,12 +775,18 @@ class LocalLLMService: ObservableObject {
 
     private init() {
         self.autoSelectBestPerf = (UserDefaults.standard.object(forKey: "microcode.localLLM.autoBestPerf") as? Bool) ?? true
-        self.scanLANEnabled = (UserDefaults.standard.object(forKey: "microcode.localLLM.scanLAN") as? Bool) ?? true
+        self.scanLANEnabled = (UserDefaults.standard.object(forKey: "microcode.localLLM.scanLAN.v2") as? Bool) ?? false
+        if let savedDisabled = UserDefaults.standard.stringArray(forKey: "microcode.localLLM.disabledPoolKeys.v1") {
+            self.disabledPoolServerKeys = Set(savedDisabled)
+        }
         self.loadPairedEndpoints()
-        self.startBonjourDiscovery()
+        if self.scanLANEnabled {
+            self.startBonjourDiscovery()
+        }
 
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            MacLLMServer.shared.startIfNeeded(preferredPort: 11436)
+            try? await Task.sleep(nanoseconds: 450_000_000)
             await self?.scanForServers()
         }
     }
@@ -637,8 +808,68 @@ class LocalLLMService: ObservableObject {
         DownloadableModel(id: "nemotron", name: "Nemotron Mini", provider: "NVIDIA", description: "Compact model optimized for reasoning.", params: "4B", sizeGB: 2.7, capabilities: ["Reasoning", "Chat"], ollamaTag: "nemotron-mini"),
     ]
 
+    /// All online, unlocked servers currently connected in the simultaneous Multi-Node Pool.
+    var connectedServers: [DetectedLLMServer] {
+        let enabled = detectedServers.filter { $0.isOnline && !$0.requiresAuthToUnlock && !disabledPoolServerKeys.contains($0.deduplicationKey.lowercased()) }
+        if !enabled.isEmpty { return enabled }
+        return detectedServers.filter { $0.isOnline && !$0.requiresAuthToUnlock }
+    }
+
+    /// Unified list of `(server, model)` pairs across ALL connected Local LLM servers simultaneously.
+    var allConnectedServerModels: [(server: DetectedLLMServer, model: LocalLLMModel)] {
+        var result: [(server: DetectedLLMServer, model: LocalLLMModel)] = []
+        for srv in connectedServers {
+            for m in srv.models {
+                result.append((server: srv, model: m))
+            }
+        }
+        return result
+    }
+
+    func isServerInActivePool(_ server: DetectedLLMServer) -> Bool {
+        guard server.isOnline && !server.requiresAuthToUnlock else { return false }
+        return !disabledPoolServerKeys.contains(server.deduplicationKey.lowercased())
+    }
+
+    func toggleServerInPool(_ server: DetectedLLMServer) {
+        let key = server.deduplicationKey.lowercased()
+        if disabledPoolServerKeys.contains(key) {
+            disabledPoolServerKeys.remove(key)
+        } else {
+            // Keep at least one server active if possible
+            let currentActive = detectedServers.filter { $0.isOnline && !$0.requiresAuthToUnlock && !disabledPoolServerKeys.contains($0.deduplicationKey.lowercased()) }
+            if currentActive.count > 1 {
+                disabledPoolServerKeys.insert(key)
+            }
+        }
+        syncPoolSnapshot()
+        AIModelCatalog.shared.integrateLocalModels()
+    }
+
+    func enableAllServersInPool() {
+        disabledPoolServerKeys.removeAll()
+        syncPoolSnapshot()
+        AIModelCatalog.shared.integrateLocalModels()
+    }
+
+    func inFlightCount(forEndpoint endpoint: String) -> Int {
+        Self.inFlightCount(forEndpoint: endpoint)
+    }
+
+    func syncPoolSnapshot() {
+        let activePool = connectedServers
+        for srv in detectedServers where srv.isOnline {
+            Self.registerEndpointAPIKey(endpoint: srv.endpoint, apiKey: srv.apiKey)
+        }
+        Self.authMapLock.lock()
+        Self.pooledServersSnapshot = activePool
+        Self.authMapLock.unlock()
+    }
+
     var activeServer: DetectedLLMServer? {
-        guard !detectedServers.isEmpty, selectedServerIndex >= 0, selectedServerIndex < detectedServers.count else { return nil }
+        guard !detectedServers.isEmpty, selectedServerIndex >= 0, selectedServerIndex < detectedServers.count else {
+            return connectedServers.first
+        }
         return detectedServers[selectedServerIndex]
     }
 
@@ -655,12 +886,22 @@ class LocalLLMService: ObservableObject {
         return value
     }
 
-    var availableModels: [LocalLLMModel] { activeServer?.models ?? [] }
+    var availableModels: [LocalLLMModel] {
+        var seen = Set<String>()
+        var merged: [LocalLLMModel] = []
+        for srv in connectedServers {
+            for m in srv.models where seen.insert(m.id).inserted {
+                merged.append(m)
+            }
+        }
+        return merged.isEmpty ? (activeServer?.models ?? []) : merged
+    }
 
     func selectServer(at index: Int, preferredModelId: String? = nil) {
         guard index >= 0, index < detectedServers.count else { return }
         selectedServerIndex = index
         let srv = detectedServers[index]
+        disabledPoolServerKeys.remove(srv.deduplicationKey.lowercased())
         let chosenModel: String
         if let preferredModelId, srv.models.contains(where: { $0.id == preferredModelId }) {
             chosenModel = preferredModelId
@@ -676,6 +917,7 @@ class LocalLLMService: ObservableObject {
         LocalLLMService.cachedModel = chosenModel
         LocalLLMService.cachedAPIKey = srv.apiKey ?? "local"
         Self.registerEndpointAPIKey(endpoint: srv.endpoint, apiKey: srv.apiKey)
+        syncPoolSnapshot()
     }
 
     func selectModelAcrossServers(modelId: String, endpointHint: String? = nil) {
@@ -706,13 +948,7 @@ class LocalLLMService: ObservableObject {
         let llmServiceTypes: Set<String> = ["_microcode-llm._tcp", "_ollama._tcp"]
         let workstationServiceTypes = [
             "_microcode-llm._tcp",
-            "_ollama._tcp",
-            "_smb._tcp",
-            "_ssh._tcp",
-            "_workstation._tcp",
-            "_rfb._tcp",
-            "_http._tcp",
-            "_companion-link._tcp"
+            "_ollama._tcp"
         ]
         let params = NWParameters()
         params.includePeerToPeer = true
@@ -895,18 +1131,29 @@ class LocalLLMService: ObservableObject {
         }
     }
 
-    func scanForServers() async {
+    func scanForServers(forceDeepScan: Bool = false) async {
         guard !isScanning else { return }
         isScanning = true
         let previouslySelectedEndpoint = activeServer?.endpoint
         let previouslySelectedModel = selectedModelId
-        scanLog = ["🔍 Scanning This Mac, LAN, Bonjour & Paired Worldwide Endpoints…"]
+        scanLog = ["🔍 Scanning This Mac\(scanLANEnabled ? ", LAN, Bonjour" : "") & Paired Endpoints…"]
 
         let ownGatewayPort: Int = LocalLLMGatewayService.shared.isServerRunning
             ? Int(LocalLLMGatewayService.shared.listeningPort)
             : -1
-        let localInterfaceSnapshot = await Task.detached(priority: .userInitiated) {
-            Self.discoverNetworkTopology()
+        let needTopology = scanLANEnabled
+        let localInterfaceSnapshot: NetworkTopologySnapshot = await Task.detached(priority: .utility) {
+            if needTopology {
+                return Self.discoverNetworkTopology()
+            } else {
+                return NetworkTopologySnapshot(
+                    ownIPs: ["127.0.0.1", "localhost", "::1"],
+                    lanSubnetPrefixes: [],
+                    primaryLANDisplay: nil,
+                    arpNeighbors: [],
+                    tailscalePeers: []
+                )
+            }
         }.value
         let ownIPs = Set(localInterfaceSnapshot.ownIPs + ["127.0.0.1", "localhost", "::1"])
 
@@ -922,7 +1169,9 @@ class LocalLLMService: ObservableObject {
         }
 
         // 1. Standard Localhost LLM Engine Ports (deduplicated per port — fingerprinted dynamically!)
-        let standardLocalPorts = [11434, 1234, 1235, 1236, 8080, 8081, 8000, 10240, 1337, 4000, 20128, 30000, 5001, 7860]
+        MacLLMServer.shared.startIfNeeded(preferredPort: 11436)
+        let macLLMPort = Int(MacLLMServer.shared.listeningPort)
+        let standardLocalPorts = [macLLMPort, 11436, 11434, 1234, 1235, 1236, 8080, 8081, 8000, 10240, 1337, 4000, 20128, 30000, 5001, 7860]
         for port in standardLocalPorts {
             addCandidate(ProbeCandidate(
                 scheme: "http",
@@ -935,10 +1184,19 @@ class LocalLLMService: ObservableObject {
             ))
         }
 
-        // 2. Dynamic Listening TCP Socket Introspection on This Mac (catches custom LM Studio / MLX / llama-server ports!)
-        let dynamicLocalPorts = await Task.detached(priority: .userInitiated) {
-            Self.discoverCandidateLocalListeningPorts(excludingPort: ownGatewayPort)
-        }.value
+        // 2. Dynamic Listening TCP Socket Introspection on This Mac (cached for 60s to avoid heavy lsof CPU spikes)
+        let now = Date()
+        let dynamicLocalPorts: [Int]
+        if forceDeepScan || now.timeIntervalSince(lastDynamicPortScanAt) > 60 {
+            let scanned = await Task.detached(priority: .utility) {
+                Self.discoverCandidateLocalListeningPorts(excludingPort: ownGatewayPort)
+            }.value
+            cachedDynamicLocalPorts = scanned
+            lastDynamicPortScanAt = now
+            dynamicLocalPorts = scanned
+        } else {
+            dynamicLocalPorts = cachedDynamicLocalPorts
+        }
         for port in dynamicLocalPorts {
             addCandidate(ProbeCandidate(
                 scheme: "http",
@@ -1083,8 +1341,12 @@ class LocalLLMService: ObservableObject {
 
         detectedServers = discovered
 
-        // 9. Preserve user choice or Auto-Select Best Perf
-        if autoSelectBestPerf, let bestIdx = detectedServers.firstIndex(where: \.isBestPerf) {
+        // 9. Preserve user choice (especially custom / paired remote endpoints) or Auto-Select Best Perf
+        if let prevEndpoint = previouslySelectedEndpoint,
+           let prevIdx = detectedServers.firstIndex(where: { $0.endpoint == prevEndpoint && $0.isOnline }),
+           (!autoSelectBestPerf || detectedServers[prevIdx].sourceKind == .worldwideQR || detectedServers[prevIdx].sourceKind == .custom) {
+            selectServer(at: prevIdx, preferredModelId: previouslySelectedModel)
+        } else if autoSelectBestPerf, let bestIdx = detectedServers.firstIndex(where: \.isBestPerf) {
             selectServer(at: bestIdx, preferredModelId: previouslySelectedModel)
         } else if let prevEndpoint = previouslySelectedEndpoint,
                   let prevIdx = detectedServers.firstIndex(where: { $0.endpoint == prevEndpoint && $0.isOnline }) {
@@ -1097,7 +1359,15 @@ class LocalLLMService: ObservableObject {
         isScanning = false
         let onlineCount = detectedServers.filter(\.isOnline).count
         scanLog.append("✅ Smart scan complete: \(onlineCount) server(s) detected")
-        AIModelCatalog.shared.integrateLocalModels()
+
+        let newSignature = detectedServers
+            .filter(\.isOnline)
+            .map { "\($0.endpoint):\($0.models.map(\.id).joined(separator: ","))" }
+            .joined(separator: "|")
+        if newSignature != lastIntegratedServerSignature {
+            lastIntegratedServerSignature = newSignature
+            AIModelCatalog.shared.integrateLocalModels()
+        }
     }
 
     private func applyBestPerfSelectionIfAvailable() {
@@ -1158,8 +1428,8 @@ class LocalLLMService: ObservableObject {
                 if let hint = candidate.labelHint, !hint.isEmpty {
                     return hint
                 }
-                if candidate.sourceKind == .lan || candidate.sourceKind == .tailscale {
-                    return Self.resolveReverseHostLabel(for: candidate.host)
+                if let cachedBonjour = bonjourPeerMachines[candidate.host], !cachedBonjour.isEmpty {
+                    return cachedBonjour
                 }
                 return nil
             }()
@@ -1365,6 +1635,9 @@ class LocalLLMService: ObservableObject {
         models: [LocalLLMModel]
     ) -> LocalLLMServerType {
         if isMicroCodeNode || port == 8475 || port == 8476 { return .microcodeNode }
+        if port == 11436 || serverHeader.contains("macllm") || bodyPreview.contains("\"owned_by\":\"macllm\"") || bodyPreview.contains("\"engine\":\"macllm\"") {
+            return .macLLM
+        }
         if port == 20128 || bodyPreview.contains("9router") { return .nineRouter }
         if port == 4000 || serverHeader.contains("litellm") || bodyPreview.contains("litellm") { return .liteLLM }
         if port == 11434 || port == 11435 || serverHeader.contains("ollama") || bodyPreview.contains("\"owned_by\":\"library\"") { return .ollama }
@@ -1535,17 +1808,20 @@ class LocalLLMService: ObservableObject {
             detectedServers[bestIdx].isBestPerf = true
             if autoSelectBestPerf {
                 selectServer(at: bestIdx)
+                syncPoolSnapshot()
                 return
             }
         }
         if let currentEndpoint, let preserved = detectedServers.firstIndex(where: { $0.endpoint == currentEndpoint }) {
             selectedServerIndex = preserved
         }
+        syncPoolSnapshot()
     }
 
     // MARK: - Worldwide QR Code & Smart Human Input Pairing Client
 
     /// Accepts ANY human input without forcing rigid syntax:
+    /// - Multiple endpoints separated by comma, semicolon, or newline (`192.168.1.50:1234, 192.168.1.51:11434`, `1234, 11434`)
     /// - Port only (`1235`, `:1235`, `1235/v1`) -> `127.0.0.1:1235`
     /// - Bare IP or hostname (`192.168.1.50`, `mac-studio.local`) -> auto-probes all LLM ports on that machine!
     /// - `Host:Port` (`192.168.1.50:1234`, `127.0.0.1:1235/v1`)
@@ -1554,6 +1830,27 @@ class LocalLLMService: ObservableObject {
     func connectOrPairEndpoint(_ rawInput: String, explicitAPIKey: String? = nil) async -> Bool {
         let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+
+        // Case 0: Multi-Endpoint Batch Input (comma, semicolon, or newline separated)
+        let batchParts = trimmed
+            .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if batchParts.count > 1 {
+            var connectedCount = 0
+            for part in batchParts {
+                if await connectOrPairEndpoint(part, explicitAPIKey: explicitAPIKey) {
+                    connectedCount += 1
+                }
+            }
+            syncPoolSnapshot()
+            AIModelCatalog.shared.integrateLocalModels()
+            if connectedCount > 0 {
+                pairingStatusMessage = "Connected \(connectedCount)/\(batchParts.count) Local LLM servers into Active Pool (\(connectedServers.count) total online)"
+                return true
+            }
+            return false
+        }
 
         // Case A: Bare port or `:port[/path]` (e.g. "1235", ":1235", "1235/v1")
         // -> Check 127.0.0.1:<port> first; if not local, sweep the entire Wi-Fi LAN for `<any-LAN-IP>:<port>`!
@@ -1829,6 +2126,8 @@ class LocalLLMService: ObservableObject {
         if selectedServerIndex >= detectedServers.count {
             selectedServerIndex = max(0, detectedServers.count - 1)
         }
+        syncPoolSnapshot()
+        AIModelCatalog.shared.integrateLocalModels()
     }
 
     nonisolated static func decodeQRCodeString(from image: NSImage) -> String? {
