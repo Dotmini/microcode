@@ -16,6 +16,8 @@ import Combine
 import AppKit
 import Security
 import WebKit
+import Network
+import CryptoKit
 
 public struct SubscriptionModelInfo: Identifiable, Hashable, Codable {
     public var id: String { "\(provider.rawValue):\(modelID)" }
@@ -38,6 +40,7 @@ public struct SubscriptionModelInfo: Identifiable, Hashable, Codable {
 
 public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codable {
     case aipass = "aipass"
+    case thai_gemini_enterprise = "thai_gemini_enterprise"
     case tokenme = "tokenme"
     case chatgpt = "chatgpt"
     case claude = "claude"
@@ -65,6 +68,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var displayName: String {
         switch self {
         case .aipass: return "TH-AI Passport (de.aipass.net)"
+        case .thai_gemini_enterprise: return "Thai AI Gemini Enterprise (AiPASS.TH · Vertex AI Search)"
         case .tokenme: return "TokenMe (9ARM — tokenme.limited)"
         case .chatgpt: return "ChatGPT Plus / Team / Pro"
         case .claude: return "Claude Pro / Team"
@@ -91,7 +95,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     
     public var providerIcon: String {
         switch self {
-        case .aipass: return "aipass"
+        case .aipass, .thai_gemini_enterprise: return "aipass"
         case .tokenme: return "tokenme"
         case .chatgpt: return "openai"
         case .claude: return "anthropic"
@@ -130,6 +134,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         switch self {
         case .aipass:
             return "gemini-3.5-flash-lite"
+        case .thai_gemini_enterprise:
+            return "gemini-4-argon"
         case .tokenme:
             return "deepseek-ai/deepseek-v4-flash-0731"
         case .chatgpt:
@@ -178,6 +184,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var shortLabel: String {
         switch self {
         case .aipass: return "TH-AI Pass"
+        case .thai_gemini_enterprise: return "Thai AI Gemini"
         case .tokenme: return "TokenMe"
         case .chatgpt: return "ChatGPT Plus"
         case .claude: return "Claude Pro"
@@ -214,10 +221,10 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
 
     public var isAPIKeyBackedPortal: Bool {
         switch self {
-        case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
+        case .deepseek, .glm, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
              .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
             return true
-        case .aipass, .chatgpt, .claude, .gemini, .deepseek, .copilot, .glm:
+        case .aipass, .thai_gemini_enterprise, .chatgpt, .claude, .gemini, .copilot:
             return false
         }
     }
@@ -251,7 +258,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
 
     public var aiProviderID: String {
         switch self {
-        case .aipass: return "aipass"
+        case .aipass, .thai_gemini_enterprise: return "aipass"
         case .tokenme: return "tokenme"
         case .chatgpt: return "openai"
         case .claude: return "anthropic"
@@ -370,6 +377,16 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
                 // Music & Audio Generation Models (TH-AI Passport)
                 SubscriptionModelInfo(modelID: "lyria-3-clip-preview", name: "Lyria 3 Clip — 30s Music Gen (AiPASS)", provider: .aipass, badge: "MUSIC", description: "Google DeepMind Lyria 3 Clip (30-second AI Music Generation)", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "lyria-3-pro-preview", name: "Lyria 3 Pro — Full Song + Vocals (AiPASS)", provider: .aipass, badge: "MUSIC", description: "Google DeepMind Lyria 3 Pro (Full-length AI Song & Vocal Generation)", aiProviderID: "aipass")
+            ]
+        case .thai_gemini_enterprise:
+            return [
+                SubscriptionModelInfo(modelID: "gemini-4-argon", name: "Gemini 4 Argon (Thai AI Enterprise)", provider: .thai_gemini_enterprise, badge: "FLAGSHIP", description: "Google Gemini 4 Argon via Thai AI Gemini Enterprise (vertexaisearch.cloud.google / AiPASS.TH)", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "gemini-4-argon-deep-research", name: "Gemini 4 Argon · Deep Research Agent", provider: .thai_gemini_enterprise, badge: "AGENT", description: "Autonomous Deep Research Agent on Thai AI Gemini Enterprise", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "gemini-4-argon-notebook", name: "Gemini Notebook Agent (Thai AI Enterprise)", provider: .thai_gemini_enterprise, badge: "AGENT", description: "Grounded Notebook & Document Synthesis Agent on Thai AI Gemini Enterprise", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "gemini-3.8-pro", name: "Gemini 3.8 Pro (Thai AI Enterprise)", provider: .thai_gemini_enterprise, badge: "PRO", description: "Google Gemini 3.8 Pro via Thai AI Gemini Enterprise", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Thai AI Enterprise)", provider: .thai_gemini_enterprise, badge: "FAST", description: "Google Gemini 3.8 Flash via Thai AI Gemini Enterprise", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Thai AI Enterprise)", provider: .thai_gemini_enterprise, badge: "PRO", description: "Google Gemini 2.5 Pro via Thai AI Gemini Enterprise", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Thai AI Enterprise)", provider: .thai_gemini_enterprise, badge: "FAST", description: "Google Gemini 2.5 Flash via Thai AI Gemini Enterprise", aiProviderID: "aipass")
             ]
         case .chatgpt:
             return [
@@ -564,12 +581,14 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var webLoginURL: URL {
         switch self {
         case .aipass: return URL(string: "https://de.aipass.net/sign-in?redirect_to=%2Fchat")!
+        case .thai_gemini_enterprise:
+            return VertexAISearchWebBridge.parseConfig(from: nil).activeURL
         case .chatgpt: return URL(string: "https://chatgpt.com")!
         case .claude: return URL(string: "https://claude.ai/login")!
         case .gemini: return URL(string: "https://gemini.google.com")!
-        case .deepseek: return URL(string: "https://chat.deepseek.com")!
+        case .deepseek: return URL(string: "https://platform.deepseek.com/api_keys")!
         case .copilot: return URL(string: "https://github.com/login/device")!
-        case .glm: return URL(string: "https://bigmodel.cn/login")!
+        case .glm: return URL(string: "https://bigmodel.cn/usercenter/proj-mgmt/apikeys")!
         case .openrouter: return URL(string: "https://openrouter.ai/settings/keys")!
         case .groq: return URL(string: "https://console.groq.com/keys")!
         case .mistral: return URL(string: "https://console.mistral.ai/api-keys")!
@@ -591,6 +610,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     public var tokenHelpTitle: String {
         switch self {
         case .aipass: return "How to get TH-AI Passport Session Cookie"
+        case .thai_gemini_enterprise: return "How to connect Thai AI Gemini Enterprise (vertexaisearch.cloud.google)"
         case .chatgpt: return "How to get ChatGPT Token"
         case .claude: return "How to get Claude Token"
         case .gemini: return "How to get Gemini Cookie"
@@ -623,6 +643,12 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
                 "2. Or open DevTools (⌥⌘I) on de.aipass.net → Application → Cookies → copy '__Secure-ai_passport_auth.session_token'.",
                 "3. Or right-click any request in Network tab → 'Copy as cURL' and paste directly below."
             ]
+        case .thai_gemini_enterprise:
+            return [
+                "1. Click '1-Click Sign In (Auto-Detect)' to sign in at vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b.",
+                "2. Or paste your session URL (https://vertexaisearch.cloud.google/us/home/cid/.../r/session/...?csesidx=...) directly below.",
+                "3. Or right-click any request in DevTools Network tab → 'Copy as cURL' and paste below."
+            ]
         case .chatgpt:
             return [
                 "1. Click 'Open Web Portal' to sign in to chatgpt.com",
@@ -637,15 +663,13 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             ]
         case .gemini:
             return [
-                "1. Go to gemini.google.com with active Google One AI Premium subscription.",
-                "2. Open DevTools (⌥⌘I) → Application → Cookies (gemini.google.com).",
-                "3. Copy '__Secure-1PSID' cookie value and paste below."
+                "1. Click '1-Click Sign In' and tap 'Sign in with Google Browser (Official OAuth)' for zero-cost Code Assist access.",
+                "2. Or run `gemini` / `agy` login in Terminal and click 'Auto-detect & Verify CLI Auth'."
             ]
         case .deepseek:
             return [
-                "1. Go to chat.deepseek.com and sign in with your phone or email.",
-                "2. Open DevTools (⌥⌘I) → Application → Local Storage (chat.deepseek.com).",
-                "3. Copy 'userToken' value and paste below."
+                "1. Click '1-Click Sign In' to open platform.deepseek.com/api_keys and copy your `sk-...` key (or connect TH-AI Passport for free DeepSeek V4 Flash).",
+                "2. Note: chat.deepseek.com web uses anti-bot PoW and cannot be called without a platform/subscription token."
             ]
         case .copilot:
             return [
@@ -741,6 +765,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         switch self {
         case .aipass:
             return "__Secure-ai_passport_auth.session_token (Application → Cookies → https://de.aipass.net)"
+        case .thai_gemini_enterprise:
+            return "https://vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b"
         case .chatgpt:
             return "(() => { const c = document.cookie.split('; '); const d = c.find(r => r.startsWith('__Secure-next-auth.session-token='))?.split('=')[1]; if (d) return d; const chunks = c.filter(r => r.trim().startsWith('__Secure-next-auth.session-token.')).sort().map(r => r.split('=')[1]).join(''); return chunks || localStorage.getItem('accessToken') || ''; })()"
         case .claude:
@@ -790,6 +816,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         switch self {
         case .aipass:
             return "Uses your TH-AI Passport (de.aipass.net) account to access 35+ frontier models (Claude 5.5, GPT-6, Gemini 4/3.8, DeepSeek V4, GLM 5.3, Grok 4.7, Typhoon 2.5)."
+        case .thai_gemini_enterprise:
+            return "Uses your Thai AI Gemini Enterprise (AiPASS.TH · vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b) workspace session for Gemini 4 Argon, Gemini Notebook, and Deep Research."
         case .chatgpt:
             return "Uses your ChatGPT Plus/Pro session or Codex CLI token. Zero API per-token charges."
         case .claude:
@@ -913,12 +941,9 @@ public class SubscriptionAuthManager: ObservableObject {
         return acc.isValid && !acc.sessionToken.isEmpty && (acc.expiresAt.map { $0 > Date() } ?? true)
     }
     
-    /// Returns true if the provider has at least one connected account not currently in 429/529 rate-limit cooldown, OR has a live CLI harness bridge.
+    /// Returns true if the provider has at least one connected, verified subscription account not currently in 429/529 cooldown.
     public func hasHealthyRoute(_ provider: SubscriptionProviderType) -> Bool {
-        if nextHealthyAccount(for: provider) != nil {
-            return true
-        }
-        return cliBridgeBinaryPath(for: provider) != nil
+        return nextHealthyAccount(for: provider) != nil
     }
     
     public var hasAnyConnected: Bool {
@@ -1021,15 +1046,29 @@ public class SubscriptionAuthManager: ObservableObject {
     public func cliBridgeBinaryPath(for provider: SubscriptionProviderType) -> String? {
         switch provider {
         case .claude:
-            return ACPHostService.resolveAgentBinary(for: .claudeCode) ?? ACPHostService.resolveAgentBinary(for: .agy)
+            if AIClient.hasLocalClaudeCodeOAuth(), let bin = ACPHostService.resolveAgentBinary(for: .claudeCode) {
+                return bin
+            }
+            if AIClient.hasJetskiCodeAssistToken(fallbackToken: ""), let agyBin = ACPHostService.resolveAgentBinary(for: .agy) {
+                return agyBin
+            }
+            return nil
         case .chatgpt:
+            let codexAuth = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/auth.json")
+            guard FileManager.default.fileExists(atPath: codexAuth.path) else { return nil }
             return ACPHostService.resolveAgentBinary(for: .codexEngine)
         case .gemini:
-            return ACPHostService.resolveAgentBinary(for: .agy) ?? ACPHostService.resolveAgentBinary(for: .geminiCLI)
+            if AIClient.hasJetskiCodeAssistToken(fallbackToken: ""), let agyBin = ACPHostService.resolveAgentBinary(for: .agy) {
+                return agyBin
+            }
+            if AIClient.loadGoogleCodeAssistCredentials(fallbackToken: "") != nil {
+                return ACPHostService.resolveAgentBinary(for: .geminiCLI)
+            }
+            return nil
         case .copilot:
-            return ACPHostService.resolveAgentBinary(for: .githubCopilot)
+            return isConnected(.copilot) ? ACPHostService.resolveAgentBinary(for: .githubCopilot) : nil
         case .qwen:
-            return ACPHostService.resolveAgentBinary(for: .qwenCode)
+            return isConnected(.qwen) ? ACPHostService.resolveAgentBinary(for: .qwenCode) : nil
         default:
             return nil
         }
@@ -1116,6 +1155,9 @@ public class SubscriptionAuthManager: ObservableObject {
     public func fetchLiveModels(for provider: SubscriptionProviderType) async {
         if provider == .copilot {
             await AIModelCatalog.shared.fetchLiveCopilotModels()
+        } else if provider == .thai_gemini_enterprise {
+            // Thai AI Gemini Enterprise uses curated Vertex AI Search / Agentspace models (Gemini 4 Argon, Notebook, Deep Research)
+            Self.setLiveModels(for: .thai_gemini_enterprise, models: SubscriptionProviderType.thai_gemini_enterprise.defaultModelInfos)
         } else if provider == .aipass {
             await AIModelCatalog.shared.fetchLiveAiPassModels()
             syncLiveModelsFromCatalog(for: .aipass)
@@ -1205,6 +1247,26 @@ public class SubscriptionAuthManager: ObservableObject {
         // 4. Otherwise treat as raw value of `__Secure-ai_passport_auth.session_token`
         return "__Secure-ai_passport_auth.session_token=\(s)"
     }
+
+    public static func isThaiGeminiEnterpriseSession(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.contains("vertexaisearch.cloud.google") || s.hasPrefix("vertexaisearch://")
+    }
+
+    /// Normalizes a pasted Thai AI Gemini Enterprise URL (`https://vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b/...`),
+    /// cURL command, or Google session cookie into a persisted Vertex AI Search session token.
+    public static func normalizeThaiGeminiEnterpriseToken(_ raw: String) -> String {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else {
+            return VertexAISearchWebBridge.defaultSessionURLString
+        }
+        let cfg = VertexAISearchWebBridge.parseConfig(from: s)
+        VertexAISearchWebBridge.saveConfig(cfg)
+        if let cookie = cfg.cookieHeader, !cookie.isEmpty {
+            return "\(cfg.fullURLString)||COOKIE:\(cookie)"
+        }
+        return cfg.fullURLString
+    }
     
     public static func isCorruptedToken(_ token: String) -> Bool {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1249,34 +1311,28 @@ public class SubscriptionAuthManager: ObservableObject {
 
     public func saveAccount(provider: SubscriptionProviderType, emailOrUser: String, sessionToken: String, source: String = "Manual") {
         let rawTrimmed = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let apiKeyProviders: Set<SubscriptionProviderType> = [
-            .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
-            .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia
-        ]
         let trimmedToken: String
-        if provider == .aipass {
+        if provider == .thai_gemini_enterprise || (provider == .aipass && Self.isThaiGeminiEnterpriseSession(rawTrimmed)) {
+            trimmedToken = Self.normalizeThaiGeminiEnterpriseToken(rawTrimmed)
+        } else if provider == .aipass {
             trimmedToken = Self.normalizeAiPassToken(rawTrimmed)
-        } else if apiKeyProviders.contains(provider) {
+        } else if provider.isAPIKeyBackedPortal {
             trimmedToken = Self.normalizeBearerOrCurlToken(rawTrimmed)
         } else {
             trimmedToken = rawTrimmed
         }
         guard !Self.isCorruptedToken(trimmedToken) else { return }
-        
-        // Also mirror direct API keys to BYOK storage so both modes stay in sync
-        if trimmedToken.hasPrefix("sk-ant-api") {
-            UserDefaults.standard.set(trimmedToken, forKey: "anthropic_api_key")
-        } else if trimmedToken.hasPrefix("AIzaSy") {
-            UserDefaults.standard.set(trimmedToken, forKey: "gemini_api_key")
-        } else if trimmedToken.hasPrefix("sk-") && !trimmedToken.hasPrefix("sk-ant-") && provider == .chatgpt {
-            UserDefaults.standard.set(trimmedToken, forKey: "openai_api_key")
-        } else if trimmedToken.hasPrefix("sk-") && provider == .deepseek {
-            UserDefaults.standard.set(trimmedToken, forKey: "deepseek_api_key")
-        } else if provider == .aipass {
-            UserDefaults.standard.set(trimmedToken, forKey: "aipass_api_key")
-        } else if apiKeyProviders.contains(provider) {
-            UserDefaults.standard.set(trimmedToken, forKey: "\(provider.aiProviderID)_api_key")
+        if provider == .deepseek && !trimmedToken.hasPrefix("sk-") {
+            lastDetectionMessage = "DeepSeek requires a platform.deepseek.com sk-... token (or connect TH-AI Passport for free DeepSeek V4 Flash)."
+            return
         }
+        if provider == .glm && trimmedToken.hasPrefix("eyJhbGci") {
+            lastDetectionMessage = "GLM requires a BigModel / Z.AI Coding Plan token (<id>.<secret>), not a web login JWT."
+            return
+        }
+        // STRICT SUBSCRIPTION ISOLATION:
+        // Never write Subscription tokens into BYOK UserDefaults (`*_api_key`).
+        // Subscription credentials live strictly inside `km_sealed_sub_<provider>`.
         
         let accountId: String = {
             if let existing = accountPools[provider]?.first(where: { $0.sessionToken == trimmedToken }) {
@@ -1310,7 +1366,14 @@ public class SubscriptionAuthManager: ObservableObject {
         accounts[provider] = account
         persistAccounts()
         
-        if provider == .aipass {
+        if provider == .thai_gemini_enterprise {
+            let cfg = VertexAISearchWebBridge.parseConfig(from: trimmedToken)
+            if let cookie = cfg.cookieHeader, !cookie.isEmpty {
+                Task { @MainActor in
+                    await VertexAISearchWebBridge.shared.syncCookieHeaderToWebKitStore(cookieHeader: cookie)
+                }
+            }
+        } else if provider == .aipass {
             Task {
                 await self.verifyAndFetchAiPassProfileAndModels(cookieHeader: trimmedToken)
             }
@@ -1429,168 +1492,67 @@ public class SubscriptionAuthManager: ObservableObject {
         persistAccounts()
     }
     
-    /// Scans local CLI tools and verifies authentication with provider before registering
+    /// Scans local CLI OAuth sessions (`codex`, `claude`, `gemini`/`agy`, `gh copilot`, `aipass`)
+    /// and verifies authentication live before registering — strictly isolated from BYOK API keys.
     public func detectLocalCLISessions() async {
         var detected = 0
         let home = FileManager.default.homeDirectoryForCurrentUser
-        
-        // 1. Check for Codex / OpenAI CLI auth (~/.codex/auth.json)
-        let codexAuth = home.appendingPathComponent(".codex/auth.json")
-        if FileManager.default.fileExists(atPath: codexAuth.path) {
-            if let data = try? Data(contentsOf: codexAuth),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                var email = "Codex Subscriber"
-                var token = ""
-                
-                if let tokens = json["tokens"] as? [String: Any] {
-                    if let access = tokens["access_token"] as? String, !access.isEmpty {
-                        token = access
-                    }
-                }
-                if token.isEmpty, let directToken = (json["access_token"] ?? json["token"] ?? json["OPENAI_API_KEY"]) as? String {
-                    token = directToken
-                }
-                
-                // Read email from id_token if available
-                if let tokens = json["tokens"] as? [String: Any],
-                   let idToken = tokens["id_token"] as? String {
-                    let parts = idToken.components(separatedBy: ".")
-                    if parts.count > 1, let payloadData = Data(base64Encoded: base64Padded(parts[1])),
-                       let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] {
-                        if let mail = payload["email"] as? String, !mail.isEmpty {
-                            email = mail
-                        }
-                    }
-                }
-                
-                if !token.isEmpty {
-                    let finalEmail = email.isEmpty ? "Codex CLI User" : email
-                    let finalToken = token
-                    if finalToken.hasPrefix("sk-") {
-                        var req = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
-                        req.setValue("Bearer \(finalToken)", forHTTPHeaderField: "Authorization")
-                        req.timeoutInterval = 5
-                        if let (_, resp) = try? await URLSession.shared.data(for: req),
-                           let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                            await MainActor.run {
-                                self.saveAccount(provider: .chatgpt, emailOrUser: finalEmail, sessionToken: finalToken, source: "Codex CLI")
-                            }
-                            detected += 1
-                        }
-                    } else {
-                        // OAuth token from Codex CLI (~/.codex/auth.json)
-                        await MainActor.run {
-                            self.saveAccount(provider: .chatgpt, emailOrUser: finalEmail, sessionToken: finalToken, source: "Codex CLI")
-                        }
-                        detected += 1
-                    }
-                }
-            }
-        }
-        
-        // 2. Check for Claude credentials (~/.claude.json, ~/.claude/config.json, or configured Anthropic key)
-        let claudeHomeJson = home.appendingPathComponent(".claude.json")
-        let claudeConfig = home.appendingPathComponent(".claude/config.json")
-        var claudeToken: String?
-        var claudeEmail = "Claude Pro / Max"
-        var hasClaudeOAuthLogin = false
-        if FileManager.default.fileExists(atPath: claudeHomeJson.path),
-           let data = try? Data(contentsOf: claudeHomeJson),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let oauthAccount = json["oauthAccount"] as? [String: Any] {
-                hasClaudeOAuthLogin = true
-                if let mail = (oauthAccount["emailAddress"] ?? oauthAccount["displayName"]) as? String, !mail.isEmpty {
-                    claudeEmail = mail
-                }
-            }
-            if let token = (json["apiKey"] ?? json["oauthToken"] ?? json["sessionKey"]) as? String,
-               token.hasPrefix("sk-ant-api") {
-                claudeToken = token
-            }
-        }
-        if claudeToken == nil, FileManager.default.fileExists(atPath: claudeConfig.path) {
-            if let data = try? Data(contentsOf: claudeConfig),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let token = (json["apiKey"] ?? json["oauthToken"] ?? json["sessionKey"]) as? String,
-               token.hasPrefix("sk-ant-api") {
-                claudeToken = token
-            }
-        }
-        if claudeToken == nil {
-            let resolved = await MainActor.run {
-                ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"]
-                    ?? ProcessInfo.processInfo.environment["CLAUDE_API_KEY"]
-                    ?? AIModelCatalog.resolveKey("anthropic")
-            }
-            if resolved.hasPrefix("sk-ant-api") {
-                claudeToken = resolved
-            }
-        }
-        
-        if let token = claudeToken, token.hasPrefix("sk-ant-api") {
-            let finalClaudeEmail = claudeEmail
-            var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models")!)
-            req.setValue(token, forHTTPHeaderField: "x-api-key")
-            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            req.timeoutInterval = 5
-            if let (_, resp) = try? await URLSession.shared.data(for: req),
-               let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                UserDefaults.standard.set(token, forKey: "anthropic_api_key")
-                await MainActor.run {
-                    self.saveAccount(provider: .claude, emailOrUser: finalClaudeEmail, sessionToken: token, source: "Anthropic Direct")
-                }
-                detected += 1
-            }
-        } else if hasClaudeOAuthLogin, ACPHostService.resolveAgentBinary(for: .claudeCode) != nil {
-            let finalClaudeEmail = claudeEmail
+
+        // 1. Check for Codex / ChatGPT Plus/Pro CLI OAuth (~/.codex/auth.json), refreshing expired access_token automatically
+        if let verifiedCodex = await AIClient.verifyCodexOAuthCredentials() {
             await MainActor.run {
                 self.saveAccount(
-                    provider: .claude,
-                    emailOrUser: "\(finalClaudeEmail) (Claude Code CLI)",
-                    sessionToken: "claude_cli_bridge:\(finalClaudeEmail)",
-                    source: "Claude Code CLI (Zero API Cost)"
+                    provider: .chatgpt,
+                    emailOrUser: verifiedCodex.email,
+                    sessionToken: verifiedCodex.accessToken,
+                    source: "Codex CLI OAuth (Zero API Cost)"
                 )
             }
             detected += 1
         }
-        
-        // 3. Check for Google AI Ultra / Code Assist OAuth (~/.gemini/jetski-standalone-oauth-token), Gemini API Key, or AGY CLI Bridge
-        if let codeAssistCreds = await MainActor.run(body: { AIClient.loadGoogleCodeAssistCredentials(fallbackToken: "") }) {
-            let oauthToken = "codeassist_oauth:\(codeAssistCreds.refreshToken)"
-            let shouldMountVertexClaude = (claudeToken == nil && !hasClaudeOAuthLogin)
+
+        // 2. Claude Code CLI zero-cost Pro / Max / Team login. `claude auth status --json` must report a real
+        //    `subscriptionType`; a prepaid Anthropic Console org bills API credits and is NOT a Subscription.
+        let verifiedClaude = await AIClient.verifyClaudeCodeSubscription()
+        let hasClaudeOAuthLogin = verifiedClaude != nil
+        if let verifiedClaude {
+            let planLabel = verifiedClaude.plan.capitalized
             await MainActor.run {
-                self.saveAccount(provider: .gemini, emailOrUser: "\(codeAssistCreds.email) (Google AI Ultra)", sessionToken: oauthToken, source: "Google AI Ultra OAuth")
+                self.saveAccount(
+                    provider: .claude,
+                    emailOrUser: "\(verifiedClaude.email) (Claude \(planLabel) · CLI)",
+                    sessionToken: "claude_cli_bridge:\(verifiedClaude.email)",
+                    source: "Claude Code CLI (Zero API Cost)"
+                )
+            }
+            detected += 1
+        } else {
+            // Purge a stale CLI-bridge entry (CLI logged out, or downgraded to a prepaid Console org)
+            await MainActor.run {
+                if let cur = self.accounts[.claude], cur.sessionToken.hasPrefix("claude_cli_bridge:") {
+                    self.disconnect(provider: .claude)
+                }
+            }
+        }
+
+        // 3. Check for Google AI Ultra / Code Assist OAuth (~/.gemini/jetski-standalone-oauth-token or ~/.gemini/oauth_creds.json),
+        //    verifying OAuth token refresh live so expired/mismatched CLI tokens never hijack Gemini or Claude.
+        if let verified = await AIClient.verifyGoogleCodeAssistCredentials() {
+            let kindTag = verified.kind == .jetski ? "jetski" : "gcli"
+            let oauthToken = "codeassist_oauth:\(kindTag):\(verified.refreshToken)"
+            let labelSuffix = verified.kind == .jetski ? "Google AI Ultra" : "Gemini Code Assist"
+            let sourceLabel = verified.kind == .jetski ? "Google AI Ultra OAuth" : "Gemini CLI OAuth"
+            // Only Antigravity/Jetski gateway hosts Vertex Claude 5.5; standard Gemini CLI OAuth only hosts Gemini models.
+            let shouldMountVertexClaude = (verified.kind == .jetski && !hasClaudeOAuthLogin)
+            await MainActor.run {
+                self.saveAccount(provider: .gemini, emailOrUser: "\(verified.email) (\(labelSuffix))", sessionToken: oauthToken, source: sourceLabel)
                 if shouldMountVertexClaude {
-                    self.saveAccount(provider: .claude, emailOrUser: "\(codeAssistCreds.email) (Claude 5.5 Ultra)", sessionToken: oauthToken, source: "Vertex Claude 5.5 OAuth")
+                    self.saveAccount(provider: .claude, emailOrUser: "\(verified.email) (Claude 5.5 Ultra)", sessionToken: oauthToken, source: "Vertex Claude 5.5 OAuth")
                 }
             }
             detected += (shouldMountVertexClaude ? 2 : 1)
-        } else {
-            let geminiKey: String = await MainActor.run {
-                ProcessInfo.processInfo.environment["GEMINI_API_KEY"]
-                    ?? ProcessInfo.processInfo.environment["GOOGLE_API_KEY"]
-                    ?? AIModelCatalog.resolveKey("gemini")
-            }
-            if geminiKey.hasPrefix("AIzaSy") {
-                await MainActor.run {
-                    self.saveAccount(provider: .gemini, emailOrUser: "Google Gemini Advanced", sessionToken: geminiKey, source: "Google AI")
-                }
-                detected += 1
-            } else if ACPHostService.resolveAgentBinary(for: .agy) != nil {
-                await MainActor.run {
-                    if !self.isConnected(.gemini) {
-                        self.saveAccount(
-                            provider: .gemini,
-                            emailOrUser: "Google Antigravity (AGY CLI)",
-                            sessionToken: "agy_cli_bridge:active",
-                            source: "Antigravity CLI (Zero API Cost)"
-                        )
-                    }
-                }
-                detected += 1
-            }
         }
-        
+
         // 4. Check for GitHub Copilot CLI session (~/.config/gh/hosts.yml or environment)
         let ghHosts = home.appendingPathComponent(".config/gh/hosts.yml")
         var ghToken: String?
@@ -1611,9 +1573,9 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         if ghToken == nil {
-            ghToken = ProcessInfo.processInfo.environment["GITHUB_TOKEN"] ?? ProcessInfo.processInfo.environment["GH_TOKEN"] ?? ProcessInfo.processInfo.environment["COPILOT_TOKEN"]
+            ghToken = ProcessInfo.processInfo.environment["COPILOT_TOKEN"]
         }
-        
+
         if let token = ghToken, !token.isEmpty {
             var req = URLRequest(url: URL(string: "https://api.github.com/copilot_internal/v2/token")!)
             req.setValue("token \(token)", forHTTPHeaderField: "Authorization")
@@ -1628,32 +1590,8 @@ public class SubscriptionAuthManager: ObservableObject {
                 detected += 1
             }
         }
-        
-        // 5. Check for DeepSeek
-        let dsKey: String = await MainActor.run {
-            ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"] ?? AIModelCatalog.resolveKey("deepseek")
-        }
-        if !dsKey.isEmpty {
-            await MainActor.run {
-                if !self.isConnected(.deepseek) {
-                    self.saveAccount(provider: .deepseek, emailOrUser: "DeepSeek API", sessionToken: dsKey, source: "Direct / Env")
-                }
-            }
-            detected += 1
-        }
-        
-        // 6. Check for GLM / Zhipu / Z.AI International
-        let glmKey: String = await MainActor.run {
-            ProcessInfo.processInfo.environment["GLM_API_KEY"] ?? ProcessInfo.processInfo.environment["ZHIPU_API_KEY"] ?? AIModelCatalog.resolveKey("glm")
-        }
-        if !glmKey.isEmpty {
-            await MainActor.run {
-                self.saveAccount(provider: .glm, emailOrUser: "Z.AI GLM Coding Plan", sessionToken: glmKey, source: "Z.AI International")
-            }
-            detected += 1
-        }
-        
-        // 7. Check for TH-AI Passport (de.aipass.net) in ~/.config/aipass-proxy/.env, environment, or WKWebView Cookie Store
+
+        // 5. Check for TH-AI Passport (de.aipass.net) in ~/.config/aipass-proxy/.env, environment, or HTTPCookieStorage
         var aipassCookie: String? = ProcessInfo.processInfo.environment["AIPASS_SESSION_TOKEN"]
             ?? ProcessInfo.processInfo.environment["AIPASS_COOKIE"]
         if aipassCookie == nil {
@@ -1687,8 +1625,6 @@ public class SubscriptionAuthManager: ObservableObject {
                 }
             }
         }
-        // Note: Avoid touching WKWebsiteDataStore.default().httpCookieStore during cold-launch CLI auto-detection,
-        // as initializing WKWebsiteDataStore spins up WebKit's JavaScriptCore/WebCore/Networking daemon threads (+60MB RAM & ~250 Mach ports).
         if let rawAiPass = aipassCookie, !rawAiPass.isEmpty {
             let normalized = Self.normalizeAiPassToken(rawAiPass)
             if !normalized.isEmpty {
@@ -1701,52 +1637,27 @@ public class SubscriptionAuthManager: ObservableObject {
         if self.isConnected(.aipass), let tok = self.token(for: .aipass) {
             await self.verifyAndFetchAiPassProfileAndModels(cookieHeader: tok)
         }
-        
-        // 8. Auto-detect additional Web / Developer Console Providers from Env or BYOK storage
-        let additionalChecks: [(SubscriptionProviderType, [String], String)] = [
-            (.openrouter, ["OPENROUTER_API_KEY"], "OpenRouter Web"),
-            (.groq, ["GROQ_API_KEY"], "GroqCloud Developer"),
-            (.mistral, ["MISTRAL_API_KEY", "CODESTRAL_API_KEY"], "Mistral Pro"),
-            (.kimi, ["MOONSHOT_API_KEY", "KIMI_API_KEY"], "Moonshot Kimi Web"),
-            (.perplexity, ["PERPLEXITY_API_KEY", "PPLX_API_KEY"], "Perplexity Pro"),
-            (.perch, ["PERCH_API_KEY", "PERCHAI_API_KEY"], "Perch AI Pro"),
-            (.tokenme, ["TOKENME_API_KEY", "TOKEN_ME_API_KEY"], "TokenMe (9ARM)"),
-            (.typhoon, ["TYPHOON_API_KEY", "OPENTYPHOON_API_KEY"], "SCB 10X Typhoon"),
-            (.qwen, ["DASHSCOPE_API_KEY", "QWEN_API_KEY"], "Alibaba Qwen"),
-            (.grok, ["XAI_API_KEY", "GROK_API_KEY"], "xAI SuperGrok"),
-            (.cerebras, ["CEREBRAS_API_KEY"], "Cerebras Cloud Free"),
-            (.together, ["TOGETHER_API_KEY"], "Together AI Cloud"),
-            (.fireworks, ["FIREWORKS_API_KEY"], "Fireworks AI"),
-            (.minimax, ["MINIMAX_API_KEY"], "MiniMax Coding Plan"),
-            (.nvidia, ["NVIDIA_API_KEY", "NGC_API_KEY"], "NVIDIA NIM Developer")
-        ]
-        for (subProv, envVars, label) in additionalChecks {
-            let resolvedKey: String = await MainActor.run {
-                for env in envVars {
-                    if let val = ProcessInfo.processInfo.environment[env], !val.isEmpty {
-                        return val
-                    }
-                }
-                return AIModelCatalog.resolveKey(subProv.aiProviderID)
-            }
-            if !resolvedKey.isEmpty {
-                await MainActor.run {
-                    if !self.isConnected(subProv) {
-                        self.saveAccount(provider: subProv, emailOrUser: label, sessionToken: resolvedKey, source: "Direct / Env")
-                    }
-                }
-                detected += 1
-            }
-        }
-        
+
         let finalDetected = detected
         await MainActor.run {
+            // If the remembered active Subscription is no longer connected (purged, expired, logged out),
+            // fall back to the first connected one so the selector never points at a dead route.
+            if !self.isConnected(self.activeProvider) {
+                let preference: [SubscriptionProviderType] = [.aipass, .chatgpt, .gemini, .claude, .copilot, .glm, .deepseek, .tokenme, .typhoon]
+                if let alt = preference.first(where: { self.isConnected($0) })
+                    ?? SubscriptionProviderType.allCases.first(where: { self.isConnected($0) }) {
+                    self.activeProvider = alt
+                    if UserDefaults.standard.string(forKey: "aiKeyMode") == "subscription" {
+                        UserDefaults.standard.set(alt.rawValue, forKey: "subscriptionActiveProvider")
+                    }
+                }
+            }
             AIModelCatalog.shared.syncAllSubscriptionModels()
             self.detectedSessionCount = finalDetected
             if finalDetected > 0 {
-                self.lastDetectionMessage = "Detected \(finalDetected) active subscription session(s)."
+                self.lastDetectionMessage = "Verified \(finalDetected) active zero-billing subscription session(s) (isolated from BYOK)."
             } else {
-                self.lastDetectionMessage = "No verified subscriptions found. Please connect in settings or use Direct API Key."
+                self.lastDetectionMessage = "No active CLI/Web subscriptions detected. Connect below or switch to BYOK for Direct API Keys."
             }
         }
     }
@@ -1993,7 +1904,163 @@ public class SubscriptionAuthManager: ObservableObject {
         }
     }
     
+    // MARK: - Google Code Assist Official Browser OAuth PKCE Flow (Zero API Billing)
+    private var googleOAuthListener: NWListener?
+
+    public func startGoogleCodeAssistOAuthFlow(
+        onSuccess: @escaping (String, String) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        googleOAuthListener?.cancel()
+        googleOAuthListener = nil
+
+        var verifierBytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, verifierBytes.count, &verifierBytes)
+        let codeVerifier = Data(verifierBytes)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let challengeDigest = SHA256.hash(data: Data(codeVerifier.utf8))
+        let codeChallenge = Data(challengeDigest)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        do {
+            let params = NWParameters.tcp
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+            let listener = try NWListener(using: params)
+            self.googleOAuthListener = listener
+
+            // Single source of truth for the public Gemini CLI installed-app OAuth client (AIClient); no duplicate literals here.
+            let oauthClient = AIClient.oauthClientCredentials(for: .geminiCLI)
+            let clientId = oauthClient.clientId
+            let clientSecret = oauthClient.clientSecret
+            let stateToken = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+
+            listener.stateUpdateHandler = { [weak self] state in
+                if case .ready = state, let port = listener.port?.rawValue {
+                    let redirectURI = "http://127.0.0.1:\(port)/oauth2callback"
+                    var comps = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+                    comps.queryItems = [
+                        URLQueryItem(name: "client_id", value: clientId),
+                        URLQueryItem(name: "redirect_uri", value: redirectURI),
+                        URLQueryItem(name: "response_type", value: "code"),
+                        URLQueryItem(name: "scope", value: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid"),
+                        URLQueryItem(name: "access_type", value: "offline"),
+                        URLQueryItem(name: "prompt", value: "consent"),
+                        URLQueryItem(name: "code_challenge", value: codeChallenge),
+                        URLQueryItem(name: "code_challenge_method", value: "S256"),
+                        URLQueryItem(name: "state", value: stateToken)
+                    ]
+                    if let authURL = comps.url {
+                        DispatchQueue.main.async {
+                            NSWorkspace.shared.open(authURL)
+                        }
+                    }
+                } else if case .failed(let err) = state {
+                    self?.googleOAuthListener = nil
+                    DispatchQueue.main.async {
+                        onError("Could not start local OAuth callback listener: \(err.localizedDescription)")
+                    }
+                }
+            }
+
+            listener.newConnectionHandler = { [weak self] conn in
+                conn.start(queue: .global(qos: .userInitiated))
+                conn.receive(minimumIncompleteLength: 1, maximumLength: 16384) { data, _, _, _ in
+                    guard let data, let reqStr = String(data: data, encoding: .utf8),
+                          let firstLine = reqStr.components(separatedBy: "\r\n").first else {
+                        conn.cancel()
+                        return
+                    }
+                    let parts = firstLine.split(separator: " ")
+                    let path = parts.count > 1 ? String(parts[1]) : "/"
+                    guard path.hasPrefix("/oauth2callback"),
+                          let port = listener.port?.rawValue,
+                          let urlComps = URLComponents(string: "http://127.0.0.1:\(port)\(path)") else {
+                        conn.cancel()
+                        return
+                    }
+                    let items = urlComps.queryItems ?? []
+                    let code = items.first(where: { $0.name == "code" })?.value
+                    let returnedState = items.first(where: { $0.name == "state" })?.value
+                    let html = (code != nil && returnedState == stateToken)
+                        ? "<html><body style='font-family:-apple-system,sans-serif;text-align:center;padding:48px;background:#111;color:#eee;'><h2>✓ Google Gemini Connected to MicroCode</h2><p>You can close this browser tab and return to MicroCode.</p></body></html>"
+                        : "<html><body style='font-family:-apple-system,sans-serif;text-align:center;padding:48px;'><h2>Authorization Cancelled</h2></body></html>"
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
+                    conn.send(content: Data(resp.utf8), completion: .contentProcessed { _ in conn.cancel() })
+                    listener.cancel()
+                    self?.googleOAuthListener = nil
+
+                    guard let code, returnedState == stateToken else {
+                        DispatchQueue.main.async { onError("Google OAuth authorization was cancelled or state mismatched.") }
+                        return
+                    }
+
+                    let redirectURI = "http://127.0.0.1:\(port)/oauth2callback"
+                    Task {
+                        do {
+                            var tokenReq = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!, timeoutInterval: 15)
+                            tokenReq.httpMethod = "POST"
+                            tokenReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                            var bodyComps = URLComponents()
+                            bodyComps.queryItems = [
+                                URLQueryItem(name: "client_id", value: clientId),
+                                URLQueryItem(name: "client_secret", value: clientSecret),
+                                URLQueryItem(name: "code", value: code),
+                                URLQueryItem(name: "code_verifier", value: codeVerifier),
+                                URLQueryItem(name: "grant_type", value: "authorization_code"),
+                                URLQueryItem(name: "redirect_uri", value: redirectURI)
+                            ]
+                            tokenReq.httpBody = bodyComps.percentEncodedQuery?.data(using: .utf8)
+                            let (tData, tResp) = try await URLSession.shared.data(for: tokenReq)
+                            guard let tHttp = tResp as? HTTPURLResponse, tHttp.statusCode == 200,
+                                  let tJson = try? JSONSerialization.jsonObject(with: tData) as? [String: Any],
+                                  let refreshToken = tJson["refresh_token"] as? String, !refreshToken.isEmpty else {
+                                let raw = String(data: tData, encoding: .utf8) ?? ""
+                                DispatchQueue.main.async { onError("Google OAuth token exchange failed: \(raw.prefix(180))") }
+                                return
+                            }
+                            let accessToken = (tJson["access_token"] as? String) ?? ""
+                            var email = "Google Gemini Subscriber"
+                            if !accessToken.isEmpty, let infoURL = URL(string: "https://www.googleapis.com/oauth2/v2/userinfo") {
+                                var uReq = URLRequest(url: infoURL, timeoutInterval: 8)
+                                uReq.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+                                if let (uData, uResp) = try? await URLSession.shared.data(for: uReq),
+                                   (uResp as? HTTPURLResponse)?.statusCode == 200,
+                                   let uJson = try? JSONSerialization.jsonObject(with: uData) as? [String: Any],
+                                   let fetchedMail = uJson["email"] as? String, !fetchedMail.isEmpty {
+                                    email = "\(fetchedMail) (Gemini Code Assist)"
+                                }
+                            }
+                            let formattedToken = "codeassist_oauth:gcli:\(refreshToken)"
+                            let finalEmail = email
+                            await MainActor.run {
+                                onSuccess(formattedToken, finalEmail)
+                            }
+                        } catch {
+                            await MainActor.run { onError(error.localizedDescription) }
+                        }
+                    }
+                }
+            }
+
+            listener.start(queue: .global(qos: .userInitiated))
+        } catch {
+            onError(error.localizedDescription)
+        }
+    }
+
     private func loadSavedAccounts() {
+        let legacyByokMirrorSources: Set<String> = [
+            "Direct / Env",
+            "Anthropic Direct",
+            "Google AI",
+            "Z.AI International"
+        ]
         var validAccounts: [SubscriptionProviderType: SubscriptionAccount] = [:]
         var validPools: [SubscriptionProviderType: [SubscriptionAccount]] = [:]
         if let poolData = UserDefaults.standard.data(forKey: accountPoolsDefaultsKey),
@@ -2001,9 +2068,16 @@ public class SubscriptionAuthManager: ObservableObject {
             for (prov, list) in decodedPools {
                 var hydratedList: [SubscriptionAccount] = []
                 for acc in list {
+                    if legacyByokMirrorSources.contains(acc.source) {
+                        deleteTokenFromKeychain(provider: "pool_\(prov.rawValue)_\(acc.id)")
+                        continue
+                    }
                     let tok = (loadTokenFromKeychain(provider: "pool_\(prov.rawValue)_\(acc.id)") ?? acc.sessionToken)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !Self.isCorruptedToken(tok), acc.isValid, !tok.isEmpty else { continue }
+                    if tok == "agy_cli_bridge:active" { continue }
+                    if prov == .deepseek && !tok.hasPrefix("sk-") { continue }
+                    if prov == .glm && tok.hasPrefix("eyJhbGci") { continue }
                     var updated = acc
                     updated.sessionToken = tok
                     hydratedList.append(updated)
@@ -2016,6 +2090,10 @@ public class SubscriptionAuthManager: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
            let decoded = try? JSONDecoder().decode([SubscriptionProviderType: SubscriptionAccount].self, from: data) {
             for (prov, acc) in decoded {
+                if legacyByokMirrorSources.contains(acc.source) {
+                    deleteTokenFromKeychain(provider: prov.rawValue)
+                    continue
+                }
                 var loadedToken = acc.sessionToken
                 if let keychainToken = loadTokenFromKeychain(provider: prov.rawValue) {
                     loadedToken = keychainToken
@@ -2023,17 +2101,13 @@ public class SubscriptionAuthManager: ObservableObject {
                     guard saveTokenToKeychain(provider: prov.rawValue, token: loadedToken) else { continue }
                 }
                 let tok = loadedToken.trimmingCharacters(in: .whitespacesAndNewlines)
-                if Self.isCorruptedToken(tok) {
+                if Self.isCorruptedToken(tok) || tok == "agy_cli_bridge:active" || (prov == .deepseek && !tok.hasPrefix("sk-")) || (prov == .glm && tok.hasPrefix("eyJhbGci")) {
                     deleteTokenFromKeychain(provider: prov.rawValue)
                     continue
                 }
-                if tok.hasPrefix("sk-ant-api") {
-                    UserDefaults.standard.set(tok, forKey: "anthropic_api_key")
-                } else if tok.hasPrefix("AIzaSy") {
-                    UserDefaults.standard.set(tok, forKey: "gemini_api_key")
-                } else if [.openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon, .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia, .deepseek, .glm].contains(prov) {
-                    UserDefaults.standard.set(tok, forKey: "\(prov.aiProviderID)_api_key")
-                }
+                // STRICT SUBSCRIPTION ISOLATION:
+                // Never mirror Subscription tokens into BYOK UserDefaults (`*_api_key`),
+                // and never hydrate BYOK keys into Subscription pools.
                 if acc.isValid && !tok.isEmpty {
                     var updatedAcc = acc
                     updatedAcc.sessionToken = tok
@@ -2048,62 +2122,10 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
 
-        // Synchronously hydrate API-key-backed subscription providers from existing BYOK UserDefaults or Env
-        // so BYOK and Web Subscription modes are immediately consistent at launch with zero network latency.
-        let instantSyncProviders: [(SubscriptionProviderType, [String], String)] = [
-            (.tokenme, ["TOKENME_API_KEY", "TOKEN_ME_API_KEY"], "TokenMe (9ARM)"),
-            (.typhoon, ["TYPHOON_API_KEY", "OPENTYPHOON_API_KEY"], "SCB 10X Typhoon"),
-            (.deepseek, ["DEEPSEEK_API_KEY"], "DeepSeek API"),
-            (.glm, ["GLM_API_KEY", "ZHIPU_API_KEY"], "Z.AI GLM Coding Plan"),
-            (.openrouter, ["OPENROUTER_API_KEY"], "OpenRouter Web"),
-            (.groq, ["GROQ_API_KEY"], "GroqCloud Developer"),
-            (.mistral, ["MISTRAL_API_KEY", "CODESTRAL_API_KEY"], "Mistral Pro"),
-            (.kimi, ["MOONSHOT_API_KEY", "KIMI_API_KEY"], "Moonshot Kimi Web"),
-            (.perplexity, ["PERPLEXITY_API_KEY", "PPLX_API_KEY"], "Perplexity Pro"),
-            (.perch, ["PERCH_API_KEY", "PERCHAI_API_KEY"], "Perch AI Pro"),
-            (.qwen, ["DASHSCOPE_API_KEY", "QWEN_API_KEY"], "Alibaba Qwen"),
-            (.grok, ["XAI_API_KEY", "GROK_API_KEY"], "xAI SuperGrok"),
-            (.cerebras, ["CEREBRAS_API_KEY"], "Cerebras Cloud Free"),
-            (.together, ["TOGETHER_API_KEY"], "Together AI Cloud"),
-            (.fireworks, ["FIREWORKS_API_KEY"], "Fireworks AI"),
-            (.minimax, ["MINIMAX_API_KEY"], "MiniMax Coding Plan"),
-            (.nvidia, ["NVIDIA_API_KEY", "NGC_API_KEY"], "NVIDIA NIM Developer")
-        ]
-        var hydratedAny = false
-        for (subProv, envVars, label) in instantSyncProviders where validAccounts[subProv] == nil {
-            var candidate = UserDefaults.standard.string(forKey: "\(subProv.aiProviderID)_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if candidate.isEmpty {
-                for env in envVars {
-                    if let val = ProcessInfo.processInfo.environment[env]?.trimmingCharacters(in: .whitespacesAndNewlines), !val.isEmpty {
-                        candidate = val
-                        break
-                    }
-                }
-            }
-            if !candidate.isEmpty && !Self.isCorruptedToken(candidate) {
-                if saveTokenToKeychain(provider: subProv.rawValue, token: candidate) {
-                    let acc = SubscriptionAccount(
-                        provider: subProv,
-                        emailOrUser: label,
-                        sessionToken: candidate,
-                        isValid: true,
-                        source: "Direct / Env",
-                        lastVerified: Date()
-                    )
-                    validAccounts[subProv] = acc
-                    _ = saveTokenToKeychain(provider: "pool_\(subProv.rawValue)_\(acc.id)", token: candidate)
-                    validPools[subProv] = [acc]
-                    hydratedAny = true
-                }
-            }
-        }
-
-        if !validAccounts.isEmpty || !validPools.isEmpty || hydratedAny {
-            self.accounts = validAccounts
-            poolLock.lock()
-            self.accountPools = validPools
-            poolLock.unlock()
-            persistAccounts()
-        }
+        self.accounts = validAccounts
+        poolLock.lock()
+        self.accountPools = validPools
+        poolLock.unlock()
+        persistAccounts()
     }
 }

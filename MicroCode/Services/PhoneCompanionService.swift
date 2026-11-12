@@ -22,6 +22,7 @@ import Security
 
 enum PhoneConnectionMode: String, CaseIterable, Identifiable {
     case lan = "lan"
+    case tailscale = "tailscale"
     case online = "online"
     
     var id: String { rawValue }
@@ -29,6 +30,7 @@ enum PhoneConnectionMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .lan: return "Same Wi-Fi / LAN"
+        case .tailscale: return "Tailscale / VPN"
         case .online: return "Cellular / Online"
         }
     }
@@ -36,13 +38,15 @@ enum PhoneConnectionMode: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .lan: return "Instant (<2ms) • Same Wi-Fi or Personal Hotspot"
-        case .online: return "4G / 5G / Any Network • Zero-Setup HTTPS Tunnel"
+        case .tailscale: return "Permanent URL • Private WireGuard Mesh"
+        case .online: return "4G / 5G / Any Network • HTTPS Tunnel"
         }
     }
     
     var icon: String {
         switch self {
         case .lan: return "wifi"
+        case .tailscale: return "network.badge.shield.half.filled"
         case .online: return "globe"
         }
     }
@@ -82,12 +86,18 @@ final class PhoneCompanionService: ObservableObject {
             UserDefaults.standard.set(isEnabled, forKey: "microcode.phoneCompanion.enabled")
             if isEnabled {
                 startServerIfNeeded()
+                ensureBackgroundMonitorRunning()
                 if connectionMode == .online {
                     startOnlineTunnel()
+                } else if connectionMode == .tailscale {
+                    refreshTailscaleStatus()
                 }
             } else {
                 stopOnlineTunnel()
                 stopServer()
+                backgroundMonitorTimer?.invalidate()
+                backgroundMonitorTimer = nil
+                isHoldingSleepAssertion = MobileSleepGuard.shared.update(shouldHold: false)
             }
         }
     }
@@ -101,6 +111,8 @@ final class PhoneCompanionService: ObservableObject {
                 } else {
                     startOnlineTunnel()
                 }
+            } else if connectionMode == .tailscale && isEnabled {
+                refreshTailscaleStatus()
             }
             regenerateQRCode()
         }
@@ -113,11 +125,36 @@ final class PhoneCompanionService: ObservableObject {
     @Published private(set) var bonjourHostname: String = ""
     @Published private(set) var pairingToken: String = ""
     @Published private(set) var oneTimePairingCode: String = ""
+    @Published private(set) var sixDigitPairingPIN: String = ""
     @Published var requireMacApprovalForNewDevices: Bool = true {
         didSet {
             UserDefaults.standard.set(requireMacApprovalForNewDevices, forKey: Self.requireApprovalDefaultsKey)
         }
     }
+    @Published var preventMacSleepWhileActive: Bool = true {
+        didSet {
+            UserDefaults.standard.set(preventMacSleepWhileActive, forKey: "microcode.phoneCompanion.preventSleep")
+            syncSleepAssertionAndPushEvents()
+        }
+    }
+    @Published var isHoldingSleepAssertion: Bool = false
+    @Published var tailscaleInfo: TailscaleNodeInfo = TailscaleNodeInfo()
+    @Published var cloudflareNamedTunnelToken: String = "" {
+        didSet {
+            UserDefaults.standard.set(cloudflareNamedTunnelToken, forKey: "microcode.phoneCompanion.cfNamedToken")
+        }
+    }
+    @Published var cloudflareNamedPublicHostname: String = "" {
+        didSet {
+            UserDefaults.standard.set(cloudflareNamedPublicHostname, forKey: "microcode.phoneCompanion.cfNamedHost")
+        }
+    }
+    @Published var pushSettings: MobilePushSettings = MobilePushSettings.load() {
+        didSet {
+            pushSettings.save()
+        }
+    }
+    @Published var lastPushStatusMessage: String = ""
     @Published private(set) var tunnelState: OnlineTunnelState = .stopped {
         didSet {
             regenerateQRCode()
@@ -130,6 +167,10 @@ final class PhoneCompanionService: ObservableObject {
             regenerateQRCode()
         }
     }
+
+    var pendingApprovalCount: Int {
+        connectedDevices.filter { $0.approvalState == .pending }.count
+    }
     
     /// Weak reference to AppState for reading active provider/model/workspace
     weak var appState: AppState?
@@ -139,8 +180,9 @@ final class PhoneCompanionService: ObservableObject {
     private let networkQueue = DispatchQueue(label: "com.dotmini.microcode.phone-companion", qos: .userInitiated)
     private var tunnelProcess: Process?
     private var networkRefreshTimer: Timer?
+    private var backgroundMonitorTimer: Timer?
     private var lastGeneratedQRURL: String = ""
-    private var cachedStateFingerprint: String = ""
+    var cachedStateFingerprint: String = ""
     private var cachedStateData: Data = Data("{}".utf8)
     private struct ThoughtParseKey: Equatable {
         let byteCount: Int
@@ -148,14 +190,17 @@ final class PhoneCompanionService: ObservableObject {
     }
     /// Per-message memo of `extractThoughtsAndCleanContent` (see `buildCompanionStateJSON`).
     private var thoughtParseCache: [String: (key: ThoughtParseKey, value: (clean: String, thought: String, isStreamingThought: Bool))] = [:]
-    private var sseConnections: [UUID: NWConnection] = [:]
+    var sseConnections: [UUID: NWConnection] = [:]
     private var sseBroadcastTimer: Timer?
     private var lastBroadcastFingerprint: String = ""
     private var sseTickCounter: Int = 0
+    var wasAgentLoadingLastTick: Bool = false
+    var lastPushedEventKey: String = ""
+    var pinFailedAttempts: [String: (count: Int, lastAttempt: Date)] = [:]
     private var workspaceLanguageCache: [String: (primary: String, label: String, langs: [String])] = [:]
     private var approvedDeviceIDs: Set<String> = []
     private var promptedPendingDeviceIDs: Set<String> = []
-    private lazy var cachedMacName: String = {
+    lazy var cachedMacName: String = {
         let raw = ProcessInfo.processInfo.hostName
             .replacingOccurrences(of: ".local", with: "")
             .replacingOccurrences(of: "-", with: " ")
@@ -170,13 +215,38 @@ final class PhoneCompanionService: ObservableObject {
         self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.phoneCompanion.enabled") as? Bool) ?? true
         // Default to zero-overhead LAN mode on cold launch; public online tunnels (cloudflared)
         // are started strictly on-demand when the user selects Worldwide/Online mode in Settings.
-        self.connectionMode = .lan
+        let savedMode = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.mode") ?? "lan"
+        self.connectionMode = (savedMode == "tailscale") ? .tailscale : .lan
         self.requireMacApprovalForNewDevices = (UserDefaults.standard.object(forKey: Self.requireApprovalDefaultsKey) as? Bool) ?? true
+        self.preventMacSleepWhileActive = (UserDefaults.standard.object(forKey: "microcode.phoneCompanion.preventSleep") as? Bool) ?? true
+        self.cloudflareNamedTunnelToken = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.cfNamedToken") ?? ""
+        self.cloudflareNamedPublicHostname = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.cfNamedHost") ?? ""
         if let savedApproved = UserDefaults.standard.stringArray(forKey: Self.approvedDevicesDefaultsKey) {
             self.approvedDeviceIDs = Set(savedApproved)
         }
         self.pairingToken = Self.loadOrCreatePairingToken()
         self.oneTimePairingCode = Self.generateSecureToken()
+        self.sixDigitPairingPIN = Self.generateRandomSixDigitPIN()
+    }
+
+    func regenerateSixDigitPIN() {
+        sixDigitPairingPIN = Self.generateRandomSixDigitPIN()
+    }
+
+    nonisolated private static func generateRandomSixDigitPIN() -> String {
+        var val: UInt32 = 0
+        _ = SecRandomCopyBytes(kSecRandomDefault, MemoryLayout<UInt32>.size, &val)
+        let num = Int(val % 900_000) + 100_000
+        return String(num)
+    }
+
+    func ensureBackgroundMonitorRunning() {
+        guard backgroundMonitorTimer == nil else { return }
+        backgroundMonitorTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.syncSleepAssertionAndPushEvents()
+            }
+        }
     }
 
     // MARK: - Pairing token storage (Keychain when signed with Team ID; 0600 file fallback for ad-hoc dev builds)
@@ -320,6 +390,11 @@ final class PhoneCompanionService: ObservableObject {
     var lanPairingURL: String {
         "http://\(activeLANHost):\(listeningPort)/?pair=\(oneTimePairingCode)"
     }
+
+    var tailscalePairingURL: String? {
+        guard tailscaleInfo.isAvailable, !tailscaleInfo.bestHost.isEmpty else { return nil }
+        return "http://\(tailscaleInfo.bestHost):\(listeningPort)/?pair=\(oneTimePairingCode)"
+    }
     
     var onlinePairingURL: String? {
         if case .connected(let base, _) = tunnelState {
@@ -333,6 +408,8 @@ final class PhoneCompanionService: ObservableObject {
         switch connectionMode {
         case .lan:
             return lanPairingURL
+        case .tailscale:
+            return tailscalePairingURL ?? lanPairingURL
         case .online:
             return onlinePairingURL ?? lanPairingURL
         }
@@ -342,6 +419,7 @@ final class PhoneCompanionService: ObservableObject {
         let newToken = Self.generateSecureToken()
         pairingToken = newToken
         oneTimePairingCode = Self.generateSecureToken()
+        sixDigitPairingPIN = Self.generateRandomSixDigitPIN()
         Self.persistPairingToken(newToken)
         connectedDevices.removeAll()
         approvedDeviceIDs.removeAll()
@@ -499,12 +577,14 @@ final class PhoneCompanionService: ObservableObject {
         if changed {
             regenerateQRCode()
         }
+        refreshTailscaleStatus()
     }
     
     // MARK: - Embedded HTTP Companion Server (NWListener)
     
     func startServerIfNeeded() {
         guard isEnabled else { return }
+        ensureBackgroundMonitorRunning()
         guard !isServerRunning && listener == nil else { return }
         refreshNetworkAddresses()
         startServer(onPort: 8470)
@@ -605,7 +685,7 @@ final class PhoneCompanionService: ObservableObject {
     
     func startOnlineTunnel() {
         stopOnlineTunnel()
-        tunnelState = .starting("Initializing zero-setup HTTPS tunnel…")
+        tunnelState = .starting("Initializing HTTPS tunnel…")
         
         let port = Int(listeningPort)
         
@@ -618,10 +698,69 @@ final class PhoneCompanionService: ObservableObject {
         ]
         
         if let cfBin = cloudflaredCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            launchCloudflaredQuickTunnel(binaryPath: cfBin, port: port)
+            let namedToken = cloudflareNamedTunnelToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let namedHost = cloudflareNamedPublicHostname.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !namedToken.isEmpty && !namedHost.isEmpty {
+                launchCloudflaredNamedTunnel(binaryPath: cfBin, token: namedToken, publicHost: namedHost, fallbackPort: port)
+            } else {
+                launchCloudflaredQuickTunnel(binaryPath: cfBin, port: port)
+            }
         } else {
             // Fallback to macOS built-in /usr/bin/ssh with localhost.run (100% zero install)
             launchSSHReverseTunnel(port: port)
+        }
+    }
+
+    private func launchCloudflaredNamedTunnel(binaryPath: String, token: String, publicHost: String, fallbackPort: Int) {
+        tunnelState = .starting("Starting Permanent Cloudflare Named Tunnel (\(publicHost))…")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: binaryPath)
+        proc.arguments = ["tunnel", "--no-autoupdate", "run", "--token", token]
+
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
+            if line.contains("Registered tunnel connection") || line.contains("Connection ") {
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    if case .connected = self.tunnelState { return }
+                    self.tunnelState = .connected(url: "https://\(publicHost)", provider: "Cloudflare Named Tunnel")
+                }
+            }
+        }
+
+        proc.terminationHandler = { [weak self] _ in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            Task { @MainActor [weak self] in
+                guard let self = self, self.tunnelProcess === proc else { return }
+                if case .starting = self.tunnelState {
+                    self.launchCloudflaredQuickTunnel(binaryPath: binaryPath, port: fallbackPort)
+                } else if self.connectionMode == .online {
+                    self.tunnelState = .stopped
+                }
+            }
+        }
+
+        do {
+            try proc.run()
+            self.tunnelProcess = proc
+            // Optimistic activation after 3.2s if cloudflared stays running quietly
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 3_200_000_000)
+                guard let self = self, self.tunnelProcess === proc, proc.isRunning else { return }
+                if case .starting = self.tunnelState {
+                    self.tunnelState = .connected(url: "https://\(publicHost)", provider: "Cloudflare Named Tunnel")
+                }
+            }
+        } catch {
+            launchCloudflaredQuickTunnel(binaryPath: binaryPath, port: fallbackPort)
         }
     }
     
@@ -809,7 +948,7 @@ final class PhoneCompanionService: ObservableObject {
                 }
             }
             
-            if isComplete || error != nil || buffer.count > 1_048_576 {
+            if isComplete || error != nil || buffer.count > 26_214_400 {
                 connection.cancel()
                 return
             }
@@ -894,15 +1033,51 @@ final class PhoneCompanionService: ObservableObject {
         // SECURITY: only the Mac itself is trusted without the pairing token/code. Every other peer, including devices on the same
         // Wi-Fi / office LAN, must present either the one-time QR pairing code (`?pair=`) or the `mc_token` session token.
         let isLocalMac = !isForwardedTunnel && (remoteIP == "127.0.0.1" || remoteIP == "::1")
+
+        // 6-Digit Pairing PIN verification endpoint (rate-limited per IP, rotates PIN on success)
+        if method == "POST" && path == "/api/pair/verify-pin" {
+            let json = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
+            let suppliedPIN = (json["pin"] as? String) ?? ""
+            let result = verifySixDigitPINAttempt(suppliedPIN: suppliedPIN, remoteIP: remoteIP, headers: headers)
+            if result.ok {
+                let viaHTTPS = (headers["x-forwarded-proto"]?.lowercased() == "https")
+                let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Strict; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
+                let body = (try? JSONSerialization.data(withJSONObject: ["ok": true, "token": pairingToken])) ?? Data("{\"ok\":true}".utf8)
+                return makeHTTPResponse(status: "200 OK", contentType: "application/json; charset=utf-8", extraHeaders: extraHeaders, body: body)
+            } else {
+                return makeJSONResponse(["ok": false, "error": result.error ?? "Invalid PIN"], status: "401 Unauthorized")
+            }
+        }
+
         guard matchedOneTimePair || matchedSessionToken || isLocalMac else {
             let unauthorizedHTML = """
-            <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-            <title>MicroCode Companion — Scan QR Code</title>
-            <style>body{background:#0d0f14;color:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;height:90vh;margin:0;padding:24px;text-align:center}
-            .card{max-width:360px;background:#161922;border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:28px}
-            h2{margin:0 0 10px;font-size:18px}p{color:#9ca3af;font-size:14px;line-height:1.5}</style></head>
-            <body><div class="card"><h2>🔒 Session Token Expired or Missing</h2>
-            <p>Please open <b>MicroCode → Settings → Connect with Phone</b> on your Mac and scan the fresh one-time QR Code.</p></div></body></html>
+            <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+            <title>MicroCode Companion — Pair Device</title>
+            <style>body{background:#0d0f14;color:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;min-height:92vh;margin:0;padding:24px;text-align:center}
+            .card{width:100%;max-width:360px;background:#161922;border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:26px}
+            h2{margin:0 0 8px;font-size:18px}p{color:#9ca3af;font-size:13.5px;line-height:1.5;margin:0 0 16px}
+            input{width:100%;box-sizing:border-box;background:#0d0f14;color:#fff;border:1px solid rgba(255,255,255,0.18);border-radius:10px;padding:12px;font-size:22px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0.28em;text-align:center;outline:none;margin-bottom:10px}
+            button{width:100%;background:#f3f4f6;color:#0d0f14;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:600;cursor:pointer}
+            #err{color:#f87171;font-size:12.5px;margin-top:10px;min-height:18px}</style></head>
+            <body><div class="card"><h2>🔒 Pair MicroCode Mobile</h2>
+            <p>Scan the QR code in <b>MicroCode → Phone</b> on your Mac, or enter the <b>6-Digit Pairing PIN</b> displayed below the QR code:</p>
+            <input id="pinBox" type="tel" inputmode="numeric" maxlength="7" placeholder="000 000" autocomplete="one-time-code">
+            <button onclick="unlockPIN()">Unlock with PIN</button>
+            <div id="err"></div></div>
+            <script>
+            async function unlockPIN(){
+              const pin=document.getElementById('pinBox').value.replace(/\\D/g,'');
+              const err=document.getElementById('err');
+              if(pin.length!==6){err.textContent='Enter the 6-digit PIN shown on your Mac.';return;}
+              err.textContent='Verifying…';
+              try{
+                const r=await fetch('/api/pair/verify-pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})});
+                const j=await r.json();
+                if(j&&j.ok){window.location.href='/';}else{err.textContent=(j&&j.error)||'Incorrect PIN.';}
+              }catch(e){err.textContent='Network error.';}
+            }
+            document.getElementById('pinBox').addEventListener('keydown',e=>{if(e.key==='Enter')unlockPIN();});
+            </script></body></html>
             """
             return makeHTTPResponse(status: "401 Unauthorized", contentType: "text/html; charset=utf-8", body: Data(unauthorizedHTML.utf8))
         }
@@ -924,10 +1099,11 @@ final class PhoneCompanionService: ObservableObject {
             return nil
         }
 
-        // State-changing requests must carry the token in the custom `X-Companion-Token` header. Browsers cannot attach a custom
-        // header cross-site without a CORS preflight, which this server never approves, so a malicious page cannot forge them.
+        // State-changing `/api/*` requests must carry the token in the custom `X-Companion-Token` header.
+        // Reverse-proxied dev servers under `/preview/*` are already authenticated by `matchedSessionToken || isLocalMac`.
         let postCustomToken = headers["x-companion-token"] ?? ""
-        if method == "POST", !(Self.constantTimeEquals(postCustomToken, pairingToken) || Self.constantTimeEquals(postCustomToken, LocalLLMGatewayService.shared.apiToken)) {
+        if method == "POST" && !path.hasPrefix("/preview/"),
+           !(Self.constantTimeEquals(postCustomToken, pairingToken) || Self.constantTimeEquals(postCustomToken, LocalLLMGatewayService.shared.apiToken)) {
             return makeJSONResponse(["ok": false, "error": "Missing X-Companion-Token header"], status: "403 Forbidden")
         }
 
@@ -963,6 +1139,7 @@ final class PhoneCompanionService: ObservableObject {
         return await handleAuthenticatedRoute(
             method: method,
             path: path,
+            rawTarget: rawTarget,
             queryItems: queryItems,
             headers: headers,
             bodyData: bodyData,
@@ -976,6 +1153,7 @@ final class PhoneCompanionService: ObservableObject {
     func handleAuthenticatedRoute(
         method: String,
         path: String,
+        rawTarget: String? = nil,
         queryItems: [URLQueryItem],
         headers: [String: String],
         bodyData: Data,
@@ -984,6 +1162,16 @@ final class PhoneCompanionService: ObservableObject {
         cookieName: String = "mc_token",
         localLLMGatewayInfo: (nodeName: String, apiToken: String)? = nil
     ) async -> Data? {
+        // Reverse-proxy authenticated local dev servers (/preview/<port>/*) over LAN, Tailscale, or 4G/5G Tunnel
+        if path.hasPrefix("/preview/") {
+            return await handlePreviewReverseProxy(
+                method: method,
+                rawTarget: rawTarget ?? path,
+                headers: headers,
+                bodyData: bodyData
+            )
+        }
+
         // Route endpoints
         switch (method, path) {
         case ("GET", "/"):
@@ -1003,6 +1191,20 @@ final class PhoneCompanionService: ObservableObject {
             let sameSite = (cookieName == "mc_llm_token") ? "Lax" : "Strict"
             let extraHeaders = ["Set-Cookie": "\(cookieName)=\(sessionToken); Path=/; SameSite=\(sameSite); HttpOnly" + (viaHTTPS ? "; Secure" : "")]
             return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", extraHeaders: extraHeaders, body: Data(html.utf8))
+
+        case ("GET", "/manifest.json"):
+            return makeHTTPResponse(status: "200 OK", contentType: "application/manifest+json; charset=utf-8", body: buildPWAManifestJSON())
+
+        case ("GET", "/sw.js"):
+            return makeHTTPResponse(status: "200 OK", contentType: "application/javascript; charset=utf-8", body: buildPWAServiceWorkerJS())
+
+        case ("GET", "/apple-touch-icon.png"):
+            return makeHTTPResponse(
+                status: "200 OK",
+                contentType: "image/png",
+                extraHeaders: ["Cache-Control": "public, max-age=3600"],
+                body: buildTouchIconPNGData()
+            )
             
         case ("GET", "/api/state"):
             let statePayload = buildCompanionStateJSON()
@@ -1036,15 +1238,66 @@ final class PhoneCompanionService: ObservableObject {
             return makeHTTPResponse(status: "404 Not Found", contentType: "text/plain", body: Data())
             
         case ("POST", "/api/send"):
-            if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
-               let prompt = (json["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !prompt.isEmpty {
-                let enqueueOnly = (json["enqueue"] as? Bool) ?? false
-                dispatchRemotePrompt(prompt, enqueueOnly: enqueueOnly)
-                broadcastSSEStateNow()
-                return makeJSONResponse(["ok": true])
+            if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                let rawPrompt = (json["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let rawAtts = (json["attachments"] as? [[String: Any]]) ?? []
+                let builtAtts = buildMobileAttachments(from: rawAtts)
+                if !rawPrompt.isEmpty || !builtAtts.isEmpty {
+                    let effectivePrompt = rawPrompt.isEmpty ? "Analyze the attached file(s)." : rawPrompt
+                    let enqueueOnly = (json["enqueue"] as? Bool) ?? false
+                    dispatchRemotePrompt(effectivePrompt, enqueueOnly: enqueueOnly, attachments: builtAtts)
+                    broadcastSSEStateNow()
+                    return makeJSONResponse(["ok": true, "attached": builtAtts.count])
+                }
             }
-            return makeJSONResponse(["ok": false, "error": "Empty prompt"], status: "400 Bad Request")
+            return makeJSONResponse(["ok": false, "error": "Empty prompt and no attachments"], status: "400 Bad Request")
+
+        case ("GET", "/api/preview/ports"):
+            return makeJSONResponse(buildPreviewPortsPayload())
+
+        case ("POST", "/api/preview/tunnel"):
+            let json = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
+            let port = (json["port"] as? Int) ?? Int((json["port"] as? String) ?? "") ?? 0
+            let action = (json["action"] as? String) ?? "start"
+            guard (1...65535).contains(port) else {
+                return makeJSONResponse(["ok": false, "error": "Invalid port"], status: "400 Bad Request")
+            }
+            if action == "stop" {
+                DevPortTunnelService.shared.stopTunnel(for: port)
+            } else {
+                DevPortTunnelService.shared.startTunnel(for: port)
+                try? await Task.sleep(nanoseconds: 450_000_000)
+            }
+            return makeJSONResponse(buildPreviewPortsPayload())
+
+        case ("GET", "/api/files/search"):
+            let q = queryItems.first(where: { $0.name == "q" })?.value ?? ""
+            return makeJSONResponse(["ok": true, "files": searchWorkspaceFiles(query: q)])
+
+        case ("GET", "/api/files/read"):
+            let p = queryItems.first(where: { $0.name == "path" })?.value ?? ""
+            return makeJSONResponse(readWorkspaceFileSafe(relativePath: p))
+
+        case ("GET", "/api/git/status"):
+            return makeJSONResponse(await handleGitStatus())
+
+        case ("GET", "/api/git/diff"):
+            let p = queryItems.first(where: { $0.name == "path" })?.value ?? ""
+            let staged = (queryItems.first(where: { $0.name == "staged" })?.value == "1")
+            return makeJSONResponse(await handleGitDiff(filePath: p, staged: staged))
+
+        case ("POST", "/api/git/action"):
+            let json = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
+            let action = (json["action"] as? String) ?? ""
+            return makeJSONResponse(await handleGitAction(action: action, body: json))
+
+        case ("GET", "/api/terminal/scripts"):
+            return makeJSONResponse(["ok": true, "scripts": discoverWorkspaceQuickScripts()])
+
+        case ("POST", "/api/terminal/exec"):
+            let json = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
+            let command = (json["command"] as? String) ?? ""
+            return makeJSONResponse(await executeMobileTerminalCommand(command))
             
         case ("POST", "/api/model/select"):
             if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
@@ -1201,6 +1454,9 @@ final class PhoneCompanionService: ObservableObject {
             return
         }
         sseTickCounter &+= 1
+        if sseTickCounter % 8 == 0 {
+            syncSleepAssertionAndPushEvents()
+        }
         let payload = buildCompanionStateJSON()
         if force || cachedStateFingerprint != lastBroadcastFingerprint {
             lastBroadcastFingerprint = cachedStateFingerprint
@@ -1233,11 +1489,18 @@ final class PhoneCompanionService: ObservableObject {
     }
 
     @discardableResult
-    private func recordConnectedDevice(headers: [String: String], remoteIP: String, isLocalMac: Bool = false) -> ConnectedPhoneDevice {
+    func recordConnectedDevice(headers: [String: String], remoteIP: String, isLocalMac: Bool = false) -> ConnectedPhoneDevice {
         let ua = headers["user-agent"] ?? ""
         let forwardedFor = headers["cf-connecting-ip"] ?? headers["x-forwarded-for"]
         let effectiveIP = forwardedFor?.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? remoteIP
-        let via = (forwardedFor != nil || effectiveIP == "127.0.0.1") ? "Online Tunnel" : "Same Wi-Fi / LAN"
+        let via: String = {
+            if forwardedFor != nil || effectiveIP == "127.0.0.1" { return "Online Tunnel" }
+            let octets = effectiveIP.split(separator: ".").compactMap { Int($0) }
+            if octets.count == 4 && octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127 {
+                return "Tailscale VPN"
+            }
+            return "Same Wi-Fi / LAN"
+        }()
         
         let deviceName: String = {
             if ua.contains("iPhone") { return "iPhone (iOS)" }
@@ -1277,41 +1540,44 @@ final class PhoneCompanionService: ObservableObject {
     private func promptMacApprovalIfNeeded(for device: ConnectedPhoneDevice) {
         guard !promptedPendingDeviceIDs.contains(device.id) else { return }
         promptedPendingDeviceIDs.insert(device.id)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            NSApp.requestUserAttention(.informationalRequest)
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            alert.messageText = "Approve Mobile Companion Connection?"
-            alert.informativeText = "\(device.name) (\(device.ipAddress) via \(device.connectionVia)) scanned your one-time QR code and is requesting access to this MicroCode workspace."
-            alert.addButton(withTitle: "Approve Device")
-            alert.addButton(withTitle: "Deny")
-            let response = alert.runModal()
-            if response == .alertFirstButtonReturn {
-                self.approveDevice(id: device.id)
-            } else {
-                self.rejectDevice(id: device.id)
-            }
-        }
+        notifyMacNewPendingDeviceNonBlocking(device)
     }
 
     private func buildPendingApprovalHTML(device: ConnectedPhoneDevice, token: String) -> String {
         return """
-        <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>MicroCode Companion — Approve on Mac</title>
-        <style>body{background:#09090b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;height:90vh;margin:0;padding:24px;text-align:center}
-        .card{max-width:360px;background:#121215;border:1px solid rgba(255,255,255,0.1);border-radius:14px;padding:28px}
-        h2{margin:0 0 10px;font-size:17px;font-weight:600}p{color:#a1a1aa;font-size:13.5px;line-height:1.5;margin:0 0 12px}
-        .meta{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#d4d4d8;background:rgba(255,255,255,0.05);padding:8px 10px;border-radius:8px}</style></head>
-        <body><div class="card"><h2>Confirm Connection on Your Mac</h2>
-        <p>Click <b>Approve Device</b> on your Mac (or in <b>Settings → Connect with Phone</b>) to authorize this session.</p>
-        <div class="meta">\(device.name) · \(device.ipAddress)</div></div>
+        <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+        <title>MicroCode Companion — Approve Session</title>
+        <style>body{background:#09090b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;min-height:92vh;margin:0;padding:24px;text-align:center}
+        .card{width:100%;max-width:360px;background:#121215;border:1px solid rgba(255,255,255,0.1);border-radius:14px;padding:26px}
+        h2{margin:0 0 8px;font-size:17px;font-weight:600}p{color:#a1a1aa;font-size:13px;line-height:1.5;margin:0 0 12px}
+        .meta{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#d4d4d8;background:rgba(255,255,255,0.05);padding:8px 10px;border-radius:8px;margin-bottom:14px}
+        input{width:100%;box-sizing:border-box;background:#09090b;color:#fff;border:1px solid rgba(255,255,255,0.16);border-radius:9px;padding:10px;font-size:20px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0.26em;text-align:center;outline:none;margin-bottom:8px}
+        button{width:100%;background:#f4f4f5;color:#09090b;border:none;border-radius:9px;padding:10px;font-size:13.5px;font-weight:600;cursor:pointer}
+        #pinErr{color:#f87171;font-size:12px;margin-top:8px;min-height:16px}</style></head>
+        <body><div class="card"><h2>Confirm Connection</h2>
+        <p id="statusDesc">Click <b>Approve</b> in <b>MicroCode → Phone</b> on your Mac, or enter your <b>6-Digit Pairing PIN</b> below:</p>
+        <div class="meta">\(device.name) · \(device.ipAddress)</div>
+        <input id="pinBox" type="tel" inputmode="numeric" maxlength="7" placeholder="000 000" autocomplete="one-time-code">
+        <button onclick="unlockPIN()">Approve with PIN</button>
+        <div id="pinErr"></div></div>
         <script>
         if (window.location.search) { try { window.history.replaceState(null, "", window.location.pathname); } catch (_) {} }
+        async function unlockPIN() {
+          const pin = document.getElementById("pinBox").value.replace(/\\D/g, "");
+          const err = document.getElementById("pinErr");
+          if (pin.length !== 6) { err.textContent = "Enter the 6-digit PIN shown on your Mac."; return; }
+          err.textContent = "Verifying…";
+          try {
+            const r = await fetch("/api/pair/verify-pin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin }) });
+            const j = await r.json();
+            if (j && j.ok) { window.location.reload(); } else { err.textContent = (j && j.error) || "Incorrect PIN."; }
+          } catch (_) { err.textContent = "Network error."; }
+        }
+        document.getElementById("pinBox").addEventListener("keydown", e => { if (e.key === "Enter") unlockPIN(); });
         setInterval(async () => {
           try {
             const r = await fetch("/api/pair/status", { headers: { "X-Companion-Token": "\(token)" } });
-            if (r.status === 403) { document.querySelector("p").textContent = "Connection was denied on your Mac."; return; }
+            if (r.status === 403) { document.getElementById("statusDesc").textContent = "Connection was denied on your Mac."; return; }
             const j = await r.json();
             if (j && j.approved) { window.location.reload(); }
           } catch (_) {}
@@ -1323,7 +1589,19 @@ final class PhoneCompanionService: ObservableObject {
     private func selectRemoteModel(mode: String, provider: String, modelId: String) {
         guard let state = appState ?? AppState.shared else { return }
         switch mode {
+        case "enterprise":
+            EnterpriseAIAuthService.shared.activateEnterpriseSelection(profileId: provider, modelId: modelId)
+        case "acp":
+            let configs = ACPHostService.shared.registeredConfigs
+            if let cfg = configs.first(where: { $0.id.uuidString == provider || $0.type.engineId == provider }) {
+                AgentWorkspaceBarState.switchToACPConfig(cfg, appState: state)
+                if !modelId.isEmpty {
+                    state.aiModel = modelId
+                    state.saveSettings()
+                }
+            }
         case "subscription":
+            ACPHostService.shared.activeAgentId = nil
             if let subType = SubscriptionProviderType(rawValue: provider) {
                 SubscriptionAuthManager.shared.activeProvider = subType
                 UserDefaults.standard.set(subType.rawValue, forKey: "subscriptionActiveProvider")
@@ -1333,17 +1611,20 @@ final class PhoneCompanionService: ObservableObject {
                 state.saveSettings()
             }
         case "local":
+            ACPHostService.shared.activeAgentId = nil
             UserDefaults.standard.set("local", forKey: "aiKeyMode")
             state.aiProvider = "local"
             state.aiModel = modelId
             LocalLLMService.shared.selectModelAcrossServers(modelId: modelId)
             state.saveSettings()
         case "cloud":
+            ACPHostService.shared.activeAgentId = nil
             UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
             state.aiProvider = "omni"
             state.aiModel = modelId
             state.saveSettings()
         default:
+            ACPHostService.shared.activeAgentId = nil
             UserDefaults.standard.set("direct", forKey: "aiKeyMode")
             state.aiProvider = provider
             state.aiModel = modelId
@@ -1426,7 +1707,7 @@ final class PhoneCompanionService: ObservableObject {
         cachedStateFingerprint = ""
     }
     
-    private func dispatchRemotePrompt(_ prompt: String, enqueueOnly: Bool = false) {
+    private func dispatchRemotePrompt(_ prompt: String, enqueueOnly: Bool = false, attachments: [AIAttachment] = []) {
         let agent = AgentService.shared
         let state = appState ?? AppState.shared
         let provider = state?.aiProvider ?? UserDefaults.standard.string(forKey: "aiProvider") ?? "gemini"
@@ -1440,7 +1721,7 @@ final class PhoneCompanionService: ObservableObject {
         if enqueueOnly && agent.isLoading {
             agent.enqueueMessage(
                 prompt,
-                attachments: []
+                attachments: attachments
             )
         } else {
             agent.startOrEnqueueMessage(
@@ -1448,7 +1729,7 @@ final class PhoneCompanionService: ObservableObject {
                 provider: provider,
                 model: model,
                 apiKey: apiKey,
-                attachments: []
+                attachments: attachments
             )
         }
     }
@@ -1461,7 +1742,17 @@ final class PhoneCompanionService: ObservableObject {
         let activeModelId = state?.aiModel ?? ""
         let activeProvId = state?.aiProvider ?? "gemini"
         
-        if keyMode == "subscription" {
+        if keyMode == "enterprise" {
+            let pName = EnterpriseAIAuthService.shared.activeProfile?.name ?? "Enterprise"
+            let mName = activeModelId.isEmpty ? "Default" : AIModelCatalog.formatModelName(activeModelId)
+            return "Enterprise · \(pName) : \(mName)"
+        } else if keyMode == "acp" || ACPHostService.shared.activeAgentId != nil {
+            let acpHost = ACPHostService.shared
+            let cfg = acpHost.registeredConfigs.first(where: { $0.id == acpHost.activeAgentId })
+            let aName = cfg?.name ?? activeProvId.uppercased()
+            let mName = activeModelId.isEmpty ? "CLI" : AIModelCatalog.formatModelName(activeModelId)
+            return "ACP · \(aName) : \(mName)"
+        } else if keyMode == "subscription" {
             let activeSub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
             let provType = activeSub.flatMap { SubscriptionProviderType(rawValue: $0) }
             if let info = SubscriptionAuthManager.shared.findModel(id: activeModelId, provider: provType) ?? SubscriptionAuthManager.shared.findModel(id: activeModelId) {
@@ -1487,7 +1778,14 @@ final class PhoneCompanionService: ObservableObject {
     private func currentProviderBrandId() -> String {
         let state = appState ?? AppState.shared
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "subscription"
-        if keyMode == "subscription" {
+        if keyMode == "enterprise" {
+            return EnterpriseAIAuthService.shared.activeProfile?.dialect.brandIconKey ?? "microcode"
+        } else if keyMode == "acp" || ACPHostService.shared.activeAgentId != nil {
+            if let cfg = ACPHostService.shared.registeredConfigs.first(where: { $0.id == ACPHostService.shared.activeAgentId }) {
+                return cfg.type.engineId
+            }
+            return state?.aiProvider ?? "microcode"
+        } else if keyMode == "subscription" {
             if let sub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"), !sub.isEmpty {
                 return sub
             }
@@ -1510,8 +1808,28 @@ final class PhoneCompanionService: ObservableObject {
         let activeModelId = state?.aiModel ?? ""
         let activeProvId = state?.aiProvider ?? ""
         var list: [[String: Any]] = []
+
+        // 0A. Enterprise API Profiles (shown at top when Enterprise profiles exist)
+        let entService = EnterpriseAIAuthService.shared
+        for prof in entService.profiles {
+            let groupTitle = "Enterprise · \(prof.name)"
+            let models = prof.availableModels.prefix(25)
+            for mId in models {
+                let isCurrent = (keyMode == "enterprise" && entService.activeProfileID == prof.id && activeModelId == mId)
+                list.append([
+                    "group": groupTitle,
+                    "mode": "enterprise",
+                    "provider": prof.id,
+                    "iconId": prof.dialect.brandIconKey,
+                    "modelId": mId,
+                    "name": AIModelCatalog.formatModelName(mId),
+                    "badge": prof.dialect.shortTitle,
+                    "active": isCurrent
+                ])
+            }
+        }
         
-        // 0. Local LLM Servers (shown first when Local mode is active)
+        // 0B. Local LLM Servers (shown near top when Local mode is active)
         var localItems: [[String: Any]] = []
         for srv in LocalLLMService.shared.detectedServers where srv.isOnline {
             let groupTitle = "Local LLM · \(srv.displayName)"
@@ -1521,6 +1839,7 @@ final class PhoneCompanionService: ObservableObject {
                     "group": groupTitle,
                     "mode": "local",
                     "provider": "local",
+                    "iconId": "local",
                     "modelId": m.id,
                     "name": m.displayName,
                     "badge": m.size ?? "Local",
@@ -1530,6 +1849,41 @@ final class PhoneCompanionService: ObservableObject {
         }
         if keyMode == "local" || activeProvId == "local" {
             list.append(contentsOf: localItems)
+        }
+
+        // 0C. External ACP CLI Agents (Claude Code, Codex, AGY, Gemini CLI, Zed, etc.)
+        let acpHost = ACPHostService.shared
+        for cfg in acpHost.registeredConfigs {
+            let engId = cfg.type.engineId
+            let groupTitle = "ACP CLI Agent · \(cfg.name)"
+            let discovered = LocalEcosystemDiscovery.shared.models(for: engId)
+            if discovered.isEmpty {
+                let isCurrent = (acpHost.activeAgentId == cfg.id)
+                list.append([
+                    "group": groupTitle,
+                    "mode": "acp",
+                    "provider": cfg.id.uuidString,
+                    "iconId": engId,
+                    "modelId": "",
+                    "name": cfg.name,
+                    "badge": "ACP CLI",
+                    "active": isCurrent
+                ])
+            } else {
+                for m in discovered.prefix(15) {
+                    let isCurrent = (acpHost.activeAgentId == cfg.id && activeModelId == m.id)
+                    list.append([
+                        "group": groupTitle,
+                        "mode": "acp",
+                        "provider": cfg.id.uuidString,
+                        "iconId": engId,
+                        "modelId": m.id,
+                        "name": m.name,
+                        "badge": m.badge.isEmpty ? "ACP" : m.badge,
+                        "active": isCurrent
+                    ])
+                }
+            }
         }
 
         // 1. Subscription Providers
@@ -1543,6 +1897,7 @@ final class PhoneCompanionService: ObservableObject {
                     "group": groupTitle,
                     "mode": "subscription",
                     "provider": prov.rawValue,
+                    "iconId": prov.rawValue,
                     "modelId": m.modelID,
                     "name": m.name,
                     "badge": m.badge,
@@ -1561,6 +1916,7 @@ final class PhoneCompanionService: ObservableObject {
                     "group": groupTitle,
                     "mode": "direct",
                     "provider": prov.id,
+                    "iconId": prov.id,
                     "modelId": m.id,
                     "name": m.name,
                     "badge": m.badge,
@@ -1582,6 +1938,7 @@ final class PhoneCompanionService: ObservableObject {
                     "group": "Dotmini Sovereign AI",
                     "mode": "cloud",
                     "provider": "omni",
+                    "iconId": "omni",
                     "modelId": m.id,
                     "name": m.name,
                     "badge": m.badge,
@@ -2071,13 +2428,17 @@ final class PhoneCompanionService: ObservableObject {
                 parsed = Self.extractThoughtsAndCleanContent(msg.content)
                 thoughtParseCache[msg.id] = (parseKey, parsed)
             }
+            let attItems: [[String: String]] = msg.attachments.map {
+                ["name": $0.name, "badge": $0.badge]
+            }
             return [
                 "id": msg.id,
                 "role": msg.role.rawValue,
                 "content": parsed.clean,
                 "thought": String(parsed.thought.suffix(3000)),
                 "thoughtStreaming": parsed.isStreamingThought,
-                "tools": tools
+                "tools": tools,
+                "attachments": attItems
             ]
         }
         
@@ -2121,9 +2482,14 @@ final class PhoneCompanionService: ObservableObject {
         }
         
         var webPreviewLANURL: String? = nil
-        if let port = activePort, activeLANHost != "127.0.0.1" {
-            let path = DeviceRuntimeService.shared.targetWebURL?.path ?? "/"
-            webPreviewLANURL = "http://\(activeLANHost):\(port)\(path.isEmpty ? "/" : path)"
+        var webPreviewProxyURL: String? = nil
+        if let port = activePort {
+            let subPath = DeviceRuntimeService.shared.targetWebURL?.path ?? "/"
+            let normalizedSub = subPath.hasPrefix("/") ? subPath : "/\(subPath)"
+            webPreviewProxyURL = "/preview/\(port)\(normalizedSub)"
+            if activeLANHost != "127.0.0.1" {
+                webPreviewLANURL = "http://\(activeLANHost):\(port)\(normalizedSub)"
+            }
         }
         
         let latestStepCount = lastMsg?.toolResults.count ?? 0
@@ -2152,6 +2518,8 @@ final class PhoneCompanionService: ObservableObject {
         if let pendingPlanDict { payload["plan"] = pendingPlanDict }
         if let pendingToolDict { payload["pendingTool"] = pendingToolDict }
         if let webPreviewLANURL { payload["webPreviewLANURL"] = webPreviewLANURL }
+        if let webPreviewProxyURL { payload["webPreviewProxyURL"] = webPreviewProxyURL }
+        if let activePort { payload["activeDevPort"] = activePort }
         
         let serialized = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
         cachedStateFingerprint = fingerprint
@@ -2160,7 +2528,7 @@ final class PhoneCompanionService: ObservableObject {
     }
     
     /// Canonical path of the workspace the phone is currently looking at ("" when none), same rule as the state payload.
-    private func currentCompanionWorkspacePath() -> String {
+    func currentCompanionWorkspacePath() -> String {
         let agent = AgentService.shared
         if let activeId = agent.activeChatId,
            let activeChat = agent.chatSessions.first(where: { $0.id == activeId }),
@@ -2173,7 +2541,7 @@ final class PhoneCompanionService: ObservableObject {
         return ""
     }
 
-    nonisolated private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+    nonisolated static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
         let x = Array(a.utf8), y = Array(b.utf8)
         guard !y.isEmpty, x.count == y.count else { return false }
         var diff: UInt8 = 0
@@ -2181,12 +2549,12 @@ final class PhoneCompanionService: ObservableObject {
         return diff == 0
     }
 
-    private func makeJSONResponse(_ object: [String: Any], status: String = "200 OK") -> Data {
+    func makeJSONResponse(_ object: [String: Any], status: String = "200 OK") -> Data {
         let body = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
         return makeHTTPResponse(status: status, contentType: "application/json; charset=utf-8", body: body)
     }
     
-    private func makeHTTPResponse(
+    func makeHTTPResponse(
         status: String,
         contentType: String,
         extraHeaders: [String: String] = [:],
@@ -2220,8 +2588,12 @@ final class PhoneCompanionService: ObservableObject {
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
         <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="mobile-web-app-capable" content="yes">
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
         <meta name="apple-mobile-web-app-title" content="\#(brandTitle)">
+        <meta name="theme-color" content="#141417">
+        <link rel="manifest" href="/manifest.json">
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png">
         <title>\#(brandTitle)</title>
         <style>
           :root {
@@ -2708,6 +3080,93 @@ final class PhoneCompanionService: ObservableObject {
             background: var(--surface); border: 1px solid var(--border); border-radius: 7px; color: var(--secondary);
           }
           .run-status { margin: 8px 12px 0; font-size: 12px; color: var(--text); }
+
+          /* 7. Mobile Connect 2.0: Action Strip, Attachments, @mention, Mic, TTS, Preview, Git & Terminal */
+          .ide-actions-strip {
+            display: flex; align-items: center; gap: 5px; overflow-x: auto;
+            scrollbar-width: none; -ms-overflow-style: none; padding-bottom: 1px;
+          }
+          .ide-actions-strip::-webkit-scrollbar { display: none; }
+          .tb-btn.live-accent {
+            border-color: rgba(34,197,94,0.45); color: #86efac; background: rgba(34,197,94,0.09);
+          }
+          .att-strip {
+            display: flex; align-items: center; gap: 6px; overflow-x: auto; padding-bottom: 2px;
+          }
+          .att-chip {
+            display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+            background: var(--surface); border: 1px solid var(--border-strong);
+            border-radius: 7px; padding: 3px 7px; font-size: 11px; color: var(--text);
+            max-width: 190px;
+          }
+          .att-chip img { width: 20px; height: 20px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
+          .att-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .att-chip-rm {
+            background: none; border: none; color: var(--secondary); font-size: 13px;
+            padding: 0 2px; cursor: pointer; line-height: 1;
+          }
+          .user-att-row {
+            display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px;
+          }
+          .user-att-pill {
+            display: inline-flex; align-items: center; gap: 4px;
+            font-family: var(--mono); font-size: 10.5px; color: #d4d4d8;
+            background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+            padding: 2px 6px; border-radius: 5px;
+          }
+          .composer-wrap { position: relative; }
+          .at-popup {
+            position: absolute; left: 10px; right: 10px; bottom: calc(100% + 4px);
+            max-height: 210px; overflow-y: auto;
+            background: var(--panel); border: 1px solid var(--border-strong);
+            border-radius: 10px; box-shadow: 0 -8px 24px rgba(0,0,0,0.55);
+            display: none; flex-direction: column; padding: 4px; z-index: 60;
+          }
+          .at-item {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 7px 9px; border-radius: 6px; font-size: 12px; color: var(--text); cursor: pointer;
+          }
+          .at-item:active { background: var(--surface-hover); }
+          .at-path { font-family: var(--mono); font-size: 10.5px; color: var(--secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .circle-icon-btn.recording {
+            background: rgba(239,68,68,0.22); border-color: var(--red); color: #fca5a5;
+            animation: pulseMic 1.1s ease-in-out infinite;
+          }
+          @keyframes pulseMic { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+          .turn-footer {
+            display: flex; align-items: center; gap: 6px; margin-top: 2px;
+          }
+          .tts-btn {
+            background: transparent; color: var(--muted); border: 1px solid var(--border);
+            border-radius: 5px; padding: 2px 7px; font-size: 10.5px; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 4px;
+          }
+          .tts-btn.speaking { color: var(--text); border-color: var(--border-strong); background: var(--surface); }
+          .modal-sheet.tall { max-height: 88dvh; height: 86dvh; }
+          .git-toolbar, .term-chips {
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 12px;
+            border-bottom: 1px solid var(--border);
+          }
+          .git-file-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border);
+            background: rgba(255,255,255,0.02); margin-bottom: 5px;
+          }
+          .git-status-badge {
+            font-family: var(--mono); font-size: 10px; font-weight: 700;
+            width: 18px; height: 18px; border-radius: 4px;
+            display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+            background: rgba(255,255,255,0.08); color: var(--text);
+          }
+          .git-status-badge.M { color: #fbbf24; background: rgba(251,191,36,0.14); }
+          .git-status-badge.A, .git-status-badge.U { color: #4ade80; background: rgba(74,222,128,0.14); }
+          .git-status-badge.D { color: #f87171; background: rgba(248,113,113,0.14); }
+          .preview-iframe-wrap {
+            flex: 1; background: #fff; position: relative; overflow: hidden;
+          }
+          .preview-iframe-wrap iframe {
+            width: 100%; height: 100%; border: none; background: #fff;
+          }
         </style>
         </head>
         <body>
@@ -2725,8 +3184,7 @@ final class PhoneCompanionService: ObservableObject {
                 <span id="wsBreadcrumb">Workspace / Chat</span>
                 <span style="font-size:10px;color:var(--muted)">▾</span>
               </div>
-              <button class="tb-btn" onclick="openApiModal()" title="OpenAI /v1 Endpoint &amp; Remote IDE">API / IDE</button>
-              <a class="tb-btn" id="previewBtn" href="#" target="_blank" style="display:none">Preview</a>
+              <button class="tb-btn" id="notifToggleBtn" onclick="toggleBrowserAlerts()" title="Enable Mobile Alerts &amp; Sound" style="padding:4px 7px">🔔</button>
             </div>
             <div class="ide-subbar">
               <div class="ws-select-wrap">
@@ -2738,7 +3196,14 @@ final class PhoneCompanionService: ObservableObject {
                 <select class="ws-select" id="sessionSelect" onchange="switchSession(this.value)" title="Chat in Workspace" style="font-weight:500"></select>
               </div>
               <button class="tb-btn" onclick="newSession()">+ Chat</button>
-               <button class="tb-btn" onclick="openRunModal()" title="Build and run on a device">Run</button>
+            </div>
+            <div class="ide-actions-strip">
+              <button class="tb-btn" id="previewBtn" onclick="openPreviewModal()">Preview</button>
+              <button class="tb-btn" id="gitBtn" onclick="openGitModal()">Git</button>
+              <button class="tb-btn" onclick="openTermModal()">Term</button>
+              <button class="tb-btn" onclick="openFilesModal()">Files</button>
+              <button class="tb-btn" onclick="openRunModal()">Run</button>
+              <button class="tb-btn" onclick="openApiModal()">API /v1</button>
             </div>
           </header>
 
@@ -2752,21 +3217,31 @@ final class PhoneCompanionService: ObservableObject {
           </div>
 
           <div class="composer-wrap">
+            <div class="at-popup" id="atPopup"></div>
+            <input type="file" id="camInput" accept="image/*" capture="environment" style="display:none" onchange="handleFilesSelected(this.files);this.value=''">
+            <input type="file" id="fileInput" multiple accept="image/*,application/pdf,text/*,.swift,.rs,.py,.ts,.tsx,.js,.json,.md,.yaml,.yml,.toml,.sh,.sql,.html,.css,.c,.cpp,.h,.go,.dart,.kt,.java" style="display:none" onchange="handleFilesSelected(this.files);this.value=''">
             <div class="composer-box">
-              <textarea class="composer-input" id="promptInput" rows="1" placeholder="Ask anything, @ to mention, / for actions"></textarea>
+              <div class="att-strip" id="attStrip" style="display:none"></div>
+              <textarea class="composer-input" id="promptInput" rows="1" placeholder="Ask anything, @file, photo, or voice…"></textarea>
               <div class="composer-toolbar">
                 <div class="composer-left">
-                  <button class="circle-icon-btn" onclick="cycleQuickPrefix()" title="Insert /plan or /review">
-                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                  <button class="circle-icon-btn" onclick="document.getElementById('camInput').click()" title="Take Photo / Camera">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h1.1l.8-1.2A1 1 0 0 1 6.23 2.4h3.54a1 1 0 0 1 .83.4L11.4 4h1.1A1.5 1.5 0 0 1 14 5.5v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5v-6Z" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8.5" r="2.2" stroke="currentColor" stroke-width="1.3"/></svg>
+                  </button>
+                  <button class="circle-icon-btn" onclick="document.getElementById('fileInput').click()" title="Upload Screenshot, PDF or Code File">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M10.5 4.5 5.8 9.2a1.5 1.5 0 1 0 2.1 2.1l5-5a3 3 0 1 0-4.24-4.24l-5.2 5.2a4.5 4.5 0 0 0 6.36 6.36l4.4-4.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
                   </button>
                   <button class="model-pill-btn" onclick="openModelModal()">
                     <img id="modelPillIcon" src="/api/icon/provider?id=gemini&token=\#(token)" width="13" height="13" style="border-radius:3px;flex-shrink:0;object-fit:contain" alt="">
                     <span id="modelPillText">Subscription · Gemini</span>
                     <svg width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M3 4.5L6 1.5l3 3M3 7.5l3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   </button>
-                  <div class="meta-pill">Local</div>
                 </div>
                 <div class="composer-right">
+                  <div class="meta-pill" id="voiceLangPill" onclick="toggleVoiceLang()" style="cursor:pointer" title="Voice Recognition Language">TH</div>
+                  <button class="circle-icon-btn" id="micBtn" onclick="toggleVoiceInput()" title="Voice-to-Agent Dictation">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="5.5" y="1.5" width="5" height="8" rx="2.5" stroke="currentColor" stroke-width="1.3"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2.5M5.5 14.5h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                  </button>
                   <div class="meta-pill" id="modePill" onclick="togglePlanPrefix()" style="cursor:pointer">Agent</div>
                   <button class="ide-queue-btn" id="queueBtn" onclick="sendPrompt(true)" title="Add to Queue">+</button>
                   <button class="ide-stop-btn" id="stopBtn" onclick="stopAgent()" title="Stop">
@@ -2799,8 +3274,84 @@ final class PhoneCompanionService: ObservableObject {
                 <span>Select AI Model</span>
                 <button class="tb-btn" onclick="closeModelModal()">Close</button>
               </div>
-              <input class="modal-search" id="modelSearch" type="text" placeholder="Filter models (Gemini, Claude, GPT, Local…)" oninput="renderModelList()">
+              <input class="modal-search" id="modelSearch" type="text" placeholder="Filter models (Enterprise, Gemini, Claude, GPT, Local, ACP…)" oninput="renderModelList()">
               <div class="modal-list" id="modelList"></div>
+            </div>
+          </div>
+
+          <!-- Live Web Preview Reverse Proxy & 1-Tap Public Tunnel Sheet -->
+          <div class="modal-backdrop" id="previewModal" onclick="if(event.target===this)closePreviewModal()">
+            <div class="modal-sheet tall">
+              <div class="modal-header">
+                <span id="previewTitle">Live Dev Preview</span>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <button class="tb-btn" onclick="reloadPreviewFrame()">Reload</button>
+                  <a class="tb-btn" id="previewExternalLink" href="#" target="_blank">Full Tab ↗</a>
+                  <button class="tb-btn" onclick="closePreviewModal()">Close</button>
+                </div>
+              </div>
+              <div class="git-toolbar" id="previewPortsBar">
+                <input id="customPreviewPort" type="number" min="1" max="65535" placeholder="Port (e.g. 3000)" style="width:128px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11.5px;font-family:var(--mono)">
+                <button class="tb-btn" onclick="openCustomPreviewPort()">Open Port</button>
+                <button class="tb-btn" id="publicPortTunnelBtn" onclick="togglePublicPortTunnel()">🌐 Public HTTPS Link</button>
+              </div>
+              <div id="publicTunnelBanner" style="display:none;padding:6px 12px;background:rgba(34,197,94,0.1);border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;align-items:center;justify-content:space-between;gap:8px"></div>
+              <div class="preview-iframe-wrap">
+                <iframe id="previewFrame" src="about:blank"></iframe>
+              </div>
+            </div>
+          </div>
+
+          <!-- Mobile Git Review, Colored Diff & AI Commit Sheet -->
+          <div class="modal-backdrop" id="gitModal" onclick="if(event.target===this)closeGitModal()">
+            <div class="modal-sheet tall">
+              <div class="modal-header">
+                <span id="gitHeaderTitle">Git Source Control</span>
+                <div style="display:flex;gap:6px">
+                  <button class="tb-btn" onclick="refreshGitStatus()">Refresh</button>
+                  <button class="tb-btn" onclick="closeGitModal()">Close</button>
+                </div>
+              </div>
+              <div class="git-toolbar">
+                <input id="gitCommitInput" type="text" placeholder="Commit message…" style="flex:1;min-width:150px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:12px;outline:none">
+                <button class="tb-btn" onclick="generateAICommitMsg()" id="aiCommitBtn">✨ AI Msg</button>
+                <button class="btn-allow" style="flex:0 0 auto;padding:6px 11px" onclick="runGitAction('commit')">Commit All</button>
+                <button class="tb-btn" onclick="runGitAction('push')">Push ↑</button>
+                <button class="tb-btn" onclick="runGitAction('pull')">Pull ↓</button>
+              </div>
+              <div id="gitStatusBanner" style="padding:4px 12px;font-size:11.5px;color:var(--secondary);display:none"></div>
+              <div class="modal-list" id="gitFilesList"></div>
+            </div>
+          </div>
+
+          <!-- Quick Terminal & Project Scripts Sheet -->
+          <div class="modal-backdrop" id="termModal" onclick="if(event.target===this)closeTermModal()">
+            <div class="modal-sheet tall">
+              <div class="modal-header">
+                <span>Workspace Quick Terminal</span>
+                <button class="tb-btn" onclick="closeTermModal()">Close</button>
+              </div>
+              <div class="term-chips" id="termScriptsBar"></div>
+              <div style="display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border)">
+                <input id="termCmdInput" type="text" placeholder="Run zsh command in workspace…" style="flex:1;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 9px;font-family:var(--mono);font-size:12px;outline:none">
+                <button class="btn-allow" style="flex:0 0 auto;padding:6px 13px" id="termRunBtn" onclick="execTermCommand()">Run</button>
+              </div>
+              <pre class="modal-list" id="termOutputBox" style="margin:0;background:#09090b;font-family:var(--mono);font-size:11px;line-height:1.48;color:#d4d4d8;white-space:pre-wrap;word-break:break-word;padding:10px 12px">Ready. Tap a project script above or enter any shell command.</pre>
+            </div>
+          </div>
+
+          <!-- Workspace File Browser & Code Viewer Sheet -->
+          <div class="modal-backdrop" id="filesModal" onclick="if(event.target===this)closeFilesModal()">
+            <div class="modal-sheet tall">
+              <div class="modal-header">
+                <span id="filesModalTitle">Workspace Files</span>
+                <div style="display:flex;gap:6px">
+                  <button class="tb-btn" id="filesBackBtn" style="display:none" onclick="showFilesListMode()">← Back</button>
+                  <button class="tb-btn" onclick="closeFilesModal()">Close</button>
+                </div>
+              </div>
+              <input class="modal-search" id="filesSearchInput" type="text" placeholder="Search files by name or path…" oninput="searchFilesDebounced()">
+              <div class="modal-list" id="filesModalBody"></div>
             </div>
           </div>
 
@@ -2860,12 +3411,34 @@ final class PhoneCompanionService: ObservableObject {
           let lastRenderKey = "";
           let autoScroll = true;
           let isAgentLoading = false;
+          let wasAgentLoadingClient = false;
+          let lastNotifiedAlertKey = "";
+          let browserAlertsEnabled = (localStorage.getItem("mc_alerts") === "1");
           let availableModels = [];
           let availableWorkspaces = [];
           let openDrawerIds = new Set();
+          let stagedAttachments = [];
+          let activePreviewPort = 0;
+          let activePreviewPath = "";
+          let voiceLang = localStorage.getItem("mc_voice_lang") || "th-TH";
+
+          if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("/sw.js").catch(() => {});
+          }
 
           const chatEl = document.getElementById("chat");
           const promptInput = document.getElementById("promptInput");
+
+          function syncAlertBtnUI() {
+            const b = document.getElementById("notifToggleBtn");
+            if (!b) return;
+            b.style.opacity = browserAlertsEnabled ? "1" : "0.55";
+            b.textContent = browserAlertsEnabled ? "🔔" : "🔕";
+          }
+          syncAlertBtnUI();
+
+          const voicePillInit = document.getElementById("voiceLangPill");
+          if (voicePillInit) voicePillInit.textContent = voiceLang.startsWith("th") ? "TH" : "EN";
 
           chatEl.addEventListener("scroll", () => {
             const dist = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight;
@@ -2876,23 +3449,24 @@ final class PhoneCompanionService: ObservableObject {
             promptInput.style.height = "auto";
             promptInput.style.height = Math.min(110, promptInput.scrollHeight) + "px";
             updateComposerButtons();
+            handleAtMentionInput();
           });
 
           function updateComposerButtons() {
-            const hasText = promptInput.value.trim().length > 0;
+            const hasContent = promptInput.value.trim().length > 0 || stagedAttachments.length > 0;
             const sendBtn = document.getElementById("sendBtn");
             const stopBtn = document.getElementById("stopBtn");
             const queueBtn = document.getElementById("queueBtn");
             if (isAgentLoading) {
               stopBtn.style.display = "inline-flex";
-              queueBtn.style.display = hasText ? "inline-flex" : "none";
-              sendBtn.style.display = hasText ? "inline-flex" : "none";
-              sendBtn.classList.toggle("disabled", !hasText);
+              queueBtn.style.display = hasContent ? "inline-flex" : "none";
+              sendBtn.style.display = hasContent ? "inline-flex" : "none";
+              sendBtn.classList.toggle("disabled", !hasContent);
             } else {
               stopBtn.style.display = "none";
               queueBtn.style.display = "none";
               sendBtn.style.display = "inline-flex";
-              sendBtn.classList.toggle("disabled", !hasText);
+              sendBtn.classList.toggle("disabled", !hasContent);
             }
           }
 
@@ -2902,7 +3476,8 @@ final class PhoneCompanionService: ObservableObject {
               headers: { "X-Companion-Token": TOKEN, "Content-Type": "application/json" }
             };
             if (body) opts.body = JSON.stringify(body);
-            const res = await fetch(path + "?token=" + encodeURIComponent(TOKEN), opts);
+            const sep = path.includes("?") ? "&" : "?";
+            const res = await fetch(path + sep + "token=" + encodeURIComponent(TOKEN), opts);
             return await res.json();
           }
 
@@ -3376,12 +3951,33 @@ final class PhoneCompanionService: ObservableObject {
               }
 
               const prevBtn = document.getElementById("previewBtn");
-              if (s.webPreviewLANURL) {
-                prevBtn.style.display = "inline-flex";
-                prevBtn.href = s.webPreviewLANURL;
+              if (s.webPreviewProxyURL || s.activeDevPort) {
+                activePreviewPort = s.activeDevPort || activePreviewPort;
+                activePreviewPath = s.webPreviewProxyURL || ("/preview/" + activePreviewPort + "/");
+                prevBtn.classList.add("live-accent");
+                prevBtn.textContent = "Preview :" + activePreviewPort;
               } else {
-                prevBtn.style.display = "none";
+                prevBtn.classList.remove("live-accent");
+                prevBtn.textContent = "Preview";
               }
+
+              // Instant Mobile Notifications, Haptics & Subtle Audio Chime
+              if (s.pendingTool && s.pendingTool.id) {
+                const k = "tool:" + s.pendingTool.id;
+                if (lastNotifiedAlertKey !== k) {
+                  lastNotifiedAlertKey = k;
+                  fireMobileAlert("Approval Needed: " + s.pendingTool.toolName, s.pendingTool.description || "Tap to approve or deny.");
+                }
+              } else if (s.plan && s.plan.state === "pending") {
+                const k = "plan:" + s.plan.title + ":" + s.plan.totalSteps;
+                if (lastNotifiedAlertKey !== k) {
+                  lastNotifiedAlertKey = k;
+                  fireMobileAlert("Plan Ready for Review", s.plan.title + " (" + s.plan.totalSteps + " steps)");
+                }
+              } else if (wasAgentLoadingClient && !s.isLoading) {
+                fireMobileAlert("MicroCode Task Complete", (s.workspace || "Workspace") + " finished executing.");
+              }
+              wasAgentLoadingClient = !!s.isLoading;
 
               // Workspaces list (ordered 100% like Mac IDE Projects -> Chats)
               availableWorkspaces = s.workspaces || [];
@@ -3467,7 +4063,10 @@ final class PhoneCompanionService: ObservableObject {
                 } else {
                   chatEl.innerHTML = msgs.map((m, mIdx) => {
                     if (m.role === "user") {
-                      return `<div class="turn-user">${esc(m.content)}</div>`;
+                      const atts = (m.attachments && m.attachments.length)
+                        ? `<div class="user-att-row">` + m.attachments.map(a => `<span class="user-att-pill">📎 ${esc(a.name)}</span>`).join("") + `</div>`
+                        : "";
+                      return `<div class="turn-user">${atts}${esc(m.content)}</div>`;
                     }
                     const tId = `thought-${m.id || mIdx}`;
                     const thoughtOpen = (m.thoughtStreaming || openDrawerIds.has(tId)) ? "open" : "";
@@ -3484,7 +4083,10 @@ final class PhoneCompanionService: ObservableObject {
                       : "";
 
                     const bodyHTML = m.content ? parseMessageContent(m.content) : "";
-                    return `<div class="turn-assistant">${thoughtHTML}${toolsHTML}${bodyHTML}</div>`;
+                    const ttsHTML = (m.content && !isAgentLoading)
+                      ? `<div class="turn-footer"><button class="tts-btn" data-raw="${encodeURIComponent(m.content.slice(0, 1800))}" onclick="speakAssistantTurn(this)">🔊 Read</button></div>`
+                      : "";
+                    return `<div class="turn-assistant">${thoughtHTML}${toolsHTML}${bodyHTML}${ttsHTML}</div>`;
                   }).join("");
                   if (autoScroll) chatEl.scrollTop = chatEl.scrollHeight;
                 }
@@ -3496,12 +4098,16 @@ final class PhoneCompanionService: ObservableObject {
 
           async function sendPrompt(enqueueOnly) {
             const text = promptInput.value.trim();
-            if (!text) return;
+            if (!text && stagedAttachments.length === 0) return;
+            const attsToSend = stagedAttachments.map(a => ({ name: a.name, mimeType: a.mimeType, dataBase64: a.dataBase64 }));
             promptInput.value = "";
             promptInput.style.height = "auto";
+            stagedAttachments = [];
+            renderAttachmentStrip();
+            hideAtPopup();
             updateComposerButtons();
             autoScroll = true;
-            await api("/api/send", { prompt: text, enqueue: !!enqueueOnly });
+            await api("/api/send", { prompt: text, enqueue: !!enqueueOnly, attachments: attsToSend });
             pollState();
           }
 
@@ -3667,7 +4273,7 @@ final class PhoneCompanionService: ObservableObject {
               }
               const badge = m.badge ? `<span class="model-badge">${esc(m.badge)}</span>` : "";
               const check = m.active ? "✓ " : "";
-              const provIcon = `/api/icon/provider?id=${encodeURIComponent(m.provider || "gemini")}&token=${encodeURIComponent(TOKEN)}`;
+              const provIcon = `/api/icon/provider?id=${encodeURIComponent(m.iconId || m.provider || "gemini")}&token=${encodeURIComponent(TOKEN)}`;
               html += `<div class="model-option ${m.active ? 'active' : ''}" data-midx="${i}" onclick="selectModelByIndex(this)">
                 <span style="display:inline-flex;align-items:center;gap:8px;min-width:0"><img src="${provIcon}" width="15" height="15" style="border-radius:3px;flex-shrink:0;object-fit:contain" alt=""><span>${check}${esc(m.name)}</span></span>
                 ${badge}
@@ -3747,6 +4353,538 @@ final class PhoneCompanionService: ObservableObject {
               if (s.isWorking) { runPollTimer = setTimeout(pollRunStatus, 1500); }
             } catch (e) {
               runPollTimer = setTimeout(pollRunStatus, 4000);
+            }
+          }
+
+          // ---- Mobile Connect 2.0: Alerts, Camera/Files, @file Mention, Voice/TTS, Preview, Git & Terminal ----
+
+          async function toggleBrowserAlerts() {
+            if (!browserAlertsEnabled) {
+              if ("Notification" in window && Notification.permission === "default") {
+                try { await Notification.requestPermission(); } catch (_) {}
+              }
+              browserAlertsEnabled = true;
+              localStorage.setItem("mc_alerts", "1");
+              playSubtleChime();
+            } else {
+              browserAlertsEnabled = false;
+              localStorage.setItem("mc_alerts", "0");
+            }
+            syncAlertBtnUI();
+          }
+
+          function playSubtleChime() {
+            try {
+              const Ctx = window.AudioContext || window.webkitAudioContext;
+              if (!Ctx) return;
+              const ctx = new Ctx();
+              const osc = ctx.createOscillator();
+              const gain = ctx.createGain();
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+              osc.frequency.setValueAtTime(880, ctx.currentTime + 0.09);
+              gain.gain.setValueAtTime(0.08, ctx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
+              osc.connect(gain);
+              gain.connect(ctx.destination);
+              osc.start();
+              osc.stop(ctx.currentTime + 0.3);
+            } catch (_) {}
+          }
+
+          function fireMobileAlert(title, body) {
+            if (!browserAlertsEnabled) return;
+            if (navigator.vibrate) { try { navigator.vibrate([110, 50, 110]); } catch (_) {} }
+            playSubtleChime();
+            if ("Notification" in window && Notification.permission === "granted") {
+              if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+                navigator.serviceWorker.ready.then(reg => {
+                  reg.showNotification(title, { body, icon: "/apple-touch-icon.png", badge: "/apple-touch-icon.png" });
+                }).catch(() => { try { new Notification(title, { body }); } catch (_) {} });
+              } else {
+                try { new Notification(title, { body }); } catch (_) {}
+              }
+            }
+          }
+
+          async function handleFilesSelected(fileList) {
+            if (!fileList || !fileList.length) return;
+            for (const f of Array.from(fileList).slice(0, 6)) {
+              if (stagedAttachments.length >= 8) break;
+              try {
+                if (f.type && f.type.startsWith("image/") && f.size > 450000) {
+                  const compressed = await compressImageToDataURL(f, 1600, 0.84);
+                  stagedAttachments.push({ name: f.name.replace(/\.[a-zA-Z0-9]+$/, ".jpg"), mimeType: "image/jpeg", dataBase64: compressed, previewURL: compressed });
+                } else {
+                  const dataURL = await readFileAsDataURL(f);
+                  stagedAttachments.push({ name: f.name, mimeType: f.type || "application/octet-stream", dataBase64: dataURL, previewURL: (f.type && f.type.startsWith("image/")) ? dataURL : "" });
+                }
+              } catch (_) {}
+            }
+            renderAttachmentStrip();
+            updateComposerButtons();
+          }
+
+          function readFileAsDataURL(file) {
+            return new Promise((resolve, reject) => {
+              const r = new FileReader();
+              r.onload = () => resolve(String(r.result || ""));
+              r.onerror = reject;
+              r.readAsDataURL(file);
+            });
+          }
+
+          function compressImageToDataURL(file, maxDim, quality) {
+            return new Promise((resolve, reject) => {
+              const r = new FileReader();
+              r.onerror = reject;
+              r.onload = () => {
+                const img = new Image();
+                img.onerror = () => resolve(String(r.result || ""));
+                img.onload = () => {
+                  let w = img.width, h = img.height;
+                  if (w > maxDim || h > maxDim) {
+                    if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+                    else { w = Math.round(w * maxDim / h); h = maxDim; }
+                  }
+                  const c = document.createElement("canvas");
+                  c.width = w; c.height = h;
+                  const ctx = c.getContext("2d");
+                  ctx.drawImage(img, 0, 0, w, h);
+                  resolve(c.toDataURL("image/jpeg", quality));
+                };
+                img.src = String(r.result || "");
+              };
+              r.readAsDataURL(file);
+            });
+          }
+
+          function renderAttachmentStrip() {
+            const strip = document.getElementById("attStrip");
+            if (!stagedAttachments.length) {
+              strip.style.display = "none";
+              strip.innerHTML = "";
+              return;
+            }
+            strip.style.display = "flex";
+            strip.innerHTML = stagedAttachments.map((a, idx) => {
+              const thumb = a.previewURL ? `<img src="${a.previewURL}" alt="">` : renderLangIcon(a.name, "", 14);
+              return `<div class="att-chip">${thumb}<span class="att-chip-name">${esc(a.name)}</span><button class="att-chip-rm" onclick="removeAttachment(${idx})">×</button></div>`;
+            }).join("");
+          }
+
+          function removeAttachment(idx) {
+            stagedAttachments.splice(idx, 1);
+            renderAttachmentStrip();
+            updateComposerButtons();
+          }
+
+          // @file Workspace Autocomplete
+          let atDebounce = null;
+          function hideAtPopup() {
+            document.getElementById("atPopup").style.display = "none";
+          }
+
+          function handleAtMentionInput() {
+            const pos = promptInput.selectionStart || promptInput.value.length;
+            const before = promptInput.value.slice(0, pos);
+            const m = before.match(/(?:^|\s)@([^\s@]*)$/);
+            if (!m) { hideAtPopup(); return; }
+            const query = m[1] || "";
+            if (atDebounce) clearTimeout(atDebounce);
+            atDebounce = setTimeout(async () => {
+              try {
+                const res = await api("/api/files/search?q=" + encodeURIComponent(query));
+                const files = (res && res.files) || [];
+                const pop = document.getElementById("atPopup");
+                if (!files.length) { hideAtPopup(); return; }
+                pop.style.display = "flex";
+                pop.innerHTML = files.slice(0, 12).map(f =>
+                  `<div class="at-item" data-fpath="${esc(f.path)}" onclick="insertAtMention(this.getAttribute('data-fpath'))">
+                    <span style="display:inline-flex;align-items:center;gap:6px;min-width:0">${renderLangIcon(f.name, f.ext, 14)}<span class="at-path">${esc(f.path)}</span></span>
+                  </div>`
+                ).join("");
+              } catch (_) { hideAtPopup(); }
+            }, 130);
+          }
+
+          function insertAtMention(relPath) {
+            const pos = promptInput.selectionStart || promptInput.value.length;
+            const before = promptInput.value.slice(0, pos);
+            const after = promptInput.value.slice(pos);
+            const replaced = before.replace(/(^|\s)@([^\s@]*)$/, `$1@${relPath} `);
+            promptInput.value = replaced + after;
+            hideAtPopup();
+            promptInput.focus();
+            updateComposerButtons();
+          }
+
+          // Voice-to-Agent (SpeechRecognition) & Read-Aloud TTS
+          let speechRec = null;
+          let isRecordingVoice = false;
+
+          function toggleVoiceLang() {
+            voiceLang = voiceLang.startsWith("th") ? "en-US" : "th-TH";
+            localStorage.setItem("mc_voice_lang", voiceLang);
+            document.getElementById("voiceLangPill").textContent = voiceLang.startsWith("th") ? "TH" : "EN";
+          }
+
+          function toggleVoiceInput() {
+            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SR) {
+              alert("Speech recognition is not supported in this browser. Use iOS Safari or Chrome.");
+              return;
+            }
+            const micBtn = document.getElementById("micBtn");
+            if (isRecordingVoice && speechRec) {
+              try { speechRec.stop(); } catch (_) {}
+              isRecordingVoice = false;
+              micBtn.classList.remove("recording");
+              return;
+            }
+            speechRec = new SR();
+            speechRec.lang = voiceLang;
+            speechRec.interimResults = true;
+            speechRec.continuous = false;
+            const prefix = promptInput.value ? (promptInput.value.trimEnd() + " ") : "";
+            isRecordingVoice = true;
+            micBtn.classList.add("recording");
+            speechRec.onresult = (ev) => {
+              let transcript = "";
+              for (let i = 0; i < ev.results.length; i++) {
+                transcript += ev.results[i][0].transcript;
+              }
+              promptInput.value = prefix + transcript;
+              promptInput.style.height = "auto";
+              promptInput.style.height = Math.min(110, promptInput.scrollHeight) + "px";
+              updateComposerButtons();
+            };
+            speechRec.onend = () => {
+              isRecordingVoice = false;
+              micBtn.classList.remove("recording");
+            };
+            speechRec.onerror = () => {
+              isRecordingVoice = false;
+              micBtn.classList.remove("recording");
+            };
+            try { speechRec.start(); } catch (_) { isRecordingVoice = false; micBtn.classList.remove("recording"); }
+          }
+
+          function speakAssistantTurn(btn) {
+            if (!("speechSynthesis" in window)) return;
+            if (window.speechSynthesis.speaking) {
+              window.speechSynthesis.cancel();
+              document.querySelectorAll(".tts-btn.speaking").forEach(b => { b.classList.remove("speaking"); b.textContent = "🔊 Read"; });
+              return;
+            }
+            const raw = decodeURIComponent(btn.getAttribute("data-raw") || "").replace(/```[\s\S]*?```/g, " [code block] ").replace(/[#*`_]/g, "");
+            if (!raw.trim()) return;
+            const u = new SpeechSynthesisUtterance(raw);
+            u.lang = /[\u0E00-\u0E7F]/.test(raw) ? "th-TH" : "en-US";
+            btn.classList.add("speaking");
+            btn.textContent = "⏹ Stop";
+            u.onend = () => { btn.classList.remove("speaking"); btn.textContent = "🔊 Read"; };
+            u.onerror = () => { btn.classList.remove("speaking"); btn.textContent = "🔊 Read"; };
+            window.speechSynthesis.speak(u);
+          }
+
+          // Live Preview Reverse Proxy & 1-Tap Public Port Tunnel
+          let currentPreviewPort = 0;
+          let currentPublicTunnelURL = "";
+
+          async function openPreviewModal() {
+            document.getElementById("previewModal").style.display = "flex";
+            await refreshPreviewPorts(true);
+          }
+
+          function closePreviewModal() {
+            document.getElementById("previewModal").style.display = "none";
+          }
+
+          async function refreshPreviewPorts(loadDefault) {
+            try {
+              const res = await api("/api/preview/ports");
+              const ports = (res && res.ports) || [];
+              if (loadDefault && !currentPreviewPort) {
+                currentPreviewPort = activePreviewPort || (ports[0] && ports[0].port) || 3000;
+              }
+              document.getElementById("customPreviewPort").value = currentPreviewPort || "";
+              const matched = ports.find(p => p.port === currentPreviewPort);
+              currentPublicTunnelURL = (matched && matched.publicTunnelURL) || "";
+              const banner = document.getElementById("publicTunnelBanner");
+              const tBtn = document.getElementById("publicPortTunnelBtn");
+              if (currentPublicTunnelURL) {
+                banner.style.display = "flex";
+                banner.innerHTML = `<a href="${esc(currentPublicTunnelURL)}" target="_blank" style="color:#86efac;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(currentPublicTunnelURL)}</a>
+                  <button class="tb-btn" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(currentPublicTunnelURL)}')">Copy</button>`;
+                tBtn.textContent = "⏹ Stop Public Link";
+              } else {
+                banner.style.display = "none";
+                tBtn.textContent = "🌐 Public HTTPS Link";
+              }
+              if (loadDefault && currentPreviewPort) {
+                loadPreviewPort(currentPreviewPort);
+              }
+            } catch (_) {}
+          }
+
+          function loadPreviewPort(port) {
+            currentPreviewPort = port;
+            const proxyUrl = `/preview/${port}/?token=${encodeURIComponent(TOKEN)}`;
+            document.getElementById("previewTitle").textContent = `Live Preview · :${port}`;
+            document.getElementById("previewExternalLink").href = proxyUrl;
+            document.getElementById("previewFrame").src = proxyUrl;
+          }
+
+          function openCustomPreviewPort() {
+            const p = parseInt(document.getElementById("customPreviewPort").value, 10);
+            if (p >= 1 && p <= 65535) {
+              loadPreviewPort(p);
+              refreshPreviewPorts(false);
+            }
+          }
+
+          function reloadPreviewFrame() {
+            const f = document.getElementById("previewFrame");
+            if (f && f.src && f.src !== "about:blank") f.src = f.src;
+          }
+
+          async function togglePublicPortTunnel() {
+            const p = currentPreviewPort || parseInt(document.getElementById("customPreviewPort").value, 10) || 3000;
+            const tBtn = document.getElementById("publicPortTunnelBtn");
+            tBtn.textContent = currentPublicTunnelURL ? "Stopping…" : "Starting HTTPS Tunnel…";
+            try {
+              await api("/api/preview/tunnel", { port: p, action: currentPublicTunnelURL ? "stop" : "start" });
+              setTimeout(() => refreshPreviewPorts(false), 900);
+              setTimeout(() => refreshPreviewPorts(false), 2600);
+            } catch (_) {}
+          }
+
+          // Mobile Git Suite
+          async function openGitModal() {
+            document.getElementById("gitModal").style.display = "flex";
+            await refreshGitStatus();
+          }
+
+          function closeGitModal() {
+            document.getElementById("gitModal").style.display = "none";
+          }
+
+          async function refreshGitStatus() {
+            const listEl = document.getElementById("gitFilesList");
+            listEl.innerHTML = `<div style="padding:12px;color:var(--secondary);font-size:12px">Loading git status…</div>`;
+            try {
+              const res = await api("/api/git/status");
+              if (!res || !res.ok) {
+                listEl.innerHTML = `<div style="padding:12px;color:var(--secondary);font-size:12px">${esc((res && res.error) || "Not a git repository.")}</div>`;
+                return;
+              }
+              const syncInfo = (res.ahead || res.behind) ? ` · ↑${res.ahead || 0} ↓${res.behind || 0}` : "";
+              document.getElementById("gitHeaderTitle").textContent = `Git · ${res.branch}${syncInfo}`;
+              const files = res.files || [];
+              document.getElementById("gitBtn").textContent = files.length ? `Git (${files.length})` : "Git";
+              if (!files.length) {
+                listEl.innerHTML = `<div style="padding:16px;text-align:center;color:var(--secondary);font-size:12.5px">Working tree clean ✓</div>`;
+                return;
+              }
+              listEl.innerHTML = files.map((f, idx) => {
+                const stAct = f.staged ? "unstage" : "stage";
+                const stLabel = f.staged ? "Unstage" : "Stage";
+                return `<div>
+                  <div class="git-file-row">
+                    <div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1;cursor:pointer" data-gpath="${esc(f.path)}" data-gstaged="${f.staged ? '1' : '0'}" data-gidx="${idx}" onclick="toggleGitFileDiff(this)">
+                      <span class="git-status-badge ${esc(f.status)}">${esc(f.status)}</span>
+                      <span style="font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.path)}</span>
+                    </div>
+                    <div style="display:flex;gap:4px;flex-shrink:0">
+                      <button class="tb-btn" style="padding:3px 7px;font-size:10.5px" data-gpath="${esc(f.path)}" onclick="runGitFileAction('${stAct}', this.getAttribute('data-gpath'))">${stLabel}</button>
+                      <button class="tb-btn" style="padding:3px 7px;font-size:10.5px;color:#fca5a5" data-gpath="${esc(f.path)}" onclick="confirmGitRevert(this.getAttribute('data-gpath'))">Revert</button>
+                    </div>
+                  </div>
+                  <div id="gitDiffBox-${idx}" style="display:none;margin-bottom:8px"></div>
+                </div>`;
+              }).join("");
+            } catch (_) {
+              listEl.innerHTML = `<div style="padding:12px;color:var(--secondary);font-size:12px">Failed to load git status.</div>`;
+            }
+          }
+
+          async function toggleGitFileDiff(el) {
+            const idx = el.getAttribute("data-gidx");
+            const box = document.getElementById("gitDiffBox-" + idx);
+            if (!box) return;
+            if (box.style.display === "block") { box.style.display = "none"; return; }
+            box.style.display = "block";
+            box.innerHTML = `<div style="padding:8px;font-size:11px;color:var(--secondary)">Loading diff…</div>`;
+            const path = el.getAttribute("data-gpath") || "";
+            const staged = el.getAttribute("data-gstaged") || "0";
+            try {
+              const res = await api(`/api/git/diff?path=${encodeURIComponent(path)}&staged=${staged}`);
+              box.innerHTML = (res && res.diff) ? renderCodeCard("diff", res.diff, path) : `<div style="padding:8px;font-size:11px;color:var(--secondary)">No text diff available.</div>`;
+            } catch (_) {
+              box.innerHTML = `<div style="padding:8px;font-size:11px;color:var(--red)">Could not load diff.</div>`;
+            }
+          }
+
+          async function runGitFileAction(action, path) {
+            await api("/api/git/action", { action, path });
+            await refreshGitStatus();
+          }
+
+          async function confirmGitRevert(path) {
+            if (!confirm(`Discard all local changes in ${path}?`)) return;
+            await runGitFileAction("revert", path);
+          }
+
+          async function generateAICommitMsg() {
+            const btn = document.getElementById("aiCommitBtn");
+            btn.textContent = "Generating…";
+            try {
+              const res = await api("/api/git/action", { action: "ai-message" });
+              if (res && res.ok && res.message) {
+                document.getElementById("gitCommitInput").value = res.message;
+              } else if (res && res.error) {
+                showGitBanner(res.error, true);
+              }
+            } catch (_) {}
+            btn.textContent = "✨ AI Msg";
+          }
+
+          function showGitBanner(msg, isErr) {
+            const b = document.getElementById("gitStatusBanner");
+            b.style.display = "block";
+            b.style.color = isErr ? "#fca5a5" : "#86efac";
+            b.textContent = msg;
+          }
+
+          async function runGitAction(action) {
+            const msg = document.getElementById("gitCommitInput").value.trim();
+            if (action === "commit" && !msg) { showGitBanner("Enter or generate a commit message first.", true); return; }
+            showGitBanner(`Running git ${action}…`, false);
+            try {
+              const res = await api("/api/git/action", { action, message: msg });
+              showGitBanner((res && (res.message || res.error)) || (res && res.ok ? "Done" : "Failed"), !(res && res.ok));
+              if (action === "commit" && res && res.ok) document.getElementById("gitCommitInput").value = "";
+              await refreshGitStatus();
+            } catch (_) {
+              showGitBanner("Network error running git command.", true);
+            }
+          }
+
+          // Quick Terminal & Auto-Detected Scripts
+          async function openTermModal() {
+            document.getElementById("termModal").style.display = "flex";
+            try {
+              const res = await api("/api/terminal/scripts");
+              const scripts = (res && res.scripts) || [];
+              document.getElementById("termScriptsBar").innerHTML = scripts.map(s =>
+                `<button class="tb-btn" data-cmd="${esc(s.cmd)}" onclick="runQuickScript(this.getAttribute('data-cmd'))">▶ ${esc(s.label)}</button>`
+              ).join("");
+            } catch (_) {}
+          }
+
+          function closeTermModal() {
+            document.getElementById("termModal").style.display = "none";
+          }
+
+          function runQuickScript(cmd) {
+            document.getElementById("termCmdInput").value = cmd;
+            execTermCommand();
+          }
+
+          async function execTermCommand() {
+            const inp = document.getElementById("termCmdInput");
+            const out = document.getElementById("termOutputBox");
+            const btn = document.getElementById("termRunBtn");
+            const cmd = inp.value.trim();
+            if (!cmd) return;
+            btn.textContent = "Running…";
+            out.textContent = `$ ${cmd}\nRunning in workspace…`;
+            try {
+              const res = await api("/api/terminal/exec", { command: cmd });
+              const hdr = `$ ${cmd}  [exit ${res.exitCode ?? "?"}, ${res.durationMs ?? 0}ms]\n\n`;
+              out.textContent = hdr + (res.output || res.error || "");
+            } catch (_) {
+              out.textContent = `$ ${cmd}\nError reaching Mac Companion.`;
+            }
+            btn.textContent = "Run";
+          }
+
+          document.getElementById("termCmdInput").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); execTermCommand(); }
+          });
+
+          // Workspace File Explorer & Viewer
+          let filesSearchTimer = null;
+          function openFilesModal() {
+            document.getElementById("filesModal").style.display = "flex";
+            showFilesListMode();
+          }
+
+          function closeFilesModal() {
+            document.getElementById("filesModal").style.display = "none";
+          }
+
+          function showFilesListMode() {
+            document.getElementById("filesBackBtn").style.display = "none";
+            document.getElementById("filesSearchInput").style.display = "block";
+            document.getElementById("filesModalTitle").textContent = "Workspace Files";
+            loadWorkspaceFilesList(document.getElementById("filesSearchInput").value || "");
+          }
+
+          function searchFilesDebounced() {
+            if (filesSearchTimer) clearTimeout(filesSearchTimer);
+            filesSearchTimer = setTimeout(() => {
+              loadWorkspaceFilesList(document.getElementById("filesSearchInput").value || "");
+            }, 140);
+          }
+
+          async function loadWorkspaceFilesList(q) {
+            const body = document.getElementById("filesModalBody");
+            try {
+              const res = await api("/api/files/search?q=" + encodeURIComponent(q));
+              const files = (res && res.files) || [];
+              if (!files.length) {
+                body.innerHTML = `<div style="padding:14px;color:var(--secondary);font-size:12px">No matching files in workspace.</div>`;
+                return;
+              }
+              body.innerHTML = files.map(f =>
+                `<div class="model-option" style="gap:8px">
+                  <div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1" data-fpath="${esc(f.path)}" onclick="openWorkspaceFileViewer(this.getAttribute('data-fpath'))">
+                    ${renderLangIcon(f.name, f.ext, 15)}
+                    <span style="font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.path)}</span>
+                  </div>
+                  <button class="tb-btn" style="padding:2px 7px;font-size:10.5px" data-fpath="${esc(f.path)}" onclick="mentionFileFromBrowser(this.getAttribute('data-fpath'))">@ Mention</button>
+                </div>`
+              ).join("");
+            } catch (_) {}
+          }
+
+          function mentionFileFromBrowser(relPath) {
+            closeFilesModal();
+            promptInput.value = (promptInput.value ? promptInput.value.trimEnd() + " " : "") + "@" + relPath + " ";
+            promptInput.focus();
+            updateComposerButtons();
+          }
+
+          async function openWorkspaceFileViewer(relPath) {
+            const body = document.getElementById("filesModalBody");
+            document.getElementById("filesBackBtn").style.display = "inline-flex";
+            document.getElementById("filesSearchInput").style.display = "none";
+            document.getElementById("filesModalTitle").textContent = relPath;
+            body.innerHTML = `<div style="padding:12px;color:var(--secondary);font-size:12px">Reading file…</div>`;
+            try {
+              const res = await api("/api/files/read?path=" + encodeURIComponent(relPath));
+              if (!res || !res.ok) {
+                body.innerHTML = `<div style="padding:12px;color:var(--red);font-size:12px">${esc((res && res.error) || "Cannot read file.")}</div>`;
+                return;
+              }
+              const ext = (relPath.split(".").pop() || "txt").toLowerCase();
+              body.innerHTML = `<div style="margin-bottom:8px;display:flex;justify-content:flex-end">
+                  <button class="tb-btn" data-fpath="${esc(relPath)}" onclick="mentionFileFromBrowser(this.getAttribute('data-fpath'))">@ Mention in Chat</button>
+                </div>` + renderCodeCard(ext, res.content || "", relPath);
+            } catch (_) {
+              body.innerHTML = `<div style="padding:12px;color:var(--red);font-size:12px">Failed to load file.</div>`;
             }
           }
 

@@ -273,6 +273,7 @@ public struct AgentConnectionsView: View {
             // List of Agents
             ScrollView {
                 VStack(spacing: 10) {
+                    enterpriseQuickConnectBanner
                     nineRouterProxyBanner
                     ForEach(AgentConnectionType.allCases) { type in
                         if type == .freeModel {
@@ -480,6 +481,114 @@ public struct AgentConnectionsView: View {
         .buttonStyle(.plain)
     }
     
+    // MARK: - Enterprise API 1-Click Connect Banner
+
+    private var enterpriseQuickConnectBanner: some View {
+        let ent = EnterpriseAIAuthService.shared
+        let isEnterpriseMode = UserDefaults.standard.string(forKey: "aiKeyMode") == "enterprise"
+        let activeName = ent.activeProfile?.name ?? "Corporate Gateway / Vertex / Azure / Bedrock"
+        return HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.indigo.opacity(0.12))
+                    .frame(width: 38, height: 38)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.indigo.opacity(0.32), lineWidth: 1)
+                    )
+                Image(systemName: "building.2.crop.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.indigo)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("Enterprise API & Corporate Gateway")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text(isEnterpriseMode ? "ACTIVE • \(activeName)" : "1-CLICK CONNECT")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1.5)
+                        .background((isEnterpriseMode ? Color.green : Color.indigo).opacity(0.15))
+                        .foregroundColor(isEnterpriseMode ? .green : .indigo)
+                        .clipShape(Capsule())
+                }
+                Text("LiteLLM / Kong / Apigee • Azure OpenAI • Vertex AI & Gemini Enterprise • AWS Bedrock • CLI SSO (gcloud / az / aws)")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            HStack(spacing: 6) {
+                Button {
+                    if let clip = NSPasteboard.general.string(forType: .string), !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if let parsed = ent.applySmartPaste(clip) {
+                            toastMessage = "✓ \(parsed.summary)"
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+                                toastMessage = nil
+                                presentationMode.wrappedValue.dismiss()
+                            }
+                        } else {
+                            toastMessage = "Clipboard has no recognized Enterprise URL, cURL, or .env — opening Hub…"
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                                toastMessage = nil
+                                openEnterpriseHubInSettings()
+                            }
+                        }
+                    } else {
+                        openEnterpriseHubInSettings()
+                    }
+                } label: {
+                    Label("Paste URL / cURL", systemImage: "doc.on.clipboard")
+                        .font(.system(size: 10, weight: .semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.indigo.opacity(0.14))
+                        .foregroundColor(.indigo)
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Color.indigo.opacity(0.30), lineWidth: 0.8))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    openEnterpriseHubInSettings()
+                } label: {
+                    Text("Configure Hub")
+                        .font(.system(size: 10, weight: .semibold))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.10))
+                        .foregroundColor(.primary)
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Color.primary.opacity(0.22), lineWidth: 0.8))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(cardSurface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(isEnterpriseMode ? Color.indigo.opacity(0.55) : cardBorder, lineWidth: isEnterpriseMode ? 1.5 : 1)
+                )
+        )
+    }
+
+    private func openEnterpriseHubInSettings() {
+        UserDefaults.standard.set("enterprise", forKey: "aiKeyMode")
+        appState.settingsSelectedTab = 2
+        presentationMode.wrappedValue.dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            appState.showingSettingsDialog = true
+        }
+    }
+
     // MARK: - 9Router Harness Proxy Banner
     
     private var nineRouterProxyBanner: some View {

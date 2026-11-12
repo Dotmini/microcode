@@ -1518,11 +1518,10 @@ struct CodeEditor: View {
             // Rendered Markdown Document View (Default for .md files like implement.md, task.md, walkthrough.md) vs Code Editor
             if isMarkdownFile && markdownRenderMode {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        RenderedMarkdownDocumentView(markdown: effectiveTextBinding.wrappedValue)
-                            .padding(24)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    RenderedMarkdownDocumentView(markdown: effectiveTextBinding.wrappedValue)
+                        .equatable()
+                        .padding(24)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.compat(nsColor: .textBackgroundColor))

@@ -134,6 +134,11 @@ final class AgentWorkspaceBarState: ObservableObject {
         } else if mode == "local" {
             appState.aiProvider = "local"
             appState.aiModel = LocalLLMService.shared.availableModels.first?.id ?? "local-model"
+        } else if mode == "enterprise" {
+            if let prof = EnterpriseAIAuthService.shared.activeProfile {
+                appState.aiProvider = prof.dialect.brandIconKey
+                appState.aiModel = prof.defaultModel.isEmpty ? (prof.availableModels.first ?? "gpt-4o") : prof.defaultModel
+            }
         } else if mode == "cloud" {
             if let first = AIModelCatalog.shared.provider("omni")?.models.first {
                 appState.aiProvider = "omni"
@@ -497,7 +502,7 @@ struct AIAgentView: View {
             return acpHost.registeredConfigs.first(where: { $0.id == id })
         }
         let rawMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? ""
-        if rawMode == "subscription" || rawMode == "direct" || rawMode == "cloud" || rawMode == "local" {
+        if rawMode == "subscription" || rawMode == "direct" || rawMode == "cloud" || rawMode == "local" || rawMode == "enterprise" {
             return nil
         }
         if appState.aiProvider == "agy" {
@@ -516,6 +521,7 @@ struct AIAgentView: View {
     
     enum AIExecutionMode: String, CaseIterable {
         case acp = "ACP"
+        case enterprise = "Enterprise"
         case cloud = "Dotmini Cloud"
         case byok = "BYOK"
         case subscription = "Subscription"
@@ -524,6 +530,7 @@ struct AIAgentView: View {
         var badgeTitle: String {
             switch self {
             case .acp: return "ACP"
+            case .enterprise: return "Enterprise"
             case .cloud: return "Dotmini Cloud"
             case .byok: return "BYOK"
             case .subscription: return "Subscription"
@@ -534,6 +541,7 @@ struct AIAgentView: View {
         var icon: String {
             switch self {
             case .acp: return "terminal.fill"
+            case .enterprise: return "building.2.crop.circle.fill"
             case .cloud: return "cloud.fill"
             case .byok: return "key.fill"
             case .subscription: return "sparkles.rectangle.stack"
@@ -544,6 +552,7 @@ struct AIAgentView: View {
         var badgeColor: Color {
             switch self {
             case .acp: return .teal
+            case .enterprise: return .indigo
             case .cloud: return .purple
             case .byok: return .blue
             case .subscription: return .orange
@@ -556,13 +565,16 @@ struct AIAgentView: View {
         if activeExternalAgentConfig != nil {
             return .acp
         }
+        if currentKeyMode == "enterprise" {
+            return .enterprise
+        }
         if appState.aiProvider == "local" || currentKeyMode == "local" {
             return .local
         }
         if currentKeyMode == "subscription" {
             return .subscription
         }
-        if appState.aiProvider == "omni" && appState.aiModel.lowercased().hasPrefix("omni") {
+        if currentKeyMode == "cloud" || (appState.aiProvider == "omni" && appState.aiModel.lowercased().hasPrefix("omni")) {
             return .cloud
         }
         return .byok
@@ -608,6 +620,9 @@ struct AIAgentView: View {
         if let activeAgent = activeExternalAgentConfig {
             return activeAgent.type.brandIconKey
         }
+        if currentExecutionMode == .enterprise, let prof = EnterpriseAIAuthService.shared.activeProfile {
+            return prof.dialect.brandIconKey
+        }
         if currentExecutionMode == .subscription,
            let subStr = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"),
            !subStr.isEmpty {
@@ -640,6 +655,10 @@ struct AIAgentView: View {
             return "\(providerName) : \(modelName)"
         }
         
+        if currentExecutionMode == .enterprise, let prof = EnterpriseAIAuthService.shared.activeProfile {
+            let modelName = appState.aiModel.isEmpty ? prof.defaultModel : appState.aiModel
+            return "\(prof.name) : \(modelName)"
+        }
         if currentKeyMode == "subscription" {
             let activeSub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
             let provType = activeSub.flatMap { SubscriptionProviderType(rawValue: $0) }
@@ -826,6 +845,7 @@ struct AIAgentView: View {
                                             onRetryAssistantMessage: { msgId in handleRetryAssistantMessage(msgId) },
                                             onDeleteMessage: { msgId, revertFiles in handleDeleteMessage(msgId, revertFiles: revertFiles) }
                                         )
+                                        .equatable()
                                         .environmentObject(appState)
                                         
                                         if let suggestion = agent.suggestedAction {
@@ -5747,6 +5767,11 @@ struct AIAgentView: View {
             } else {
                 appState.aiModel = "local-model"
             }
+        } else if mode == "enterprise" {
+            if let prof = EnterpriseAIAuthService.shared.activeProfile {
+                appState.aiProvider = prof.dialect.brandIconKey
+                appState.aiModel = prof.defaultModel.isEmpty ? (prof.availableModels.first ?? "gpt-4o") : prof.defaultModel
+            }
         } else if mode == "cloud" {
             if let first = AIModelCatalog.shared.provider("omni")?.models.first {
                 appState.aiProvider = "omni"
@@ -5885,7 +5910,7 @@ struct AIAgentView: View {
     
     private func makeSubscriptionModelMenuItem(_ subModel: SubscriptionModelInfo) -> NSMenuItem {
         let title = subModel.badge.isEmpty ? subModel.name : "\(subModel.name) [\(subModel.badge)]"
-        let isChecked = (currentExecutionMode == .subscription && appState.aiModel == subModel.modelID)
+        let isChecked = (currentExecutionMode == .subscription && SubscriptionAuthManager.shared.activeProvider == subModel.provider && appState.aiModel == subModel.modelID)
         return makeActionMenuItem(title, brandKey: subModel.provider.rawValue, checked: isChecked) {
             switchToNativeMode(mode: "subscription")
             appState.aiProvider = subModel.aiProviderID
@@ -5901,6 +5926,64 @@ struct AIAgentView: View {
         Task { await AIModelCatalog.shared.refreshIfNeeded(force: false) }
         let rootMenu = NSMenu(title: "Select AI Model")
         rootMenu.autoenablesItems = false
+
+        // 0. Enterprise API & Corporate Gateways (Vertex AI, Azure OpenAI, AWS Bedrock, LiteLLM, Agentspace)
+        let entService = EnterpriseAIAuthService.shared
+        let entMenu = NSMenu(title: "Enterprise API")
+        entMenu.autoenablesItems = false
+        for prof in entService.profiles {
+            let profMenu = NSMenu(title: prof.name)
+            profMenu.autoenablesItems = false
+            profMenu.addItem(makeActionMenuItem("\(prof.dialect.shortTitle) • \(prof.endpointSummary)", enabled: false))
+            profMenu.addItem(.separator())
+            for m in prof.availableModels.prefix(80) {
+                let isChecked = (currentExecutionMode == .enterprise && entService.activeProfileID == prof.id && appState.aiModel == m)
+                profMenu.addItem(makeActionMenuItem(m, brandKey: prof.dialect.brandIconKey, checked: isChecked) {
+                    entService.activateEnterpriseSelection(profileId: prof.id, modelId: m)
+                })
+            }
+            profMenu.addItem(.separator())
+            profMenu.addItem(makeActionMenuItem("Verify & Fetch Live Models Now", systemImage: "checkmark.shield") {
+                Task {
+                    _ = await entService.discoverModelsAndVerify(profileId: prof.id)
+                }
+            })
+            profMenu.addItem(makeActionMenuItem("Configure '\(prof.name)' in Settings…", systemImage: "gearshape") {
+                entService.activeProfileID = prof.id
+                UserDefaults.standard.set("enterprise", forKey: "aiKeyMode")
+                appState.settingsSelectedTab = 2
+                appState.showingSettingsDialog = true
+            })
+            let statusBadge = prof.isVerified ? " (Verified)" : ""
+            entMenu.addItem(makeSubmenuItem(
+                "\(prof.name) — \(prof.dialect.shortTitle)\(statusBadge)",
+                brandKey: prof.dialect.brandIconKey,
+                checked: currentExecutionMode == .enterprise && entService.activeProfileID == prof.id,
+                submenu: profMenu
+            ))
+        }
+        entMenu.addItem(.separator())
+        entMenu.addItem(makeActionMenuItem("Paste Clipboard URL / cURL / .env to Connect…", systemImage: "wand.and.stars") {
+            if let clip = NSPasteboard.general.string(forType: .string),
+               let res = entService.applySmartPaste(clip) {
+                Task { _ = await entService.discoverModelsAndVerify(profileId: res.profile.id) }
+            } else {
+                UserDefaults.standard.set("enterprise", forKey: "aiKeyMode")
+                appState.settingsSelectedTab = 2
+                appState.showingSettingsDialog = true
+            }
+        })
+        entMenu.addItem(makeActionMenuItem("Open 1-Click Enterprise API Hub…", systemImage: "building.2.crop.circle.fill") {
+            UserDefaults.standard.set("enterprise", forKey: "aiKeyMode")
+            appState.settingsSelectedTab = 2
+            appState.showingSettingsDialog = true
+        })
+        rootMenu.addItem(makeSubmenuItem(
+            "Enterprise API (Vertex AI, Azure, Bedrock, LiteLLM)",
+            brandKey: entService.activeProfile?.dialect.brandIconKey ?? "openai",
+            checked: currentExecutionMode == .enterprise,
+            submenu: entMenu
+        ))
         
         // 1. Subscription (OAuth Accounts)
         let subMenu = NSMenu(title: "Subscription")
@@ -6163,7 +6246,7 @@ struct AIAgentView: View {
             cloudMenu.addItem(makeActionMenuItem(quotaSummary, systemImage: "checkmark.seal.fill", enabled: false))
         } else {
             cloudMenu.addItem(makeActionMenuItem("Sign in to Dotmini Cloud…", systemImage: "person.badge.key.fill") {
-                appState.settingsSelectedTab = 9
+                appState.settingsSelectedTab = 6
                 appState.showingSettingsDialog = true
             })
         }
@@ -6184,7 +6267,7 @@ struct AIAgentView: View {
         }
         cloudMenu.addItem(.separator())
         cloudMenu.addItem(makeActionMenuItem("Top Up Cloud AI Credit / Upgrade Plan…", systemImage: "creditcard.fill") {
-            appState.settingsSelectedTab = 9
+            appState.settingsSelectedTab = 6
             appState.showingSettingsDialog = true
         })
         cloudMenu.addItem(makeActionMenuItem("Open Cloud Console (microcode.dotmini.net)…", systemImage: "safari") {

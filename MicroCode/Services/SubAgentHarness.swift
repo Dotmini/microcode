@@ -302,7 +302,7 @@ public final class SubAgentHarness: ObservableObject {
         - Execute the required actions to complete the objective and verify your changes before finishing.
         """
         
-        let universalMetaTools: Set<String> = ["skill_engine", "mcp_orchestrator", "swarm_orchestrator", "pns_nervous_system", "send_message", "get_diagnostics", "git_status"]
+        let universalMetaTools: Set<String> = ["skill_engine", "slop_check", "mcp_orchestrator", "swarm_orchestrator", "pns_nervous_system", "send_message", "get_diagnostics", "git_status"]
         let baseToolSchemas = toolbox.toolSchemas().filter { dict in
             let name = dict["name"] as? String ?? ""
             if universalMetaTools.contains(name) { return true }
@@ -852,7 +852,7 @@ public final class SubAgentHarness: ObservableObject {
         let globalKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct"
         let subActiveProvider = UserDefaults.standard.string(forKey: "subscriptionActiveProvider") ?? ""
         let globalProviderStr: String = {
-            if globalKeyMode == "subscription" && subActiveProvider == "aipass" {
+            if globalKeyMode == "subscription" && (subActiveProvider == "aipass" || subActiveProvider == "thai_gemini_enterprise") {
                 return "aipass"
             }
             if globalKeyMode == "subscription" && subActiveProvider == "tokenme" {
@@ -866,7 +866,7 @@ public final class SubAgentHarness: ObservableObject {
         let rawModel = (endpoint.model == "inherit" || endpoint.model.isEmpty) ? globalModel : endpoint.model
         
         let normalized = AIModelCatalog.shared.normalizedSelection(provider: rawProvider, model: rawModel)
-        var provider = StreamableAIProvider(rawValue: normalized.provider) ?? StreamableAIProvider.detect(from: normalized.model)
+        let provider = StreamableAIProvider(rawValue: normalized.provider) ?? StreamableAIProvider.detect(from: normalized.model)
         let model = normalized.model
         
         if let explicit = explicitApiKey, !explicit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -887,41 +887,48 @@ public final class SubAgentHarness: ObservableObject {
             let subKey = resolveSubscriptionToken(for: provider)
             return ResolvedAgentRoute(provider: provider, model: model, apiKey: subKey, keyModeOverride: "subscription", authSource: .subscription)
         case .acpCLI:
-            let subKey = resolveSubscriptionToken(for: provider)
-            let byokKey = AIModelCatalog.resolveKey(provider.rawValue)
-            let chosenKey = !subKey.isEmpty ? subKey : byokKey
-            let chosenMode = !subKey.isEmpty ? "subscription" : (!byokKey.isEmpty ? "direct" : globalKeyMode)
-            return ResolvedAgentRoute(provider: provider, model: model, apiKey: chosenKey, keyModeOverride: chosenMode, authSource: .acpCLI)
-        case .dotminiCloud:
-            if SubscriptionAuthManager.shared.isConnected(.aipass) {
-                let aipassKey = SubscriptionAuthManager.shared.token(for: .aipass) ?? ""
-                return ResolvedAgentRoute(provider: .aipass, model: model, apiKey: aipassKey, keyModeOverride: "subscription", authSource: .dotminiCloud)
+            if globalKeyMode == "subscription" {
+                let subKey = resolveSubscriptionToken(for: provider)
+                return ResolvedAgentRoute(provider: provider, model: model, apiKey: subKey, keyModeOverride: "subscription", authSource: .acpCLI)
+            } else {
+                let byokKey = AIModelCatalog.resolveKey(provider.rawValue)
+                return ResolvedAgentRoute(provider: provider, model: model, apiKey: byokKey, keyModeOverride: globalKeyMode == "direct" ? "direct" : globalKeyMode, authSource: .acpCLI)
             }
+        case .dotminiCloud:
             return ResolvedAgentRoute(provider: provider, model: model, apiKey: "", keyModeOverride: "cloud", authSource: .dotminiCloud)
         case .local:
             return ResolvedAgentRoute(provider: .local, model: model, apiKey: "", keyModeOverride: "local", authSource: .local)
         case .auto:
-            // Smart Auto Resolution:
-            // 1. Check direct BYOK API key for the requested provider
-            let byokKey = AIModelCatalog.resolveKey(provider.rawValue)
-            if !byokKey.isEmpty {
-                return ResolvedAgentRoute(provider: provider, model: model, apiKey: byokKey, keyModeOverride: "direct", authSource: .byok)
+            // Strict Mode Isolation between Subscription (`aiKeyMode == "subscription"`) and BYOK (`aiKeyMode == "direct"`):
+            if globalKeyMode == "subscription" {
+                if hasActiveSubscription(for: provider) {
+                    let subKey = resolveSubscriptionToken(for: provider)
+                    return ResolvedAgentRoute(provider: provider, model: model, apiKey: subKey, keyModeOverride: "subscription", authSource: .subscription)
+                }
+                if SubscriptionAuthManager.shared.isConnected(.thai_gemini_enterprise) {
+                    let key = SubscriptionAuthManager.shared.token(for: .thai_gemini_enterprise) ?? ""
+                    return ResolvedAgentRoute(provider: .aipass, model: model, apiKey: key, keyModeOverride: "subscription", authSource: .subscription)
+                }
+                if SubscriptionAuthManager.shared.isConnected(.aipass) {
+                    let aipassKey = SubscriptionAuthManager.shared.token(for: .aipass) ?? ""
+                    return ResolvedAgentRoute(provider: .aipass, model: model, apiKey: aipassKey, keyModeOverride: "subscription", authSource: .subscription)
+                }
+                let fallbackProv = StreamableAIProvider(rawValue: globalProviderStr) ?? .gemini
+                let fallbackSubKey = resolveSubscriptionToken(for: fallbackProv)
+                return ResolvedAgentRoute(provider: fallbackProv, model: globalModel, apiKey: fallbackSubKey, keyModeOverride: "subscription", authSource: .subscription)
+            } else if globalKeyMode == "direct" {
+                let byokKey = AIModelCatalog.resolveKey(provider.rawValue)
+                if !byokKey.isEmpty {
+                    return ResolvedAgentRoute(provider: provider, model: model, apiKey: byokKey, keyModeOverride: "direct", authSource: .byok)
+                }
+                let fallbackProv = StreamableAIProvider(rawValue: globalProviderStr) ?? .gemini
+                let fallbackKey = AIModelCatalog.resolveKey(fallbackProv.rawValue)
+                return ResolvedAgentRoute(provider: fallbackProv, model: globalModel, apiKey: fallbackKey, keyModeOverride: "direct", authSource: .byok)
+            } else {
+                let fallbackProv = StreamableAIProvider(rawValue: globalProviderStr) ?? provider
+                let fallbackAuth: AgentAuthSource = globalKeyMode == "cloud" ? .dotminiCloud : .local
+                return ResolvedAgentRoute(provider: fallbackProv, model: globalModel, apiKey: "", keyModeOverride: globalKeyMode, authSource: fallbackAuth)
             }
-            // 2. Check active Subscription / OAuth (Codex OAuth, Google CodeAssist, Copilot, AiPass)
-            if hasActiveSubscription(for: provider) {
-                let subKey = resolveSubscriptionToken(for: provider)
-                return ResolvedAgentRoute(provider: provider, model: model, apiKey: subKey, keyModeOverride: "subscription", authSource: .subscription)
-            }
-            // 3. Check if AiPass is connected (supports multi-vendor models like Claude, Gemini, GPT, DeepSeek)
-            if SubscriptionAuthManager.shared.isConnected(.aipass) {
-                let aipassKey = SubscriptionAuthManager.shared.token(for: .aipass) ?? ""
-                return ResolvedAgentRoute(provider: .aipass, model: model, apiKey: aipassKey, keyModeOverride: "subscription", authSource: .subscription)
-            }
-            // 4. Fallback to user's currently active global provider + keyMode
-            provider = StreamableAIProvider(rawValue: globalProviderStr) ?? .gemini
-            let fallbackKey = AIModelCatalog.resolveKey(provider.rawValue)
-            let fallbackAuth: AgentAuthSource = globalKeyMode == "subscription" ? .subscription : (globalKeyMode == "cloud" ? .dotminiCloud : .byok)
-            return ResolvedAgentRoute(provider: provider, model: globalModel, apiKey: fallbackKey, keyModeOverride: globalKeyMode, authSource: fallbackAuth)
         }
     }
     
@@ -942,9 +949,8 @@ public final class SubAgentHarness: ObservableObject {
                 || AIClient.loadGoogleCodeAssistCredentials(fallbackToken: token) != nil
                 || SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .gemini) != nil
         case .anthropic:
-            let token = SubscriptionAuthManager.shared.getAccount(.claude)?.sessionToken ?? ""
             return SubscriptionAuthManager.shared.isConnected(.claude)
-                || AIClient.loadGoogleCodeAssistCredentials(fallbackToken: token) != nil
+                || AIClient.hasLocalClaudeCodeOAuth()
                 || SubscriptionAuthManager.shared.cliBridgeBinaryPath(for: .claude) != nil
         default:
             return false
@@ -967,17 +973,10 @@ public final class SubAgentHarness: ObservableObject {
                 }
             }
         }
-        switch provider {
-        case .aipass:
-            return UserDefaults.standard.string(forKey: "aipass_api_key") ?? ""
-        case .tokenme:
-            return UserDefaults.standard.string(forKey: "tokenme_api_key") ?? ""
-        default:
-            return ""
-        }
+        return ""
     }
     
-    /// Executes a single model turn with automatic multi-auth / multi-provider failover so a SubAgent or CEO never fails on 401/429.
+    /// Executes a single model turn with automatic multi-provider failover strictly within the active auth mode (never crosses Subscription <-> BYOK).
     func dispatchModelTurnWithFailover(
         messages: [[(String, Any)]],
         systemPrompt: String?,
@@ -989,39 +988,35 @@ public final class SubAgentHarness: ObservableObject {
         let primaryRoute = resolveExecutionRoute(for: endpoint, explicitApiKey: explicitApiKey)
         var candidateRoutes: [ResolvedAgentRoute] = [primaryRoute]
         
-        // Build fallback chain across BYOK, Subscription, AiPass, and Global Active Model
-        let byokKey = AIModelCatalog.resolveKey(primaryRoute.provider.rawValue)
-        if !byokKey.isEmpty && primaryRoute.keyModeOverride != "direct" {
-            candidateRoutes.append(ResolvedAgentRoute(
-                provider: primaryRoute.provider,
-                model: primaryRoute.model,
-                apiKey: byokKey,
-                keyModeOverride: "direct",
-                authSource: .byok
-            ))
-        }
-        if hasActiveSubscription(for: primaryRoute.provider) && primaryRoute.keyModeOverride != "subscription" {
-            candidateRoutes.append(ResolvedAgentRoute(
-                provider: primaryRoute.provider,
-                model: primaryRoute.model,
-                apiKey: resolveSubscriptionToken(for: primaryRoute.provider),
-                keyModeOverride: "subscription",
-                authSource: .subscription
-            ))
-        }
-        // Global active setup fallback
         let globalKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct"
         let globalProvStr = UserDefaults.standard.string(forKey: "aiProvider") ?? "gemini"
         let globalModel = UserDefaults.standard.string(forKey: "aiModel") ?? "gemini-2.5-flash"
         let globalProv = StreamableAIProvider(rawValue: globalProvStr) ?? .gemini
-        let globalKey = AIModelCatalog.resolveKey(globalProv.rawValue)
-        candidateRoutes.append(ResolvedAgentRoute(
-            provider: globalProv,
-            model: globalModel,
-            apiKey: globalKey,
-            keyModeOverride: globalKeyMode,
-            authSource: globalKeyMode == "subscription" ? .subscription : .byok
-        ))
+
+        if primaryRoute.keyModeOverride == "subscription" || globalKeyMode == "subscription" {
+            // Subscription-only backup route (never touches BYOK keys)
+            if primaryRoute.provider != globalProv || primaryRoute.model != globalModel {
+                candidateRoutes.append(ResolvedAgentRoute(
+                    provider: globalProv,
+                    model: globalModel,
+                    apiKey: resolveSubscriptionToken(for: globalProv),
+                    keyModeOverride: "subscription",
+                    authSource: .subscription
+                ))
+            }
+        } else if primaryRoute.keyModeOverride == "direct" || globalKeyMode == "direct" {
+            // BYOK-only backup route (never jumps to Subscription OAuth/CLI)
+            let globalKey = AIModelCatalog.resolveKey(globalProv.rawValue)
+            if !globalKey.isEmpty && (primaryRoute.provider != globalProv || primaryRoute.model != globalModel) {
+                candidateRoutes.append(ResolvedAgentRoute(
+                    provider: globalProv,
+                    model: globalModel,
+                    apiKey: globalKey,
+                    keyModeOverride: "direct",
+                    authSource: .byok
+                ))
+            }
+        }
         
         var lastError: Error?
         for (idx, route) in candidateRoutes.enumerated() {

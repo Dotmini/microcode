@@ -66,6 +66,33 @@ private final class StreamContinuationGate: @unchecked Sendable {
     }
 }
 
+// MARK: - Decoupled Session Summary Store & Scroll Gate
+
+/// Publishes ONLY low-frequency session/sidebar metadata changes (never per-token `messages` or `activityLog` ticks),
+/// preventing global window bars and workspace sidebars from re-evaluating 10+ times/sec during AI streaming.
+@MainActor
+final class AgentSessionSummaryStore: ObservableObject {
+    static let shared = AgentSessionSummaryStore()
+    @Published private(set) var revision: UInt64 = 0
+
+    func bump() {
+        revision &+= 1
+    }
+}
+
+/// Tracks active trackpad/mouse scroll wheel motion so `.onHover` handlers skip mutating `@State` mid-scroll.
+enum ChatScrollActivityGate {
+    nonisolated(unsafe) private static var lastScrollTimestamp: CFTimeInterval = 0
+
+    static func recordScrollEvent() {
+        lastScrollTimestamp = CACurrentMediaTime()
+    }
+
+    static var isScrolling: Bool {
+        (CACurrentMediaTime() - lastScrollTimestamp) < 0.18
+    }
+}
+
 // MARK: - Agent Service
 
 @MainActor
@@ -79,6 +106,7 @@ class AgentService: ObservableObject {
     @Published var isLoading = false {
         didSet {
             guard isLoading != oldValue else { return }
+            AgentSessionSummaryStore.shared.bump()
             if isLoading {
                 if backgroundActivityToken == nil {
                     backgroundActivityToken = ProcessInfo.processInfo.beginActivity(
@@ -139,12 +167,26 @@ class AgentService: ObservableObject {
     @Published var taskMdContent: String? = nil
     
     // Multi-Chat & Multi-Workspace Concurrent Execution Isolation State
-    @Published var chatSessions: [ChatSession] = []
-    @Published var activeChatId: String?
+    @Published var chatSessions: [ChatSession] = [] {
+        didSet { AgentSessionSummaryStore.shared.bump() }
+    }
+    @Published var activeChatId: String? {
+        didSet {
+            if activeChatId != oldValue { AgentSessionSummaryStore.shared.bump() }
+        }
+    }
     @Published private(set) var runningChatId: String? = nil
     @Published private(set) var runningWorkspacePath: String? = nil
-    @Published private(set) var runningChatIds: Set<String> = []
-    @Published private(set) var runningWorkspacesByChatId: [String: String] = [:]
+    @Published private(set) var runningChatIds: Set<String> = [] {
+        didSet {
+            if runningChatIds != oldValue { AgentSessionSummaryStore.shared.bump() }
+        }
+    }
+    @Published private(set) var runningWorkspacesByChatId: [String: String] = [:] {
+        didSet {
+            if runningWorkspacesByChatId != oldValue { AgentSessionSummaryStore.shared.bump() }
+        }
+    }
     private var runningChatScope: AgentSessionScope = .editor
     private var runningScopesByChatId: [String: AgentSessionScope] = [:]
     private var runningTasksByChatId: [String: Task<Void, Never>] = [:]
@@ -1237,6 +1279,9 @@ class AgentService: ObservableObject {
         }
         toolBox.workspaceRoot = path
         UserDefaults.standard.set(path, forKey: workspaceStorageKey)
+        if didChangeWorkspace {
+            AgentSessionSummaryStore.shared.bump()
+        }
 
         // Editor instructions and MCP configuration must not leak into a
         // scientific research session. Science has its own indexed evidence.
@@ -1594,7 +1639,11 @@ class AgentService: ObservableObject {
     }
     
     // MARK: - AI.arx Portable Agent Capsule Checkpoint (~/.microcode/workspaces/<id>/AI.arx)
-    var lastImportedArxPatchPath: String? = nil
+    var lastImportedArxPatchPath: String? = nil {
+        didSet {
+            if lastImportedArxPatchPath != oldValue { AgentSessionSummaryStore.shared.bump() }
+        }
+    }
 
     func exportableMessages(for chatId: String?) -> [AgentMessageData] {
         guard let targetId = chatId ?? activeChatId else {
@@ -2191,7 +2240,12 @@ class AgentService: ObservableObject {
         let isGeminiModel = lowerModel.contains("gemini") || lowerModel.contains("gemma")
         let activeSub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
-        if resolvedProvider == "local" || keyMode == "local" || provider.lowercased() == "local" {
+        if keyMode == "enterprise", let prof = EnterpriseAIAuthService.shared.activeProfile {
+            detectedProvider = StreamableAIProvider(rawValue: prof.dialect.brandIconKey) ?? .openai
+            if resolvedModel.isEmpty {
+                resolvedModel = prof.defaultModel.isEmpty ? (prof.availableModels.first ?? "gpt-4o") : prof.defaultModel
+            }
+        } else if resolvedProvider == "local" || keyMode == "local" || provider.lowercased() == "local" {
             detectedProvider = .local
             if let srv = await LocalLLMService.shared.ensureAnyLocalLLMServerRunning() {
                 let validModels = Set(srv.models.map(\.id))
@@ -2206,13 +2260,13 @@ class AgentService: ObservableObject {
             }
         } else if keyMode == "subscription" && (activeSub == "tokenme" || resolvedProvider == "tokenme") && SubscriptionAuthManager.shared.isConnected(.tokenme) {
             detectedProvider = .tokenme
-        } else if keyMode == "subscription" && (activeSub == "aipass" || resolvedProvider == "aipass") && SubscriptionAuthManager.shared.isConnected(.aipass) {
+        } else if keyMode == "subscription" && (activeSub == "aipass" || activeSub == "thai_gemini_enterprise" || resolvedProvider == "aipass") && (SubscriptionAuthManager.shared.isConnected(.aipass) || SubscriptionAuthManager.shared.isConnected(.thai_gemini_enterprise)) {
             detectedProvider = .aipass
         } else if detectedProvider == .gemini && !isGeminiModel {
             if keyMode == "subscription" {
                 if activeSub == "tokenme" || resolvedProvider == "tokenme" {
                     detectedProvider = .tokenme
-                } else if activeSub == "aipass" || resolvedProvider == "aipass" {
+                } else if activeSub == "aipass" || activeSub == "thai_gemini_enterprise" || resolvedProvider == "aipass" {
                     detectedProvider = .aipass
                 } else if activeSub == "copilot" || SubscriptionAuthManager.shared.isConnected(.copilot) || resolvedProvider == "copilot" {
                     detectedProvider = .copilot
@@ -2939,7 +2993,7 @@ class AgentService: ObservableObject {
                 }
             }
             var kernelFollowUp: String?
-            let readOnlyTools: Set<String> = ["attachment_read", "file_read", "multi_file_read", "grep_search", "find_symbol", "list_directory_tree", "file_search", "get_diagnostics", "git_status", "git_diff", "git_log", "lsp_hover", "lsp_definition", "lsp_completions", "lsp_diagnostics", "lsp_status", "inspect_image", "extract_pdf"]
+            let readOnlyTools: Set<String> = ["attachment_read", "file_read", "multi_file_read", "grep_search", "find_symbol", "list_directory_tree", "file_search", "get_diagnostics", "git_status", "git_diff", "git_log", "lsp_hover", "lsp_definition", "lsp_completions", "lsp_diagnostics", "lsp_status", "inspect_image", "extract_pdf", "slop_check"]
             let allReadOnly = receivedToolCalls.allSatisfy { readOnlyTools.contains($0.name) }
             
             if allReadOnly && receivedToolCalls.count > 1 {
@@ -3853,9 +3907,10 @@ class AgentService: ObservableObject {
         pendingStreamFullText = currentFullText
         
         let now = ProcessInfo.processInfo.systemUptime
-        // Adaptive throttle: ~10.5fps (95ms) for concise replies, scaling to ~6.9fps (145ms) once
-        // markdown exceeds 2 KB to prevent full-tree SwiftUI layout & GPU spikes on long streams.
-        let minInterval: TimeInterval = currentFullText.utf8.count > 2048 ? 0.145 : 0.095
+        // Adaptive throttle: ~10.5fps (95ms) for concise replies, scaling to ~6.9fps (145ms) > 2 KB
+        // and ~4.8fps (210ms) > 8 KB to prevent SwiftUI layout & GPU spikes on large Markdown/table streams.
+        let utf8Len = currentFullText.utf8.count
+        let minInterval: TimeInterval = utf8Len > 8192 ? 0.210 : (utf8Len > 2048 ? 0.145 : 0.095)
         let lastUptime = lastStreamUpdateUptimeByChat[chatKey] ?? 0
         if now - lastUptime >= minInterval {
             lastStreamUpdateUptimeByChat[chatKey] = now

@@ -152,6 +152,80 @@ struct WebSubscriptionLoginSheet: View {
             
             Divider()
             
+            // Thai AI Gemini Enterprise (AiPASS.TH · Vertex AI Search) Session URL & Cookie Bar
+            if provider == .thai_gemini_enterprise && !isSuccess {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12))
+                            .foregroundColor(.blue)
+                        Text("Thai AI Gemini Enterprise (AiPASS.TH · vertexaisearch.cloud.google) — Sign in below or paste your session URL / cURL:")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button(action: {
+                            let target = URL(string: manualKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? provider.webLoginURL
+                            NSWorkspace.shared.open(target)
+                            statusMessage = "Opened Thai AI Gemini Enterprise in browser — copy your session URL or cURL, then click Connect Session."
+                        }) {
+                            Label("Open in Browser", systemImage: "safari")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField(
+                            "https://vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b/r/session/...",
+                            text: $manualKeyInput
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .onSubmit {
+                            if let url = URL(string: manualKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)),
+                               url.host?.contains("vertexaisearch.cloud.google") == true {
+                                let cfg = VertexAISearchWebBridge.parseConfig(from: url.absoluteString)
+                                VertexAISearchWebBridge.saveConfig(cfg)
+                                webView?.load(URLRequest(url: url))
+                            } else {
+                                _ = tryConnectManualOrClipboardKey(allowClipboardFallback: false)
+                            }
+                        }
+
+                        Button(action: {
+                            let trimmed = manualKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if let url = URL(string: trimmed), url.host?.contains("vertexaisearch.cloud.google") == true {
+                                let cfg = VertexAISearchWebBridge.parseConfig(from: trimmed)
+                                VertexAISearchWebBridge.saveConfig(cfg)
+                                webView?.load(URLRequest(url: url))
+                                statusMessage = "Loading Thai AI Gemini Enterprise session..."
+                            }
+                        }) {
+                            Label("Load URL", systemImage: "arrow.right.circle")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button(action: {
+                            _ = tryConnectManualOrClipboardKey(allowClipboardFallback: true)
+                        }) {
+                            Label("Connect Session", systemImage: "checkmark.seal.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(Color.blue.opacity(0.06))
+
+                Divider()
+            }
+
             // Quick API Key / Safari OAuth Bypass Bar for API-Key-Backed Portals (e.g. TokenMe Google/Discord Sign-In)
             if provider.isAPIKeyBackedPortal && !isSuccess {
                 VStack(alignment: .leading, spacing: 6) {
@@ -201,26 +275,144 @@ struct WebSubscriptionLoginSheet: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                        
-                        let savedByok = (UserDefaults.standard.string(forKey: "\(provider.aiProviderID)_api_key") ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !savedByok.isEmpty && !SubscriptionAuthManager.isCorruptedToken(savedByok) {
-                            Button(action: {
-                                handleTokenDetected(token: savedByok, user: "\(provider.shortLabel) Subscription")
-                            }) {
-                                Label("Use Saved API Key", systemImage: "checkmark.seal.fill")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.green)
-                            .controlSize(.small)
-                        }
                     }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 9)
                 .background(Color.accentColor.opacity(0.06))
                 
+                Divider()
+            }
+
+            // Google Gemini Official Loopback PKCE OAuth Banner (avoids WebView disallowed_useragent & unusable __Secure-1PSID cookies)
+            if provider == .gemini && !isSuccess {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Official Google Browser OAuth (Recommended — Zero API Billing)")
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Text("Signs in via your default browser (Safari/Chrome) for renewable Gemini Code Assist OAuth without WebView blocks.")
+                            .font(.system(size: 10.5))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button(action: {
+                        isScanning = true
+                        statusMessage = "Waiting for Google sign-in in your browser..."
+                        SubscriptionAuthManager.shared.startGoogleCodeAssistOAuthFlow(
+                            onSuccess: { token, email in
+                                handleTokenDetected(token: token, user: email)
+                            },
+                            onError: { err in
+                                isScanning = false
+                                statusMessage = err
+                            }
+                        )
+                    }) {
+                        Label("Sign in via Browser OAuth", systemImage: "safari.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(Color.blue.opacity(0.08))
+
+                Divider()
+            }
+
+            // Claude Code CLI Zero-Cost OAuth Quick Connect Banner (if logged in locally)
+            if provider == .claude && !isSuccess && AIClient.hasLocalClaudeCodeOAuth() && ACPHostService.resolveAgentBinary(for: .claudeCode) != nil {
+                HStack(spacing: 10) {
+                    Image(systemName: "terminal.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(.orange)
+                    Text("Detected active Claude Code CLI OAuth login on this Mac (Zero API Cost) — or sign in to claude.ai below:")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    Button(action: {
+                        isScanning = true
+                        Task {
+                            await SubscriptionAuthManager.shared.detectLocalCLISessions()
+                            await MainActor.run {
+                                if let acc = SubscriptionAuthManager.shared.getAccount(.claude) {
+                                    SubscriptionAuthManager.shared.activeProvider = .claude
+                                    UserDefaults.standard.set(SubscriptionProviderType.claude.rawValue, forKey: "subscriptionActiveProvider")
+                                    UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+                                    UserDefaults.standard.set(SubscriptionProviderType.claude.aiProviderID, forKey: "aiProvider")
+                                    if let firstModel = SubscriptionProviderType.claude.modelInfos.first?.modelID {
+                                        UserDefaults.standard.set(firstModel, forKey: "aiModel")
+                                    }
+                                    detectedUser = acc.emailOrUser
+                                    isSuccess = true
+                                    isScanning = false
+                                    statusMessage = "Linked \(acc.emailOrUser)!"
+                                    onConnected?()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dismiss() }
+                                } else {
+                                    isScanning = false
+                                }
+                            }
+                        }
+                    }) {
+                        Label("Use Claude CLI OAuth", systemImage: "bolt.shield.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.orange.opacity(0.08))
+
+                Divider()
+            }
+
+            // ChatGPT / Codex CLI OAuth Auto-Refresh Quick Connect Banner (if ~/.codex/auth.json exists)
+            if provider == .chatgpt && !isSuccess && FileManager.default.fileExists(atPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/auth.json").path) {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(.green)
+                    Text("Detected local Codex ChatGPT OAuth session (~/.codex/auth.json) — click to refresh & connect, or sign in below:")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    Button(action: {
+                        isScanning = true
+                        statusMessage = "Refreshing ChatGPT Codex OAuth session..."
+                        Task {
+                            if let verified = await AIClient.verifyCodexOAuthCredentials() {
+                                await MainActor.run {
+                                    handleTokenDetected(token: verified.accessToken, user: verified.email)
+                                }
+                            } else {
+                                await MainActor.run {
+                                    isScanning = false
+                                    statusMessage = "Local Codex token expired — please sign in to chatgpt.com below."
+                                }
+                            }
+                        }
+                    }) {
+                        Label("Refresh & Connect Codex OAuth", systemImage: "checkmark.seal.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.green.opacity(0.08))
+
                 Divider()
             }
             
@@ -359,7 +551,15 @@ struct WebSubscriptionLoginSheet: View {
             if provider == .copilot {
                 startCopilotFlow()
             } else if provider == .tokenme {
-                statusMessage = "Copy your tm_... key from TokenMe Console (or click Paste & Connect / Use Saved API Key)."
+                statusMessage = "Copy your tm_... key from TokenMe Console (or click Paste & Connect)."
+            } else if provider == .gemini {
+                statusMessage = "Click 'Sign in via Browser OAuth' above for official zero-cost Google Code Assist authentication."
+            } else if provider == .deepseek || provider == .glm {
+                statusMessage = "Sign in to \(provider.shortLabel) Console below, copy an API key, or click Paste & Connect."
+            } else if provider == .thai_gemini_enterprise {
+                let savedURL = UserDefaults.standard.string(forKey: "thai_gemini_enterprise_url") ?? ""
+                manualKeyInput = savedURL.isEmpty ? VertexAISearchWebBridge.defaultSessionURLString : savedURL
+                statusMessage = "Sign in to Thai AI Gemini Enterprise (AiPASS.TH) below or click Connect Session."
             }
         }
     }
@@ -367,6 +567,15 @@ struct WebSubscriptionLoginSheet: View {
     @discardableResult
     private func tryConnectManualOrClipboardKey(allowClipboardFallback: Bool) -> Bool {
         let typed = manualKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if provider == .thai_gemini_enterprise {
+            let source = !typed.isEmpty
+                ? typed
+                : ((allowClipboardFallback ? NSPasteboard.general.string(forType: .string) : nil)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+            let effectiveSource = source.isEmpty ? (currentURL?.absoluteString ?? VertexAISearchWebBridge.defaultSessionURLString) : source
+            let normalized = SubscriptionAuthManager.normalizeThaiGeminiEnterpriseToken(effectiveSource)
+            handleTokenDetected(token: normalized, user: "Thai AI Gemini Enterprise (AiPASS.TH)")
+            return true
+        }
         if !typed.isEmpty {
             let normalized = provider.isAPIKeyBackedPortal
                 ? SubscriptionAuthManager.normalizeBearerOrCurlToken(typed)
@@ -375,7 +584,7 @@ struct WebSubscriptionLoginSheet: View {
                 handleTokenDetected(token: normalized, user: "\(provider.shortLabel) Subscription")
                 return true
             } else {
-                statusMessage = "Invalid token format — paste your real API key (e.g. tm_...)."
+                statusMessage = "Invalid token format — paste your real API key (e.g. tm_... or sk-...)."
                 return false
             }
         }
@@ -394,8 +603,9 @@ struct WebSubscriptionLoginSheet: View {
         }
         let knownPrefixes = ["tm_", "tkm_", "tk_", "tokenme_", "perch-", "sk-or-v1-", "gsk_", "pplx-", "xai-", "csk-", "fw_", "nvapi-", "sk-"]
         let matchesPrefix = knownPrefixes.contains { normalized.hasPrefix($0) }
+        let looksLikeZhipuGLMKey = (provider == .glm && !normalized.hasPrefix("eyJhbGci") && normalized.split(separator: ".").count == 2 && normalized.count >= 32)
         let looksLikeCurlExtraction = clip.contains("curl ") && clip.lowercased().contains("authorization:")
-        if matchesPrefix || looksLikeCurlExtraction {
+        if matchesPrefix || looksLikeZhipuGLMKey || looksLikeCurlExtraction {
             handleTokenDetected(token: normalized, user: "\(provider.shortLabel) Subscription")
             return true
         }
@@ -490,7 +700,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
         // Hook navigator.clipboard.writeText & copy events on API-key portals (e.g. playground.opentyphoon.ai)
         // so clicking "Copy Key" in a Next.js modal immediately triggers 1-Click Auto-Connect.
         switch provider {
-        case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
+        case .deepseek, .glm, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
              .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
             let clipboardHookJS = """
             (() => {
@@ -655,35 +865,13 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                     }
                     
                 case .gemini:
-                    if let cookie = cookies.first(where: { ($0.name == "__Secure-1PSID" || $0.name == "__Secure-3PSID" || $0.name == "SID") && !$0.value.isEmpty }) {
-                        self.isFound = true
-                        DispatchQueue.main.async {
-                            self.parent.onTokenDetected(cookie.value, "Google One Subscriber")
-                        }
-                        return
-                    }
-                    
-                case .deepseek:
-                    if let cookie = cookies.first(where: { ($0.name == "userToken" || $0.name == "auth_token") && !SubscriptionAuthManager.isCorruptedToken($0.value) }) {
-                        self.isFound = true
-                        DispatchQueue.main.async {
-                            self.parent.onTokenDetected(cookie.value, "DeepSeek Web User")
-                        }
-                        return
-                    }
+                    // Handled via Official Loopback PKCE Browser OAuth (`startGoogleCodeAssistOAuthFlow`) or local CLI OAuth;
+                    // raw `__Secure-1PSID` (`g.a000...`) web cookies cannot call Google APIs and must not falsely auto-close.
+                    break
                     
                 case .copilot:
                     // Handled exclusively by GitHub Device Flow to obtain official OAuth token (client 01ab8ac9400c4e429b23)
                     break
-                    
-                case .glm:
-                    if let cookie = cookies.first(where: { $0.name == "token" && !SubscriptionAuthManager.isCorruptedToken($0.value) }) {
-                        self.isFound = true
-                        DispatchQueue.main.async {
-                            self.parent.onTokenDetected(cookie.value, "GLM BigModel User")
-                        }
-                        return
-                    }
                     
                 case .aipass:
                     let aipassCookies = cookies.filter { $0.domain.contains("aipass.net") }
@@ -696,8 +884,15 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                         }
                         return
                     }
+
+                case .thai_gemini_enterprise:
+                    if let webView = webView {
+                        DispatchQueue.main.async {
+                            self.checkJavaScript(in: webView)
+                        }
+                    }
                     
-                case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
+                case .deepseek, .glm, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
                      .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
                     if let webView = webView {
                         DispatchQueue.main.async {
@@ -749,60 +944,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 })()
                 """
                 
-            case .deepseek:
-                jsScript = """
-                (() => {
-                    try {
-                        for (const key of ['userToken', 'user_token', 'auth_token', 'token', 'd_token']) {
-                            const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
-                            if (!raw || raw === 'null' || raw === 'undefined') continue;
-                            try {
-                                const parsed = JSON.parse(raw);
-                                if (parsed && typeof parsed === 'object') {
-                                    const val = parsed.value || parsed.token || parsed.access_token;
-                                    if (typeof val === 'string' && val.length > 16 && val !== 'null') {
-                                        return JSON.stringify({ token: val, user: 'DeepSeek User' });
-                                    }
-                                    continue;
-                                }
-                            } catch(e) {}
-                            const trimmed = String(raw).trim();
-                            if (!trimmed.startsWith('{') && trimmed.length > 16 && !trimmed.includes('"value":null')) {
-                                return JSON.stringify({ token: trimmed, user: 'DeepSeek User' });
-                            }
-                        }
-                    } catch(e) {}
-                    return null;
-                })()
-                """
-                
-            case .gemini:
-                jsScript = """
-                (() => {
-                    try {
-                        const m1 = document.cookie.match(/__Secure-1PSID=([^;]+)/);
-                        if (m1 && m1[1]) return JSON.stringify({ token: m1[1], user: 'Gemini Advanced' });
-                        const m3 = document.cookie.match(/__Secure-3PSID=([^;]+)/);
-                        if (m3 && m3[1]) return JSON.stringify({ token: m3[1], user: 'Gemini Advanced' });
-                        const ms = document.cookie.match(/(?:^|;\\s*)SID=([^;]+)/);
-                        if (ms && ms[1]) return JSON.stringify({ token: ms[1], user: 'Google Account' });
-                    } catch(e) {}
-                    return null;
-                })()
-                """
-                
-            case .glm:
-                jsScript = """
-                (() => {
-                    try {
-                        const tok = localStorage.getItem('token');
-                        if (tok && tok !== 'null' && !tok.startsWith('{')) return JSON.stringify({ token: tok, user: 'GLM User' });
-                    } catch(e) {}
-                    return null;
-                })()
-                """
-                
-            case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
+            case .deepseek, .glm, .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .tokenme, .typhoon,
                  .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
                 let userLabel = parent.provider.shortLabel
                 let isTokenMe = parent.provider == .tokenme ? "true" : "false"
@@ -823,7 +965,8 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                             /csk-[A-Za-z0-9]{24,}/,
                             /fw_[A-Za-z0-9]{20,}/,
                             /nvapi-[A-Za-z0-9_-]{24,}/,
-                            /sk-[A-Za-z0-9_-]{28,}/
+                            /sk-[A-Za-z0-9_-]{28,}/,
+                            /^[A-Za-z0-9]{28,40}\\.[A-Za-z0-9]{12,24}$/
                         ];
                         if (typeof window.__mcCopiedToken === 'string' && window.__mcCopiedToken.length >= 20) {
                             const copied = window.__mcCopiedToken.trim();
@@ -856,7 +999,40 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 })()
                 """
                 
-            case .copilot, .aipass:
+            case .thai_gemini_enterprise:
+                jsScript = """
+                (() => {
+                    try {
+                        if (location.hostname !== 'vertexaisearch.cloud.google' || !location.pathname.includes('/cid/')) {
+                            return null;
+                        }
+                        const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
+                        const hasWorkspaceMarkers = location.search.includes('csesidx=') ||
+                                                    bodyText.includes('New chat') ||
+                                                    bodyText.includes('Gemini 4 Argon') ||
+                                                    bodyText.includes('Deep Research') ||
+                                                    bodyText.includes('AiPASS') ||
+                                                    Boolean(document.querySelector('textarea, [contenteditable="true"], ucs-standalone-app'));
+                        if (!hasWorkspaceMarkers) return null;
+                        let userLabel = 'Thai AI Gemini Enterprise (AiPASS.TH)';
+                        const lines = bodyText.split('\\n').map(s => s.trim()).filter(Boolean);
+                        const idx = lines.findIndex(l => l === 'Recent' || l.startsWith('Recent'));
+                        if (idx >= 0 && lines.length > idx + 2) {
+                            const tail = lines[lines.length - 1];
+                            if (tail && tail.length >= 3 && tail.length <= 42 && !tail.includes('Generative AI')) {
+                                userLabel = tail + ' (AiPASS.TH)';
+                            }
+                        }
+                        return JSON.stringify({
+                            token: location.href,
+                            user: userLabel
+                        });
+                    } catch (e) {}
+                    return null;
+                })()
+                """
+
+            case .copilot, .aipass, .gemini:
                 jsScript = ""
             }
             

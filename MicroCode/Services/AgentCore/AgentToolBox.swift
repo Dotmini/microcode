@@ -151,6 +151,7 @@ class AgentToolBox: ObservableObject {
         register(VoiceCodingTool())
         // Feature 11: Autonomous Skill Engine 2.0, Hyper-Mesh MCP 2.0, SubAgent Swarm 2.0 & PNS 24/7
         register(SkillEngineTool())
+        register(SlopCheckTool())
         register(MCPOrchestratorTool())
         register(SwarmOrchestratorTool())
         register(PNSNervousSystemTool())
@@ -5941,6 +5942,116 @@ struct SendMessageTool: AgentTool {
             SubAgentHarness.shared.sendMessage(recipientId: recipientId, message: message)
         }
         return success ? "Message delivered to SubAgent #\(recipientId.prefix(6))." : "SubAgent #\(recipientId.prefix(6)) not found."
+    }
+}
+
+// MARK: - slop_check (deterministic quality + secret linter)
+
+struct SlopCheckTool: AgentTool {
+    let name = "slop_check"
+    let description = "Deterministic linter for generic AI filler and leaked secrets. Scans a file, a directory, the files changed in git (changed_only), or inline text. Flags filler openers/closers and hype wording in prose, placeholder bodies, empty catch blocks, restating comments and debug output in code, default-template UI tells (purple gradients, lorem ipsum, removed focus outline) and hard-coded keys. Run it on what you produced before you finalise and fix every high finding."
+    let parameters = [
+        ToolParameter(name: "path", type: "string", description: "File or directory to scan (absolute, ~ or workspace-relative).", required: false),
+        ToolParameter(name: "text", type: "string", description: "Inline text to scan instead of a file, for example your draft reply.", required: false),
+        ToolParameter(name: "extension", type: "string", description: "Extension hint for inline text: md, swift, ts, tsx, html, css, py ... Defaults to prose.", required: false),
+        ToolParameter(name: "changed_only", type: "boolean", description: "Scan only files changed in git (staged, unstaged, untracked) under the workspace.", required: false)
+    ]
+
+    private static let skipDirs: Set<String> = [".git", ".build", "build", "dist", "node_modules", "DerivedData", "Pods", "target", ".next", ".venv", "venv", "__pycache__", ".codetuner-build"]
+    private static let maxFiles = 200
+    private static let maxBytes = 400_000
+
+    func execute(params: [String: Any]) async throws -> String {
+        let ws = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
+
+        if let text = params["text"] as? String, !text.isEmpty {
+            let ext = (params["extension"] as? String)?.trimmingCharacters(in: CharacterSet(charactersIn: ". ")) ?? "md"
+            return SlopLint.report(SlopLint.scan(text: text, fileExtension: ext))
+        }
+
+        var files: [String] = []
+        let changedOnly = (params["changed_only"] as? Bool) ?? false
+        let rawPath = (params["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        func resolve(_ p: String) -> String {
+            let expanded = NSString(string: p).expandingTildeInPath
+            if expanded.hasPrefix("/") { return expanded }
+            return NSString(string: ws ?? FileManager.default.currentDirectoryPath).appendingPathComponent(expanded)
+        }
+
+        if changedOnly || rawPath.isEmpty {
+            guard let root = ws else { throw ToolBoxError.invalidParams("No workspace is open; pass path or text.") }
+            files = Self.gitChangedFiles(root: root)
+            if files.isEmpty { return "slop_check: no changed files under \(root)" }
+        } else {
+            let resolved = resolve(rawPath)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir) else {
+                throw ToolBoxError.invalidParams("Path not found: \(resolved)")
+            }
+            if isDir.boolValue {
+                files = Self.collect(directory: resolved)
+            } else {
+                files = [resolved]
+            }
+        }
+
+        var sections: [String] = []
+        var totalHigh = 0, totalFindings = 0, scanned = 0
+        for path in files.prefix(Self.maxFiles) {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let size = attrs[.size] as? Int, size <= Self.maxBytes,
+                  let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            scanned += 1
+            let findings = SlopLint.scan(text: text, fileExtension: (path as NSString).pathExtension)
+            guard !findings.isEmpty else { continue }
+            totalFindings += findings.count
+            totalHigh += findings.filter { $0.severity == .high }.count
+            let display = ws.flatMap { path.hasPrefix($0 + "/") ? String(path.dropFirst($0.count + 1)) : nil } ?? path
+            sections.append(SlopLint.report(findings, file: display, limit: 12))
+        }
+        if sections.isEmpty { return "slop_check: clean (\(scanned) file(s) scanned)" }
+        let header = "slop_check: \(totalFindings) finding(s), \(totalHigh) high, across \(sections.count) of \(scanned) scanned file(s)"
+        return ([header] + sections).joined(separator: "\n\n")
+    }
+
+    private static func collect(directory: String) -> [String] {
+        var out: [String] = []
+        guard let en = FileManager.default.enumerator(atPath: directory) else { return out }
+        while let rel = en.nextObject() as? String {
+            let comp = (rel as NSString).lastPathComponent
+            if skipDirs.contains(comp) { en.skipDescendants(); continue }
+            let ext = (rel as NSString).pathExtension.lowercased()
+            if SlopLint.codeExtensions.contains(ext) || SlopLint.uiExtensions.contains(ext) || ["md", "markdown", "txt"].contains(ext) {
+                out.append((directory as NSString).appendingPathComponent(rel))
+                if out.count >= maxFiles { break }
+            }
+        }
+        return out
+    }
+
+    private static func gitChangedFiles(root: String) -> [String] {
+        let proc = Process()
+        let pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all"]
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        guard (try? proc.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let entries = String(decoding: data, as: UTF8.self).split(separator: "\0").map(String.init)
+        var out: [String] = []
+        for e in entries where e.count > 3 {
+            let status = e.prefix(2)
+            if status.contains("D") { continue }
+            let rel = String(e.dropFirst(3))
+            let ext = (rel as NSString).pathExtension.lowercased()
+            if SlopLint.codeExtensions.contains(ext) || SlopLint.uiExtensions.contains(ext) || ["md", "markdown", "txt"].contains(ext) {
+                out.append((root as NSString).appendingPathComponent(rel))
+            }
+        }
+        return out
     }
 }
 

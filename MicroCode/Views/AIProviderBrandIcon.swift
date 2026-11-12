@@ -117,7 +117,7 @@ struct AIProviderBrandIcon: View {
             return "lmstudio"
         case "vllm", "mlx":
             return "vllm"
-        case "aipass", "thai_passport", "th_ai_pass":
+        case "aipass", "thai_passport", "th_ai_pass", "thai_gemini_enterprise":
             return "aipass"
         case "microcode", "microcodenative", "microcode_native", "omni", "dotmini", "custom":
             return "microcode"

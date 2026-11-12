@@ -132,6 +132,61 @@ final class MarkdownAttrCache {
         cache.removeAll(keepingCapacity: false)
         lock.unlock()
     }
+
+    @MainActor
+    static func handleOpenURL(_ url: URL, appState: AppState) -> OpenURLAction.Result {
+        let scheme = url.scheme?.lowercased() ?? ""
+        if url.isFileURL || scheme == "file" || scheme == "microcode-file" {
+            let wsPath = appState.workspaceFolder?.path
+                ?? AgentService.shared.currentWorkspace
+                ?? AgentToolBox.shared.effectiveWorkspaceRoot
+
+            var rawRef = url.absoluteString
+            if scheme == "microcode-file" {
+                rawRef = String(rawRef.dropFirst("microcode-file://".count))
+                rawRef = rawRef.removingPercentEncoding ?? rawRef
+            } else if scheme == "file" {
+                rawRef = url.path.isEmpty
+                    ? (String(rawRef.dropFirst("file://".count)).removingPercentEncoding ?? "")
+                    : url.path
+            }
+
+            // Extract optional #L10-L20 fragment before resolving file on disk
+            var cleanFilePart = rawRef
+            if let hashRange = cleanFilePart.range(of: #"\s*#L\d+(?:-L?\d+)?$"#, options: .regularExpression) {
+                cleanFilePart = String(cleanFilePart[..<hashRange.lowerBound])
+            } else if let colonRange = cleanFilePart.range(of: #":\d+(?::\d+)?$"#, options: .regularExpression) {
+                cleanFilePart = String(cleanFilePart[..<colonRange.lowerBound])
+            }
+
+            if appState.editorMode != .aiAgent,
+               let resolvedURL = PreviewDockService.resolveFileURL(pathOrName: cleanFilePart, workspaceRoot: wsPath) {
+                Task { @MainActor in
+                    await appState.loadFile(url: resolvedURL)
+                }
+                return .handled
+            }
+
+            if PreviewDockService.shared.openFileFromReference(url.absoluteString, workspacePath: wsPath) {
+                return .handled
+            }
+
+            if let resolvedURL = PreviewDockService.resolveFileURL(pathOrName: cleanFilePart, workspaceRoot: wsPath) {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("MicroCodeOpenFileURL"),
+                    object: resolvedURL
+                )
+                return .handled
+            }
+
+            // File does not exist on disk yet (e.g. an example script name in docs like `verify_fixes.sh`):
+            // NEVER fall back to `.systemAction` on `microcode-file://`, which triggers macOS Finder error -50!
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(cleanFilePart, forType: .string)
+            return .handled
+        }
+        return .systemAction
+    }
 }
 
 /// Renders inline markdown (bold, italic, code, links)
@@ -164,64 +219,45 @@ struct MarkdownTextView: View, Equatable {
             .lineSpacing(5)
             .textSelection(.enabled)
             .environment(\.openURL, OpenURLAction { url in
-                if url.isFileURL || url.scheme == "file" || url.scheme == "microcode-file" {
-                    if PreviewDockService.shared.openFileFromReference(url.absoluteString, workspacePath: appState.workspaceFolder?.path) {
-                        return .handled
-                    }
-                    let cleanPath = url.path.isEmpty
-                        ? url.absoluteString.replacingOccurrences(of: "file://", with: "").replacingOccurrences(of: "microcode-file://", with: "").removingPercentEncoding ?? ""
-                        : url.path
-                    if !cleanPath.isEmpty {
-                        NotificationCenter.default.post(
-                            name: NSNotification.Name("MicroCodeOpenFileURL"),
-                            object: URL(fileURLWithPath: cleanPath)
-                        )
-                        return .handled
-                    }
-                }
-                return .systemAction
+                MarkdownAttrCache.handleOpenURL(url, appState: appState)
             })
     }
 }
 
-/// Renders heading with proper font size
+/// Renders heading with proper font size and subtle GFM divider on H1/H2
 struct HeadingView: View {
     let level: Int
     let content: String
     @EnvironmentObject var appState: AppState
     
     var body: some View {
-        Text(MarkdownAttrCache.getOrParse(content, fontSize: fontSize))
-            .font(.system(size: fontSize, weight: .bold))
-            .foregroundColor(.primary)
-            .tint(.accentColor)
-            .textSelection(.enabled)
-            .environment(\.openURL, OpenURLAction { url in
-                if url.isFileURL || url.scheme == "file" || url.scheme == "microcode-file" {
-                    if PreviewDockService.shared.openFileFromReference(url.absoluteString, workspacePath: appState.workspaceFolder?.path) {
-                        return .handled
-                    }
-                    let path = url.path
-                    if !path.isEmpty {
-                        NotificationCenter.default.post(
-                            name: Notification.Name("MicroCodeOpenFileURL"),
-                            object: URL(fileURLWithPath: path)
-                        )
-                        return .handled
-                    }
-                }
-                return .systemAction
-            })
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, topPadding)
-            .padding(.bottom, 4)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(MarkdownAttrCache.getOrParse(content, fontSize: fontSize))
+                .font(.system(size: fontSize, weight: level <= 2 ? .bold : .semibold))
+                .foregroundColor(.primary)
+                .tint(.accentColor)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .environment(\.openURL, OpenURLAction { url in
+                    MarkdownAttrCache.handleOpenURL(url, appState: appState)
+                })
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if level <= 2 {
+                Divider()
+                    .opacity(level == 1 ? 0.45 : 0.28)
+            }
+        }
+        .padding(.top, topPadding)
+        .padding(.bottom, level <= 2 ? 4 : 2)
     }
     
     private var fontSize: CGFloat {
         let base = appState.agentFontSize
         switch level {
-        case 1: return base * 1.5
-        case 2: return base * 1.3
+        case 1: return base * 1.52
+        case 2: return base * 1.30
         case 3: return base * 1.15
         case 4: return base * 1.05
         default: return base
@@ -229,7 +265,7 @@ struct HeadingView: View {
     }
     
     private var topPadding: CGFloat {
-        level <= 2 ? 12 : 6
+        level == 1 ? 10 : (level == 2 ? 12 : 6)
     }
 }
 
@@ -245,7 +281,7 @@ struct RenderedMarkdownDocumentView: View, Equatable {
     var body: some View {
         let blocks = MessageContentParser.parse(markdown)
         Group {
-            if blocks.count > 12 {
+            if blocks.count > 6 {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     renderedBlocks(blocks)
                 }
@@ -255,7 +291,9 @@ struct RenderedMarkdownDocumentView: View, Equatable {
                 }
             }
         }
-        .textSelection(.enabled)
+        .environment(\.openURL, OpenURLAction { url in
+            MarkdownAttrCache.handleOpenURL(url, appState: appState)
+        })
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -268,13 +306,16 @@ struct RenderedMarkdownDocumentView: View, Equatable {
             case .text(let text):
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     MarkdownTextView(text: text)
+                        .equatable()
                 }
             case .code(let lang, let code):
                 let lower = lang.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
                 if lower == "markdown" || lower == "md" || lower.hasSuffix(".md") {
                     MarkdownTextView(text: code)
+                        .equatable()
                 } else {
                     NativeCodeBlockView(language: lang, code: code)
+                        .equatable()
                 }
             case .heading(let level, let content):
                 HeadingView(level: level, content: content)
@@ -282,6 +323,7 @@ struct RenderedMarkdownDocumentView: View, Equatable {
                 ListView(items: items, isOrdered: isOrdered)
             case .table(let headers, let rows):
                 TableBlockView(headers: headers, rows: rows)
+                    .equatable()
             case .blockquote(let content):
                 BlockquoteView(content: content)
             case .latex(let expression, let isBlock):
@@ -310,14 +352,33 @@ struct ListView: View {
     
     private var unifiedListAttributedString: AttributedString {
         var combined = AttributedString()
+        var topLevelOrder = 0
         for (index, rawItem) in items.enumerated() {
             if index > 0 {
                 combined.append(AttributedString("\n"))
             }
-            var marker = AttributedString(isOrdered ? "\(index + 1).  " : "•  ")
-            marker.foregroundColor = .secondary
-            combined.append(marker)
-            combined.append(MarkdownAttrCache.getOrParse(rawItem, fontSize: appState.agentFontSize))
+            if rawItem.hasPrefix("    ") {
+                let indentSpaces = rawItem.prefix(while: { $0 == " " })
+                let afterIndent = String(rawItem.dropFirst(indentSpaces.count))
+                if let subMarkerRange = afterIndent.range(of: #"^(?:◦|\d+\.)\s+"#, options: .regularExpression) {
+                    var marker = AttributedString(String(indentSpaces) + String(afterIndent[subMarkerRange]))
+                    marker.foregroundColor = .secondary
+                    combined.append(marker)
+                    let body = String(afterIndent[subMarkerRange.upperBound...])
+                    combined.append(MarkdownAttrCache.getOrParse(body, fontSize: appState.agentFontSize))
+                } else {
+                    var marker = AttributedString(String(indentSpaces) + "◦  ")
+                    marker.foregroundColor = .secondary
+                    combined.append(marker)
+                    combined.append(MarkdownAttrCache.getOrParse(afterIndent, fontSize: appState.agentFontSize))
+                }
+            } else {
+                topLevelOrder += 1
+                var marker = AttributedString(isOrdered ? "\(topLevelOrder).  " : "•  ")
+                marker.foregroundColor = .secondary
+                combined.append(marker)
+                combined.append(MarkdownAttrCache.getOrParse(rawItem, fontSize: appState.agentFontSize))
+            }
         }
         return combined
     }
@@ -332,22 +393,7 @@ struct ListView: View {
                 .lineSpacing(6)
                 .textSelection(.enabled)
                 .environment(\.openURL, OpenURLAction { url in
-                    if url.isFileURL || url.scheme == "file" || url.scheme == "microcode-file" {
-                        if PreviewDockService.shared.openFileFromReference(url.absoluteString, workspacePath: appState.workspaceFolder?.path) {
-                            return .handled
-                        }
-                        let cleanPath = url.path.isEmpty
-                            ? url.absoluteString.replacingOccurrences(of: "file://", with: "").replacingOccurrences(of: "microcode-file://", with: "").removingPercentEncoding ?? ""
-                            : url.path
-                        if !cleanPath.isEmpty {
-                            NotificationCenter.default.post(
-                                name: NSNotification.Name("MicroCodeOpenFileURL"),
-                                object: URL(fileURLWithPath: cleanPath)
-                            )
-                            return .handled
-                        }
-                    }
-                    return .systemAction
+                    MarkdownAttrCache.handleOpenURL(url, appState: appState)
                 })
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 8)
@@ -385,49 +431,100 @@ struct ListView: View {
                     }
                 }
             }
-            .textSelection(.enabled)
             .padding(.leading, 6)
             .padding(.vertical, 2)
         }
     }
 }
 
-/// Renders blockquote
+/// Renders blockquote & GitHub-style Alerts (`[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`)
 struct BlockquoteView: View {
     let content: String
     @EnvironmentObject var appState: AppState
-    
-    var body: some View {
-        HStack(spacing: 0) {
-            Rectangle()
-                .fill(Color.accentColor.opacity(0.6))
-                .frame(width: 3)
-            
-            Text(MarkdownAttrCache.getOrParse(content, fontSize: appState.agentFontSize))
-                .font(.system(size: appState.agentFontSize))
-                .foregroundColor(.secondary)
-                .tint(.accentColor)
-                .italic()
-                .textSelection(.enabled)
-                .environment(\.openURL, OpenURLAction { url in
-                    if url.isFileURL || url.scheme == "file" || url.scheme == "microcode-file" {
-                        if PreviewDockService.shared.openFileFromReference(url.absoluteString, workspacePath: appState.workspaceFolder?.path) {
-                            return .handled
-                        }
-                        let path = url.path
-                        if !path.isEmpty {
-                            NotificationCenter.default.post(
-                                name: Notification.Name("MicroCodeOpenFileURL"),
-                                object: URL(fileURLWithPath: path)
-                            )
-                            return .handled
-                        }
-                    }
-                    return .systemAction
-                })
-                .padding(.leading, 12)
-                .padding(.vertical, 4)
+
+    private struct CalloutStyle {
+        let accent: Color
+        let badgeTitle: String?
+        let badgeIcon: String?
+        let cleanedBody: String
+    }
+
+    private var callout: CalloutStyle {
+        let lines = content.components(separatedBy: "\n")
+        let first = (lines.first ?? "").trimmingCharacters(in: .whitespaces)
+        let upper = first.uppercased()
+        if upper.hasPrefix("[!WARNING]") {
+            let restFirst = String(first.dropFirst("[!WARNING]".count)).trimmingCharacters(in: .whitespaces)
+            let tail = ([restFirst] + lines.dropFirst()).filter { !$0.isEmpty }.joined(separator: "\n")
+            return CalloutStyle(accent: .orange, badgeTitle: "Warning", badgeIcon: "exclamationmark.triangle.fill", cleanedBody: tail)
+        } else if upper.hasPrefix("[!CAUTION]") {
+            let restFirst = String(first.dropFirst("[!CAUTION]".count)).trimmingCharacters(in: .whitespaces)
+            let tail = ([restFirst] + lines.dropFirst()).filter { !$0.isEmpty }.joined(separator: "\n")
+            return CalloutStyle(accent: .red, badgeTitle: "Caution", badgeIcon: "octagon.fill", cleanedBody: tail)
+        } else if upper.hasPrefix("[!IMPORTANT]") {
+            let restFirst = String(first.dropFirst("[!IMPORTANT]".count)).trimmingCharacters(in: .whitespaces)
+            let tail = ([restFirst] + lines.dropFirst()).filter { !$0.isEmpty }.joined(separator: "\n")
+            return CalloutStyle(accent: .purple, badgeTitle: "Important", badgeIcon: "exclamationmark.bubble.fill", cleanedBody: tail)
+        } else if upper.hasPrefix("[!TIP]") {
+            let restFirst = String(first.dropFirst("[!TIP]".count)).trimmingCharacters(in: .whitespaces)
+            let tail = ([restFirst] + lines.dropFirst()).filter { !$0.isEmpty }.joined(separator: "\n")
+            return CalloutStyle(accent: .green, badgeTitle: "Tip", badgeIcon: "lightbulb.fill", cleanedBody: tail)
+        } else if upper.hasPrefix("[!NOTE]") {
+            let restFirst = String(first.dropFirst("[!NOTE]".count)).trimmingCharacters(in: .whitespaces)
+            let tail = ([restFirst] + lines.dropFirst()).filter { !$0.isEmpty }.joined(separator: "\n")
+            return CalloutStyle(accent: .blue, badgeTitle: "Note", badgeIcon: "info.circle.fill", cleanedBody: tail)
+        } else if first.hasPrefix("⚠️") {
+            return CalloutStyle(accent: .orange, badgeTitle: nil, badgeIcon: nil, cleanedBody: content)
+        } else if first.hasPrefix("🚨") || first.hasPrefix("🔴") || first.hasPrefix("🛑") {
+            return CalloutStyle(accent: .red, badgeTitle: nil, badgeIcon: nil, cleanedBody: content)
+        } else if first.hasPrefix("💡") || first.hasPrefix("✅") {
+            return CalloutStyle(accent: .green, badgeTitle: nil, badgeIcon: nil, cleanedBody: content)
         }
+        return CalloutStyle(accent: .accentColor, badgeTitle: nil, badgeIcon: nil, cleanedBody: content)
+    }
+
+    var body: some View {
+        let resolved = callout
+        let font = MarkdownTextView.resolvedFont(name: appState.agentFontName, size: appState.agentFontSize)
+        HStack(alignment: .top, spacing: 0) {
+            Rectangle()
+                .fill(resolved.accent.opacity(0.85))
+                .frame(width: 3.5)
+
+            VStack(alignment: .leading, spacing: 6) {
+                if let title = resolved.badgeTitle, let icon = resolved.badgeIcon {
+                    HStack(spacing: 5) {
+                        Image(systemName: icon)
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Text(title)
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundColor(resolved.accent)
+                }
+
+                if !resolved.cleanedBody.isEmpty {
+                    Text(MarkdownAttrCache.getOrParse(resolved.cleanedBody, fontSize: appState.agentFontSize))
+                        .font(font)
+                        .foregroundColor(.primary.opacity(0.88))
+                        .tint(.accentColor)
+                        .lineSpacing(5)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .environment(\.openURL, OpenURLAction { url in
+                            MarkdownAttrCache.handleOpenURL(url, appState: appState)
+                        })
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(resolved.accent.opacity(0.055))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(resolved.accent.opacity(0.16), lineWidth: 1)
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -2051,14 +2148,18 @@ struct HTMLBlockView: View {
     }
 }
 
-/// Renders Markdown Table with native text selection, unobstructed drag-highlight, and quick cell/table copy
-struct TableBlockView: View {
+/// Renders Markdown Table with smart column sizing, multi-line cell wrapping, aligned borders, and zero scroll/hover thrash
+struct TableBlockView: View, Equatable {
     let headers: [String]
     let rows: [[String]]
-    @State private var copiedCellKey: String? = nil
-    @State private var hoveredCellKey: String? = nil
+    @EnvironmentObject var appState: AppState
     @State private var copiedTable: Bool = false
-    
+    @State private var measuredWidth: CGFloat = 520
+
+    static func == (lhs: TableBlockView, rhs: TableBlockView) -> Bool {
+        lhs.headers == rhs.headers && lhs.rows == rhs.rows
+    }
+
     private var tsvRepresentation: String {
         var lines: [String] = [headers.joined(separator: "\t")]
         for row in rows {
@@ -2066,36 +2167,115 @@ struct TableBlockView: View {
         }
         return lines.joined(separator: "\n")
     }
-    
+
     private static func plainCellValue(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "**", with: "")
             .replacingOccurrences(of: "`", with: "")
     }
-    
+
+    private struct ColumnLayoutPlan {
+        let widths: [CGFloat]
+        let needsHorizontalScroll: Bool
+        var totalWidth: CGFloat {
+            widths.reduce(0, +) + CGFloat(max(0, widths.count - 1))
+        }
+    }
+
+    private func computeLayoutPlan(availableWidth: CGFloat) -> ColumnLayoutPlan {
+        guard !headers.isEmpty else {
+            return ColumnLayoutPlan(widths: [], needsHorizontalScroll: false)
+        }
+        let colCount = headers.count
+        var maxCharsPerCol: [Int] = Array(repeating: 1, count: colCount)
+        for col in 0..<colCount {
+            let hLen = max(1, Self.plainCellValue(headers[col]).count)
+            var best = hLen
+            for row in rows where col < row.count {
+                let cLen = Self.plainCellValue(row[col]).count
+                if cLen > best { best = cLen }
+            }
+            maxCharsPerCol[col] = best
+        }
+
+        let minWidths: [CGFloat] = maxCharsPerCol.enumerated().map { idx, chars in
+            let headerLen = Self.plainCellValue(headers[idx]).count
+            if chars <= 3 && headerLen <= 3 {
+                return 44
+            } else if chars <= 10 && headerLen <= 10 {
+                return 84
+            } else if chars <= 20 {
+                return 112
+            } else {
+                return 136
+            }
+        }
+
+        let weights: [CGFloat] = maxCharsPerCol.map { chars in
+            if chars <= 3 { return 3.5 }
+            if chars <= 12 { return CGFloat(chars) }
+            return 12.0 + sqrt(CGFloat(chars - 12)) * 3.8
+        }
+
+        let dividerTotal = CGFloat(max(0, colCount - 1))
+        let totalMin = minWidths.reduce(0, +) + dividerTotal
+        let effectiveAvailable = max(0, availableWidth - 2)
+
+        if effectiveAvailable >= totalMin && effectiveAvailable > 0 {
+            let extra = effectiveAvailable - totalMin
+            let flexIndices = maxCharsPerCol.indices.filter { maxCharsPerCol[$0] > 4 }
+            let activeIndices = flexIndices.isEmpty ? Array(maxCharsPerCol.indices) : flexIndices
+            let weightSum = activeIndices.reduce(CGFloat(0)) { $0 + weights[$1] }
+            var fitted = minWidths
+            if weightSum > 0 && extra > 0 {
+                for i in activeIndices {
+                    fitted[i] += floor(extra * (weights[i] / weightSum))
+                }
+                let remainder = effectiveAvailable - (fitted.reduce(0, +) + dividerTotal)
+                if let widestIdx = activeIndices.max(by: { weights[$0] < weights[$1] }), remainder > 0 {
+                    fitted[widestIdx] += remainder
+                }
+            }
+            return ColumnLayoutPlan(widths: fitted, needsHorizontalScroll: false)
+        } else {
+            let scrollWidths: [CGFloat] = maxCharsPerCol.enumerated().map { idx, chars in
+                let minW = minWidths[idx]
+                let estimated = CGFloat(chars) * 7.5 + 26
+                return min(280, max(minW, estimated))
+            }
+            return ColumnLayoutPlan(widths: scrollWidths, needsHorizontalScroll: true)
+        }
+    }
+
     @ViewBuilder
-    private func tableGridContent(scrollable: Bool) -> some View {
-        let minColW: CGFloat = scrollable ? 110 : 72
-        let maxColW: CGFloat? = scrollable ? nil : .infinity
+    private func tableGridContent(columnWidths: [CGFloat]) -> some View {
+        let totalW = columnWidths.reduce(0, +) + CGFloat(max(0, columnWidths.count - 1))
+        let cellFontSize = max(11.5, appState.agentFontSize - 0.5)
+        let cellFont = MarkdownTextView.resolvedFont(name: appState.agentFontName, size: cellFontSize)
+
         VStack(alignment: .leading, spacing: 0) {
             // Header Row
-            HStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 0) {
                 ForEach(headers.indices, id: \.self) { idx in
-                    HStack(spacing: 4) {
-                        Text(MarkdownAttrCache.getOrParse(headers[idx]))
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.primary)
-                            .textSelection(.enabled)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(minWidth: minColW, maxWidth: maxColW, alignment: .leading)
-                    
+                    let colW = idx < columnWidths.count ? columnWidths[idx] : 120
+                    Text(MarkdownAttrCache.getOrParse(headers[idx], fontSize: 12))
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.primary)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 10)
+                        .padding(.trailing, idx == headers.count - 1 ? 26 : 0)
+                        .padding(.vertical, 8)
+                        .frame(width: colW, alignment: .leading)
+
                     if idx < headers.count - 1 {
-                        Divider()
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.10))
+                            .frame(width: 1)
                     }
                 }
             }
+            .fixedSize(horizontal: false, vertical: true)
             .background(Color.primary.opacity(0.06))
             .overlay(alignment: .trailing) {
                 Button(action: {
@@ -2112,101 +2292,110 @@ struct TableBlockView: View {
                                 .font(.system(size: 9.5, weight: .medium))
                         }
                     }
-                    .foregroundColor(copiedTable ? .green : .secondary.opacity(0.75))
+                    .foregroundColor(copiedTable ? .green : .secondary.opacity(0.8))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
                     .background(Color.primary.opacity(0.06))
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 8)
+                .padding(.trailing, 6)
                 .help("คัดลอกทั้งตาราง (Copy Table)")
             }
-            
-            Divider()
-            
-            // Data Rows
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.14))
+                .frame(height: 1)
+
+            // Data Rows — zero per-cell .onHover or @EnvironmentObject instantiation so 120Hz scroll stays locked
             ForEach(rows.indices, id: \.self) { rowIdx in
                 let row = rows[rowIdx]
-                HStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
                     ForEach(headers.indices, id: \.self) { colIdx in
+                        let colW = colIdx < columnWidths.count ? columnWidths[colIdx] : 120
                         let cellText = colIdx < row.count ? row[colIdx] : ""
-                        let cellKey = "\(rowIdx)-\(colIdx)"
-                        let cleanValue = Self.plainCellValue(cellText)
-                        HStack(spacing: 4) {
-                            MarkdownTextView(text: cellText)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.trailing, !cleanValue.isEmpty ? 16 : 0)
-                        .padding(.vertical, 7)
-                        .frame(minWidth: minColW, maxWidth: maxColW, alignment: .leading)
-                        .onHover { hovering in
-                            if hovering {
-                                hoveredCellKey = cellKey
-                            } else if hoveredCellKey == cellKey {
-                                hoveredCellKey = nil
-                            }
-                        }
-                        .overlay(alignment: .trailing) {
-                            if !cleanValue.isEmpty && (hoveredCellKey == cellKey || copiedCellKey == cellKey) {
-                                Button(action: {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(cleanValue, forType: .string)
-                                    copiedCellKey = cellKey
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
-                                        if copiedCellKey == cellKey { copiedCellKey = nil }
+                        Text(MarkdownAttrCache.getOrParse(cellText, fontSize: cellFontSize))
+                            .font(cellFont)
+                            .foregroundColor(.primary)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(width: colW, alignment: .topLeading)
+                            .contextMenu {
+                                let cleanValue = Self.plainCellValue(cellText)
+                                if !cleanValue.isEmpty {
+                                    Button("คัดลอกช่องนี้ (Copy Cell)") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(cleanValue, forType: .string)
                                     }
-                                }) {
-                                    Image(systemName: copiedCellKey == cellKey ? "checkmark" : "doc.on.doc")
-                                        .font(.system(size: 9.5, weight: .medium))
-                                        .foregroundColor(copiedCellKey == cellKey ? .green : .secondary)
-                                        .padding(4)
-                                        .background(Color.primary.opacity(0.07))
-                                        .cornerRadius(4)
                                 }
-                                .buttonStyle(.plain)
-                                .padding(.trailing, 6)
-                                .help("คัดลอก '\(cleanValue)'")
+                                Button("คัดลอกทั้งตาราง (Copy Table TSV)") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(tsvRepresentation, forType: .string)
+                                }
                             }
-                        }
-                        
+
                         if colIdx < headers.count - 1 {
-                            Divider()
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.08))
+                                .frame(width: 1)
                         }
                     }
                 }
-                .background(rowIdx % 2 == 1 ? Color.primary.opacity(0.02) : Color.clear)
-                
+                .fixedSize(horizontal: false, vertical: true)
+                .background(rowIdx % 2 == 1 ? Color.primary.opacity(0.025) : Color.clear)
+
                 if rowIdx < rows.count - 1 {
-                    Divider().opacity(0.5)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(height: 1)
                 }
             }
         }
-        .textSelection(.enabled)
+        .frame(width: totalW, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color.primary.opacity(0.13), lineWidth: 1)
         )
-        .cornerRadius(6)
     }
-    
+
     var body: some View {
+        let plan = computeLayoutPlan(availableWidth: measuredWidth)
         Group {
-            if headers.count >= 5 {
+            if plan.needsHorizontalScroll {
                 ScrollView(.horizontal, showsIndicators: true) {
-                    tableGridContent(scrollable: true)
+                    tableGridContent(columnWidths: plan.widths)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ViewThatFits(in: .horizontal) {
-                    tableGridContent(scrollable: false)
-                    ScrollView(.horizontal, showsIndicators: true) {
-                        tableGridContent(scrollable: true)
-                    }
-                }
+                tableGridContent(columnWidths: plan.widths)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.vertical, 4)
+        .environment(\.openURL, OpenURLAction { url in
+            MarkdownAttrCache.handleOpenURL(url, appState: appState)
+        })
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        let w = floor(geo.size.width)
+                        if w > 40 && abs(w - measuredWidth) >= 6 {
+                            measuredWidth = w
+                        }
+                    }
+                    .onChange(of: geo.size.width) { newW in
+                        let w = floor(newW)
+                        if w > 40 && abs(w - measuredWidth) >= 6 {
+                            measuredWidth = w
+                        }
+                    }
+            }
+        )
     }
 }
 

@@ -260,6 +260,11 @@ public final class EnterpriseAIAuthService: ObservableObject {
     @Published public var statusMessage: String = ""
     @Published public var policyStatus: EnterprisePolicyStatus? = nil
 
+    // Multi-Profile 1-Click Enterprise Hub State
+    @Published public var profiles: [EnterpriseAPIProfile] = []
+    @Published public var activeProfileID: String = ""
+    @Published public var cliStatus: EnterpriseCLIDetectionStatus = EnterpriseCLIDetectionStatus()
+
     // Cached OAuth2 Access Token for Vertex AI
     private var cachedVertexToken: (token: String, expiresAt: Date)? = nil
 
@@ -336,10 +341,11 @@ public final class EnterpriseAIAuthService: ObservableObject {
         self.isMDMManaged = (mdm?.string(forKey: "enterprise_connection_mode") != nil)
 
         loadSecretsFromKeychain()
+        loadProfilesFromDiskOrMigrate()
     }
 
     public var isEnterpriseActive: Bool {
-        mode != .disabled
+        mode != .disabled || (UserDefaults.standard.string(forKey: "aiKeyMode") == "enterprise" && activeProfile != nil)
     }
 
     // MARK: - Keychain Management
@@ -664,7 +670,7 @@ public final class EnterpriseAIAuthService: ObservableObject {
 
     // MARK: - Enterprise Request Enrichment & Local DLP
 
-    /// Applies Enterprise governance headers (Zero Data Retention, Org ID, Product) to outgoing requests
+    /// Applies Enterprise governance headers (Zero Data Retention, Org ID, Product, Custom Headers) to outgoing requests
     public func applyEnterpriseHeaders(to request: inout URLRequest) {
         guard isEnterpriseActive else { return }
         request.setValue("true", forHTTPHeaderField: "X-Dotmini-Enterprise")
@@ -677,6 +683,9 @@ public final class EnterpriseAIAuthService: ObservableObject {
         }
         if mode == .geminiVertex && !vertexProjectId.isEmpty {
             request.setValue(vertexProjectId, forHTTPHeaderField: "x-goog-user-project")
+        }
+        if UserDefaults.standard.string(forKey: "aiKeyMode") == "enterprise", let prof = activeProfile {
+            applyProfileHeaders(profile: prof, to: &request)
         }
     }
 

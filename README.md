@@ -74,6 +74,34 @@ We built a **fully native macOS IDE from scratch** using SwiftUI, Rust, and Meta
 
 ---
 
+## What's New in v2.5.41
+
+### 1. Subscription and BYOK are fully isolated
+- **Two credential stores, never mixed.** Web Subscription credentials live only in `km_sealed_sub_<provider>`; BYOK keys live only in `<provider>_api_key`. Subscription mode never reads, writes or bills a BYOK key, and BYOK mode never borrows a Subscription login or a CLI session. Cross-provider failover now happens only inside the active mode.
+- **CLI bridges no longer inherit shell API keys.** `claude`, `codex` and `gemini` run with `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` and `GOOGLE_API_KEY` removed, so a subscription turn cannot silently bill an API key.
+- **Enterprise Vertex / custom-gateway overrides can no longer hijack a Subscription turn** (this was why Google AI Ultra returned 401 on machines with Vertex enabled).
+
+### 2. Subscription reliability
+- **ChatGPT / Codex**: expired `~/.codex/auth.json` tokens refresh automatically (with one retry on 401); account id is read from the JWT; every real Codex model slug is accepted.
+- **Claude**: only a real Pro / Max / Team login (`claude auth status` reports a `subscriptionType`) counts as a Subscription. A prepaid Console org with no credit is rejected instead of streaming "Credit balance is too low" as the answer. Anthropic OAuth tokens use the correct headers. `claude.ai` web sessions are supported through `ClaudeWebSessionBridge`.
+- **Gemini**: official browser OAuth (loopback PKCE) replaces unusable web cookies.
+- **GLM** uses the Coding Plan endpoint with automatic Z.AI / BigModel region fallback; Subscription routes ignore the BYOK custom base URL.
+- **Settings → AI → Subscription → Test connections** sends a one-line probe through each Subscription route and shows why a login does not work (not connected, expired, no credit or plan, wrong model, provider down).
+
+### 3. Built-in skills and a harness baseline
+- Ten skills ship inside the app: four from Anthropic's `anthropics/skills` (Apache-2.0, unmodified, with their licences: `frontend-design`, `webapp-testing`, `mcp-builder`, `theme-factory`) and six of ours (`microcode-harness-core`, `microcode-anti-slop`, `microcode-swift-macos-ui`, `microcode-thai-ui-typography`, `microcode-security-baseline`, `microcode-skill-authoring`). Provenance is in `MicroCode/Resources/BuiltinSkills/NOTICE.md`.
+- The harness protocol and the anti-slop bar are injected into every agent and sub-agent turn; the rest load by intent.
+- New `slop_check` tool: a deterministic linter for filler prose, placeholder code, empty `catch`, default-template UI tells and hard-coded secrets.
+
+### 4. Dotmini Cloud purchase flow
+- "Top Up / Plans", "Sign In" and the Cloud menu's upgrade item opened the Cloud GPU page; they now open **Account & License**.
+- Email sign-up and password reset are available in the app.
+- After opening Beam Checkout the app confirms the payment automatically and offers "Use Dotmini Cloud AI now".
+- The offline cloud model list only contains models the gateway really serves.
+
+### 5. MicroCode AI ships from this repository
+- `MicroCode AI` (standalone, AI-agent edition) is now built from the same commit and published in the same release as MicroCode (`package_ai_from_lite.sh`).
+
 ## What's New in v2.5.40
 
 ### 1. AI Agent as a Real-Time Teammate in Collaboration Mode (`MicroCode AI` + Follow Mode)

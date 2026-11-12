@@ -90,6 +90,13 @@ struct SettingsView: View {
         (4, "About", "info.circle")
     ]
 
+    static var visibleSidebarItems: [(tab: Int, title: String, icon: String)] {
+        if AppEdition.isStandaloneAI {
+            return sidebarItems.filter { ![1, 9, 5].contains($0.tab) }
+        }
+        return sidebarItems
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // ── Sidebar (Codex-style) ──────────────────────────────────
@@ -106,7 +113,7 @@ struct SettingsView: View {
                 .padding(.top, 6)
                 .padding(.bottom, 16)
 
-                ForEach(Self.sidebarItems, id: \.tab) { item in
+                ForEach(Self.visibleSidebarItems, id: \.tab) { item in
                     CodexSidebarRow(title: item.title, icon: item.icon,
                                     selected: selectedTab == item.tab) {
                         selectedTab = item.tab
@@ -252,6 +259,7 @@ struct SettingsView: View {
     
     private var subscriptionSettingsContent: some View {
         MicroCodeLicenseSettingsView()
+            .environmentObject(appState)
     }
     
     // MARK: - Firebase Authentication
@@ -760,6 +768,7 @@ struct SettingsView: View {
     @State private var aiKeyMode: String = "direct"  // "cloud" = Dotmini proxy, "direct" = user's own key, "subscription" = ChatGPT/Claude/Gemini/DeepSeek subscription, "local" = local LLM
     @State private var dotminiLicenseKey: String = ""
     @ObservedObject private var subscriptionAuth = SubscriptionAuthManager.shared
+    @ObservedObject private var healthProbe = SubscriptionHealthProbe.shared
     @ObservedObject private var supabaseAuth = SupabaseAuthService.shared
     
     private var aiSettingsContent: some View {
@@ -864,6 +873,36 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                     
+                    // Mode Button: Enterprise API
+                    Button {
+                        aiKeyMode = "enterprise"
+                        if let prof = EnterpriseAIAuthService.shared.activeProfile {
+                            selectedProvider = prof.dialect.brandIconKey
+                            selectedModel = prof.defaultModel.isEmpty ? (prof.availableModels.first ?? "gpt-4o") : prof.defaultModel
+                        }
+                        hasChanges = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "building.2.crop.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.indigo)
+                            Text("Enterprise")
+                                .font(.system(size: 11.5, weight: aiKeyMode == "enterprise" ? .semibold : .regular))
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(aiKeyMode == "enterprise" ? Color.primary.opacity(0.12) : Color.primary.opacity(0.03))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(aiKeyMode == "enterprise" ? Color.primary.opacity(0.25) : Color.primary.opacity(0.06), lineWidth: 1)
+                        )
+                        .foregroundColor(.primary)
+                    }
+                    .buttonStyle(.plain)
+
                     // Mode Button: Local
                     Button {
                         aiKeyMode = "local"
@@ -899,7 +938,14 @@ struct SettingsView: View {
             )
             
             // ── 2. Mode-Specific Configuration ──
-            if aiKeyMode == "cloud" {
+            if aiKeyMode == "enterprise" {
+                EnterpriseConnectHubView { newProv, newModel in
+                    selectedProvider = newProv
+                    selectedModel = newModel
+                    hasChanges = true
+                }
+                .environmentObject(appState)
+            } else if aiKeyMode == "cloud" {
                 // Dotmini Cloud Dedicated Panel
                 let cloudModels = modelCatalog.dotminiCloudModels
                 let hasCloudSession = supabaseAuth.session != nil
@@ -982,7 +1028,7 @@ struct SettingsView: View {
                             }
                             Spacer()
                             Button("Top Up / Plans") {
-                                appState.settingsSelectedTab = 9
+                                appState.settingsSelectedTab = 6
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
@@ -1002,7 +1048,7 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                             Spacer()
                             Button("Sign In") {
-                                appState.settingsSelectedTab = 9
+                                appState.settingsSelectedTab = 6
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
@@ -1286,10 +1332,7 @@ struct SettingsView: View {
         appState.aiProvider = provider.aiProviderID
         appState.aiModel = chosenModel
         subscriptionAuth.activeProvider = provider
-        if let tok = subscriptionAuth.token(for: provider), !tok.isEmpty, provider.isAPIKeyBackedPortal {
-            providerKeys[provider.aiProviderID] = tok
-            appState.apiKeys[provider.aiProviderID] = tok
-        }
+        // Strict isolation: NEVER copy Subscription tokens into BYOK `providerKeys` or `appState.apiKeys`
         UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
         UserDefaults.standard.set(provider.rawValue, forKey: "subscriptionActiveProvider")
         UserDefaults.standard.set(provider.aiProviderID, forKey: "aiProvider")
@@ -1322,6 +1365,24 @@ struct SettingsView: View {
                         }
                         .controlSize(.small)
                     }
+
+                    Button {
+                        Task { await healthProbe.runAll() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if healthProbe.isRunning {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "stethoscope")
+                                    .font(.system(size: 10))
+                            }
+                            Text(healthProbe.isRunning ? "Testing…" : "Test connections")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(healthProbe.isRunning)
 
                     Button {
                         Task {
@@ -1520,11 +1581,34 @@ struct SettingsView: View {
                             Spacer()
                         }
                             
+                        // Live health (from "Test connections")
+                        if let health = healthProbe.results[provider.rawValue], isConn || health.status != .notConnected {
+                            HStack(alignment: .top, spacing: 6) {
+                                Circle()
+                                    .fill(health.status == .ok ? Color.green : Color.orange)
+                                    .frame(width: 7, height: 7)
+                                    .padding(.top, 4)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(health.status == .ok ? "\(health.hint) · \(health.latencyMs) ms · \(health.model)" : health.hint)
+                                        .font(.system(size: 10.5, weight: .medium))
+                                        .foregroundColor(health.status == .ok ? .green : .orange)
+                                    if health.status != .ok, !health.message.isEmpty {
+                                        Text(health.message)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(3)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                                Spacer()
+                            }
+                        }
+
                         // Action Row
-                        let isCurrentlySelectedSub = (aiKeyMode == "subscription" && selectedProvider == provider.aiProviderID)
+                        let isCurrentlySelectedSub = (aiKeyMode == "subscription" && subscriptionAuth.activeProvider == provider)
                         let existingByokKey = (providerKeys[provider.aiProviderID] ?? UserDefaults.standard.string(forKey: "\(provider.aiProviderID)_api_key") ?? "")
                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                        let showInlineKeyRow = (!isConn && (isGuideExpanded || provider == .tokenme)) || (isConn && isGuideExpanded && provider.isAPIKeyBackedPortal)
+                        let showInlineKeyRow = (!isConn && (isGuideExpanded || provider == .tokenme || provider == .thai_gemini_enterprise)) || (isConn && isGuideExpanded && (provider.isAPIKeyBackedPortal || provider == .thai_gemini_enterprise))
 
                         HStack(spacing: 8) {
                             if isConn {
@@ -1633,23 +1717,38 @@ struct SettingsView: View {
                         }
                         .padding(.top, 2)
 
-                        // Inline Token / API Key Entry (Always visible for TokenMe when unconnected, or when toggled)
+                        // Inline Token / API Key Entry (Always visible for TokenMe / Thai Gemini Enterprise when unconnected, or when toggled)
                         if showInlineKeyRow {
                             VStack(spacing: 8) {
                                 HStack(spacing: 8) {
-                                    SecureField(
-                                        provider == .tokenme
-                                            ? "Paste TokenMe API key (tm_...) or cURL command"
-                                            : "Paste Token / API Key / Cookie manually",
-                                        text: Binding(
-                                            get: { subscriptionTokenInputs[provider.rawValue] ?? "" },
-                                            set: { subscriptionTokenInputs[provider.rawValue] = $0 }
+                                    if provider == .thai_gemini_enterprise {
+                                        TextField(
+                                            "https://vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b/r/session/...",
+                                            text: Binding(
+                                                get: {
+                                                    subscriptionTokenInputs[provider.rawValue]
+                                                        ?? "https://vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b/r/session/2836962715286832461?csesidx=306441087"
+                                                },
+                                                set: { subscriptionTokenInputs[provider.rawValue] = $0 }
+                                            )
                                         )
-                                    )
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.system(size: 11, design: .monospaced))
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.system(size: 11, design: .monospaced))
+                                    } else {
+                                        SecureField(
+                                            provider == .tokenme
+                                                ? "Paste TokenMe API key (tm_...) or cURL command"
+                                                : "Paste Token / API Key / Cookie manually",
+                                            text: Binding(
+                                                get: { subscriptionTokenInputs[provider.rawValue] ?? "" },
+                                                set: { subscriptionTokenInputs[provider.rawValue] = $0 }
+                                            )
+                                        )
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.system(size: 11, design: .monospaced))
+                                    }
                                     
-                                    if provider.isAPIKeyBackedPortal {
+                                    if provider.isAPIKeyBackedPortal || provider == .thai_gemini_enterprise {
                                         Button("Paste") {
                                             if let clip = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
                                                !clip.isEmpty {
@@ -1661,14 +1760,16 @@ struct SettingsView: View {
                                     }
                                     
                                     Button("Connect") {
-                                        let token = subscriptionTokenInputs[provider.rawValue] ?? ""
+                                        let defaultVertexURL = "https://vertexaisearch.cloud.google/us/home/cid/1b5ab175-0783-4463-8a33-b61845396a2b/r/session/2836962715286832461?csesidx=306441087"
+                                        let rawInput = subscriptionTokenInputs[provider.rawValue] ?? (provider == .thai_gemini_enterprise ? defaultVertexURL : "")
+                                        let token = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
                                         let email = subscriptionEmailInputs[provider.rawValue] ?? ""
                                         if !token.isEmpty {
                                             subscriptionAuth.saveAccount(
                                                 provider: provider,
                                                 emailOrUser: email.isEmpty ? "\(provider.shortLabel) Subscription" : email,
                                                 sessionToken: token,
-                                                source: "Subscription Key"
+                                                source: provider == .thai_gemini_enterprise ? "Vertex AI Search Session URL" : "Subscription Key"
                                             )
                                             subscriptionTokenInputs[provider.rawValue] = ""
                                             expandedProviderGuide[provider.rawValue] = false
@@ -1677,7 +1778,7 @@ struct SettingsView: View {
                                     }
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
-                                    .disabled((subscriptionTokenInputs[provider.rawValue] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    .disabled(provider != .thai_gemini_enterprise && (subscriptionTokenInputs[provider.rawValue] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                 }
                             }
                             .padding(.top, 4)

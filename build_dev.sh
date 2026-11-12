@@ -139,17 +139,12 @@ else
     DEFAULT_APP_DIR="$BUILD_ROOT/apps"
 fi
 mkdir -p "$DEFAULT_APP_DIR"
-BUNDLE_NAME="${CODETUNER_APP_DEST:-$DEFAULT_APP_DIR/MicroCode.app}"
-# Gracefully terminate any running instance executing from $BUNDLE_NAME BEFORE unlinking
-# its Mach-O binary on external storage (prevents mmap __TEXT page-fault SIGBUS loops).
-if pgrep -f "$BUNDLE_NAME/Contents/MacOS/MicroCode" >/dev/null 2>&1; then
-    echo "⏹ Stopping running MicroCode instance at $BUNDLE_NAME..."
-    pkill -TERM -f "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
-    sleep 0.5
-    pkill -KILL -f "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
-fi
+FINAL_BUNDLE_NAME="${CODETUNER_APP_DEST:-$DEFAULT_APP_DIR/MicroCode.app}"
+BUNDLE_PARENT_DIR="$(dirname "$FINAL_BUNDLE_NAME")"
+BUNDLE_BASE_NAME="$(basename "$FINAL_BUNDLE_NAME")"
+BUNDLE_NAME="$BUNDLE_PARENT_DIR/.staging_${BUNDLE_BASE_NAME}"
 rm -rf "$BUNDLE_NAME"
-echo "📦 Creating Bundle: $BUNDLE_NAME"
+echo "📦 Staging Bundle: $FINAL_BUNDLE_NAME"
 mkdir -p "$BUNDLE_NAME/Contents/MacOS"
 mkdir -p "$BUNDLE_NAME/Contents/Resources"
 
@@ -200,7 +195,7 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.40</string>
+    <string>2.5.41</string>
     <key>CFBundleVersion</key>
     <string>38</string>
     <key>CFBundlePackageType</key>
@@ -262,6 +257,7 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>microcode</string>
+                <string>microcode-file</string>
             </array>
         </dict>
     </array>
@@ -395,7 +391,7 @@ do
     fi
 done
 
-# 7. Code Sign Bundle
+# 7. Code Sign Staging Bundle, then Atomically Swap into Final Destination
 echo "🔐 Signing Bundle..."
 dot_clean -m "$BUNDLE_NAME" 2>/dev/null || true
 xattr -cr "$BUNDLE_NAME" 2>/dev/null || true
@@ -405,37 +401,52 @@ else
     codesign --force --deep --sign - "$BUNDLE_NAME"
 fi
 
+if pgrep -f "$FINAL_BUNDLE_NAME/Contents/MacOS/MicroCode" >/dev/null 2>&1; then
+    echo "⏹ Stopping running MicroCode instance at $FINAL_BUNDLE_NAME..."
+    pkill -TERM -f "$FINAL_BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+    sleep 0.4
+    pkill -KILL -f "$FINAL_BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+fi
+rm -rf "$FINAL_BUNDLE_NAME"
+mv "$BUNDLE_NAME" "$FINAL_BUNDLE_NAME"
+BUNDLE_NAME="$FINAL_BUNDLE_NAME"
+
 # Show final size
 echo ""
 echo "📊 Dev Bundle Size: $(du -sh "$BUNDLE_NAME" | cut -f1)"
 echo "✅ Dev Bundle Ready: $BUNDLE_NAME"
 
-# Symlink to root workspace so standard open / shortcuts work with 0 disk overhead on internal drive
-rm -rf "MicroCode.app"
-ln -sfn "$BUNDLE_NAME" "MicroCode.app"
-echo "🔗 Workspace symlink updated: MicroCode.app -> $BUNDLE_NAME"
+if [ -z "${CODETUNER_APP_DEST:-}" ] || [ "$BUNDLE_NAME" = "/Applications/MicroCode.app" ]; then
+    # Symlink to root workspace so standard open / shortcuts work with 0 disk overhead on internal drive
+    rm -rf "MicroCode.app"
+    ln -sfn "$BUNDLE_NAME" "MicroCode.app"
+    echo "🔗 Workspace symlink updated: MicroCode.app -> $BUNDLE_NAME"
 
-# Register with LaunchServices if installed in /Applications
-if [ "$BUNDLE_NAME" = "/Applications/MicroCode.app" ]; then
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/MicroCode.app" 2>/dev/null || true
-    echo "📱 System Applications updated (real bundle): /Applications/MicroCode.app"
-elif [ -w "/Applications" ]; then
-    rm -rf "/Applications/MicroCode.app"
-    ditto "$BUNDLE_NAME" "/Applications/MicroCode.app"
-    dot_clean -m "/Applications/MicroCode.app" 2>/dev/null || true
-    xattr -cr "/Applications/MicroCode.app" 2>/dev/null || true
-    if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
-        codesign --force --deep --sign "Apple Development: business@dotmini.net (A58QB9B355)" "/Applications/MicroCode.app" 2>/dev/null || codesign --force --deep --sign - "/Applications/MicroCode.app"
-    else
-        codesign --force --deep --sign - "/Applications/MicroCode.app"
+    # Register with LaunchServices if installed in /Applications
+    if [ "$BUNDLE_NAME" = "/Applications/MicroCode.app" ]; then
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/MicroCode.app" 2>/dev/null || true
+        echo "📱 System Applications updated (real bundle): /Applications/MicroCode.app"
+    elif [ -w "/Applications" ]; then
+        rm -rf "/Applications/MicroCode.app"
+        ditto "$BUNDLE_NAME" "/Applications/MicroCode.app"
+        dot_clean -m "/Applications/MicroCode.app" 2>/dev/null || true
+        xattr -cr "/Applications/MicroCode.app" 2>/dev/null || true
+        if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
+            codesign --force --deep --sign "Apple Development: business@dotmini.net (A58QB9B355)" "/Applications/MicroCode.app" 2>/dev/null || codesign --force --deep --sign - "/Applications/MicroCode.app"
+        else
+            codesign --force --deep --sign - "/Applications/MicroCode.app"
+        fi
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/MicroCode.app" 2>/dev/null || true
+        echo "📱 System Applications updated (real bundle): /Applications/MicroCode.app"
     fi
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/MicroCode.app" 2>/dev/null || true
-    echo "📱 System Applications updated (real bundle): /Applications/MicroCode.app"
-fi
 
-# Also sync to ~/Applications folder so Dock/Spotlight shortcuts pointing there never run a stale build
-if [ -d "$HOME/Applications" ]; then
-    rm -rf "$HOME/Applications/MicroCode.app"
-    ln -sfn "/Applications/MicroCode.app" "$HOME/Applications/MicroCode.app"
-    echo "📱 User Applications updated: $HOME/Applications/MicroCode.app -> /Applications/MicroCode.app"
+    # Also sync to ~/Applications folder so Dock/Spotlight shortcuts pointing there never run a stale build
+    if [ -d "$HOME/Applications" ]; then
+        rm -rf "$HOME/Applications/MicroCode.app"
+        ln -sfn "/Applications/MicroCode.app" "$HOME/Applications/MicroCode.app"
+        echo "📱 User Applications updated: $HOME/Applications/MicroCode.app -> /Applications/MicroCode.app"
+    fi
+else
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$BUNDLE_NAME" 2>/dev/null || true
+    echo "📱 Custom Application Bundle registered: $BUNDLE_NAME (main /Applications/MicroCode.app untouched)"
 fi

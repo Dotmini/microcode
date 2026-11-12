@@ -12,7 +12,13 @@ import Foundation
 class BackendService {
     static let shared = BackendService()
 
-    private let baseURL = "http://127.0.0.1:3000"
+    static var backendPort: Int {
+        AppEdition.isStandaloneAI ? 3001 : 3000
+    }
+
+    private var baseURL: String {
+        "http://127.0.0.1:\(Self.backendPort)"
+    }
     private var backendProcess: Process?
     private let session: URLSession
     private var nativeRemoteConfigs: [String: RemoteConnectionConfig] = [:]
@@ -59,6 +65,8 @@ class BackendService {
         process.arguments = []
         var env = ProcessInfo.processInfo.environment
         env["RUST_LOG"] = "info"
+        env["MICROCODE_PORT"] = String(Self.backendPort)
+        env["PORT"] = String(Self.backendPort)
         env["MICROCODE_LOCAL_API_TOKEN"] = LocalBackendAuth.token
         // Hand the backend our PID so it can self-exit if we die (the Rust
         // side also watches for re-parenting to launchd as a backstop).
@@ -147,20 +155,13 @@ class BackendService {
     /// and keeps running — pegging a CPU core and holding port 3000 so the
     /// next launch can't bind. Reap by exact binary name and by :3000 owner.
     private func killStaleBackends() {
-        for name in ["microcode-backend", "codetunner-backend"] {
-            let pk = Process()
-            pk.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pk.arguments = ["-9", "-x", name]
-            pk.standardOutput = FileHandle.nullDevice
-            pk.standardError = FileHandle.nullDevice
-            try? pk.run(); pk.waitUntilExit()
-        }
-        // Only kill stale port 3000 listeners if they are actually our backend processes!
-        // Never kill arbitrary third-party developer processes (Next.js, Node, Rails, etc.).
+        let port = Self.backendPort
+        // Only kill stale listeners on our specific backend port (3000 for MicroCode IDE, 3001 for MicroCode AI Standalone)
+        // so both apps can run side-by-side simultaneously without ever affecting each other!
         let sh = Process()
         sh.executableURL = URL(fileURLWithPath: "/bin/sh")
         sh.arguments = ["-c", """
-            for pid in $(lsof -ti tcp:3000 2>/dev/null); do
+            for pid in $(lsof -ti tcp:\(port) 2>/dev/null); do
                 comm=$(ps -p "$pid" -o comm= 2>/dev/null)
                 if echo "$comm" | grep -qE "microcode-backend|codetunner-backend"; then
                     kill -9 "$pid" 2>/dev/null || true

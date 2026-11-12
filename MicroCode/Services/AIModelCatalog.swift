@@ -97,13 +97,10 @@ final class AIModelCatalog: ObservableObject {
             result.append(m)
         }
         if cloudGatewayModels.isEmpty {
+            // Only models the live Dotmini gateway serves (api.dotmini.net/v1/models); the live refresh adds anything new.
             let defaultCloudFrontier: [AIModelDefinition] = [
-                AIModelDefinition(id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", provider: "gemini", badge: "CLOUD"),
-                AIModelDefinition(id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "gemini", badge: "CLOUD"),
-                AIModelDefinition(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "gemini", badge: "FAST"),
-                AIModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", badge: "CLOUD"),
-                AIModelDefinition(id: "deepseek-reasoner", name: "DeepSeek Reasoner (R1)", provider: "deepseek", badge: "REASONING"),
-                AIModelDefinition(id: "deepseek-chat", name: "DeepSeek Chat", provider: "deepseek", badge: "FAST")
+                AIModelDefinition(id: "deepseek-flash", name: "DeepSeek Flash", provider: "deepseek", badge: "FAST"),
+                AIModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", badge: "CLOUD")
             ]
             for m in defaultCloudFrontier where seen.insert(m.id).inserted {
                 result.append(m)
@@ -166,6 +163,11 @@ final class AIModelCatalog: ObservableObject {
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct"
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         var effectiveProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        if keyMode == "enterprise" {
+            let fallbackModel = EnterpriseAIAuthService.shared.activeProfile?.defaultModel ?? "gpt-4o"
+            let fallbackProv = EnterpriseAIAuthService.shared.activeProfile?.dialect.brandIconKey ?? (effectiveProvider.isEmpty ? "openai" : effectiveProvider)
+            return (fallbackProv, trimmed.isEmpty ? fallbackModel : trimmed)
+        }
         
         // Never let "omni" claim third-party models in non-cloud modes; in Dotmini Cloud mode, preserve cloud selection
         if effectiveProvider == "omni" {
@@ -601,13 +603,27 @@ final class AIModelCatalog: ObservableObject {
                 return envVal
             }
         }
-        // Fallback to sealed Web Subscription token for API-key-backed providers (e.g. Typhoon, OpenRouter, Groq)
-        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sub_\(provider)"),
+        return ""
+    }
+
+    /// Reads ONLY the sealed Web Subscription portal credential (`km_sealed_sub_<provider>`), strictly isolated from BYOK keys.
+    public static func resolveSubscriptionPortalKey(_ provider: String) -> String {
+        let subKeyName: String = {
+            switch provider.lowercased() {
+            case "openai": return "chatgpt"
+            case "anthropic": return "claude"
+            default: return provider.lowercased()
+            }
+        }()
+        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sub_\(subKeyName)"),
            let unsealed = KeychainManager.unsealSecret(sealed)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !unsealed.isEmpty,
            !SubscriptionAuthManager.isCorruptedToken(unsealed),
            !unsealed.hasPrefix("codeassist_oauth:"),
-           !unsealed.hasPrefix("cli-oauth:") {
+           !unsealed.hasPrefix("cli-oauth:"),
+           !unsealed.hasPrefix("agy_cli_bridge:"),
+           !unsealed.hasPrefix("claude_cli_bridge:"),
+           !unsealed.hasPrefix("codex_cli_bridge:") {
             return unsealed
         }
         return ""
@@ -1327,8 +1343,9 @@ final class AIModelCatalog: ObservableObject {
     }
 
     private func fetchLiveOpenAICompatibleModels(providerId: String, endpoint: String) async {
-        let key = resolveKey(providerId)
-        let hasCustomBase = (providerId == "custom") || StreamableAIProvider.hasCustomByokBaseURL(for: providerId)
+        let isSubMode = (UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct") == "subscription"
+        let key = isSubMode ? Self.resolveSubscriptionPortalKey(providerId) : resolveKey(providerId)
+        let hasCustomBase = !isSubMode && ((providerId == "custom") || StreamableAIProvider.hasCustomByokBaseURL(for: providerId))
         let allowNoKey = (providerId == "9router" || providerId == "typhoon" || hasCustomBase)
         guard (!key.isEmpty || allowNoKey), let url = URL(string: endpoint) else { return }
         var req = URLRequest(url: url, timeoutInterval: providerId == "9router" ? 3.5 : 10)

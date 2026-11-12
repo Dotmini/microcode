@@ -105,7 +105,7 @@ struct ToolScope {
         "file_read": .core, "file_write": .core, "replace_in_file": .core,
         "multi_replace_in_file": .core, "apply_patch": .core,
         "grep_search": .core, "codebase_search": .core, "shell": .core, "git_status": .core,
-        "skill_engine": .core, "pns_nervous_system": .core,
+        "skill_engine": .core, "slop_check": .core, "pns_nervous_system": .core,
         "preview_control": .core, "ide_browser": .core,
         // MCP & Orchestration
         "mcp_orchestrator": .mcp,

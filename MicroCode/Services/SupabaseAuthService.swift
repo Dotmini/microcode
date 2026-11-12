@@ -308,12 +308,40 @@ final class SupabaseAuthService: ObservableObject {
         ])
         let (data, response) = try await network.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw AuthError.rejected("Unable to create your account. Check the details and try again.")
+            let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let detail = (body["msg"] as? String) ?? (body["message"] as? String) ?? (body["error_description"] as? String) ?? ""
+            let lower = detail.lowercased()
+            if lower.contains("password") {
+                throw AuthError.rejected("รหัสผ่านไม่ผ่านเกณฑ์ความปลอดภัย กรุณาใช้อย่างน้อย 8 ตัวอักษร ผสมตัวอักษรและตัวเลข")
+            }
+            if lower.contains("already") || lower.contains("registered") {
+                throw AuthError.rejected("อีเมลนี้มีบัญชีอยู่แล้ว กรุณาเข้าสู่ระบบ หรือกด “ลืมรหัสผ่าน”")
+            }
+            if lower.contains("rate limit") || (response as? HTTPURLResponse)?.statusCode == 429 {
+                throw AuthError.rejected("ส่งคำขอบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่")
+            }
+            throw AuthError.rejected(detail.isEmpty ? "สร้างบัญชีไม่สำเร็จ กรุณาตรวจสอบอีเมลและรหัสผ่านแล้วลองใหม่" : "สร้างบัญชีไม่สำเร็จ: \(detail)")
         }
         guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AuthError.invalidResponse }
         guard generation == sessionGeneration else { throw CancellationError() }
         guard raw["access_token"] as? String != nil else { return nil }
         return try await consumeSessionPayload(raw)
+    }
+
+    /// Sends a GoTrue password-recovery email. The response never reveals whether the address has an account.
+    func sendPasswordReset(email: String) async throws {
+        guard await bootstrapConfiguration() else { throw AuthError.unconfigured }
+        guard let configuration = configurationProvider() else { throw AuthError.unconfigured }
+        var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/recover"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["email": email])
+        let (_, response) = try await network.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw AuthError.rejected("ส่งอีเมลรีเซ็ตรหัสผ่านไม่สำเร็จ กรุณารอสักครู่แล้วลองใหม่")
+        }
     }
 
     /// GoTrue authorization-code flow. Only the matching in-memory PKCE attempt
@@ -1017,6 +1045,8 @@ final class SupabaseAuthService: ObservableObject {
         }
         let isVerified = (json["verified"] as? Bool) ?? false
         if isVerified {
+            defaults.removeObject(forKey: "microcode.lastOrderRef")
+            defaults.removeObject(forKey: "microcode.lastPaymentLinkID")
             await refreshEntitlement()
             let isAITopup = (json["isAICreditTopup"] as? Bool) ?? ((json["plan"] as? String) == "ai_credit_topup")
             if isAITopup {
@@ -1032,7 +1062,57 @@ final class SupabaseAuthService: ObservableObject {
         }
     }
 
+
+    // MARK: - Automatic payment confirmation
+
+    @Published private(set) var paymentWatchMessage = ""
+    @Published private(set) var paymentWatchVerified = false
+    @Published private(set) var isWatchingPayment = false
+    private var paymentWatchTask: Task<Void, Never>?
+
+    /// After the customer opens a Beam checkout link, poll the server for that order until it is paid
+    /// (about 15 minutes), so nobody has to come back and press "Verify" after paying.
+    func beginPaymentWatch() {
+        paymentWatchTask?.cancel()
+        paymentWatchVerified = false
+        let hasOrder = !(defaults.string(forKey: "microcode.lastOrderRef") ?? "").isEmpty
+            || !(defaults.string(forKey: "microcode.lastPaymentLinkID") ?? "").isEmpty
+        guard hasOrder else {
+            isWatchingPayment = false
+            paymentWatchMessage = "กดปุ่ม Verify Payment & Sync Credit หลังชำระเงินเพื่ออัปเดตสิทธิ์"
+            return
+        }
+        isWatchingPayment = true
+        paymentWatchMessage = "รอการชำระเงิน… สิทธิ์จะเปิดใช้งานให้อัตโนมัติเมื่อชำระสำเร็จ"
+        paymentWatchTask = Task { [weak self] in
+            let started = Date()
+            while !Task.isCancelled, Date().timeIntervalSince(started) < 15 * 60 {
+                let waitSeconds: UInt64 = Date().timeIntervalSince(started) < 180 ? 4 : 10
+                try? await Task.sleep(nanoseconds: waitSeconds * 1_000_000_000)
+                guard let self, !Task.isCancelled, self.session != nil else { return }
+                let result = await self.verifyLatestPayment()
+                if result.verified {
+                    self.paymentWatchVerified = true
+                    self.paymentWatchMessage = result.message
+                    self.isWatchingPayment = false
+                    return
+                }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.isWatchingPayment = false
+            self.paymentWatchMessage = "ยังไม่พบการชำระเงิน — หากชำระแล้วให้กด Verify Payment & Sync Credit"
+        }
+    }
+
+    func cancelPaymentWatch() {
+        paymentWatchTask?.cancel()
+        paymentWatchTask = nil
+        isWatchingPayment = false
+    }
+
     func signOut() {
+        cancelPaymentWatch()
+        paymentWatchMessage = ""
         sessionGeneration = UUID()
         webAuthID = nil
         webAuthSession?.cancel()

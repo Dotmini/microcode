@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 /// client-generated "license key" field in this view.
 struct MicroCodeLicenseSettingsView: View {
     @ObservedObject private var auth = SupabaseAuthService.shared
+    @EnvironmentObject private var appState: AppState
     @ObservedObject private var platformKey = DotminiPlatformKeyService.shared
     @ObservedObject private var enterprise = EnterpriseAIAuthService.shared
     @ObservedObject private var telemetry = TelemetryService.shared
@@ -23,6 +24,8 @@ struct MicroCodeLicenseSettingsView: View {
     @State private var checkoutStatus = ""
     @State private var checkoutVerified = false
     @State private var customTopupTHB = ""
+    @State private var isCreatingAccount = false
+    @State private var displayName = ""
 
     var body: some View {
         ScrollView {
@@ -38,7 +41,7 @@ struct MicroCodeLicenseSettingsView: View {
                     installRegistryCard
                 }
                 platformKeyCard
-                enterpriseCard
+                EnterpriseConnectHubView()
                 architectureNote
             }
             .padding(20)
@@ -160,11 +163,29 @@ struct MicroCodeLicenseSettingsView: View {
                 .textFieldStyle(.roundedBorder)
             SecureField("Password", text: $password)
                 .textFieldStyle(.roundedBorder)
-            Button(isWorking ? "Signing in…" : "Sign In") {
-                Task { await signInWithPassword() }
+            if isCreatingAccount {
+                TextField("Name (optional)", text: $displayName)
+                    .textFieldStyle(.roundedBorder)
+            }
+            Button(isWorking ? (isCreatingAccount ? "Creating account…" : "Signing in…") : (isCreatingAccount ? "Create account" : "Sign In")) {
+                Task { isCreatingAccount ? await createAccount() : await signInWithPassword() }
             }
             .buttonStyle(.borderedProminent)
             .disabled(email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty || isWorking)
+            HStack {
+                Button(isCreatingAccount ? "Already have an account? Sign in" : "New here? Create an account") {
+                    isCreatingAccount.toggle()
+                    status = ""
+                }
+                .buttonStyle(.link)
+                Spacer()
+                if !isCreatingAccount {
+                    Button("Forgot password?") { Task { await resetPassword() } }
+                        .buttonStyle(.link)
+                        .disabled(isWorking)
+                }
+            }
+            .font(.system(size: 11))
             if !status.isEmpty { statusText }
         }
         .cardStyle()
@@ -249,14 +270,14 @@ struct MicroCodeLicenseSettingsView: View {
                     aiCreditTopupButton(label: "+ ฿500", planKey: "ai_topup_500")
                     aiCreditTopupButton(label: "+ ฿1,000", planKey: "ai_topup_1000")
                     Spacer()
-                    TextField("Custom ฿ (≥50)", text: $customTopupTHB)
+                    TextField("Custom ฿ (≥20)", text: $customTopupTHB)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 115)
                     Button("Top Up") {
                         let amt = Double(customTopupTHB.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-                        guard amt >= 50 else {
+                        guard amt >= 20 else {
                             checkoutVerified = false
-                            checkoutStatus = "กรุณาระบุยอดเติมเครดิต Cloud AI ขั้นต่ำ ฿50"
+                            checkoutStatus = "กรุณาระบุยอดเติมเครดิต Cloud AI ขั้นต่ำ ฿20"
                             return
                         }
                         Task { await startAITopup(planKey: "ai_topup_custom", customAmountTHB: amt, title: "฿\(Int(amt))") }
@@ -311,6 +332,20 @@ struct MicroCodeLicenseSettingsView: View {
                     .foregroundColor(checkoutVerified ? .green : .secondary)
             }
 
+            if !auth.paymentWatchMessage.isEmpty {
+                HStack(spacing: 8) {
+                    if auth.isWatchingPayment { ProgressView().controlSize(.small) }
+                    Text(auth.paymentWatchMessage)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(auth.paymentWatchVerified ? .green : .secondary)
+                    if auth.paymentWatchVerified && (UserDefaults.standard.string(forKey: "aiKeyMode") ?? "") != "cloud" {
+                        Button("Use Dotmini Cloud AI now") { activateDotminiCloudMode() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                    }
+                }
+            }
+
             HStack(spacing: 10) {
                 Button {
                     Task {
@@ -347,6 +382,19 @@ struct MicroCodeLicenseSettingsView: View {
         .disabled(isCheckingOut || auth.session == nil)
     }
 
+    /// Switches chat to Dotmini Cloud with a model the gateway really serves (first live cloud model).
+    private func activateDotminiCloudMode() {
+        let model = AIModelCatalog.shared.dotminiCloudModels.first
+        UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
+        if let model {
+            appState.aiProvider = model.provider
+            appState.aiModel = model.id
+        }
+        appState.saveSettings()
+        checkoutVerified = true
+        checkoutStatus = "สลับไปใช้ Dotmini Cloud AI แล้ว\(model.map { " (โมเดล \($0.name))" } ?? "")"
+    }
+
     private func startAITopup(planKey: String, customAmountTHB: Double?, title: String) async {
         isCheckingOut = true
         checkoutVerified = false
@@ -355,6 +403,7 @@ struct MicroCodeLicenseSettingsView: View {
             let session = try await auth.createAICreditTopupCheckout(planKey: planKey, customAmountTHB: customAmountTHB)
             checkoutStatus = "เปิดหน้าชำระเงินเติมเครดิต Cloud AI (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment & Sync Credit"
             NSWorkspace.shared.open(session.checkoutURL)
+            auth.beginPaymentWatch()
         } catch {
             checkoutStatus = error.localizedDescription
         }
@@ -396,6 +445,7 @@ struct MicroCodeLicenseSettingsView: View {
                         let session = try await auth.createSubscriptionCheckout(plan: planKey)
                         checkoutStatus = "เปิดหน้าชำระเงิน Beam Checkout (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment & Sync Plan"
                         NSWorkspace.shared.open(session.checkoutURL)
+                        auth.beginPaymentWatch()
                     } catch {
                         checkoutStatus = error.localizedDescription
                     }
@@ -994,6 +1044,41 @@ struct MicroCodeLicenseSettingsView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value).font(.system(size: 17, weight: .bold, design: .rounded))
             Text(label).font(.caption).foregroundColor(.secondary)
+        }
+    }
+
+    private func createAccount() async {
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanEmail.contains("@"), cleanEmail.contains(".") else { status = "กรุณากรอกอีเมลให้ถูกต้อง"; return }
+        guard password.count >= 8 else { status = "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร"; return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let session = try await auth.signUp(email: cleanEmail, password: password, displayName: name.isEmpty ? (cleanEmail.components(separatedBy: "@").first ?? "MicroCode User") : name)
+            if session != nil {
+                persistedEmail = cleanEmail
+                password = ""
+                status = "สร้างบัญชีสำเร็จ เข้าสู่ระบบแล้ว"
+            } else {
+                status = "ส่งอีเมลยืนยันไปที่ \(cleanEmail) แล้ว กรุณากดลิงก์ในอีเมล จากนั้นกลับมากด Sign In (ตรวจโฟลเดอร์ Spam ด้วย)"
+                isCreatingAccount = false
+            }
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func resetPassword() async {
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanEmail.contains("@") else { status = "กรอกอีเมลก่อน แล้วกด “ลืมรหัสผ่าน”"; return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            try await auth.sendPasswordReset(email: cleanEmail)
+            status = "หากอีเมลนี้มีบัญชี ระบบได้ส่งลิงก์รีเซ็ตรหัสผ่านไปแล้ว"
+        } catch {
+            status = error.localizedDescription
         }
     }
 

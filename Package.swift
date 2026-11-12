@@ -38,7 +38,10 @@ let package = Package(
             path: "MicroCode",
             exclude: [
                 "Services/DeviceMetalShaders.metal",
-                "Services/MicroCore/MicroCore.swift"
+                "Services/MicroCore/MicroCore.swift",
+                // Bundled skills are plain folders copied verbatim into Contents/Resources by build_dev.sh;
+                // SwiftPM must not flatten them (many share SKILL.md / LICENSE.txt names).
+                "Resources/BuiltinSkills"
             ],
             sources: [
                 "MicroCodeApp.swift",
@@ -97,6 +100,11 @@ let package = Package(
                 "Views/EmbeddedWebAppPreviewView.swift",
                 "Views/EmbeddedDeviceDockView.swift",
                 "Services/SubscriptionAuthManager.swift",
+                "Services/SubscriptionHealthProbe.swift",
+                "Services/SlopLint.swift",
+                "Services/DotminiCloudProbe.swift",
+                "Services/VertexAISearchWebBridge.swift",
+                "Services/ClaudeWebSessionBridge.swift",
                 "Services/LocalSubscriptionGatewayService.swift",
                 "Services/DeviceCommandBarService.swift",
                 "Services/NoiseCancelingLogService.swift",
@@ -206,12 +214,14 @@ let package = Package(
                 "Services/TeamIntegrationService.swift",
                 "Services/AgentMemoryService.swift",
                 "Services/AIClient.swift",            // Direct AI API Client
+                "Services/AIClient+Enterprise.swift", // Enterprise API Streaming & Converse Drivers
                 "Services/TelemetryService.swift",    // Opt-in product analytics
                 "Services/GitAuthService.swift",      // Hosting auth via secure vendor CLIs
                 "Services/AIModelCatalog.swift",       // Shared dynamic model registry
                 "Services/LocalEcosystemDiscovery.swift", // Real discovered models from Codex, AGY, Claude Code, Zed
                 "Services/DotminiPlatformKeyService.swift", // Platform API-key bridge
                 "Services/EnterpriseAIAuthService.swift",  // Enterprise AI & Governance (Vertex AI, Dotmini Enterprise ZDR)
+                "Services/EnterpriseConnectionProfiles.swift", // 1-Click Enterprise Profiles, Smart Paste, CLI SSO & SigV4
                 "Services/AIProviderAuthService.swift",// Multi-provider Auth + Keychain
                 "Services/KeychainManager.swift",      // Keychain CRUD + Rust FFI Bridge
                 "Services/MCPServer.swift",            // MCP Protocol Server
@@ -233,6 +243,7 @@ let package = Package(
                 "Views/Settings/AgentSkillsView.swift",
                 "Views/Settings/PhoneCompanionSettingsView.swift",
                 "Services/PhoneCompanionService.swift",
+                "Services/PhoneCompanionService+NextGen.swift",
                 "Services/DevPortTunnelService.swift",
                 "Services/BillingService.swift",
                 "Services/MicroCore/microcode_core.swift",
@@ -261,6 +272,7 @@ let package = Package(
                 "Views/IDEBrowserView.swift",
                 "Views/ModelBrowserSheet.swift",
                 "Views/Settings/MicroCodeLicenseSettingsView.swift",
+                "Views/Settings/EnterpriseConnectHubView.swift",
                 "Views/TerminalTextView.swift",
                 "Views/TerminalWebView.swift",
                 "Views/Components/PlaygroundTerminalView.swift",

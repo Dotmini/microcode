@@ -424,8 +424,11 @@ struct RichMessageRow: View, Equatable {
                 .frame(maxWidth: 880, alignment: .trailing)
                 .contextMenu { userMessageContextMenu }
                 .onHover { hovering in
-                    if isHoveringMessage != hovering {
-                        isHoveringMessage = hovering
+                    if hovering {
+                        guard !ChatScrollActivityGate.isScrolling else { return }
+                        if !isHoveringMessage { isHoveringMessage = true }
+                    } else if isHoveringMessage {
+                        isHoveringMessage = false
                     }
                 }
                 Spacer(minLength: 0)
@@ -446,17 +449,20 @@ struct RichMessageRow: View, Equatable {
                         onRejectChange: onRejectChange
                     )
                     .equatable()
-                    .textSelection(.enabled)
                     if !isStreaming && (!message.content.isEmpty || !message.toolResults.isEmpty) {
                         assistantActionToolbar
                             .opacity((isHoveringMessage || isCopied) ? 0.92 : 0)
                             .allowsHitTesting(isHoveringMessage || isCopied)
                     }
                 }
-                .frame(maxWidth: 880, alignment: .leading)
+                .frame(minWidth: 0, maxWidth: 880, alignment: .leading)
+                .clipped()
                 .onHover { hovering in
-                    if isHoveringMessage != hovering {
-                        isHoveringMessage = hovering
+                    if hovering {
+                        guard !ChatScrollActivityGate.isScrolling else { return }
+                        if !isHoveringMessage { isHoveringMessage = true }
+                    } else if isHoveringMessage {
+                        isHoveringMessage = false
                     }
                 }
                 Spacer(minLength: 0)
@@ -1204,15 +1210,18 @@ private struct AICellContentHost: View, Equatable {
         case .text(let text):
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownTextView(text: text)
+                    .equatable()
             }
         case .code(let lang, let code):
             NativeCodeBlockView(language: lang, code: code)
+                .equatable()
         case .heading(let level, let content):
             HeadingView(level: level, content: content)
         case .list(let items, let isOrdered):
             ListView(items: items, isOrdered: isOrdered)
         case .table(let headers, let rows):
             TableBlockView(headers: headers, rows: rows)
+                .equatable()
         case .blockquote(let content):
             BlockquoteView(content: content)
         case .latex(let expression, let isBlock):

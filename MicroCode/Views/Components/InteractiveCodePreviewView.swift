@@ -18,8 +18,11 @@ struct InteractiveCodePreviewView: View {
     @EnvironmentObject var appState: AppState
     
     @State private var codeContent: String = ""
-    @State private var highlightedLines: [AttributedString] = []
-    @State private var maxLineCharCount: Int = 0
+    @State private var highlightedNSCode: NSAttributedString = NSAttributedString()
+    @State private var lineUTF16Offsets: [Int] = [0]
+    @State private var codeRevision: UInt64 = 0
+    @State private var cachedMarkdownFrontmatter: [(key: String, value: String)] = []
+    @State private var cachedMarkdownBody: String = ""
     @State private var isLoading: Bool = true
     @State private var errorMessage: String? = nil
     @State private var isCopied: Bool = false
@@ -46,6 +49,15 @@ struct InteractiveCodePreviewView: View {
     
     private var fileExtension: String {
         url.pathExtension.lowercased()
+    }
+
+    private var isMarkdownDocument: Bool {
+        switch fileExtension {
+        case "md", "markdown", "mdx":
+            return true
+        default:
+            return false
+        }
     }
 
     private var supportsLiveRender: Bool {
@@ -100,7 +112,7 @@ struct InteractiveCodePreviewView: View {
     /// avoiding painting 100% of every line blue when `#L1-N` covers the entire file.
     private var effectiveHighlightRange: ClosedRange<Int>? {
         guard let range = activeHighlightRange else { return nil }
-        let total = highlightedLines.count
+        let total = lineUTF16Offsets.count
         if total > 0 && range.lowerBound <= 1 && range.upperBound >= total {
             return nil
         }
@@ -178,6 +190,9 @@ struct InteractiveCodePreviewView: View {
         .background(editorCanvas)
         .onAppear {
             activeHighlightRange = highlightRange
+            if isMarkdownDocument && highlightRange == nil {
+                showLiveRender = true
+            }
             loadFileContent(for: url)
             checkGitDiff(for: url)
         }
@@ -188,11 +203,17 @@ struct InteractiveCodePreviewView: View {
             hasGitDiff = false
             liveSwiftUIDylibPath = nil
             swiftUICompileError = nil
+            let ext = newURL.pathExtension.lowercased()
+            let isMD = (ext == "md" || ext == "markdown" || ext == "mdx")
+            showLiveRender = isMD && (highlightRange == nil)
             loadFileContent(for: newURL)
             checkGitDiff(for: newURL)
         }
         .onChange(of: highlightRange) { newRange in
             activeHighlightRange = newRange
+            if newRange != nil && isMarkdownDocument {
+                showLiveRender = false
+            }
         }
         .onChange(of: appState.appTheme) { newTheme in
             rehighlightCurrentCode(theme: newTheme)
@@ -290,7 +311,52 @@ struct InteractiveCodePreviewView: View {
             Spacer(minLength: 6)
 
             // Playground-Style Live Render Toggle (.swift SwiftUI, .html/.svg Web, .md Markdown)
-            if supportsLiveRender {
+            if isMarkdownDocument {
+                HStack(spacing: 1) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.14)) {
+                            showLiveRender = true
+                            showGitDiff = false
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.richtext")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("Preview")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(showLiveRender ? Color.accentColor.opacity(0.18) : Color.clear)
+                        .foregroundColor(showLiveRender ? .accentColor : .secondary)
+                        .cornerRadius(3.5)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.14)) {
+                            showLiveRender = false
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                                .font(.system(size: 8.5, weight: .semibold))
+                            Text("Raw")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(!showLiveRender ? Color.primary.opacity(0.10) : Color.clear)
+                        .foregroundColor(!showLiveRender ? .primary : .secondary)
+                        .cornerRadius(3.5)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(2)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(5)
+                .help("Switch between Rendered Markdown Preview and Raw Markdown Source")
+            } else if supportsLiveRender {
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         showLiveRender.toggle()
@@ -387,95 +453,23 @@ struct InteractiveCodePreviewView: View {
         .background(headerBg)
     }
     
-    // MARK: - Syntax-Highlighted Code Viewer (Theme-Matched & Full-Width Rows)
+    // MARK: - Syntax-Highlighted Code Viewer (120Hz Native AppKit TextKit2/TextKit1 ScrollView)
     
     private var codeViewer: some View {
         let theme = appState.appTheme
-        let totalLines = max(1, highlightedLines.count)
-        let gutterWidth: CGFloat = totalLines > 9999 ? 48 : (totalLines > 999 ? 40 : (totalLines > 99 ? 32 : 26))
-        let gutterTotalWidth: CGFloat = showLineNumbers ? (gutterWidth + 18.5) : 0
-        let contentNaturalWidth: CGFloat = gutterTotalWidth + CGFloat(maxLineCharCount) * 7.35 + 40
-        let highlightBg = Color(nsColor: theme.selectionColor).opacity(theme.isDark ? 0.52 : 0.42)
-        let lineNumBaseColor = Color(nsColor: theme.commentColor).opacity(0.78)
-        let rangeToHighlight = effectiveHighlightRange
-        
-        return GeometryReader { geo in
-            let minRowWidth = max(geo.size.width, contentNaturalWidth)
-            ScrollViewReader { scrollProxy in
-                ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(0..<highlightedLines.count, id: \.self) { index in
-                            let lineNumber = index + 1
-                            let isHighlighted = rangeToHighlight?.contains(lineNumber) ?? false
-                            
-                            HStack(alignment: .center, spacing: 0) {
-                                if showLineNumbers {
-                                    Rectangle()
-                                        .fill(isHighlighted ? Color.accentColor : Color.clear)
-                                        .frame(width: 2.5, height: 20)
-                                    
-                                    Text("\(lineNumber)")
-                                        .font(.system(size: 11.5, design: .monospaced))
-                                        .foregroundColor(isHighlighted ? .accentColor : lineNumBaseColor)
-                                        .frame(width: gutterWidth, alignment: .trailing)
-                                        .padding(.trailing, 10)
-                                        .padding(.leading, 6)
-                                }
-                                
-                                Text(highlightedLines[index])
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .lineLimit(1)
-                                    .fixedSize(horizontal: true, vertical: false)
-                                    .padding(.leading, 6)
-                                    .padding(.trailing, 24)
-                                
-                                Spacer(minLength: 0)
-                            }
-                            .frame(minWidth: minRowWidth, minHeight: 20, maxHeight: 20, alignment: .leading)
-                            .background(isHighlighted ? highlightBg : Color.clear)
-                            .id(lineNumber)
-                        }
-                    }
-                    .frame(minWidth: minRowWidth, alignment: .leading)
-                    .padding(.vertical, 8)
-                    .textSelection(.enabled)
-                }
-                .onAppear {
-                    scrollToHighlightedLine(using: scrollProxy, range: activeHighlightRange, totalLineCount: highlightedLines.count)
-                }
-                .onChange(of: activeHighlightRange) { newRange in
-                    scrollToHighlightedLine(using: scrollProxy, range: newRange, totalLineCount: highlightedLines.count)
-                }
-                .onChange(of: highlightedLines.count) { newCount in
-                    scrollToHighlightedLine(using: scrollProxy, range: activeHighlightRange, totalLineCount: newCount)
-                }
-            }
-        }
-    }
-
-    private func scrollToHighlightedLine(
-        using proxy: ScrollViewProxy,
-        range: ClosedRange<Int>?,
-        totalLineCount: Int
-    ) {
-        guard totalLineCount > 0 else { return }
-        // Suppress full-file range (1...totalLineCount) and always anchor to .topLeading
-        // so horizontal scroll stays pinned at x = 0 (never centered by UnitPoint.top).
-        if let r = range,
-           !(r.lowerBound <= 1 && r.upperBound >= totalLineCount),
-           r.lowerBound > 0,
-           r.lowerBound <= totalLineCount {
-            let targetRow = max(1, r.lowerBound - 3)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    proxy.scrollTo(targetRow, anchor: .topLeading)
-                }
-            }
-        } else {
-            DispatchQueue.main.async {
-                proxy.scrollTo(1, anchor: .topLeading)
-            }
-        }
+        return PreviewReadOnlyCodeNSView(
+            attributedCode: highlightedNSCode,
+            rawCode: codeContent,
+            lineUTF16Offsets: lineUTF16Offsets,
+            revision: codeRevision,
+            showLineNumbers: showLineNumbers,
+            highlightRange: effectiveHighlightRange,
+            editorBackground: theme.editorBackground,
+            gutterTextColor: theme.commentColor.withAlphaComponent(0.78),
+            selectionHighlightColor: theme.selectionColor.withAlphaComponent(theme.isDark ? 0.52 : 0.40),
+            isGlass: theme.isGlass
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
     // MARK: - Playground-Style Live Render View (SwiftUI / HTML / SVG / Markdown)
@@ -558,29 +552,111 @@ struct InteractiveCodePreviewView: View {
             )
 
         case "md", "markdown", "mdx":
+            let mdBody = cachedMarkdownBody.isEmpty && !codeContent.isEmpty ? codeContent : cachedMarkdownBody
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let attr = try? AttributedString(
-                        markdown: codeContent,
-                        options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-                    ) {
-                        Text(attr)
-                            .font(.system(size: 13))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Text(codeContent)
-                            .font(.system(size: 13))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if !cachedMarkdownFrontmatter.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(cachedMarkdownFrontmatter, id: \.key) { pair in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text(pair.key)
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .frame(minWidth: 76, alignment: .leading)
+                                    Text(pair.value)
+                                        .font(.system(size: 11.5))
+                                        .foregroundColor(.primary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.04))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                        .cornerRadius(8)
                     }
+
+                    RenderedMarkdownDocumentView(markdown: mdBody)
+                        .equatable()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(16)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
 
         default:
             codeViewer
         }
+    }
+
+    private static let relativeMarkdownImageRegex = try? NSRegularExpression(
+        pattern: #"!\[([^\]]*)\]\((?!https?://|file://|data:|/)([^)\s]+)\)"#,
+        options: []
+    )
+
+    private static func extractYAMLFrontmatterAndResolveMedia(
+        markdown: String,
+        baseDir: URL
+    ) -> (frontmatter: [(key: String, value: String)], body: String) {
+        let normalized = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var body = normalized
+        var frontmatter: [(key: String, value: String)] = []
+
+        if normalized.hasPrefix("---\n") {
+            let lines = normalized.components(separatedBy: "\n")
+            if let closingIdx = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }),
+               closingIdx <= 30 {
+                let fmLines = Array(lines[1..<closingIdx])
+                var parsedPairs: [(key: String, value: String)] = []
+                var validYAML = !fmLines.isEmpty
+                for rawLine in fmLines {
+                    let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+                    if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+                    guard let colon = trimmed.firstIndex(of: ":") else {
+                        validYAML = false
+                        break
+                    }
+                    let key = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
+                    let val = String(trimmed[trimmed.index(after: colon)...])
+                        .trimmingCharacters(in: .whitespaces)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    if key.isEmpty || key.contains(" ") {
+                        validYAML = false
+                        break
+                    }
+                    parsedPairs.append((key: key, value: val))
+                }
+                if validYAML && !parsedPairs.isEmpty {
+                    frontmatter = parsedPairs
+                    body = lines[(closingIdx + 1)...].joined(separator: "\n")
+                }
+            }
+        }
+
+        if let regex = relativeMarkdownImageRegex, body.contains("![") {
+            let ns = body as NSString
+            let matches = regex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length))
+            for match in matches.reversed() where match.numberOfRanges >= 3 {
+                let alt = ns.substring(with: match.range(at: 1))
+                let relPath = ns.substring(with: match.range(at: 2))
+                let cleanRel = relPath.hasPrefix("./") ? String(relPath.dropFirst(2)) : relPath
+                let resolvedURL = baseDir.appendingPathComponent(cleanRel).standardizedFileURL
+                if FileManager.default.fileExists(atPath: resolvedURL.path) {
+                    let replacement = "![\(alt)](file://\(resolvedURL.path))"
+                    body = (body as NSString).replacingCharacters(in: match.range, with: replacement)
+                }
+            }
+        }
+
+        return (frontmatter, body)
     }
 
     private struct ThemeSyntaxPalette {
@@ -625,31 +701,100 @@ struct InteractiveCodePreviewView: View {
         return (expanded, maxChars)
     }
 
+    private static func buildHighlightedNSCode(
+        _ rawText: String,
+        language: String,
+        isDark: Bool,
+        baseTextColor: NSColor
+    ) -> (attributed: NSAttributedString, lineOffsets: [Int]) {
+        let normalized = rawText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let offsets = SyntaxHighlightingEngine.computeUTF16LineStartsFast(normalized)
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let para = NSMutableParagraphStyle()
+        para.minimumLineHeight = 19
+        para.maximumLineHeight = 19
+        para.lineBreakMode = .byClipping
+
+        if normalized.utf8.count <= 180_000 && language != "text" {
+            let highlighted = SyntaxHighlightingEngine.highlight(
+                normalized,
+                language: language,
+                fontSize: 12,
+                isDark: isDark
+            )
+            let mutable = NSMutableAttributedString(attributedString: highlighted)
+            let fullRange = NSRange(location: 0, length: mutable.length)
+            if fullRange.length > 0 {
+                mutable.addAttributes([
+                    .font: font,
+                    .paragraphStyle: para
+                ], range: fullRange)
+            }
+            return (mutable, offsets)
+        } else {
+            let plain = NSAttributedString(
+                string: normalized,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: baseTextColor,
+                    .paragraphStyle: para
+                ]
+            )
+            return (plain, offsets)
+        }
+    }
+
     private func rehighlightCurrentCode(theme: AppTheme) {
         let currentCode = codeContent
         guard !currentCode.isEmpty else { return }
         let lang = detectedLanguage
-        let palette = ThemeSyntaxPalette(theme: theme)
+        let isDark = theme.isDark
+        let baseColor = theme.editorText
         DispatchQueue.global(qos: .userInitiated).async {
-            let prepared = Self.normalizeDisplayLines(currentCode)
-            let styled = Self.highlightLines(prepared.lines, language: lang, palette: palette)
+            let built = Self.buildHighlightedNSCode(
+                currentCode,
+                language: lang,
+                isDark: isDark,
+                baseTextColor: baseColor
+            )
             DispatchQueue.main.async {
-                self.maxLineCharCount = prepared.maxChars
-                self.highlightedLines = styled
+                self.highlightedNSCode = built.attributed
+                self.lineUTF16Offsets = built.lineOffsets
+                self.codeRevision &+= 1
             }
         }
     }
 
     private func applyLiveBufferContent(_ newContent: String) {
         let lang = detectedLanguage
-        let palette = ThemeSyntaxPalette(theme: appState.appTheme)
+        let isDark = appState.appTheme.isDark
+        let baseColor = appState.appTheme.editorText
+        let isMD = isMarkdownDocument
+        let baseDir = url.deletingLastPathComponent()
         self.codeContent = newContent
         DispatchQueue.global(qos: .userInteractive).async {
-            let prepared = Self.normalizeDisplayLines(newContent)
-            let styled = Self.highlightLines(prepared.lines, language: lang, palette: palette)
+            let mdExtracted: (frontmatter: [(key: String, value: String)], body: String)? = isMD
+                ? Self.extractYAMLFrontmatterAndResolveMedia(markdown: newContent, baseDir: baseDir)
+                : nil
+            if let md = mdExtracted {
+                _ = MessageContentParser.parse(md.body)
+            }
+            let built = Self.buildHighlightedNSCode(
+                newContent,
+                language: lang,
+                isDark: isDark,
+                baseTextColor: baseColor
+            )
             DispatchQueue.main.async {
-                self.maxLineCharCount = prepared.maxChars
-                self.highlightedLines = styled
+                if let md = mdExtracted {
+                    self.cachedMarkdownFrontmatter = md.frontmatter
+                    self.cachedMarkdownBody = md.body
+                }
+                self.highlightedNSCode = built.attributed
+                self.lineUTF16Offsets = built.lineOffsets
+                self.codeRevision &+= 1
             }
         }
     }
@@ -692,7 +837,11 @@ struct InteractiveCodePreviewView: View {
         errorMessage = nil
         let targetURL = overrideURL ?? url
         let lang = Self.detectLanguage(for: targetURL)
-        let palette = ThemeSyntaxPalette(theme: appState.appTheme)
+        let ext = targetURL.pathExtension.lowercased()
+        let isMD = (ext == "md" || ext == "markdown" || ext == "mdx")
+        let baseDir = targetURL.deletingLastPathComponent()
+        let isDark = appState.appTheme.isDark
+        let baseColor = appState.appTheme.editorText
         
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -718,13 +867,31 @@ struct InteractiveCodePreviewView: View {
                     string = "⚠️ [LARGE FILE WARNING: File size is \(formatted). Previewing the first 1 MB in read-only mode.]\n\n" + string
                 }
                 
-                let prepared = Self.normalizeDisplayLines(string)
-                let styled = Self.highlightLines(prepared.lines, language: lang, palette: palette)
+                let mdExtracted: (frontmatter: [(key: String, value: String)], body: String)? = isMD
+                    ? Self.extractYAMLFrontmatterAndResolveMedia(markdown: string, baseDir: baseDir)
+                    : nil
+                if let md = mdExtracted {
+                    _ = MessageContentParser.parse(md.body)
+                }
+                let built = Self.buildHighlightedNSCode(
+                    string,
+                    language: lang,
+                    isDark: isDark,
+                    baseTextColor: baseColor
+                )
                 
                 DispatchQueue.main.async {
                     self.codeContent = string
-                    self.maxLineCharCount = prepared.maxChars
-                    self.highlightedLines = styled
+                    if let md = mdExtracted {
+                        self.cachedMarkdownFrontmatter = md.frontmatter
+                        self.cachedMarkdownBody = md.body
+                    } else {
+                        self.cachedMarkdownFrontmatter = []
+                        self.cachedMarkdownBody = ""
+                    }
+                    self.highlightedNSCode = built.attributed
+                    self.lineUTF16Offsets = built.lineOffsets
+                    self.codeRevision &+= 1
                     self.isLoading = false
                 }
             } catch {
@@ -1364,7 +1531,6 @@ struct InteractiveDiffPreviewView: View {
                     }
                     .frame(minWidth: minRowWidth, alignment: .leading)
                     .padding(.vertical, 4)
-                    .textSelection(.enabled)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -1498,7 +1664,6 @@ struct InteractiveDiffFilePreviewView: View {
                         }
                         .frame(minWidth: minRowWidth, alignment: .leading)
                         .padding(.vertical, 4)
-                        .textSelection(.enabled)
                     }
                 }
                 .background(editorCanvas)
@@ -1535,6 +1700,270 @@ struct InteractiveDiffFilePreviewView: View {
                 self.displayLines = expanded
                 self.maxLineChars = maxChars
                 self.isLoading = false
+            }
+        }
+    }
+}
+
+// MARK: - 120Hz Native AppKit Read-Only Code Viewer + Line Number Gutter
+
+private final class PreviewCodeGutterRulerView: NSRulerView {
+    weak var textView: NSTextView?
+    var lineUTF16Offsets: [Int] = [0]
+    var highlightRange: ClosedRange<Int>?
+    var textColor: NSColor = .secondaryLabelColor
+    var bgColor: NSColor = .textBackgroundColor
+    var isGlass: Bool = false
+
+    override var isFlipped: Bool { true }
+
+    private let gutterFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    private let gutterBoldFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
+
+    init(scrollView: NSScrollView, textView: NSTextView) {
+        self.textView = textView
+        super.init(scrollView: scrollView, orientation: .verticalRuler)
+        self.clientView = textView
+        self.ruleThickness = 44
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func updateRuleThickness() {
+        let total = max(1, lineUTF16Offsets.count)
+        let desired: CGFloat = total > 9999 ? 54 : (total > 999 ? 46 : 38)
+        if abs(ruleThickness - desired) > 0.5 {
+            ruleThickness = desired
+        }
+    }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        guard let textView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return }
+
+        if !isGlass {
+            bgColor.setFill()
+            rect.fill()
+        }
+
+        let visibleRect = scrollView?.contentView.bounds ?? textView.visibleRect
+        let inset = textView.textContainerInset
+        let containerRect = visibleRect.offsetBy(dx: -inset.width, dy: -inset.height)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: containerRect, in: textContainer)
+        guard glyphRange.length > 0 || lineUTF16Offsets.count <= 1 else { return }
+        let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+
+        // Binary search starting 0-based line index for charRange.location
+        var lo = 0
+        var hi = max(0, lineUTF16Offsets.count - 1)
+        while lo < hi {
+            let mid = (lo + hi + 1) >> 1
+            if lineUTF16Offsets[mid] <= charRange.location {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
+        }
+
+        let endChar = NSMaxRange(charRange)
+        let totalCount = lineUTF16Offsets.count
+        var lineIdx = lo
+        while lineIdx < totalCount {
+            let charLoc = lineUTF16Offsets[lineIdx]
+            if charLoc > endChar && lineIdx > lo { break }
+
+            let glyphIdx = charLoc < layoutManager.numberOfGlyphs
+                ? layoutManager.glyphIndexForCharacter(at: charLoc)
+                : max(0, layoutManager.numberOfGlyphs - 1)
+            let lineRect: NSRect
+            if layoutManager.numberOfGlyphs > 0 && glyphIdx < layoutManager.numberOfGlyphs {
+                lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIdx, effectiveRange: nil, withoutAdditionalLayout: true)
+            } else {
+                lineRect = NSRect(x: 0, y: 0, width: 100, height: 19)
+            }
+
+            let y = lineRect.minY + inset.height - visibleRect.minY
+            if y > bounds.maxY + 24 { break }
+            if y + lineRect.height >= -24 {
+                let lineNum = lineIdx + 1
+                let isHighlighted = highlightRange?.contains(lineNum) ?? false
+                if isHighlighted {
+                    NSColor.controlAccentColor.setFill()
+                    NSRect(x: 0, y: y, width: 2.5, height: max(18, lineRect.height)).fill()
+                }
+                let numStr = "\(lineNum)" as NSString
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: isHighlighted ? gutterBoldFont : gutterFont,
+                    .foregroundColor: isHighlighted ? NSColor.controlAccentColor : textColor
+                ]
+                let size = numStr.size(withAttributes: attrs)
+                let drawPt = NSPoint(
+                    x: max(4, ruleThickness - size.width - 8),
+                    y: y + max(0, (lineRect.height - size.height) * 0.5)
+                )
+                numStr.draw(at: drawPt, withAttributes: attrs)
+            }
+            lineIdx += 1
+        }
+    }
+}
+
+private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
+    let attributedCode: NSAttributedString
+    let rawCode: String
+    let lineUTF16Offsets: [Int]
+    let revision: UInt64
+    let showLineNumbers: Bool
+    let highlightRange: ClosedRange<Int>?
+    let editorBackground: NSColor
+    let gutterTextColor: NSColor
+    let selectionHighlightColor: NSColor
+    let isGlass: Bool
+
+    final class Coordinator: NSObject {
+        var lastRevision: UInt64 = 0
+        var lastHighlightRange: ClosedRange<Int>?
+        var appliedTempRange: NSRange?
+        weak var gutterView: PreviewCodeGutterRulerView?
+        nonisolated(unsafe) var boundsObserver: NSObjectProtocol?
+
+        deinit {
+            if let obs = boundsObserver {
+                NotificationCenter.default.removeObserver(obs)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = !isGlass
+        scrollView.backgroundColor = editorBackground
+
+        // Force TextKit 1 (`NSTextView(usingTextLayoutManager: false)`) so NSRulerView glyph layout & temporary attributes run at 120Hz
+        let textView: NSTextView
+        if #available(macOS 13.0, *) {
+            textView = NSTextView(usingTextLayoutManager: false)
+        } else {
+            textView = NSTextView()
+        }
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.allowsUndo = false
+        textView.usesFindBar = true
+        textView.drawsBackground = !isGlass
+        textView.backgroundColor = editorBackground
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = []
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+
+        scrollView.documentView = textView
+
+        let gutter = PreviewCodeGutterRulerView(scrollView: scrollView, textView: textView)
+        scrollView.verticalRulerView = gutter
+        scrollView.hasVerticalRuler = showLineNumbers
+        scrollView.rulersVisible = showLineNumbers
+        context.coordinator.gutterView = gutter
+
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        context.coordinator.boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak gutter] _ in
+            gutter?.needsDisplay = true
+        }
+
+        applyUpdates(to: scrollView, textView: textView, coordinator: context.coordinator, isInitial: true)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        applyUpdates(to: scrollView, textView: textView, coordinator: context.coordinator, isInitial: false)
+    }
+
+    private func applyUpdates(
+        to scrollView: NSScrollView,
+        textView: NSTextView,
+        coordinator: Coordinator,
+        isInitial: Bool
+    ) {
+        scrollView.drawsBackground = !isGlass
+        scrollView.backgroundColor = editorBackground
+        textView.drawsBackground = !isGlass
+        textView.backgroundColor = editorBackground
+
+        if scrollView.rulersVisible != showLineNumbers {
+            scrollView.hasVerticalRuler = showLineNumbers
+            scrollView.rulersVisible = showLineNumbers
+        }
+
+        let didChangeContent = isInitial || coordinator.lastRevision != revision
+        if didChangeContent {
+            coordinator.lastRevision = revision
+            coordinator.appliedTempRange = nil
+            textView.textStorage?.setAttributedString(attributedCode)
+        }
+
+        if let gutter = coordinator.gutterView {
+            gutter.lineUTF16Offsets = lineUTF16Offsets
+            gutter.highlightRange = highlightRange
+            gutter.textColor = gutterTextColor
+            gutter.bgColor = editorBackground
+            gutter.isGlass = isGlass
+            gutter.updateRuleThickness()
+            gutter.needsDisplay = true
+        }
+
+        let didChangeHighlight = didChangeContent || coordinator.lastHighlightRange != highlightRange
+        if didChangeHighlight, let lm = textView.layoutManager {
+            coordinator.lastHighlightRange = highlightRange
+            let docLen = (textView.string as NSString).length
+            if let prev = coordinator.appliedTempRange, prev.location + prev.length <= docLen {
+                lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: prev)
+            }
+            coordinator.appliedTempRange = nil
+
+            if let range = highlightRange, !lineUTF16Offsets.isEmpty, docLen > 0 {
+                let startIdx = max(0, min(lineUTF16Offsets.count - 1, range.lowerBound - 1))
+                let endLineIdx = max(startIdx, min(lineUTF16Offsets.count - 1, range.upperBound - 1))
+                let charStart = min(docLen, lineUTF16Offsets[startIdx])
+                let charEnd: Int
+                if endLineIdx + 1 < lineUTF16Offsets.count {
+                    charEnd = min(docLen, lineUTF16Offsets[endLineIdx + 1])
+                } else {
+                    charEnd = docLen
+                }
+                if charEnd > charStart {
+                    let nsRange = NSRange(location: charStart, length: charEnd - charStart)
+                    lm.addTemporaryAttribute(.backgroundColor, value: selectionHighlightColor, forCharacterRange: nsRange)
+                    coordinator.appliedTempRange = nsRange
+                    DispatchQueue.main.async {
+                        let contextStartIdx = max(0, startIdx - 3)
+                        let contextCharStart = min(docLen, lineUTF16Offsets[contextStartIdx])
+                        textView.scrollRangeToVisible(NSRange(location: contextCharStart, length: min(1, docLen - contextCharStart)))
+                    }
+                }
+            } else if didChangeContent {
+                textView.scroll(NSPoint.zero)
             }
         }
     }

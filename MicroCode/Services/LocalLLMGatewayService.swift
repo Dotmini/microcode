@@ -567,7 +567,7 @@ final class LocalLLMGatewayService: ObservableObject {
                 }
             }
 
-            if isComplete || error != nil || buffer.count > 4_194_304 {
+            if isComplete || error != nil || buffer.count > 26_214_400 {
                 connection.cancel()
                 return
             }
@@ -653,11 +653,13 @@ final class LocalLLMGatewayService: ObservableObject {
         let effectiveClientIP = headers["cf-connecting-ip"] ?? headers["x-forwarded-for"]?.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? remoteIP
         recordClientVisit(ip: effectiveClientIP, via: isProxiedTunnel ? "Worldwide" : "LAN")
 
-        // 1. Unified Mobile Connect IDE Web App & Companion API (`GET /` and `/api/*` except Ollama `/api/tags`)
-        if (method == "GET" && (path == "/" || path.isEmpty)) || (path.hasPrefix("/api/") && path != "/api/tags") {
+        // 1. Unified Mobile Connect IDE Web App, PWA Assets, Live Preview Proxy & Companion API (`GET /` and `/api/*` except Ollama `/api/tags`)
+        let isCompanionWebAsset = (method == "GET" && (path == "/" || path.isEmpty || path == "/manifest.json" || path == "/sw.js" || path == "/apple-touch-icon.png"))
+        if isCompanionWebAsset || path.hasPrefix("/preview/") || (path.hasPrefix("/api/") && path != "/api/tags") {
             if let respData = await PhoneCompanionService.shared.handleAuthenticatedRoute(
                 method: method,
                 path: path.isEmpty ? "/" : path,
+                rawTarget: rawTarget,
                 queryItems: comps?.queryItems ?? [],
                 headers: headers,
                 bodyData: bodyData,

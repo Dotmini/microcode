@@ -961,11 +961,16 @@ class AppState: ObservableObject {
         workspaceFolder = nil
         openFiles.removeAll()
         currentFile = nil
-        editorMode = .code
+        editorMode = AppEdition.isStandaloneAI ? .aiAgent : .code
         UserDefaults.standard.removeObject(forKey: "lastWorkspacePath")
     }
 
     func showWelcomeScreen() {
+        if AppEdition.isStandaloneAI {
+            editorMode = .aiAgent
+            showingWelcomeHome = false
+            return
+        }
         closeWorkspace()
         showingWelcomeHome = true
     }
@@ -1091,8 +1096,12 @@ class AppState: ObservableObject {
     @Published var currentProjectType: ProjectType = .unknown
     
     // Editor Mode - exclusive selection
-    @Published var editorMode: EditorMode = .code {
+    @Published var editorMode: EditorMode = AppEdition.isStandaloneAI ? .aiAgent : .code {
         didSet {
+            if AppEdition.isStandaloneAI && editorMode != .aiAgent {
+                editorMode = .aiAgent
+                return
+            }
             if oldValue == .code && editorMode != .code {
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 250_000_000)
@@ -1227,12 +1236,15 @@ class AppState: ObservableObject {
             return true
         }
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        if keyMode == "enterprise" {
+            return EnterpriseAIAuthService.shared.activeProfile != nil
+        }
         if keyMode == "acp" {
             return ACPHostService.shared.activeAgentId != nil
                 || LocalEcosystemDiscovery.shared.engines.contains(where: { $0.id == aiProvider && $0.isInstalled })
         }
         if keyMode == "subscription" {
-            return SubscriptionAuthManager.shared.hasAnyConnected || !resolveApiKey(for: aiProvider).isEmpty
+            return SubscriptionAuthManager.shared.hasAnyConnected
         }
         if keyMode == "local" || aiProvider == "local" {
             return LocalLLMService.shared.activeServer?.isOnline == true
@@ -1326,6 +1338,7 @@ class AppState: ObservableObject {
 
     func openLaunchTargetsParallel(_ urls: [URL]) {
         var arxURLs: [URL] = []
+        var enterpriseConfigURLs: [URL] = []
         var directoryURLs: [URL] = []
         var fileURLs: [URL] = []
         for url in urls {
@@ -1335,9 +1348,22 @@ class AppState: ObservableObject {
                 directoryURLs.append(url)
             } else if url.pathExtension.lowercased() == "arx" {
                 arxURLs.append(url)
+            } else if url.lastPathComponent.lowercased().hasSuffix(".microcode-enterprise.json") || url.pathExtension.lowercased() == "mcent" {
+                enterpriseConfigURLs.append(url)
             } else {
                 fileURLs.append(url)
             }
+        }
+        if !enterpriseConfigURLs.isEmpty {
+            Task { @MainActor in
+                for entURL in enterpriseConfigURLs {
+                    if EnterpriseAIAuthService.shared.importTeamShareFile(from: entURL) {
+                        self.settingsSelectedTab = 2
+                        self.showingSettingsDialog = true
+                    }
+                }
+            }
+            if directoryURLs.isEmpty && fileURLs.isEmpty && arxURLs.isEmpty { return }
         }
         if !arxURLs.isEmpty {
             Task { @MainActor in
@@ -5504,25 +5530,30 @@ class AppState: ObservableObject {
     // MARK: - Editor Mode
     
     func setEditorMode(_ mode: EditorMode) {
+        let effectiveMode: EditorMode = AppEdition.isStandaloneAI ? .aiAgent : mode
         var tx = Transaction()
         tx.disablesAnimations = true
         withTransaction(tx) {
             // Mutual exclusion: Close inline agent panel when entering full agent mode
-            if mode == .aiAgent && aiChatVisible {
+            if effectiveMode == .aiAgent && aiChatVisible {
                 aiChatVisible = false
             }
-            if editorMode != mode {
-                editorMode = mode
+            if editorMode != effectiveMode {
+                editorMode = effectiveMode
             }
         }
-        TelemetryService.shared.recordMode(mode)
-        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: mode)
+        TelemetryService.shared.recordMode(effectiveMode)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: effectiveMode)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             IdleStateCompactor.shared.performAIWorkloadCompaction()
         }
     }
     
     func toggleEditorMode(_ mode: EditorMode) {
+        if AppEdition.isStandaloneAI {
+            switchToMode(.aiAgent)
+            return
+        }
         if editorMode == mode && !showingWelcomeHome {
             switchToMode(.code)
         } else {
@@ -5531,21 +5562,22 @@ class AppState: ObservableObject {
     }
 
     func switchToMode(_ mode: EditorMode) {
+        let effectiveMode: EditorMode = AppEdition.isStandaloneAI ? .aiAgent : mode
         var tx = Transaction()
         tx.disablesAnimations = true
         withTransaction(tx) {
             if showingWelcomeHome {
                 showingWelcomeHome = false
             }
-            if mode == .aiAgent && aiChatVisible {
+            if effectiveMode == .aiAgent && aiChatVisible {
                 aiChatVisible = false
             }
-            if editorMode != mode {
-                editorMode = mode
+            if editorMode != effectiveMode {
+                editorMode = effectiveMode
             }
         }
-        TelemetryService.shared.recordMode(mode)
-        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: mode)
+        TelemetryService.shared.recordMode(effectiveMode)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: effectiveMode)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             IdleStateCompactor.shared.performAIWorkloadCompaction()
         }

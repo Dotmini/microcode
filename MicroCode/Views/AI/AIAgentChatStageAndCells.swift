@@ -1096,6 +1096,67 @@ struct MessageContentParser {
         return blocks
     }
     
+    private static func splitMarkdownTableRow(_ rawLine: String) -> [String] {
+        var working = rawLine.trimmingCharacters(in: .whitespaces)
+        if working.hasPrefix("|") {
+            working.removeFirst()
+        }
+        if working.hasSuffix("|") && !working.hasSuffix("\\|") {
+            working.removeLast()
+        }
+        var cells: [String] = []
+        var current = ""
+        var escaped = false
+        var inBackticks = false
+        for ch in working {
+            if escaped {
+                if ch == "|" {
+                    current.append("|")
+                } else {
+                    current.append("\\")
+                    current.append(ch)
+                }
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "`" {
+                inBackticks.toggle()
+                current.append(ch)
+            } else if ch == "|" && !inBackticks {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        if escaped {
+            current.append("\\")
+        }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
+    }
+
+    private static func isMarkdownTableSeparator(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") && trimmed.contains("-") else { return false }
+        let cells = splitMarkdownTableRow(trimmed)
+        guard !cells.isEmpty else { return false }
+        return cells.allSatisfy { cell in
+            guard !cell.isEmpty else { return false }
+            let core = cell.trimmingCharacters(in: CharacterSet(charactersIn: ": "))
+            return core.count >= 2 && core.allSatisfy { $0 == "-" }
+        }
+    }
+
+    private static func isHorizontalDividerLine(_ trimmed: String) -> Bool {
+        guard trimmed.count >= 3 else { return false }
+        let noSpaces = trimmed.filter { $0 != " " }
+        guard noSpaces.count >= 3 else { return false }
+        return noSpaces.allSatisfy({ $0 == "-" })
+            || noSpaces.allSatisfy({ $0 == "*" })
+            || noSpaces.allSatisfy({ $0 == "_" })
+    }
+
     private static func parseTextContent(_ text: String) -> [MessageBlock] {
         var blocks: [MessageBlock] = []
         let lines = text.components(separatedBy: "\n")
@@ -1104,38 +1165,41 @@ struct MessageContentParser {
         var isOrderedList = false
         var lineIndex = 0
         
+        func flushTextAndList() {
+            if !currentText.isEmpty {
+                let joined = currentText.joined(separator: "\n")
+                if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    blocks.append(.text(joined))
+                }
+                currentText = []
+            }
+            if !listItems.isEmpty {
+                blocks.append(.list(listItems, isOrderedList))
+                listItems = []
+            }
+        }
+
         while lineIndex < lines.count {
             let line = lines[lineIndex]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let indentSpaces = line.prefix(while: { $0 == " " || $0 == "\t" }).reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
             
             // Check for Markdown Table (| col1 | col2 |)
-            if trimmed.hasPrefix("|") && trimmed.hasSuffix("|") && trimmed.contains("|") && lineIndex + 1 < lines.count {
-                let nextLine = lines[lineIndex + 1].trimmingCharacters(in: .whitespaces)
-                if nextLine.hasPrefix("|") && (nextLine.contains("---") || nextLine.contains("-|-") || nextLine.contains(":--") || nextLine.contains("--:")) {
-                    // Flush current text
-                    if !currentText.isEmpty {
-                        blocks.append(.text(currentText.joined(separator: "\n")))
-                        currentText = []
-                    }
-                    // Flush list
-                    if !listItems.isEmpty {
-                        blocks.append(.list(listItems, isOrderedList))
-                        listItems = []
-                    }
-                    
-                    // Parse headers from current line
-                    let headers = trimmed.split(separator: "|", omittingEmptySubsequences: true).map { String($0).trimmingCharacters(in: .whitespaces) }
-                    
+            if trimmed.contains("|") && lineIndex + 1 < lines.count && isMarkdownTableSeparator(lines[lineIndex + 1]) {
+                let headers = splitMarkdownTableRow(trimmed)
+                if headers.count >= 2 || trimmed.hasPrefix("|") {
+                    flushTextAndList()
                     var tableRows: [[String]] = []
                     lineIndex += 2 // Skip header line and separator line
                     
                     while lineIndex < lines.count {
                         let rowLine = lines[lineIndex].trimmingCharacters(in: .whitespaces)
-                        if rowLine.hasPrefix("|") && rowLine.hasSuffix("|") {
-                            let cells = rowLine.split(separator: "|", omittingEmptySubsequences: true).map { String($0).trimmingCharacters(in: .whitespaces) }
-                            if !cells.isEmpty {
-                                tableRows.append(cells)
+                        if rowLine.hasPrefix("|") || (rowLine.contains("|") && !rowLine.isEmpty && !rowLine.hasPrefix("#") && !rowLine.hasPrefix(">") && !rowLine.hasPrefix("- ")) {
+                            var cells = splitMarkdownTableRow(rowLine)
+                            if cells.count < headers.count {
+                                cells.append(contentsOf: Array(repeating: "", count: headers.count - cells.count))
                             }
+                            tableRows.append(cells)
                             lineIndex += 1
                         } else {
                             break
@@ -1151,15 +1215,7 @@ struct MessageContentParser {
             
             // Check for headings (# H1, ## H2, etc.)
             if let match = trimmed.range(of: "^#{1,6}\\s+", options: .regularExpression) {
-                if !currentText.isEmpty {
-                    blocks.append(.text(currentText.joined(separator: "\n")))
-                    currentText = []
-                }
-                if !listItems.isEmpty {
-                    blocks.append(.list(listItems, isOrderedList))
-                    listItems = []
-                }
-                
+                flushTextAndList()
                 let level = trimmed.prefix(while: { $0 == "#" }).count
                 let heading = String(trimmed[match.upperBound...])
                 blocks.append(.heading(level, heading))
@@ -1169,66 +1225,93 @@ struct MessageContentParser {
             
             // Check for block LaTeX ($$...$$)
             if trimmed.hasPrefix("$$") && trimmed.hasSuffix("$$") && trimmed.count > 4 {
-                if !currentText.isEmpty {
-                    blocks.append(.text(currentText.joined(separator: "\n")))
-                    currentText = []
-                }
+                flushTextAndList()
                 let latex = String(trimmed.dropFirst(2).dropLast(2))
                 blocks.append(.latex(latex, true))
                 lineIndex += 1
                 continue
             }
             
-            // Check for blockquote (> ...)
-            if trimmed.hasPrefix("> ") {
-                if !currentText.isEmpty {
-                    blocks.append(.text(currentText.joined(separator: "\n")))
-                    currentText = []
+            // Check for multi-line blockquote (> ...)
+            if trimmed == ">" || trimmed.hasPrefix("> ") || (trimmed.hasPrefix(">") && trimmed.count > 1 && !trimmed.hasPrefix(">>")) {
+                flushTextAndList()
+                var quoteLines: [String] = []
+                while lineIndex < lines.count {
+                    let qTrimmed = lines[lineIndex].trimmingCharacters(in: .whitespaces)
+                    if qTrimmed == ">" {
+                        quoteLines.append("")
+                        lineIndex += 1
+                    } else if qTrimmed.hasPrefix("> ") {
+                        quoteLines.append(String(qTrimmed.dropFirst(2)))
+                        lineIndex += 1
+                    } else if qTrimmed.hasPrefix(">") {
+                        quoteLines.append(String(qTrimmed.dropFirst(1)).trimmingCharacters(in: .whitespaces))
+                        lineIndex += 1
+                    } else {
+                        break
+                    }
                 }
-                if !listItems.isEmpty {
-                    blocks.append(.list(listItems, isOrderedList))
-                    listItems = []
-                }
-                blocks.append(.blockquote(String(trimmed.dropFirst(2))))
-                lineIndex += 1
+                blocks.append(.blockquote(quoteLines.joined(separator: "\n")))
                 continue
             }
             
-            // Check for horizontal divider line (--- or ***)
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                if !currentText.isEmpty {
-                    blocks.append(.text(currentText.joined(separator: "\n")))
-                    currentText = []
-                }
-                if !listItems.isEmpty {
-                    blocks.append(.list(listItems, isOrderedList))
-                    listItems = []
-                }
+            // Check for horizontal divider line (--- or *** or ___)
+            if isHorizontalDividerLine(trimmed) {
+                flushTextAndList()
                 blocks.append(.html("<hr/>"))
                 lineIndex += 1
                 continue
             }
             
-            // Check for unordered list (- or * item)
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+            // Check for unordered list (- or * or + item)
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
                 if !currentText.isEmpty {
-                    blocks.append(.text(currentText.joined(separator: "\n")))
+                    let joined = currentText.joined(separator: "\n")
+                    if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        blocks.append(.text(joined))
+                    }
                     currentText = []
                 }
-                isOrderedList = false
-                listItems.append(String(trimmed.dropFirst(2)))
+                let itemBody = String(trimmed.dropFirst(2))
+                if indentSpaces >= 2 && !listItems.isEmpty {
+                    let depth = max(1, min(4, indentSpaces / 2))
+                    let prefix = String(repeating: "    ", count: depth) + "◦  "
+                    listItems.append(prefix + itemBody)
+                } else {
+                    if !listItems.isEmpty && isOrderedList {
+                        blocks.append(.list(listItems, isOrderedList))
+                        listItems = []
+                    }
+                    isOrderedList = false
+                    listItems.append(itemBody)
+                }
                 lineIndex += 1
                 continue
             }
             
             // Check for ordered list (1. item)
-            if let _ = trimmed.range(of: "^\\d+\\.\\s+", options: .regularExpression) {
+            if let numMatch = trimmed.range(of: "^(\\d+)\\.\\s+", options: .regularExpression) {
                 if !currentText.isEmpty {
-                    blocks.append(.text(currentText.joined(separator: "\n")))
+                    let joined = currentText.joined(separator: "\n")
+                    if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        blocks.append(.text(joined))
+                    }
                     currentText = []
                 }
-                isOrderedList = true
-                listItems.append(String(trimmed.drop(while: { $0.isNumber || $0 == "." || $0 == " " })))
+                let numberPrefix = String(trimmed[numMatch]).trimmingCharacters(in: .whitespaces)
+                let itemBody = String(trimmed[numMatch.upperBound...])
+                if indentSpaces >= 2 && !listItems.isEmpty {
+                    let depth = max(1, min(4, indentSpaces / 2))
+                    let prefix = String(repeating: "    ", count: depth) + "\(numberPrefix)  "
+                    listItems.append(prefix + itemBody)
+                } else {
+                    if !listItems.isEmpty && !isOrderedList {
+                        blocks.append(.list(listItems, isOrderedList))
+                        listItems = []
+                    }
+                    isOrderedList = true
+                    listItems.append(itemBody)
+                }
                 lineIndex += 1
                 continue
             }
@@ -1250,13 +1333,7 @@ struct MessageContentParser {
             
             // Check for Markdown Media ![alt](url_or_path)
             if let mediaMatch = extractMarkdownMedia(from: trimmed) {
-                if !currentText.isEmpty {
-                    let joined = currentText.joined(separator: "\n")
-                    if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        blocks.append(.text(joined))
-                    }
-                    currentText = []
-                }
+                flushTextAndList()
                 blocks.append(.media(mediaMatch.kind, mediaMatch.alt, mediaMatch.target))
                 lineIndex += 1
                 continue
@@ -1268,15 +1345,7 @@ struct MessageContentParser {
         }
         
         // Flush remaining
-        if !listItems.isEmpty {
-            blocks.append(.list(listItems, isOrderedList))
-        }
-        if !currentText.isEmpty {
-            let joined = currentText.joined(separator: "\n")
-            if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                blocks.append(.text(joined))
-            }
-        }
+        flushTextAndList()
         
         return blocks
     }
@@ -1396,6 +1465,18 @@ struct AgentChatStage: View, Equatable {
     @State private var userScrolledUp: Bool = false
     @State private var scrollTracker = ChatScrollInteractionTracker()
     
+    private static func messagesDigest(_ list: [AgentMessageModel]) -> Int {
+        var hasher = Hasher()
+        hasher.combine(list.count)
+        for msg in list {
+            hasher.combine(msg.id)
+            hasher.combine(msg.content.utf8.count)
+            hasher.combine(msg.toolResults.count)
+            hasher.combine(msg.pendingChanges.count)
+        }
+        return hasher.finalize()
+    }
+
     static func == (lhs: AgentChatStage, rhs: AgentChatStage) -> Bool {
         lhs.isLoading == rhs.isLoading &&
         lhs.domain == rhs.domain &&
@@ -1408,7 +1489,8 @@ struct AgentChatStage: View, Equatable {
         lhs.messages.last?.id == rhs.messages.last?.id &&
         lhs.messages.last?.content == rhs.messages.last?.content &&
         lhs.messages.last?.toolResults.count == rhs.messages.last?.toolResults.count &&
-        lhs.messages.last?.pendingChanges == rhs.messages.last?.pendingChanges
+        lhs.messages.last?.pendingChanges == rhs.messages.last?.pendingChanges &&
+        messagesDigest(lhs.messages) == messagesDigest(rhs.messages)
     }
     
     var body: some View {
@@ -1606,7 +1688,6 @@ struct AgentChatStage: View, Equatable {
                                         )
                                 }
                             }
-                            .textSelection(.enabled)
                             .frame(width: max(0, stageGeo.size.width))
                         }
                         
@@ -1721,7 +1802,7 @@ struct AgentChatStage: View, Equatable {
             .onChange(of: messages.last?.content) { _ in
                 if !userScrolledUp {
                     let now = Date()
-                    if now.timeIntervalSince(scrollTracker.lastAutoScrollTime) >= 0.08 {
+                    if now.timeIntervalSince(scrollTracker.lastAutoScrollTime) >= 0.14 {
                         scrollTracker.lastAutoScrollTime = now
                         proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                     }
@@ -1736,6 +1817,7 @@ struct AgentChatStage: View, Equatable {
                 if scrollTracker.monitor == nil {
                     let tracker = scrollTracker
                     scrollTracker.monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { event in
+                        ChatScrollActivityGate.recordScrollEvent()
                         if let sv = tracker.scrollView {
                             guard event.window === sv.window else { return event }
                             let localPt = sv.convert(event.locationInWindow, from: nil)

@@ -12,6 +12,32 @@ import SwiftUI
 import AppKit
 import UserNotifications
 
+enum AppEdition {
+    static let isStandaloneAI: Bool = {
+        if Bundle.main.bundleIdentifier == "com.dotmini.microcode.ai" {
+            return true
+        }
+        if (Bundle.main.object(forInfoDictionaryKey: "MicroCodeStandaloneAI") as? Bool) == true {
+            return true
+        }
+        let bundleName = Bundle.main.bundleURL.deletingPathExtension().lastPathComponent
+        if bundleName == "MicroCode AI" || bundleName == "MicroCodeAI" {
+            return true
+        }
+        if ProcessInfo.processInfo.environment["MICROCODE_STANDALONE_AI"] == "1" {
+            return true
+        }
+        if CommandLine.arguments.contains("--standalone-ai") {
+            return true
+        }
+        return false
+    }()
+
+    static var displayName: String {
+        isStandaloneAI ? "MicroCode AI" : "MicroCode"
+    }
+}
+
 @main
 enum MicroCodeEntryPoint {
     static func main() {
@@ -55,6 +81,55 @@ struct MicroCodeApp: App {
         // signals and exceptions during startup are recorded too.
         CrashReporter.shared.install()
         CrashReporter.shared.breadcrumb("MicroCodeApp.init")
+
+        // Diagnostics: `MICROCODE_SKILLS_DUMP_OUT=/path/report.json` writes what the skill loader found in this bundle, then exits.
+        if let dumpOut = ProcessInfo.processInfo.environment["MICROCODE_SKILLS_DUMP_OUT"], !dumpOut.isEmpty {
+            Task { @MainActor in
+                let store = AgentSkillsStore.shared
+                let probes: [String: String] = [
+                    "ui_th": "ออกแบบหน้าเว็บ landing page ให้สวย",
+                    "swift": "fix the SwiftUI sidebar layout in macOS",
+                    "thai_text": "ช่วยเขียนข้อความบนปุ่มและฟอร์มภาษาไทย",
+                    "security": "review how we store the oauth token",
+                    "unrelated_th": "ช่วยดู bug ว่าทำไมแอปค้าง"
+                ]
+                var routed: [String: [String]] = [:]
+                for (k, q) in probes {
+                    routed[k] = store.rankSkills(forPrompt: q).filter { !AgentSkillsStore.coreSkillIds.contains($0.skill.id) }.prefix(3).map { "\($0.skill.id):\($0.score)" }
+                }
+                let report: [String: Any] = [
+                    "builtinRoot": AgentSkillsStore.builtinRootPath ?? "MISSING",
+                    "builtin": store.skills.filter { $0.isBuiltin }.map { ["id": $0.id, "enabled": $0.isEnabled, "provider": $0.provider, "descChars": $0.description.count] as [String: Any] },
+                    "coreSnippetChars": store.coreProtocolSnippet().count,
+                    "coreSnippetHead": String(store.coreProtocolSnippet().prefix(160)),
+                    "routing": routed,
+                    "promptSnippetHasCore": store.activeSkillsPromptSnippet(forPrompt: "hello").contains("MICROCODE CORE PROTOCOL")
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
+                    try? data.write(to: URL(fileURLWithPath: dumpOut), options: .atomic)
+                }
+                exit(0)
+            }
+        }
+
+        // Diagnostics: `MICROCODE_CLOUD_PROBE_OUT=/path/report.json` checks the Dotmini Cloud purchase chain with the signed-in session (no payment made), then exits.
+        if let cloudOut = ProcessInfo.processInfo.environment["MICROCODE_CLOUD_PROBE_OUT"], !cloudOut.isEmpty {
+            Task { @MainActor in
+                await DotminiCloudProbe.runAndWrite(to: cloudOut)
+                exit(0)
+            }
+        }
+
+        // Diagnostics: `MICROCODE_SUB_PROBE_OUT=/path/report.json` runs a live Web Subscription health
+        // check with the app's own credentials (redacted report only), then exits.
+        if let probeOut = ProcessInfo.processInfo.environment["MICROCODE_SUB_PROBE_OUT"], !probeOut.isEmpty {
+            Task { @MainActor in
+                _ = SubscriptionAuthManager.shared
+                await SubscriptionAuthManager.shared.detectLocalCLISessions()
+                await SubscriptionHealthProbe.shared.runAllAndWrite(to: probeOut)
+                exit(0)
+            }
+        }
         
         // Launch ACP 1.0 JSON-RPC stdio server when invoked with `--acp-server`
         let args = CommandLine.arguments
@@ -253,6 +328,13 @@ struct MicroCodeApp: App {
             return
         }
 
+        if url.scheme?.lowercased() == "microcode-file" {
+            Task { @MainActor in
+                _ = MarkdownAttrCache.handleOpenURL(url, appState: appState)
+            }
+            return
+        }
+
         // Supabase OAuth uses the app URL scheme. Its browser callback carries
         // real access/refresh tokens; do not treat it as a human license key.
         if url.scheme?.lowercased() == "microcode", url.host?.lowercased() == "auth" {
@@ -312,6 +394,18 @@ struct MicroCodeApp: App {
                     try? await CollaborationService.shared.joinSession(shareCode: token, mountWorkspace: true)
                 } else {
                     AppState.shared?.showingCollaborationView = true
+                }
+            }
+            return
+        }
+
+        // 1-Click Enterprise Team Setup Deep Link (e.g. microcode://enterprise?config=<base64url>)
+        if (url.scheme?.lowercased() == "microcode" || url.scheme?.lowercased() == "codetuner"),
+           (url.host?.lowercased() == "enterprise" || url.host?.lowercased() == "enterprise-connect") {
+            Task { @MainActor in
+                if EnterpriseAIAuthService.shared.applySmartPaste(url.absoluteString) != nil {
+                    appState.settingsSelectedTab = 2
+                    appState.showingSettingsDialog = true
                 }
             }
             return

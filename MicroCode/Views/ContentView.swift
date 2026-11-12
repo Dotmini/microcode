@@ -750,18 +750,20 @@ private struct NativeSidebarSplitContainer<SidebarContent: View, MainContent: Vi
 struct AgenticEditorWorkspace: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
-    @State private var surface: AgenticWorkspaceSurface = .editor
+    @State private var surface: AgenticWorkspaceSurface = AppEdition.isStandaloneAI ? .agent : .editor
     @State private var shortcutMonitor: Any? = nil
 
     /// Modes that manage their own left sidebar and don't need the global file browser.
     /// These modes (Embedded Studio, Browser, API Client, Remote Explorer) have
     /// specialized sidebars with mode-specific navigation.
     private var modeHasOwnSidebar: Bool {
-        [.embedded, .browser, .apiClient, .remoteX, .notebook, .playground].contains(appState.editorMode)
+        if AppEdition.isStandaloneAI { return false }
+        return [.embedded, .browser, .apiClient, .remoteX, .notebook, .playground].contains(appState.editorMode)
     }
 
     private var shouldShowWelcome: Bool {
-        (appState.workspaceFolder == nil && appState.openFiles.isEmpty && appState.editorMode == .code) || appState.showingWelcomeHome
+        if AppEdition.isStandaloneAI { return false }
+        return (appState.workspaceFolder == nil && appState.openFiles.isEmpty && appState.editorMode == .code) || appState.showingWelcomeHome
     }
 
     var body: some View {
@@ -780,7 +782,7 @@ struct AgenticEditorWorkspace: View {
                     showsGlobalSidebar: !modeHasOwnSidebar
                 ) {
                     Group {
-                        if surface == .editor {
+                        if surface == .editor && !AppEdition.isStandaloneAI {
                             XcodeEditorSidebar(surface: $surface)
                         } else {
                             AgenticWorkspaceSidebar(surface: $surface)
@@ -796,7 +798,7 @@ struct AgenticEditorWorkspace: View {
                                 modeHasOwnSidebar: modeHasOwnSidebar
                             )
 
-                            if surface == .agent {
+                            if surface == .agent || AppEdition.isStandaloneAI {
                                 AIAgentView(allowsChatSidebar: false, usesUnifiedWindowToolbar: true)
                                     .environmentObject(appState)
                             } else {
@@ -917,7 +919,7 @@ struct AgenticEditorWorkspace: View {
                     return nil
                 }
             }
-            if flags == [.control] || flags == [.command, .option] {
+            if !AppEdition.isStandaloneAI && (flags == [.control] || flags == [.command, .option]) {
                 switch chars {
                 case "0" where flags == [.control]:
                     var tx = Transaction()
@@ -1431,102 +1433,119 @@ private struct WorkspaceUnifiedHeaderBar: View {
                         .layoutPriority(1)
                 }
 
-                // Surface Toggle (Agent vs Code Editor vs More Mode)
-                let isMoreSurfaceActive = surface == .editor && appState.editorMode != .code && appState.editorMode != .aiAgent
-                HStack(spacing: 2) {
-                    Button {
-                        appState.switchToMode(.aiAgent)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "brain")
-                                .font(.system(size: 10))
-                            if !isUltraTightHeader {
-                                Text("Agent")
-                                    .font(.system(size: 11, weight: isAgentSurface ? .semibold : .medium))
-                                    .lineLimit(1)
+                // Surface Toggle (Agent vs Code Editor vs More Mode) — hidden in Standalone MicroCode AI
+                if !AppEdition.isStandaloneAI {
+                    let isMoreSurfaceActive = surface == .editor && appState.editorMode != .code && appState.editorMode != .aiAgent
+                    HStack(spacing: 2) {
+                        Button {
+                            appState.switchToMode(.aiAgent)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "brain")
+                                    .font(.system(size: 10))
+                                if !isUltraTightHeader {
+                                    Text("Agent")
+                                        .font(.system(size: 11, weight: isAgentSurface ? .semibold : .medium))
+                                        .lineLimit(1)
+                                }
                             }
                         }
-                    }
-                    .agenticTabStyle(active: isAgentSurface, compact: isCompactHeader)
-                    .help("Agent Mode")
+                        .agenticTabStyle(active: isAgentSurface, compact: isCompactHeader)
+                        .help("Agent Mode")
 
-                    Button {
-                        appState.switchToMode(.code)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "curlybraces")
-                                .font(.system(size: 10))
-                            if !isUltraTightHeader {
-                                Text(isCompactHeader ? "Editor" : "Code Editor")
-                                    .font(.system(size: 11, weight: (surface == .editor && appState.editorMode == .code) ? .semibold : .medium))
-                                    .lineLimit(1)
+                        Button {
+                            appState.switchToMode(.code)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "curlybraces")
+                                    .font(.system(size: 10))
+                                if !isUltraTightHeader {
+                                    Text(isCompactHeader ? "Editor" : "Code Editor")
+                                        .font(.system(size: 11, weight: (surface == .editor && appState.editorMode == .code) ? .semibold : .medium))
+                                        .lineLimit(1)
+                                }
                             }
                         }
-                    }
-                    .agenticTabStyle(active: surface == .editor && appState.editorMode == .code, compact: isCompactHeader)
-                    .help("Code Editor Mode")
+                        .agenticTabStyle(active: surface == .editor && appState.editorMode == .code, compact: isCompactHeader)
+                        .help("Code Editor Mode")
 
-                    Menu {
-                        Button("Playground Mode") {
-                            appState.switchToMode(.playground)
-                        }
-                        Button("Cell Mode (Notebook)") {
-                            appState.switchToMode(.notebook)
-                        }
-                        Button("SSH Remote Browser") {
-                            appState.switchToMode(.remoteX)
-                        }
-                        Button("Science Mode") {
-                            appState.switchToMode(.science)
-                        }
-                        Button("IDE Web Browser") {
-                            appState.switchToMode(.browser)
-                        }
-                        Button("Embed & IoT Studio") {
-                            appState.switchToMode(.embedded)
-                        }
-                        Button("API Studio") {
-                            appState.openAPIStudio()
-                        }
-                        Button("Extension Studio") {
-                            appState.openExtensionStudio()
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "square.grid.2x2")
-                                .font(.system(size: 10))
-                            if !isUltraTightHeader && (isMoreSurfaceActive || !isCompactHeader) {
-                                Text(isMoreSurfaceActive ? appState.editorMode.displayName : "More Mode")
-                                    .font(.system(size: 11, weight: isMoreSurfaceActive ? .semibold : .medium))
-                                    .lineLimit(1)
+                        Menu {
+                            Button("Playground Mode") {
+                                appState.switchToMode(.playground)
                             }
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 7, weight: .bold))
+                            Button("Cell Mode (Notebook)") {
+                                appState.switchToMode(.notebook)
+                            }
+                            Button("SSH Remote Browser") {
+                                appState.switchToMode(.remoteX)
+                            }
+                            Button("Science Mode") {
+                                appState.switchToMode(.science)
+                            }
+                            Button("IDE Web Browser") {
+                                appState.switchToMode(.browser)
+                            }
+                            Button("Embed & IoT Studio") {
+                                appState.switchToMode(.embedded)
+                            }
+                            Button("API Studio") {
+                                appState.openAPIStudio()
+                            }
+                            Button("Extension Studio") {
+                                appState.openExtensionStudio()
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "square.grid.2x2")
+                                    .font(.system(size: 10))
+                                if !isUltraTightHeader && (isMoreSurfaceActive || !isCompactHeader) {
+                                    Text(isMoreSurfaceActive ? appState.editorMode.displayName : "More Mode")
+                                        .font(.system(size: 11, weight: isMoreSurfaceActive ? .semibold : .medium))
+                                        .lineLimit(1)
+                                }
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 7, weight: .bold))
+                            }
                         }
+                        .agenticTabStyle(active: isMoreSurfaceActive, compact: isCompactHeader)
+                        .help("More Modes (Playground, Notebook, Science, SSH, Browser, IoT, API)")
                     }
-                    .agenticTabStyle(active: isMoreSurfaceActive, compact: isCompactHeader)
-                    .help("More Modes (Playground, Notebook, Science, SSH, Browser, IoT, API)")
+                    .padding(2)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(6)
+                    .fixedSize()
+                    .layoutPriority(3)
                 }
-                .padding(2)
-                .background(Color.primary.opacity(0.04))
-                .cornerRadius(6)
-                .fixedSize()
-                .layoutPriority(3)
 
                 // Trailing window/panel controls — pinned at top priority so [...] and [◨] are never pushed off-screen
                 HStack(spacing: isCompactHeader ? 4 : 6) {
-                    // Overflow Layout Menu [...]
-                    AgenticLayoutMenu()
-                        .environmentObject(appState)
-                        .fixedSize()
+                    if !AppEdition.isStandaloneAI {
+                        // Overflow Layout Menu [...]
+                        AgenticLayoutMenu()
+                            .environmentObject(appState)
+                            .fixedSize()
+                    }
 
                     // Context & Preview Inspector [sidebar.right]
                     UnifiedRightInspectorToggleButton()
                         .environmentObject(appState)
 
-                    // Settings [⚙] — only show in top bar when the left sidebar is hidden
-                    HeaderCollapsedSettingsButton(modeHasOwnSidebar: modeHasOwnSidebar)
-                        .environmentObject(appState)
+                    // Settings [⚙] — always accessible in Standalone AI or when left sidebar is hidden
+                    if AppEdition.isStandaloneAI {
+                        Button(action: { appState.showingSettingsDialog = true }) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 28, height: 26)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        .help("Settings (⌘,)")
+                    } else {
+                        HeaderCollapsedSettingsButton(modeHasOwnSidebar: modeHasOwnSidebar)
+                            .environmentObject(appState)
+                    }
                 }
                 .fixedSize()
                 .layoutPriority(10)
@@ -1545,7 +1564,8 @@ private struct WorkspaceUnifiedHeaderBar: View {
 
 private struct UnifiedHeaderBreadcrumbView: View {
     @EnvironmentObject var appState: AppState
-    @ObservedObject private var agent = AgentService.shared
+    @ObservedObject private var sessionSummary = AgentSessionSummaryStore.shared
+    private var agent: AgentService { AgentService.shared }
     let surface: AgenticWorkspaceSurface
     let showDetailSegment: Bool
     let maxBreadcrumbWidth: CGFloat
@@ -1630,7 +1650,6 @@ private struct UnifiedAgentModePillsView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var barState = AgentWorkspaceBarState.shared
     @ObservedObject private var planManager = ImplementationPlanManager.shared
-    @ObservedObject private var agent = AgentService.shared
     let veryCompact: Bool
 
     private var isPlanActive: Bool {
@@ -1713,7 +1732,7 @@ private struct UnifiedAgentModePillsView: View {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) { barState.selectTaskTab(3) }
                 } label: {
-                    Label("Diagnostic Logs (\(agent.activityLog.count))", systemImage: "terminal")
+                    Label("Diagnostic Logs", systemImage: "terminal")
                 }
 
                 Button {
@@ -2366,7 +2385,8 @@ private struct UnifiedAgentActionsMenu: View {
     @ObservedObject private var acpHost = ACPHostService.shared
     @ObservedObject private var teamIntegrations = TeamIntegrationService.shared
     @ObservedObject private var teamTasks = TeamTaskService.shared
-    @ObservedObject private var agent = AgentService.shared
+    @ObservedObject private var sessionSummary = AgentSessionSummaryStore.shared
+    private var agent: AgentService { AgentService.shared }
     let isCompact: Bool
 
     private var hasActiveTeamContext: Bool {
@@ -2616,7 +2636,8 @@ extension View {
 
 struct AgenticWorkspaceSidebar: View {
     @EnvironmentObject var appState: AppState
-    @StateObject private var agent = AgentService.shared
+    @ObservedObject private var sessionSummary = AgentSessionSummaryStore.shared
+    private var agent: AgentService { AgentService.shared }
     @ObservedObject private var trafficLights = WindowTrafficLightsController.shared
     @Binding var surface: AgenticWorkspaceSurface
     @State private var isProjectsExpanded = true
@@ -2649,11 +2670,15 @@ struct AgenticWorkspaceSidebar: View {
                 .padding(.top, 8)
                 .padding(.bottom, 8)
             
-            workspaceFilesSection
-                .padding(.top, 6)
-                .frame(maxWidth: .infinity, maxHeight: isFilesExpanded ? .infinity : nil, alignment: .top)
-            
-            if !isFilesExpanded {
+            if !AppEdition.isStandaloneAI {
+                workspaceFilesSection
+                    .padding(.top, 6)
+                    .frame(maxWidth: .infinity, maxHeight: isFilesExpanded ? .infinity : nil, alignment: .top)
+                
+                if !isFilesExpanded {
+                    Spacer(minLength: 0)
+                }
+            } else if !isProjectsExpanded {
                 Spacer(minLength: 0)
             }
             
@@ -2727,7 +2752,7 @@ struct AgenticWorkspaceSidebar: View {
     @ViewBuilder
     private var sidebarHeader: some View {
         HStack(spacing: 6) {
-            Text("MicroCode")
+            Text(AppEdition.displayName)
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.primary)
                 .lineLimit(1)
@@ -2879,7 +2904,7 @@ struct AgenticWorkspaceSidebar: View {
                         .foregroundColor(.secondary.opacity(0.7))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 4)
-                } else if isFilesExpanded {
+                } else if isFilesExpanded && !AppEdition.isStandaloneAI {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 2) {
                             ForEach(groups) { group in
@@ -2997,7 +3022,12 @@ struct AgenticWorkspaceSidebar: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { hovering in
-                    hoveredPlusProjectId = hovering ? group.id : (hoveredPlusProjectId == group.id ? nil : hoveredPlusProjectId)
+                    if hovering {
+                        guard !ChatScrollActivityGate.isScrolling else { return }
+                        if hoveredPlusProjectId != group.id { hoveredPlusProjectId = group.id }
+                    } else if hoveredPlusProjectId == group.id {
+                        hoveredPlusProjectId = nil
+                    }
                 }
                 .help("New Conversation in \(group.projectName)")
 
@@ -3017,17 +3047,24 @@ struct AgenticWorkspaceSidebar: View {
             )
             .padding(.horizontal, 6)
             .onHover { hovering in
-                hoveredProjectId = hovering ? group.id : (hoveredProjectId == group.id ? nil : hoveredProjectId)
+                if hovering {
+                    guard !ChatScrollActivityGate.isScrolling else { return }
+                    if hoveredProjectId != group.id { hoveredProjectId = group.id }
+                } else if hoveredProjectId == group.id {
+                    hoveredProjectId = nil
+                }
             }
             .contextMenu {
                 Button("New Conversation in \(group.projectName)") {
                     createNewConversation(in: group.projectPath, groupId: group.id)
                 }
                 if let path = group.projectPath, !path.isEmpty {
-                    Button("Open in Code Editor") {
-                        Task { @MainActor in
-                            await appState.openWorkspace(url: URL(fileURLWithPath: path))
-                            appState.switchToMode(.code)
+                    if !AppEdition.isStandaloneAI {
+                        Button("Open in Code Editor") {
+                            Task { @MainActor in
+                                await appState.openWorkspace(url: URL(fileURLWithPath: path))
+                                appState.switchToMode(.code)
+                            }
                         }
                     }
                     Button("Reveal in Finder") {
@@ -3153,7 +3190,12 @@ struct AgenticWorkspaceSidebar: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            hoveredChatId = hovering ? chat.id : (hoveredChatId == chat.id ? nil : hoveredChatId)
+            if hovering {
+                guard !ChatScrollActivityGate.isScrolling else { return }
+                if hoveredChatId != chat.id { hoveredChatId = chat.id }
+            } else if hoveredChatId == chat.id {
+                hoveredChatId = nil
+            }
         }
         .padding(.horizontal, 6)
         .contextMenu {
@@ -3255,25 +3297,7 @@ struct AgenticWorkspaceSidebar: View {
 
             Spacer()
 
-            Button(action: {
-                appState.settingsSelectedTab = 11
-                appState.showingSettingsDialog = true
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "qrcode")
-                        .font(.system(size: 11))
-                    Text("Phone")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.055))
-                .cornerRadius(5)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Connect with Phone via QR Code")
+            SidebarPhoneCompanionButton(appState: appState)
 
             Button(action: { appState.showingSettingsDialog = true }) {
                 Image(systemName: "questionmark.circle")
@@ -3318,4 +3342,51 @@ struct AgenticWorkspaceSidebar: View {
         return !collapsedProjectIds.contains(group.id)
     }
 }
+
+private struct SidebarPhoneCompanionButton: View {
+    let appState: AppState
+    @ObservedObject private var companion = PhoneCompanionService.shared
+
+    private var approvedCount: Int {
+        companion.connectedDevices.filter { $0.approvalState == .approved }.count
+    }
+
+    var body: some View {
+        let pending = companion.pendingApprovalCount
+        Button(action: {
+            appState.settingsSelectedTab = 11
+            appState.showingSettingsDialog = true
+        }) {
+            HStack(spacing: 4.5) {
+                Image(systemName: pending > 0 ? "iphone.radiowaves.left.and.right" : "qrcode")
+                    .font(.system(size: 11))
+                Text("Phone")
+                    .font(.system(size: 11, weight: .medium))
+
+                if pending > 0 {
+                    Text("\(pending)")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 4.5)
+                        .padding(.vertical, 1)
+                        .background(Color.orange)
+                        .clipShape(Capsule())
+                } else if companion.isEnabled && approvedCount > 0 {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 6, height: 6)
+                }
+            }
+            .foregroundColor(pending > 0 ? .primary : .secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(pending > 0 ? Color.orange.opacity(0.14) : Color.primary.opacity(0.055))
+            .cornerRadius(5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(pending > 0 ? "\(pending) mobile device(s) waiting for approval" : "Connect with Phone via QR Code or 6-Digit PIN")
+    }
+}
+
 

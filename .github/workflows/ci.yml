@@ -188,7 +188,7 @@ jobs:
           elif git describe --tags --abbrev=0 2>/dev/null; then
             VERSION="$(git describe --tags --abbrev=0 | sed 's/^v//')"
           else
-            VERSION="2.5.40"
+            VERSION="2.5.41"
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)
@@ -366,6 +366,37 @@ jobs:
           if-no-files-found: warn
 
   # ══════════════════════════════════════════════════════════════════════════
+  # Job 3b: MicroCode AI (Standalone) — same repo, same commit, same release
+  # Derived from the Universal Lite build by package_ai_from_lite.sh (no second compile).
+  # ══════════════════════════════════════════════════════════════════════════
+  package-ai:
+    name: "🤖 Package MicroCode AI"
+    needs: [build-arch, package-lite]
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Universal Lite
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ needs.build-arch.outputs.version }}-${{ needs.build-arch.outputs.short_sha }}-lite
+          path: lite/
+
+      - name: "🤖 Derive MicroCode AI from Universal Lite"
+        run: |
+          chmod +x package_ai_from_lite.sh
+          ./package_ai_from_lite.sh lite/Dotmini_MicroCode_Lite.dmg "${{ needs.build-arch.outputs.version }}" Dist/AI
+
+      - name: Upload AI DMG+PKG
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ needs.build-arch.outputs.version }}-${{ needs.build-arch.outputs.short_sha }}-ai
+          path: Dist/AI/
+          retention-days: 14
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════════════════════
   # Job 4: Test (parallel with build, depends on security)
   # ══════════════════════════════════════════════════════════════════════════
   test:
@@ -483,8 +514,9 @@ jobs:
   # ══════════════════════════════════════════════════════════════════════════
   release:
     name: "🚀 Release"
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-arch, package-lite]
+    # MicroCode AI is optional here: a packaging failure must never block the main MicroCode release.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && needs.build-arch.result == 'success' && needs.package-lite.result == 'success' }}
+    needs: [build-arch, package-lite, package-ai]
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -613,6 +645,14 @@ jobs:
           VERSION="${{ needs.build-arch.outputs.version }}"
           if echo "$REF $VERSION" | grep -qiE 'developer|beta|alpha|-'; then
             IS_PRE="true"
+          fi
+
+          if ls release-assets/Dotmini_MicroCode_AI_* >/dev/null 2>&1; then
+            {
+              echo ""
+              echo "### 🤖 MicroCode AI (Standalone)"
+              echo "Same commit, AI-agent-only edition: \`Dotmini_MicroCode_AI_Universal.dmg\` / \`.pkg\` (Apple Silicon + Intel). Installs side by side with MicroCode."
+            } >> release-body.md
           fi
 
           gh release create "${{ github.ref_name }}" \
