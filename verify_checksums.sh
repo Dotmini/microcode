@@ -31,19 +31,19 @@ while IFS= read -r line; do
     
     if [ ! -f "$FILE" ]; then
         echo "⚠️  MISSING: $FILE"
-        ((MISSING++))
+        MISSING=$((MISSING + 1))
         continue
     fi
     
     CURRENT_HASH=$(shasum -a 256 "$FILE" | awk '{print $1}')
     
     if [ "$HASH" == "$CURRENT_HASH" ]; then
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     else
         echo "❌ FAILED:  $FILE"
         echo "   Expected: $HASH"
         echo "   Got:      $CURRENT_HASH"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
     fi
 done < "$CHECKSUM_FILE"
 

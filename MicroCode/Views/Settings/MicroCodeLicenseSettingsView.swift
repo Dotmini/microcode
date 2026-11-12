@@ -47,6 +47,9 @@ struct MicroCodeLicenseSettingsView: View {
             .padding(20)
         }
         .task {
+            if email.isEmpty && !persistedEmail.isEmpty {
+                email = persistedEmail
+            }
             if auth.isAdminProvider {
                 telemetry.loadCachedAdminDataIfAuthorized()
                 await telemetry.fetchAllInstallsAndHistory()
@@ -135,6 +138,19 @@ struct MicroCodeLicenseSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Sign in")
                 .font(.system(size: 13, weight: .semibold))
+            if !auth.reauthReason.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(auth.reauthReason)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.primary)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.14)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+            }
             Button {
                 isWorking = true
                 status = "Opening secure browser sign-in…"

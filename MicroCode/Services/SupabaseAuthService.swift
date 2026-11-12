@@ -210,6 +210,7 @@ final class SupabaseAuthService: ObservableObject {
 
     @Published private(set) var session: Session?
     @Published private(set) var entitlement: Entitlement = .unknown
+    @Published private(set) var reauthReason: String = ""
 
     private let accessTokenAccount = "supabase.access-token"
     private let refreshTokenAccount = "supabase.refresh-token"
@@ -631,42 +632,217 @@ final class SupabaseAuthService: ObservableObject {
         return URL(string: baseStr) ?? URL(string: "https://microcode.dotmini.net/dashboard")!
     }
 
+    private enum RefreshOutcome {
+        case success(String)
+        case transientFailure
+        case terminalInvalid
+    }
+
     @discardableResult
     func refreshAccessTokenIfNeeded(force: Bool = false) async -> String? {
         if let refreshTask { return await refreshTask.value }
+        if session == nil {
+            restorePersistedSession()
+        }
         guard let existing = session else { return nil }
         if !force && !existing.isExpired { return existing.accessToken }
-        guard let configuration = configurationProvider(), !existing.refreshToken.isEmpty else { return nil }
+        _ = await bootstrapConfiguration()
+        guard let configuration = configurationProvider() ?? Configuration.cached() else {
+            return existing.isExpired ? nil : existing.accessToken
+        }
+
+        // Web-synced sessions without a refresh token: verify whether the JWT is still accepted by GoTrue
+        if existing.refreshToken.isEmpty {
+            let status = await verifyAccessTokenStatus(existing.accessToken, configuration: configuration)
+            if status == 200 {
+                return existing.accessToken
+            }
+            if status == 401 || status == 403 {
+                expireDeadSession(reason: "เซสชัน Dotmini Cloud หมดอายุแล้ว กรุณาเข้าสู่ระบบใหม่อีกครั้ง")
+                return nil
+            }
+            return existing.isExpired ? nil : existing.accessToken
+        }
+
         let generation = sessionGeneration
         let task = Task { @MainActor () -> String? in
-            var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/token")
-                .appending(queryItems: [URLQueryItem(name: "grant_type", value: "refresh_token")]))
-            request.httpMethod = "POST"
-            request.timeoutInterval = 4
-            request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": existing.refreshToken])
-            do {
-                let saved = try await self.fetchSession(request)
-                guard !Task.isCancelled, generation == self.sessionGeneration,
-                      existing.userID.isEmpty || saved.userID == existing.userID else { return nil }
-                try self.persist(saved)
-                return saved.accessToken
-            } catch { return nil } // outages must not erase a recoverable refresh credential
+            let outcome = await self.performRefreshRequest(refreshToken: existing.refreshToken, configuration: configuration, expectedUserID: existing.userID, generation: generation)
+            switch outcome {
+            case .success(let freshAccess):
+                return freshAccess
+            case .transientFailure:
+                return existing.isExpired ? nil : existing.accessToken
+            case .terminalInvalid:
+                // Check if the companion app (`MicroCode` <-> `MicroCode AI`) already rotated the single-use GoTrue refresh token
+                if let diskEncoded = KeychainManager.shared.reloadIntegrationSecretFromDisk(account: self.sessionAccount),
+                   let diskData = diskEncoded.data(using: .utf8),
+                   let diskSession = try? JSONDecoder().decode(Session.self, from: diskData),
+                   diskSession.userID == existing.userID,
+                   (diskSession.accessToken != existing.accessToken || diskSession.refreshToken != existing.refreshToken) {
+                    self.session = diskSession
+                    self.reauthReason = ""
+                    if !diskSession.isExpired {
+                        return diskSession.accessToken
+                    }
+                    if !diskSession.refreshToken.isEmpty {
+                        if case .success(let rotatedAccess) = await self.performRefreshRequest(
+                            refreshToken: diskSession.refreshToken,
+                            configuration: configuration,
+                            expectedUserID: diskSession.userID,
+                            generation: generation
+                        ) {
+                            return rotatedAccess
+                        }
+                    }
+                }
+                // Confirm whether existing accessToken is also dead before clearing the session
+                let userStatus = await self.verifyAccessTokenStatus(existing.accessToken, configuration: configuration)
+                if userStatus == 200 {
+                    return existing.accessToken
+                }
+                if generation == self.sessionGeneration {
+                    self.expireDeadSession(reason: "เซสชัน Dotmini Cloud หมดอายุแล้ว กรุณาเข้าสู่ระบบใหม่อีกครั้ง")
+                }
+                return nil
+            }
         }
         refreshTask = task
         let value = await task.value
         if generation == sessionGeneration { refreshTask = nil }
-        return value ?? existing.accessToken
+        return value
+    }
+
+    private func performRefreshRequest(
+        refreshToken: String,
+        configuration: Configuration,
+        expectedUserID: String,
+        generation: UUID
+    ) async -> RefreshOutcome {
+        var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/token")
+            .appending(queryItems: [URLQueryItem(name: "grant_type", value: "refresh_token")]))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": refreshToken])
+
+        var responseData: Data?
+        var statusCode: Int?
+
+        if let (data, response) = try? await network.data(for: request),
+           let http = response as? HTTPURLResponse {
+            responseData = data
+            statusCode = http.statusCode
+        } else if let urlStr = request.url?.absoluteString {
+            let anonKey = configuration.anonKey
+            let bodyStr = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            let fallback = await Task.detached(priority: .userInitiated) {
+                Self.curlIPv4Response(arguments: [
+                    "-X", "POST", urlStr,
+                    "-H", "apikey: \(anonKey)",
+                    "-H", "Content-Type: application/json",
+                    "-d", bodyStr
+                ])
+            }.value
+            responseData = fallback?.data
+            statusCode = fallback?.statusCode
+        }
+
+        guard let statusCode, let responseData else { return .transientFailure }
+        if (200..<300).contains(statusCode) {
+            guard let raw = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                  let saved = try? decodeSession(raw),
+                  !Task.isCancelled,
+                  generation == sessionGeneration,
+                  expectedUserID.isEmpty || saved.userID == expectedUserID else {
+                return .transientFailure
+            }
+            try? persist(saved)
+            return .success(saved.accessToken)
+        }
+        if statusCode == 400 || statusCode == 401 || statusCode == 403 {
+            return .terminalInvalid
+        }
+        return .transientFailure
+    }
+
+    private func verifyAccessTokenStatus(_ jwt: String, configuration: Configuration) async -> Int? {
+        guard !jwt.isEmpty else { return 401 }
+        var req = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/user"), timeoutInterval: 6)
+        req.httpMethod = "GET"
+        req.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+        if let (_, resp) = try? await network.data(for: req),
+           let http = resp as? HTTPURLResponse {
+            return http.statusCode
+        }
+        let urlStr = req.url?.absoluteString ?? "https://supabase-ai.dotmini.net/auth/v1/user"
+        let anonKey = configuration.anonKey
+        let fallback = await Task.detached(priority: .userInitiated) {
+            Self.curlIPv4Response(arguments: [
+                urlStr,
+                "-H", "apikey: \(anonKey)",
+                "-H", "Authorization: Bearer \(jwt)"
+            ])
+        }.value
+        return fallback?.statusCode
+    }
+
+    private func expireDeadSession(reason: String) {
+        let savedEmail = session?.email ?? defaults.string(forKey: "dotminiUserEmail") ?? ""
+        cancelPaymentWatch()
+        sessionGeneration = UUID()
+        refreshTask?.cancel()
+        refreshTask = nil
+        KeychainManager.shared.deleteIntegrationSecret(account: sessionAccount)
+        KeychainManager.shared.deleteIntegrationSecret(account: accessTokenAccount)
+        KeychainManager.shared.deleteIntegrationSecret(account: refreshTokenAccount)
+        KeychainManager.shared.deleteIntegrationSecret(account: entitlementAccount)
+        session = nil
+        entitlement = .unknown
+        reauthReason = reason
+        if !savedEmail.isEmpty {
+            defaults.set(savedEmail, forKey: "dotminiUserEmail")
+        }
+        TelemetryService.shared.clearAdminCache()
+    }
+
+    private nonisolated static func curlIPv4Response(arguments: [String]) -> (data: Data, statusCode: Int)? {
+        let marker = "\n__MC_HTTP_STATUS__:"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        proc.arguments = ["-4", "-sS", "--connect-timeout", "4", "--max-time", "12", "-w", "\(marker)%{http_code}"] + arguments
+        let out = Pipe()
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = out
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            let rawData = out.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0,
+                  let markerData = marker.data(using: .utf8),
+                  let range = rawData.range(of: markerData, options: .backwards) else {
+                return nil
+            }
+            let body = rawData.subdata(in: 0..<range.lowerBound)
+            let codeStr = String(data: rawData.subdata(in: range.upperBound..<rawData.count), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let code = Int(codeStr), code > 0 else { return nil }
+            return (body, code)
+        } catch {
+            return nil
+        }
     }
 
     private nonisolated static func curlIPv4JSON(arguments: [String]) -> Data? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        proc.arguments = ["-4", "-sS", "--connect-timeout", "3", "--max-time", "5"] + arguments
+        proc.arguments = ["-4", "-sS", "--connect-timeout", "4", "--max-time", "12"] + arguments
         let out = Pipe()
+        proc.standardInput = FileHandle.nullDevice
         proc.standardOutput = out
-        proc.standardError = Pipe()
+        proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
             let data = out.fileHandleForReading.readDataToEndOfFile()
@@ -681,12 +857,14 @@ final class SupabaseAuthService: ObservableObject {
         _ = await bootstrapConfiguration()
         guard let configuration = configurationProvider() ?? Configuration.cached(),
               let userID = session?.userID, !userID.isEmpty else { return }
-        let token = await refreshAccessTokenIfNeeded() ?? session?.accessToken ?? configuration.anonKey
+        let refreshedJWT = await refreshAccessTokenIfNeeded()
+        guard let userID = session?.userID, !userID.isEmpty else { return }
+        let token = refreshedJWT ?? session?.accessToken ?? configuration.anonKey
 
         var profile: [String: Any]?
 
         // 1. Primary canonical ledger: Dotmini Cloud subscription & Beam payment gateway (`/api/subscription/status`)
-        if let jwt = session?.accessToken, !jwt.isEmpty {
+        if let jwt = refreshedJWT ?? session?.accessToken, !jwt.isEmpty {
             let emailParam = (session?.email ?? "").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             let uidParam = userID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             let statusURLString = "https://microcode.dotmini.net/api/subscription/status?uid=\(uidParam)&email=\(emailParam)"
@@ -1126,9 +1304,15 @@ final class SupabaseAuthService: ObservableObject {
         KeychainManager.shared.deleteIntegrationSecret(account: refreshTokenAccount)
         KeychainManager.shared.deleteIntegrationSecret(account: entitlementAccount)
         let defaults = defaults
-        ["cloudGPUAuthToken", "cloudGPURefreshToken", "microRentToken", "dotminiLicenseKey", "dotminiUserEmail"].forEach { defaults.removeObject(forKey: $0) }
+        ["cloudGPUAuthToken", "cloudGPURefreshToken", "microRentToken", "dotminiLicenseKey", "dotminiUserEmail"].forEach {
+            defaults.removeObject(forKey: $0)
+        }
+        for suiteName in ["com.dotmini.microcode", "com.dotmini.microcode.ai"] {
+            UserDefaults(suiteName: suiteName)?.removeObject(forKey: "dotminiUserEmail")
+        }
         session = nil
         entitlement = .unknown
+        reauthReason = ""
         TelemetryService.shared.clearAdminCache()
     }
 
@@ -1206,10 +1390,16 @@ final class SupabaseAuthService: ObservableObject {
             KeychainManager.shared.deleteIntegrationSecret(account: entitlementAccount)
         }
         session = newSession
+        reauthReason = ""
         KeychainManager.shared.deleteIntegrationSecret(account: accessTokenAccount)
         KeychainManager.shared.deleteIntegrationSecret(account: refreshTokenAccount)
         clearLegacyCredentials()
-        if !newSession.email.isEmpty { defaults.set(newSession.email, forKey: "dotminiUserEmail") }
+        if !newSession.email.isEmpty {
+            defaults.set(newSession.email, forKey: "dotminiUserEmail")
+            for suiteName in ["com.dotmini.microcode", "com.dotmini.microcode.ai"] {
+                UserDefaults(suiteName: suiteName)?.set(newSession.email, forKey: "dotminiUserEmail")
+            }
+        }
         // Identity refresh must never change the user's selected inference mode.
     }
 

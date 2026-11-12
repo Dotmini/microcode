@@ -986,10 +986,12 @@ final class AIClient: ObservableObject {
         }
         let lower = trimmed.lowercased()
         if StreamableAIProvider.isDotminiCloudProxy(baseURL) {
-            if lower == "omni-o1x-pro" || lower == "omni" || lower == "omni-max" {
-                return "deepseek-chat"
-            } else if lower == "omni-o1x-lite" {
-                return "omni-mini"
+            if lower == "omni" || lower == "omni-max" {
+                return "omni-o1x-pro"
+            } else if lower == "omni-mini" {
+                return "omni-o1x-lite"
+            } else if lower == "omni-o1x-pro" || lower == "omni-o1x-lite" || lower == "deepseek-flash" || lower == "deepseek-v4-pro" {
+                return lower
             }
         }
         if lower == provider.rawValue {
@@ -1178,15 +1180,25 @@ final class AIClient: ObservableObject {
                 let pipe = Pipe()
                 proc.executableURL = URL(fileURLWithPath: bin)
                 proc.arguments = ["auth", "status", "--json"]
+                proc.standardInput = FileHandle.nullDevice
                 proc.standardOutput = pipe
-                proc.standardError = Pipe()
+                proc.standardError = FileHandle.nullDevice
                 var env = ProcessInfo.processInfo.environment
                 env.removeValue(forKey: "ANTHROPIC_API_KEY")
                 env.removeValue(forKey: "CLAUDE_API_KEY")
+                env["CI"] = "1"
                 proc.environment = env
                 do { try proc.run() } catch { continuation.resume(returning: ""); return }
-                let killer = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 8, execute: killer)
+                let pid = proc.processIdentifier
+                let killer = DispatchWorkItem {
+                    if proc.isRunning {
+                        proc.terminate()
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                            if proc.isRunning && pid > 0 { kill(pid, SIGKILL) }
+                        }
+                    }
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: killer)
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 proc.waitUntilExit()
                 killer.cancel()
@@ -1872,14 +1884,14 @@ final class AIClient: ObservableObject {
                 } else if keyMode == "cloud" && activeBaseURL == provider.cloudBaseURL && provider != .local {
                     if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
                         requestKey = platformKey
-                    } else if SupabaseAuthService.shared.session != nil {
-                        guard let refreshed = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded() else {
-                            onError("Could not refresh your Dotmini session. Check your connection or sign in again.")
-                            return
-                        }
+                    } else if let refreshed = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded() {
                         requestKey = refreshed
                     } else {
-                        requestKey = actualKey
+                        let msg = SupabaseAuthService.shared.reauthReason.isEmpty
+                            ? "เซสชัน Dotmini Cloud หมดอายุหรือยังไม่ได้เข้าสู่ระบบ กรุณาเข้าสู่ระบบที่ Settings → Account & License"
+                            : SupabaseAuthService.shared.reauthReason
+                        onError(msg)
+                        return
                     }
                 } else {
                     requestKey = actualKey
@@ -2792,6 +2804,12 @@ final class AIClient: ObservableObject {
             // ━━━ CLOUD MODE (Dotmini) ━━━
             let sessionToken = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded()
             let microToken = DotminiPlatformKeyService.shared.authorizationToken ?? sessionToken ?? ""
+            if microToken.isEmpty && provider != .local {
+                let msg = SupabaseAuthService.shared.reauthReason.isEmpty
+                    ? "เซสชัน Dotmini Cloud หมดอายุหรือยังไม่ได้เข้าสู่ระบบ กรุณาเข้าสู่ระบบที่ Settings → Account & License"
+                    : SupabaseAuthService.shared.reauthReason
+                throw NSError(domain: "AIClient", code: 401, userInfo: [NSLocalizedDescriptionKey: msg])
+            }
             actualKey = microToken
             baseURL = provider.cloudBaseURL
         }
@@ -4935,14 +4953,14 @@ final class AIClient: ObservableObject {
             }
             if isCloudProxy,
                (code == 400 || code == 404 || code == 429 || code == 500 || code == 502 || code == 503),
-               effectiveModel != "deepseek-chat" {
-                NSLog("⚠️ [streamOpenAI] Dotmini Cloud HTTP %d on %@ — transparently retrying on deepseek-chat", code, effectiveModel)
+               effectiveModel != "deepseek-flash" {
+                NSLog("⚠️ [streamOpenAI] Dotmini Cloud HTTP %d on %@ — transparently retrying on deepseek-flash", code, effectiveModel)
                 try await streamOpenAI(
                     prompt: prompt,
                     attachments: attachments,
                     systemPrompt: systemPrompt,
                     conversationHistory: conversationHistory,
-                    model: "deepseek-chat",
+                    model: "deepseek-flash",
                     apiKey: apiKey,
                     baseURL: baseURL,
                     tools: tools,
@@ -5711,9 +5729,9 @@ final class AIClient: ObservableObject {
             }
             if isCloudProxy,
                (httpResponse.statusCode == 400 || httpResponse.statusCode == 404 || httpResponse.statusCode == 429 || httpResponse.statusCode == 500 || httpResponse.statusCode == 502 || httpResponse.statusCode == 503),
-               effectiveModel != "deepseek-chat" {
-                NSLog("⚠️ [syncOpenAI] Dotmini Cloud HTTP %d on %@ — transparently retrying on deepseek-chat", httpResponse.statusCode, effectiveModel)
-                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: "deepseek-chat", apiKey: apiKey, baseURL: baseURL, tools: tools, maxTokensOverride: maxTokensOverride)
+               effectiveModel != "deepseek-flash" {
+                NSLog("⚠️ [syncOpenAI] Dotmini Cloud HTTP %d on %@ — transparently retrying on deepseek-flash", httpResponse.statusCode, effectiveModel)
+                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: "deepseek-flash", apiKey: apiKey, baseURL: baseURL, tools: tools, maxTokensOverride: maxTokensOverride)
             }
             let errorText = Self.extractOpenAICompatibleErrorMessage(from: raw)
                 ?? (raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : String(raw.prefix(400)))
@@ -5768,6 +5786,11 @@ final class AIClient: ObservableObject {
                     let args = (try? JSONSerialization.jsonObject(with: Data(argsStr.utf8))) as? [String: Any] ?? [:]
                     toolCalls.append(AIToolCall(id: tc["id"] as? String ?? UUID().uuidString, name: name, arguments: args))
                 }
+            }
+        }
+        if isCloudProxy {
+            Task { @MainActor in
+                await SupabaseAuthService.shared.refreshEntitlement()
             }
         }
         return (text: text, toolCalls: toolCalls)
@@ -7867,6 +7890,7 @@ final class AIClient: ObservableObject {
                 proc.executableURL = URL(fileURLWithPath: binaryPath)
                 proc.arguments = args
                 proc.currentDirectoryURL = URL(fileURLWithPath: wsPath)
+                proc.standardInput = FileHandle.nullDevice
                 proc.standardOutput = outPipe
                 proc.standardError = errPipe
 

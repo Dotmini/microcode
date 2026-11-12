@@ -1674,24 +1674,43 @@ public class SubscriptionAuthManager: ObservableObject {
         return nil
     }
     
+    private static let companionSuites = ["com.dotmini.microcode", "com.dotmini.microcode.ai"]
+
     @discardableResult
     private func saveTokenToKeychain(provider: String, token: String) -> Bool {
         guard !token.isEmpty, let sealed = KeychainManager.sealSecret(token) else { return false }
-        UserDefaults.standard.set(sealed, forKey: "km_sealed_sub_\(provider)")
+        let key = "km_sealed_sub_\(provider)"
+        UserDefaults.standard.set(sealed, forKey: key)
+        for suiteName in Self.companionSuites {
+            UserDefaults(suiteName: suiteName)?.set(sealed, forKey: key)
+        }
         return true
     }
 
     private func loadTokenFromKeychain(provider: String) -> String? {
-        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sub_\(provider)"),
+        let key = "km_sealed_sub_\(provider)"
+        if let sealed = UserDefaults.standard.data(forKey: key),
            let unsealed = KeychainManager.unsealSecret(sealed),
            !unsealed.isEmpty {
             return unsealed
+        }
+        for suiteName in Self.companionSuites {
+            if let sealed = UserDefaults(suiteName: suiteName)?.data(forKey: key),
+               let unsealed = KeychainManager.unsealSecret(sealed),
+               !unsealed.isEmpty {
+                UserDefaults.standard.set(sealed, forKey: key)
+                return unsealed
+            }
         }
         return nil
     }
 
     private func deleteTokenFromKeychain(provider: String) {
-        UserDefaults.standard.removeObject(forKey: "km_sealed_sub_\(provider)")
+        let key = "km_sealed_sub_\(provider)"
+        UserDefaults.standard.removeObject(forKey: key)
+        for suiteName in Self.companionSuites {
+            UserDefaults(suiteName: suiteName)?.removeObject(forKey: key)
+        }
     }
     
     private func base64Padded(_ str: String) -> String {
@@ -1888,6 +1907,9 @@ public class SubscriptionAuthManager: ObservableObject {
         }
         if let encoded = try? JSONEncoder().encode(metadata) {
             UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+            for suiteName in Self.companionSuites {
+                UserDefaults(suiteName: suiteName)?.set(encoded, forKey: userDefaultsKey)
+            }
         }
         poolLock.lock()
         let poolSnapshot = accountPools
@@ -1901,6 +1923,9 @@ public class SubscriptionAuthManager: ObservableObject {
         }
         if let encodedPool = try? JSONEncoder().encode(poolMetadata) {
             UserDefaults.standard.set(encodedPool, forKey: accountPoolsDefaultsKey)
+            for suiteName in Self.companionSuites {
+                UserDefaults(suiteName: suiteName)?.set(encodedPool, forKey: accountPoolsDefaultsKey)
+            }
         }
     }
     
@@ -2087,8 +2112,23 @@ public class SubscriptionAuthManager: ObservableObject {
                 }
             }
         }
+        var mergedDecoded: [SubscriptionProviderType: SubscriptionAccount] = [:]
+        for suiteName in Self.companionSuites {
+            if let suiteData = UserDefaults(suiteName: suiteName)?.data(forKey: userDefaultsKey),
+               let d = try? JSONDecoder().decode([SubscriptionProviderType: SubscriptionAccount].self, from: suiteData) {
+                for (k, v) in d where mergedDecoded[k] == nil {
+                    mergedDecoded[k] = v
+                }
+            }
+        }
         if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
            let decoded = try? JSONDecoder().decode([SubscriptionProviderType: SubscriptionAccount].self, from: data) {
+            for (k, v) in decoded {
+                mergedDecoded[k] = v
+            }
+        }
+        if !mergedDecoded.isEmpty {
+            let decoded = mergedDecoded
             for (prov, acc) in decoded {
                 if legacyByokMirrorSources.contains(acc.source) {
                     deleteTokenFromKeychain(provider: prov.rawValue)

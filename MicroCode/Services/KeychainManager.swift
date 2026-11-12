@@ -177,15 +177,33 @@ class KeychainManager: ObservableObject {
 
     // MARK: - Integration & SSH Secrets (Hardware-Bound AES-256-GCM Sealed Vault)
 
+    private static let sharedAccountSuites = [
+        "com.dotmini.microcode",
+        "com.dotmini.microcode.ai"
+    ]
+
+    private static func isSharedDotminiAccount(_ account: String) -> Bool {
+        account.hasPrefix("supabase.") || account.hasPrefix("dotmini.platform.")
+    }
+
     @discardableResult
     func saveIntegrationSecret(_ value: String, account: String) -> Bool {
         guard !value.isEmpty else {
             return deleteIntegrationSecret(account: account)
         }
+        let sealedKey = "km_sealed_sec_\(account)"
         memoryCache["sec:\(account)"] = value
         UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
         if let sealed = encryptSecret(value) {
-            UserDefaults.standard.set(sealed, forKey: "km_sealed_sec_\(account)")
+            UserDefaults.standard.set(sealed, forKey: sealedKey)
+            if Self.isSharedDotminiAccount(account) {
+                for suiteName in Self.sharedAccountSuites {
+                    if let suite = UserDefaults(suiteName: suiteName) {
+                        suite.removeObject(forKey: "km_secret_\(account)")
+                        suite.set(sealed, forKey: sealedKey)
+                    }
+                }
+            }
         }
         return true
     }
@@ -202,20 +220,87 @@ class KeychainManager: ObservableObject {
             _ = saveIntegrationSecret(legacy, account: account)
             return legacy
         }
-        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sec_\(account)"),
+        let sealedKey = "km_sealed_sec_\(account)"
+        if let sealed = UserDefaults.standard.data(forKey: sealedKey),
            let decrypted = decryptSecret(sealed), !decrypted.isEmpty {
             memoryCache[cacheKey] = decrypted
             return decrypted
+        }
+        if Self.isSharedDotminiAccount(account) {
+            for suiteName in Self.sharedAccountSuites {
+                if let suite = UserDefaults(suiteName: suiteName),
+                   let sealed = suite.data(forKey: sealedKey),
+                   let decrypted = decryptSecret(sealed), !decrypted.isEmpty {
+                    UserDefaults.standard.set(sealed, forKey: sealedKey)
+                    memoryCache[cacheKey] = decrypted
+                    return decrypted
+                }
+            }
         }
         memoryCache[cacheKey] = Self.missingSentinel
         return nil
     }
 
+    /// Bypasses in-memory cache and re-reads from disk/sibling bundle preferences.
+    /// Used when GoTrue rotates a single-use refresh token in the companion app (`MicroCode` vs `MicroCode AI`).
+    func reloadIntegrationSecretFromDisk(account: String) -> String? {
+        memoryCache.removeValue(forKey: "sec:\(account)")
+        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
+        if Self.isSharedDotminiAccount(account) {
+            for suiteName in Self.sharedAccountSuites {
+                CFPreferencesAppSynchronize(suiteName as CFString)
+            }
+        }
+        let sealedKey = "km_sealed_sec_\(account)"
+        // Prefer whichever shared suite holds the freshest session payload
+        if Self.isSharedDotminiAccount(account) {
+            var candidates: [Data] = []
+            if let local = UserDefaults.standard.data(forKey: sealedKey) {
+                candidates.append(local)
+            }
+            for suiteName in Self.sharedAccountSuites {
+                if let suite = UserDefaults(suiteName: suiteName),
+                   let data = suite.data(forKey: sealedKey) {
+                    candidates.append(data)
+                }
+            }
+            var bestString: String?
+            var bestExpiry: TimeInterval = -.infinity
+            for sealed in candidates {
+                guard let str = decryptSecret(sealed), !str.isEmpty else { continue }
+                if let jsonData = str.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                   let exp = (obj["expiresAt"] as? TimeInterval) ?? (obj["expiresAt"] as? NSNumber)?.doubleValue {
+                    if exp > bestExpiry {
+                        bestExpiry = exp
+                        bestString = str
+                    }
+                } else if bestString == nil {
+                    bestString = str
+                }
+            }
+            if let bestString {
+                memoryCache["sec:\(account)"] = bestString
+                return bestString
+            }
+        }
+        return readIntegrationSecret(account: account)
+    }
+
     @discardableResult
     func deleteIntegrationSecret(account: String) -> Bool {
+        let sealedKey = "km_sealed_sec_\(account)"
         memoryCache["sec:\(account)"] = Self.missingSentinel
         UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
-        UserDefaults.standard.removeObject(forKey: "km_sealed_sec_\(account)")
+        UserDefaults.standard.removeObject(forKey: sealedKey)
+        if Self.isSharedDotminiAccount(account) {
+            for suiteName in Self.sharedAccountSuites {
+                if let suite = UserDefaults(suiteName: suiteName) {
+                    suite.removeObject(forKey: "km_secret_\(account)")
+                    suite.removeObject(forKey: sealedKey)
+                }
+            }
+        }
         return true
     }
     

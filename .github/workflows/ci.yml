@@ -47,8 +47,8 @@ jobs:
   # ══════════════════════════════════════════════════════════════════════════
   security:
     name: "🔐 Security"
-    runs-on: macos-15
-    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -59,13 +59,8 @@ jobs:
             echo "❌ CHECKSUMS.sha256 or verify_checksums.sh is missing!"
             exit 1
           fi
-          chmod +x verify_checksums.sh
-          ./verify_checksums.sh
-
-      - name: Performance gate (stream sanitizer + editor cache differential fuzz)
-        run: |
-          chmod +x Scripts/perf/*.sh
-          Scripts/perf/run_perf_gate.sh 600
+          sha256sum -c CHECKSUMS.sha256 --quiet
+          echo "✅ All SHA256 checksums verified"
 
       - name: Scan for hardcoded secrets
         run: |
@@ -117,8 +112,8 @@ jobs:
   # ══════════════════════════════════════════════════════════════════════════
   lint:
     name: "🔍 Lint"
-    runs-on: macos-15
-    timeout-minutes: 15
+    runs-on: macos-14
+    timeout-minutes: 30
     if: "!startsWith(github.ref, 'refs/tags/v')"
 
     steps:
@@ -128,6 +123,11 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
+
+      - name: Performance gate (stream sanitizer + editor cache differential fuzz)
+        run: |
+          chmod +x Scripts/perf/*.sh
+          Scripts/perf/run_perf_gate.sh 600
 
       - name: Swift syntax check
         run: |
@@ -159,16 +159,16 @@ jobs:
   build-arch:
     name: "🔨 Build ${{ matrix.arch }}"
     needs: security
-    runs-on: macos-15
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: arm64
-            os: macos-15
+            os: macos-14
           - arch: x86_64
-            os: macos-15
+            os: macos-14
 
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -319,8 +319,8 @@ jobs:
   package-lite:
     name: "📦 Package Universal Lite"
     needs: build-arch
-    runs-on: macos-15
-    timeout-minutes: 10
+    runs-on: macos-14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -365,28 +365,10 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-  # ══════════════════════════════════════════════════════════════════════════
-  # Job 3b: MicroCode AI (Standalone) — same repo, same commit, same release
-  # Derived from the Universal Lite build by package_ai_from_lite.sh (no second compile).
-  # ══════════════════════════════════════════════════════════════════════════
-  package-ai:
-    name: "🤖 Package MicroCode AI"
-    needs: [build-arch, package-lite]
-    runs-on: macos-15
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Universal Lite
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-${{ needs.build-arch.outputs.version }}-${{ needs.build-arch.outputs.short_sha }}-lite
-          path: lite/
-
       - name: "🤖 Derive MicroCode AI from Universal Lite"
         run: |
           chmod +x package_ai_from_lite.sh
-          ./package_ai_from_lite.sh lite/Dotmini_MicroCode_Lite.dmg "${{ needs.build-arch.outputs.version }}" Dist/AI
+          ./package_ai_from_lite.sh Dist/Lite/Dotmini_MicroCode_Lite.dmg "${{ needs.build-arch.outputs.version }}" Dist/AI
 
       - name: Upload AI DMG+PKG
         uses: actions/upload-artifact@v4
@@ -402,8 +384,8 @@ jobs:
   test:
     name: "🧪 Test"
     needs: security
-    runs-on: macos-15
-    timeout-minutes: 30
+    runs-on: macos-14
+    timeout-minutes: 45
     if: "!inputs.skip_tests && !startsWith(github.ref, 'refs/tags/v')"
 
     steps:
@@ -480,8 +462,8 @@ jobs:
   checksums:
     name: "🔒 Auto-Checksums"
     needs: [build-arch]
-    runs-on: macos-15
-    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
 
     steps:
@@ -514,9 +496,8 @@ jobs:
   # ══════════════════════════════════════════════════════════════════════════
   release:
     name: "🚀 Release"
-    # MicroCode AI is optional here: a packaging failure must never block the main MicroCode release.
     if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && needs.build-arch.result == 'success' && needs.package-lite.result == 'success' }}
-    needs: [build-arch, package-lite, package-ai]
+    needs: [build-arch, package-lite]
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
