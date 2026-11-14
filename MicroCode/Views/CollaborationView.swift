@@ -804,37 +804,45 @@ struct CollaborationView: View {
                                 .scaleEffect(0.75)
                         } else {
                             Circle()
-                                .fill(isRelayActive ? Color.green : Color.orange)
-                                .frame(width: 6, height: 6)
+                                .fill(isRelayActive ? Color(red: 0.22, green: 0.76, blue: 0.48) : Color.secondary.opacity(0.55))
+                                .frame(width: 5.5, height: 5.5)
                         }
                         Text(
                             isConnectingOnline
                                 ? "Connecting cloudai.dotmini.net…"
                                 : (collab.isOfficialDotminiRelayActive ? "Dotmini Official Relay" : "Online HTTPS Relay")
                         )
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(isRelayActive ? .green : .secondary)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background((isRelayActive ? Color.green : Color.primary).opacity(0.10))
+                    .background(Color.primary.opacity(0.055))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+                    )
                     .cornerRadius(5)
                 } else {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 4.5) {
                         Circle()
-                            .fill(Color.green)
-                            .frame(width: 6, height: 6)
+                            .fill(Color(red: 0.22, green: 0.76, blue: 0.48))
+                            .frame(width: 5.5, height: 5.5)
                         Text("LAN · :\(collab.listeningPort)")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.06))
+                    .background(Color.primary.opacity(0.055))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+                    )
                     .cornerRadius(5)
                 }
                 
@@ -1142,25 +1150,28 @@ struct CollaborationView: View {
                 Button {
                     collab.setAITeammateEnabled(!collab.isAITeammateEnabled)
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 9.5, weight: .bold))
-                        Text(collab.isAITeammateEnabled ? "AI Teammate · ON" : "AI Teammate · OFF")
-                            .font(.system(size: 10, weight: .semibold))
+                    HStack(spacing: 4.5) {
+                        AIProviderBrandIcon(provider: "microcode", size: 11)
+                        Text(collab.isAITeammateEnabled ? "Agent · ON" : "Agent · OFF")
+                            .font(.system(size: 10, weight: .medium))
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
-                    .foregroundColor(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97) : .secondary)
+                    .foregroundColor(collab.isAITeammateEnabled ? .primary : .secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3.5)
                     .background(
                         RoundedRectangle(cornerRadius: 5)
-                            .fill(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.14) : Color.primary.opacity(0.05))
+                            .fill(Color.primary.opacity(collab.isAITeammateEnabled ? 0.09 : 0.04))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.primary.opacity(collab.isAITeammateEnabled ? 0.16 : 0.08), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)
                 .fixedSize(horizontal: true, vertical: false)
-                .help("เปิด/ปิด AI Agent เป็นเพื่อนร่วมทีมแบบ Real-Time ในโหมด Collab")
+                .help("เปิด/ปิด MicroCode Agent เป็นผู้ร่วมงานในเซสชัน")
 
                 if collab.isAITeammateEnabled {
                     Button {
@@ -1168,23 +1179,27 @@ struct CollaborationView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: isFollowingAI ? "eye.fill" : "eye")
-                                .font(.system(size: 9.5, weight: .semibold))
-                            Text(isFollowingAI ? "Following AI" : "Follow AI")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: 9.5, weight: .medium))
+                            Text(isFollowingAI ? "Following Agent" : "Follow Agent")
+                                .font(.system(size: 10, weight: .medium))
                                 .lineLimit(1)
                                 .fixedSize(horizontal: true, vertical: false)
                         }
-                        .foregroundColor(isFollowingAI ? .white : Color(red: 0.66, green: 0.33, blue: 0.97))
+                        .foregroundColor(isFollowingAI ? .primary : .secondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3.5)
                         .background(
                             RoundedRectangle(cornerRadius: 5)
-                                .fill(isFollowingAI ? Color(red: 0.66, green: 0.33, blue: 0.97) : Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
+                                .fill(Color.primary.opacity(isFollowingAI ? 0.13 : 0.04))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .stroke(Color.primary.opacity(isFollowingAI ? 0.24 : 0.08), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
                     .fixedSize(horizontal: true, vertical: false)
-                    .help(isFollowingAI ? "คลิกเพื่อหยุด Follow AI Agent" : "ติดตามดูไฟล์และบรรทัดที่ AI Agent กำลังอ่าน/แก้ไขแบบ Real-Time")
+                    .help(isFollowingAI ? "คลิกเพื่อหยุดติดตามตำแหน่งไฟล์ของ Agent" : "ติดตามดูไฟล์และบรรทัดที่ Agent กำลังทำงานแบบ Real-Time")
                 }
 
                 if isFollowingOtherPeer {
@@ -1408,19 +1423,28 @@ struct CollaborationView: View {
             Spacer(minLength: 8)
             
             if let editor = file.activeEditorName, !editor.isEmpty {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(peerColor)
-                        .frame(width: 6, height: 6)
+                let isAIEditor = (editor == CollaborationService.aiTeammateDisplayName)
+                HStack(spacing: 4.5) {
+                    if isAIEditor {
+                        AIProviderBrandIcon(provider: "microcode", size: 10)
+                    } else {
+                        Circle()
+                            .fill(peerColor.opacity(0.85))
+                            .frame(width: 5.5, height: 5.5)
+                    }
                     Text(editor)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(peerColor)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background(peerColor.opacity(0.14))
+                .background(Color.primary.opacity(0.045))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                )
                 .cornerRadius(4)
                 .fixedSize(horizontal: true, vertical: false)
             }
@@ -1506,26 +1530,25 @@ struct CollaborationView: View {
                         chatInput = "@ai " + chatInput
                     }
                 } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 10, weight: .bold))
+                    HStack(spacing: 4) {
+                        AIProviderBrandIcon(provider: "microcode", size: 11)
                         Text("@ai")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .fixedSize(horizontal: true, vertical: false)
                     }
-                    .foregroundColor(Color(red: 0.66, green: 0.33, blue: 0.97))
+                    .foregroundColor(.primary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
-                    .background(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
+                    .background(Color.primary.opacity(0.05))
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.35), lineWidth: 1)
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                     )
                     .cornerRadius(6)
                 }
                 .buttonStyle(.plain)
                 .fixedSize(horizontal: true, vertical: false)
-                .help("สั่งงาน AI Agent ร่วมกับทีมใน Session Chat (@ai ...)")
+                .help("สั่งงาน MicroCode Agent ร่วมกับทีมใน Session Chat (@ai ...)")
 
                 TextField("Message collaborators or type @ai to command AI Agent…", text: $chatInput)
                     .textFieldStyle(.plain)
@@ -1655,20 +1678,18 @@ struct ParticipantRow: View {
         HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(peerColor.opacity(isAITeammate ? 0.24 : 0.20))
+                    .fill(Color.primary.opacity(0.055))
                     .frame(width: 28, height: 28)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .stroke(peerColor.opacity(0.65), lineWidth: 1.2)
+                            .stroke(Color.primary.opacity(0.11), lineWidth: 1)
                     )
                 if isAITeammate {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(peerColor)
+                    AIProviderBrandIcon(provider: "microcode", size: 15)
                 } else {
                     Text(participant.displayName.prefix(1).uppercased())
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundColor(peerColor)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.primary)
                 }
             }
             
@@ -1680,14 +1701,14 @@ struct ParticipantRow: View {
                         .lineLimit(1)
                         .layoutPriority(1)
                     
-                    Text(participant.role.uppercased())
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundColor(isAITeammate ? peerColor : .secondary)
+                    Text(isAITeammate ? "AGENT" : participant.role.uppercased())
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 5.5)
                         .padding(.vertical, 1.5)
-                        .background(isAITeammate ? peerColor.opacity(0.14) : Color.primary.opacity(0.06))
+                        .background(Color.primary.opacity(0.055))
                         .cornerRadius(3.5)
                 }
                 
@@ -1696,12 +1717,12 @@ struct ParticipantRow: View {
                         ProgrammingLanguageIconView(fileName: (cursor.filePath as NSString).lastPathComponent, size: 11)
                     } else {
                         Circle()
-                            .fill(peerColor.opacity(0.8))
+                            .fill(peerColor.opacity(0.75))
                             .frame(width: 5, height: 5)
                     }
                     Text(participant.liveActivitySummary)
-                        .font(.system(size: 10.5, weight: participant.cursorPosition?.isTyping == true ? .semibold : .regular, design: .monospaced))
-                        .foregroundColor(participant.cursorPosition?.isTyping == true ? peerColor : .secondary)
+                        .font(.system(size: 10.5, weight: participant.cursorPosition?.isTyping == true ? .medium : .regular, design: .monospaced))
+                        .foregroundColor(participant.cursorPosition?.isTyping == true ? .primary : .secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -1709,9 +1730,9 @@ struct ParticipantRow: View {
                 if participant.isAIActive, let aiText = participant.aiStatusText, !aiText.isEmpty {
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(peerColor)
-                            .frame(width: 5, height: 5)
-                        Text("AI Agent: \(aiText)")
+                            .fill(Color.secondary.opacity(0.65))
+                            .frame(width: 4.5, height: 4.5)
+                        Text(aiText)
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -1729,17 +1750,21 @@ struct ParticipantRow: View {
                     }
                 } label: {
                     HStack(spacing: 3) {
-                        Image(systemName: "location.fill")
-                            .font(.system(size: 9))
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 8.5, weight: .semibold))
                         Text("Jump")
                             .font(.system(size: 10.5, weight: .medium))
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
-                    .foregroundColor(peerColor)
+                    .foregroundColor(.secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(peerColor.opacity(0.12))
+                    .background(Color.primary.opacity(0.045))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+                    )
                     .cornerRadius(5)
                 }
                 .buttonStyle(.plain)
@@ -1752,13 +1777,13 @@ struct ParticipantRow: View {
                         .font(.system(size: 10.5, weight: .medium))
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
-                        .foregroundColor(isFollowing ? peerColor : .primary)
+                        .foregroundColor(.primary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(isFollowing ? peerColor.opacity(0.16) : Color.primary.opacity(0.05))
+                        .background(Color.primary.opacity(isFollowing ? 0.13 : 0.045))
                         .overlay(
                             RoundedRectangle(cornerRadius: 5)
-                                .stroke(isFollowing ? peerColor.opacity(0.5) : Color.primary.opacity(0.12), lineWidth: 1)
+                                .stroke(Color.primary.opacity(isFollowing ? 0.26 : 0.10), lineWidth: 1)
                         )
                         .cornerRadius(5)
                 }
@@ -1767,15 +1792,15 @@ struct ParticipantRow: View {
             }
             
             Circle()
-                .fill(participant.isOnline ? Color.green : Color.secondary.opacity(0.35))
-                .frame(width: 6.5, height: 6.5)
+                .fill(participant.isOnline ? Color(red: 0.22, green: 0.76, blue: 0.48) : Color.secondary.opacity(0.30))
+                .frame(width: 6, height: 6)
         }
         .padding(10)
         .background(Color.primary.opacity(0.025))
         .cornerRadius(6)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(peerColor.opacity(isFollowing ? 0.45 : 0.14), lineWidth: 1)
+                .stroke(Color.primary.opacity(isFollowing ? 0.22 : 0.07), lineWidth: 1)
         )
     }
 }
@@ -1804,36 +1829,33 @@ struct HeaderCollaborationPresenceBar: View {
                 } label: {
                     HStack(spacing: 5) {
                         Circle()
-                            .fill(Color.green)
-                            .frame(width: 6, height: 6)
+                            .fill(Color(red: 0.22, green: 0.76, blue: 0.48))
+                            .frame(width: 5.5, height: 5.5)
 
                         HStack(spacing: -4) {
                             ForEach(Array(online.prefix(3))) { peer in
-                                let c = CollaborationColorHelper.swiftUIColor(fromHex: peer.color)
                                 let isAI = peer.userId == CollaborationService.aiTeammateUserId || peer.role == "AI Agent"
                                 ZStack {
                                     Circle()
-                                        .fill(c)
+                                        .fill(Color(nsColor: .controlBackgroundColor))
                                         .frame(width: 17, height: 17)
                                     if isAI {
-                                        Image(systemName: "sparkles")
-                                            .font(.system(size: 8.5, weight: .bold))
-                                            .foregroundColor(.white)
+                                        AIProviderBrandIcon(provider: "microcode", size: 10)
                                     } else {
                                         Text(peer.displayName.prefix(1).uppercased())
-                                            .font(.system(size: 9, weight: .bold, design: .rounded))
-                                            .foregroundColor(.white)
+                                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                                            .foregroundColor(.primary)
                                     }
                                 }
                                 .overlay(
-                                    Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.3)
+                                    Circle().stroke(Color.primary.opacity(0.16), lineWidth: 1)
                                 )
                             }
                         }
 
                         Text(session.shareCode)
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(.primary.opacity(0.92))
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.primary.opacity(0.9))
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
@@ -1841,30 +1863,21 @@ struct HeaderCollaborationPresenceBar: View {
                 .buttonStyle(.plain)
                 .help(activeSummary)
 
-                if collab.isAITeammateEnabled {
-                    let isFollowingAI = collab.followingUserId == CollaborationService.aiTeammateUserId
+                if let followingId = collab.followingUserId {
                     Button {
-                        collab.toggleFollow(userId: CollaborationService.aiTeammateUserId)
+                        collab.toggleFollow(userId: followingId)
                     } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: isFollowingAI ? "eye.fill" : "sparkles")
-                                .font(.system(size: 8.5, weight: .bold))
-                            Text("AI")
-                                .font(.system(size: 9.5, weight: .bold))
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .foregroundColor(isFollowingAI ? .white : Color(red: 0.66, green: 0.33, blue: 0.97))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(isFollowingAI ? Color(red: 0.66, green: 0.33, blue: 0.97) : Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.15))
-                        )
+                        Image(systemName: "eye.fill")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.10))
+                            .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .help(isFollowingAI ? "Following MicroCode AI — click to stop" : "Follow MicroCode AI in real time")
+                    .fixedSize()
+                    .help("Currently following collaborator — click to stop following")
                 }
 
                 Menu {
@@ -1896,7 +1909,7 @@ struct HeaderCollaborationPresenceBar: View {
                             Button {
                                 Task { await collab.jumpToParticipant(peer) }
                             } label: {
-                                Label("Jump to \(peer.displayName) (\(peer.liveActivitySummary))", systemImage: "location.fill")
+                                Label("Jump to \(peer.displayName) (\(peer.liveActivitySummary))", systemImage: "arrow.up.right")
                             }
                             Button {
                                 collab.toggleFollow(userId: peer.userId)
@@ -1913,11 +1926,11 @@ struct HeaderCollaborationPresenceBar: View {
                     Button {
                         appState.showingCollaborationView = true
                     } label: {
-                        Label("Open Team Collaboration Panel…", systemImage: "person.2.fill")
+                        Label("Open Team Collaboration Panel…", systemImage: "person.2")
                     }
                 } label: {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 8.5, weight: .bold))
+                        .font(.system(size: 8.5, weight: .semibold))
                         .foregroundColor(.secondary)
                         .frame(width: 14, height: 18)
                         .contentShape(Rectangle())
@@ -1931,11 +1944,11 @@ struct HeaderCollaborationPresenceBar: View {
             .fixedSize(horizontal: true, vertical: false)
             .background(
                 Capsule(style: .continuous)
-                    .fill(Color.green.opacity(0.10))
+                    .fill(Color.primary.opacity(0.055))
             )
             .overlay(
                 Capsule(style: .continuous)
-                    .strokeBorder(Color.green.opacity(0.32), lineWidth: 1)
+                    .strokeBorder(Color.primary.opacity(0.11), lineWidth: 1)
             )
         }
     }
@@ -2120,24 +2133,27 @@ struct CollaborationWorkspaceMouseOverlay: View {
                                         .frame(width: 15, height: 19)
                                         .shadow(color: Color.black.opacity(0.42), radius: 3, x: 0, y: 1.5)
 
-                                    HStack(spacing: 4) {
+                                    HStack(spacing: 4.5) {
+                                        Circle()
+                                            .fill(peerColor)
+                                            .frame(width: 5.5, height: 5.5)
                                         Text(peer.displayName)
-                                            .font(.system(size: 10.5, weight: .bold))
-                                            .foregroundColor(.white)
+                                            .font(.system(size: 10.5, weight: .semibold))
+                                            .foregroundColor(Color(white: 0.94))
                                         Text("· \(peer.liveActivitySummary)")
-                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                            .foregroundColor(.white.opacity(0.92))
+                                            .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                            .foregroundColor(Color(white: 0.72))
                                             .lineLimit(1)
                                     }
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2.5)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
                                     .background(
                                         Capsule(style: .continuous)
-                                            .fill(peerColor)
+                                            .fill(Color(red: 0.11, green: 0.12, blue: 0.14).opacity(0.95))
                                     )
                                     .overlay(
                                         Capsule(style: .continuous)
-                                            .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
+                                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
                                     )
                                     .shadow(color: Color.black.opacity(0.35), radius: 4, x: 0, y: 2)
                                     .offset(x: 11, y: -2)
@@ -2166,25 +2182,25 @@ struct CollaborationWorkspaceMouseOverlay: View {
 
                         HStack(spacing: 4.5) {
                             Circle()
-                                .fill(Color.white)
-                                .frame(width: 5, height: 5)
+                                .fill(myColor)
+                                .frame(width: 5.5, height: 5.5)
                             Text("\(collab.localDisplayName) (You)")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(.white)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Color(white: 0.94))
                             Text("· \(myCursorSummary)")
-                                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.9))
+                                .font(.system(size: 9.5, weight: .regular, design: .monospaced))
+                                .foregroundColor(Color(white: 0.70))
                                 .lineLimit(1)
                         }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2.5)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
                         .background(
                             Capsule(style: .continuous)
-                                .fill(myColor.opacity(localIsPressing ? 0.98 : 0.88))
+                                .fill(Color(red: 0.11, green: 0.12, blue: 0.14).opacity(localIsPressing ? 0.98 : 0.93))
                         )
                         .overlay(
                             Capsule(style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.3), lineWidth: 0.8)
+                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
                         )
                         .shadow(color: Color.black.opacity(0.28), radius: 3, x: 0, y: 1.5)
                         .offset(x: pillX, y: pillY)

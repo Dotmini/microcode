@@ -462,7 +462,7 @@ final class CollaborationService: ObservableObject {
     // AI Agent as a Live Collaborator Teammate (ONLY active when currentSession != nil)
     nonisolated static let aiTeammateUserId = "ai-agent-teammate"
     nonisolated static let aiTeammateDisplayName = "MicroCode AI"
-    nonisolated static let aiTeammateColor = "#A855F7"
+    nonisolated static let aiTeammateColor = "#94A3B8"
     @Published var isAITeammateEnabled: Bool = true {
         didSet {
             guard currentSession != nil else { return }
@@ -624,14 +624,14 @@ final class CollaborationService: ObservableObject {
     private var typingResetTask: Task<Void, Never>? = nil
 
     static let collaboratorPalette = [
-        "#3B82F6", // Electric Blue
-        "#10B981", // Emerald Green
-        "#F59E0B", // Vivid Amber
-        "#EC4899", // Hot Pink
-        "#8B5CF6", // Vivid Violet
-        "#06B6D4", // Bright Cyan
-        "#EF4444", // Coral Red
-        "#84CC16"  // Lime Green
+        "#64748B", // Slate
+        "#5B8DEF", // Muted Steel Blue
+        "#4E9F86", // Muted Sage
+        "#C28E5C", // Warm Ochre
+        "#7C8EA6", // Graphite Blue
+        "#8C7A6B", // Warm Stone
+        "#5F9EA0", // Cadet
+        "#94A3B8"  // Silver Slate
     ]
     
     private static let formalPalette = collaboratorPalette
@@ -4826,9 +4826,9 @@ final class CollaborationService: ObservableObject {
               --text: #e5e7eb;
               --secondary: #9ca3af;
               --muted: #6b7280;
-              --accent: #3b82f6;
-              --ai: #a855f7;
-              --green: #10b981;
+              --accent: #e5e7eb;
+              --ai: #94a3b8;
+              --green: #38c17a;
               --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
               --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
               --line-h: 20px;
@@ -5117,54 +5117,54 @@ final class CollaborationService: ObservableObject {
             }
             .btn:hover { background: rgba(255,255,255,0.12); }
             .btn-primary {
-              background: #2563eb;
-              border-color: #3b82f6;
-              color: #fff;
-            }
-            .btn-ai {
-              background: rgba(168,85,247,0.18);
-              border-color: rgba(168,85,247,0.45);
-              color: #e9d5ff;
+              background: #f3f4f6;
+              border-color: #f3f4f6;
+              color: #0b0d12;
               font-weight: 600;
             }
-            .btn-ai:hover { background: rgba(168,85,247,0.28); }
+            .btn-ai {
+              background: rgba(255,255,255,0.06);
+              border-color: rgba(255,255,255,0.14);
+              color: #e5e7eb;
+              font-weight: 500;
+            }
+            .btn-ai:hover { background: rgba(255,255,255,0.11); }
             .peer-row {
               padding: 7px 9px;
               border-radius: 6px;
               background: rgba(255,255,255,0.025);
-              border: 1px solid rgba(255,255,255,0.05);
+              border: 1px solid rgba(255,255,255,0.06);
               display: flex;
               align-items: center;
               gap: 8px;
               font-size: 12px;
               cursor: pointer;
             }
-            .peer-row:hover { background: rgba(255,255,255,0.06); }
+            .peer-row:hover { background: rgba(255,255,255,0.055); }
             .peer-row.ai-peer {
-              background: rgba(168,85,247,0.09);
-              border-color: rgba(168,85,247,0.28);
+              background: rgba(255,255,255,0.035);
+              border-color: rgba(255,255,255,0.10);
             }
             .peer-row.following {
-              border-color: rgba(168,85,247,0.7);
-              box-shadow: 0 0 0 1px rgba(168,85,247,0.28);
+              border-color: rgba(255,255,255,0.28);
             }
             .follow-btn {
               font-size: 10px;
-              font-weight: 600;
+              font-weight: 500;
               padding: 3px 7px;
               border-radius: 4px;
-              border: 1px solid rgba(255,255,255,0.14);
-              background: rgba(255,255,255,0.06);
+              border: 1px solid rgba(255,255,255,0.12);
+              background: rgba(255,255,255,0.05);
               color: #e5e7eb;
               cursor: pointer;
               flex-shrink: 0;
             }
             .follow-btn.active {
-              background: #a855f7;
-              border-color: #c084fc;
-              color: #fff;
+              background: rgba(255,255,255,0.15);
+              border-color: rgba(255,255,255,0.28);
+              color: #f3f4f6;
             }
-            .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+            .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
             .chat-box {
               flex: 1;
               display: flex;
@@ -5185,12 +5185,13 @@ final class CollaborationService: ObservableObject {
               padding: 6px 8px;
               border-radius: 6px;
               background: rgba(255,255,255,0.025);
+              border: 1px solid rgba(255,255,255,0.05);
               line-height: 1.42;
               word-break: break-word;
             }
             .chat-msg-card.ai-msg {
-              background: rgba(168,85,247,0.11);
-              border: 1px solid rgba(168,85,247,0.26);
+              background: rgba(255,255,255,0.04);
+              border: 1px solid rgba(255,255,255,0.10);
             }
             .chat-input-row {
               padding: 8px;
@@ -5250,7 +5251,7 @@ final class CollaborationService: ObservableObject {
               <span class="badge" id="wsStatusBadge">LIVE</span>
             </div>
             <div style="display:flex;align-items:center;gap:8px">
-              <span id="followBanner" style="display:none;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;background:rgba(168,85,247,0.18);border:1px solid rgba(168,85,247,0.45);font-size:11px;color:#e9d5ff"></span>
+              <span id="followBanner" style="display:none;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);font-size:11px;color:#e5e7eb"></span>
               <input class="txt" id="nameInput" style="width:140px" placeholder="Your name" onchange="saveName()">
               <span class="badge" id="peerCountBadge">1 online</span>
             </div>
@@ -5293,7 +5294,7 @@ final class CollaborationService: ObservableObject {
             <div class="sidebar-right">
               <div class="section-hdr">
                 <span>LIVE COLLABORATORS</span>
-                <button class="btn btn-ai" style="padding:2px 7px;font-size:10px" onclick="followAITeammate()">✦ Follow AI</button>
+                <button class="btn btn-ai" style="padding:2px 7px;font-size:10px" onclick="followAITeammate()">Follow Agent</button>
               </div>
               <div class="peer-list" id="peerList" style="max-height:245px"></div>
               <div class="chat-box">
@@ -5473,14 +5474,13 @@ final class CollaborationService: ObservableObject {
                 const endLn = Math.max(startLn, c.endLine || startLn);
                 const topPx = topPad + (startLn - 1) * lineH;
                 const heightPx = Math.max(lineH, (endLn - startLn + 1) * lineH);
-                const col = escapeHtml(p.color || (isAI ? "#A855F7" : "#3B82F6"));
-                const bgAlpha = isAI ? "26" : (pid === userId ? "16" : "20");
+                const col = escapeHtml(p.color || "#64748B");
+                const bgAlpha = "18";
                 const statusSuffix = isAI
                   ? (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : (p.aiStatusText ? ` · ${p.aiStatusText}` : ` · Ln ${startLn}`))
                   : (pid === userId ? " (You)" : (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : ` · Ln ${startLn}`));
-                const prefixIcon = isAI ? "✦ " : "● ";
                 bands.push(`<div class="collab-line-band" style="top:${topPx}px;height:${heightPx}px;background:${col}${bgAlpha};border-left-color:${col}">
-                  <div class="collab-line-tag" style="background:${col}">${prefixIcon}${escapeHtml(p.displayName)}${escapeHtml(statusSuffix)}</div>
+                  <div class="collab-line-tag" style="background:rgba(18,20,24,0.94);border:1px solid rgba(255,255,255,0.14)">● ${escapeHtml(p.displayName)}${escapeHtml(statusSuffix)}</div>
                 </div>`);
               }
               overlay.innerHTML = bands.join("");
@@ -5850,9 +5850,8 @@ final class CollaborationService: ObservableObject {
                 } else {
                   const filePeers = cachedPeers.filter(p => (p.userId || p.id) !== userId && p.cursor && p.cursor.filePath === item.path);
                   const topPeer = filePeers[0];
-                  const isAIPeer = topPeer && ((topPeer.userId || topPeer.id) === AI_USER_ID || topPeer.role === "AI Agent");
                   const badge = topPeer
-                    ? `<span class="badge" style="font-size:9.5px;padding:1px 5px;border-color:${escapeHtml(topPeer.color)};color:${escapeHtml(topPeer.color)};background:${escapeHtml(topPeer.color)}18">${isAIPeer ? '✦ ' : ''}${escapeHtml(topPeer.displayName)}:${topPeer.cursor.line || 1}</span>`
+                    ? `<span class="badge" style="font-size:9.5px;padding:1px 5px;border-color:rgba(255,255,255,0.12);color:var(--secondary);background:rgba(255,255,255,0.05)">${escapeHtml(topPeer.displayName)}:${topPeer.cursor.line || 1}</span>`
                     : "";
                   html.push(`<div class="file-row ${item.path === activeFile ? 'active' : ''}" style="padding-left:${pad + 14}px" onclick="openFile('${item.path.replace(/'/g, "\\'")}')">
                     <div class="file-item-left">
@@ -5885,16 +5884,16 @@ final class CollaborationService: ObservableObject {
                   ? `<button class="follow-btn ${isFollow ? 'active' : ''}" onclick="toggleFollowPeer('${escapeHtml(pid)}', event)">${isFollow ? 'Following' : 'Follow'}</button>`
                   : "";
                 const roleBadge = isAI
-                  ? `<span class="badge" style="font-size:9px;padding:1px 5px;background:rgba(168,85,247,0.22);border-color:rgba(168,85,247,0.5);color:#e9d5ff">✦ AI AGENT</span>`
+                  ? `<span class="badge" style="font-size:9px;padding:1px 5px;background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.12);color:var(--secondary)">AGENT</span>`
                   : `<span style="color:var(--muted);font-weight:400">(${escapeHtml(p.role)})</span>`;
                 return `<div class="peer-row ${isAI ? 'ai-peer' : ''} ${isFollow ? 'following' : ''}" ${clickAttr}>
-                  <span class="dot" style="background:${escapeHtml(p.color || '#3b82f6')}"></span>
+                  <span class="dot" style="background:${escapeHtml(p.color || '#64748b')}"></span>
                   <div style="min-width:0;flex:1">
                     <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px">
                       <span>${escapeHtml(p.displayName)}${pid === userId ? ' (You)' : ''}</span>
                       ${roleBadge}
                     </div>
-                    <div style="font-size:10.5px;color:${isAI && p.isAIActive ? '#d8b4fe' : 'var(--secondary)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(act)}</div>
+                    <div style="font-size:10.5px;color:var(--secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(act)}</div>
                   </div>
                   ${followBtn}
                 </div>`;
@@ -5902,8 +5901,7 @@ final class CollaborationService: ObservableObject {
 
               const sameFilePeers = peers.filter(p => (p.userId || p.id) !== userId && p.cursor && p.cursor.filePath === activeFile);
               document.getElementById("activeEditorsIndicator").innerHTML = sameFilePeers.map(p => {
-                const isAI = (p.userId || p.id) === AI_USER_ID || p.role === "AI Agent";
-                return `<span style="color:${escapeHtml(p.color)};font-weight:600">${isAI ? '✦' : '●'} ${escapeHtml(p.displayName)} (Ln ${p.cursor.line || 1})</span>`;
+                return `<span style="color:var(--secondary);font-weight:500">● ${escapeHtml(p.displayName)} (Ln ${p.cursor.line || 1})</span>`;
               }).join(" &nbsp; ");
 
               updateSyntaxAndGutter();
@@ -5913,21 +5911,20 @@ final class CollaborationService: ObservableObject {
               for (const p of peers) {
                 const pid = p.userId || p.id;
                 if (pid === userId || !p.mouse) continue;
-                const isAI = pid === AI_USER_ID || p.role === "AI Agent";
                 const mx = p.mouse.x !== undefined ? p.mouse.x : (p.mouse.normX !== undefined ? p.mouse.normX : 0.5);
                 const my = p.mouse.y !== undefined ? p.mouse.y : (p.mouse.normY !== undefined ? p.mouse.normY : 0.5);
                 const px = rect.left + mx * rect.width;
                 const py = rect.top + my * rect.height;
-                const col = escapeHtml(p.color || "#3b82f6");
+                const col = escapeHtml(p.color || "#64748b");
                 const sub = p.cursor && p.cursor.filePath ? ` · ${p.cursor.filePath.split('/').pop()}:${p.cursor.line || 1}` : "";
                 cursorsHtml.push(`<div class="remote-cursor" style="transform:translate(${px.toFixed(1)}px, ${py.toFixed(1)}px)">
                   <svg width="16" height="18" viewBox="0 0 16 18" fill="none"><path d="M1 1L6.2 15.5L8.7 9.6L14.8 7.5L1 1Z" fill="${col}" stroke="#fff" stroke-width="1.3"/></svg>
-                  <div class="cursor-pill" style="background:${col}">${isAI ? '✦ ' : ''}${escapeHtml(p.displayName)}${escapeHtml(sub)}</div>
+                  <div class="cursor-pill" style="background:rgba(18,20,24,0.95);border:1px solid rgba(255,255,255,0.14)">● ${escapeHtml(p.displayName)}${escapeHtml(sub)}</div>
                 </div>`);
               }
               if (localMouse.visible && localMouse.x > 0) {
                 cursorsHtml.push(`<div class="remote-cursor" style="transform:translate(${(localMouse.x + 14).toFixed(1)}px, ${(localMouse.y + 16).toFixed(1)}px);transition:none;opacity:0.88">
-                  <div class="cursor-pill" style="background:${escapeHtml(myColor)};margin:0;font-size:10px">● ${escapeHtml(displayName)} (You)</div>
+                  <div class="cursor-pill" style="background:rgba(18,20,24,0.95);border:1px solid rgba(255,255,255,0.14);margin:0;font-size:10px">● ${escapeHtml(displayName)} (You)</div>
                 </div>`);
               }
               document.getElementById("cursorLayer").innerHTML = cursorsHtml.join("");
@@ -5939,7 +5936,7 @@ final class CollaborationService: ObservableObject {
               box.innerHTML = (cachedChats || []).map(c => {
                 const isAI = c.userId === AI_USER_ID || c.displayName === "MicroCode AI";
                 return `<div class="chat-msg-card ${isAI ? 'ai-msg' : ''}">
-                  <strong style="color:${escapeHtml(c.userColor || (isAI ? '#c084fc' : '#60a5fa'))}">${isAI ? '✦ ' : ''}${escapeHtml(c.displayName)}:</strong>
+                  <strong style="color:#f3f4f6">${escapeHtml(c.displayName)}:</strong>
                   <span>${escapeHtml(c.message)}</span>
                 </div>`;
               }).join("");
