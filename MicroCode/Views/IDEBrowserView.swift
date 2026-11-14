@@ -806,10 +806,13 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             proc.standardOutput = pipe
             proc.standardError = FileHandle.nullDevice
             var discovered: [ActiveLocalPortProcess] = []
-            let nonWebPorts: Set<Int> = [
-                companionPort, llmGatewayPort, 8470, 8471, 8472, 11436, 18888, 20128,
+            var nonWebPorts: Set<Int> = [
+                companionPort, llmGatewayPort, 11436, 18888, 20128,
                 5432, 3306, 6379, 27017, 11434, 5037, 3283, 22
             ]
+            for internalPort in 8470...8515 {
+                nonWebPorts.insert(internalPort)
+            }
             let ignoredSubstrings = [
                 "rapportd", "controlce", "airplayxp", "sharingd", "homed", "identitys",
                 "onedrive", "dropbox", "spotify", "figma", "slack", "discord",
@@ -1057,7 +1060,7 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             for match in matches.reversed() {
                 let full = ns.substring(with: match.range)
                 let portStr = ns.substring(with: match.range(at: 1))
-                if let port = Int(portStr), (1024...65535).contains(port), port != 8472, port != 11434 {
+                if let port = Int(portStr), (1024...65535).contains(port), !(8470...8515).contains(port), port != 11434 {
                     let normalized = full
                         .replacingOccurrences(of: "0.0.0.0", with: "127.0.0.1")
                         .replacingOccurrences(of: "[::]", with: "127.0.0.1")
@@ -1076,7 +1079,7 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             let ns = clean as NSString
             if let m = portRegex.matches(in: clean, options: [], range: NSRange(location: 0, length: ns.length)).last {
                 let portStr = ns.substring(with: m.range(at: 1))
-                if let port = Int(portStr), (1024...65535).contains(port), port != 8472 {
+                if let port = Int(portStr), (1024...65535).contains(port), !(8470...8515).contains(port) {
                     return URL(string: "http://127.0.0.1:\(port)/")
                 }
             }

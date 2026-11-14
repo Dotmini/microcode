@@ -778,9 +778,10 @@ extension PhoneCompanionService {
         }
         portsSet.remove(Int(listeningPort))
         portsSet.remove(Int(LocalLLMGatewayService.shared.listeningPort))
-        portsSet.remove(8470)
-        portsSet.remove(8471)
-        portsSet.remove(8472)
+        portsSet.remove(Int(CollaborationService.shared.listeningPort))
+        for internalPort in 8470...8515 {
+            portsSet.remove(internalPort)
+        }
 
         let recommendedPort = browserAuto.bestActivePort(forWorkspace: canonicalWs.isEmpty ? nil : canonicalWs)
             ?? (UniversalAppPreviewBridge.shared.activeProcess?.isRunning == true ? DeviceRuntimeService.shared.lastDetectedDevServerPort : nil)

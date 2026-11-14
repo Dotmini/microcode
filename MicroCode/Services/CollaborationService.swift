@@ -507,14 +507,17 @@ final class CollaborationService: ObservableObject {
     }
     @Published var localColor: String
     
-    // Transport & Tunnel State
-    @Published var listeningPort: UInt16 = 8472
+    // Transport & Tunnel State (Dedicated Port Range 8490...8515 — zero overlap with Mobile Connect 8470...8489)
+    nonisolated static let collabPortRange: ClosedRange<UInt16> = 8490...8515
+    @Published var listeningPort: UInt16 = 8490
     @Published var isServerRunning: Bool = false
     @Published var lanAddresses: [String] = []
     @Published var selectedLANAddress: String = "127.0.0.1"
     @Published var transportMode: TransportMode = .lan
     @Published var tunnelStatus: TunnelStatus = .idle
     @Published var publicTunnelURL: String? = nil
+    @Published var isOfficialDotminiRelayActive: Bool = false
+    @Published var activeTunnelProvider: String = "cloudai.dotmini.net"
     @Published var qrCodeImage: NSImage? = nil
     
     // Bonjour / LAN Auto-Discovery
@@ -522,7 +525,7 @@ final class CollaborationService: ObservableObject {
     
     enum TransportMode: String, CaseIterable, Identifiable {
         case lan = "LAN / P2P"
-        case online = "Online Tunnel"
+        case online = "Online HTTPS"
         var id: String { rawValue }
     }
     
@@ -583,6 +586,19 @@ final class CollaborationService: ObservableObject {
     private var hostMaintenanceTimer: Timer?
     private var tunnelProcess: Process?
     private var tunnelOutputPipe: Pipe?
+    private var collabRelayWebSocketTask: URLSessionWebSocketTask?
+    private var collabRelayWebSocketSession: URLSession?
+    private var collabRelayConnectTask: Task<Void, Never>?
+    private var collabRelayPingTimer: Timer?
+    private var activeTunnelBoundPort: Int = 0
+    private lazy var collabRelayLoopbackSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.timeoutIntervalForRequest = 35
+        cfg.timeoutIntervalForResource = 40
+        return URLSession(configuration: cfg)
+    }()
     private var isApplyingRemoteEdit: Bool = false
     private var lastSyncedLocalFileHashes: [String: Int] = [:]
     private var fileRevisionSnapshots: [String: [Int: String]] = [:] // relativePath -> (revision -> content snapshot, bounded to 32)
@@ -847,6 +863,9 @@ final class CollaborationService: ObservableObject {
         }
         
         recordActivity(actorName: localDisplayName, actorColor: localColor, action: "started host session", target: wsInfo.name)
+        if transportMode == .online {
+            startOnlineTunnel()
+        }
         regenerateQRCode()
         startHostMaintenanceTimer()
         NotificationCenter.default.post(name: Self.remotePresenceDidChangeNotification, object: nil)
@@ -862,8 +881,8 @@ final class CollaborationService: ObservableObject {
         connectionStatus = .connecting
         
         // Parse input: can be:
-        // 1. Full URL: "http://<lan-host>:8472/?code=ABCD12" or "https://xxx.trycloudflare.com/?code=ABCD12"
-        // 2. Compact token: "<lan-host>:8472#ABCD12"
+        // 1. Full URL: "http://<lan-host>:8490/?code=ABCD12" or "https://cloudai.dotmini.net/<poly>/?code=ABCD12"
+        // 2. Compact token: "<lan-host>:8490#ABCD12"
         // 3. Just room code: "ABCD12" (matches discovered LAN session or local loopback)
         var baseEndpoint = ""
         var code = ""
@@ -873,12 +892,16 @@ final class CollaborationService: ObservableObject {
                 let scheme = comps.scheme ?? "http"
                 let host = comps.host ?? "127.0.0.1"
                 let portPart = comps.port.map { ":\($0)" } ?? ""
-                baseEndpoint = "\(scheme)://\(host)\(portPart)"
+                let cleanPath = comps.path
+                    .replacingOccurrences(of: #"/index\.html$"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression)
+                baseEndpoint = "\(scheme)://\(host)\(portPart)\(cleanPath)"
                 code = comps.queryItems?.first(where: { $0.name == "code" })?.value?.uppercased() ?? ""
             }
         } else if trimmed.contains("#") {
             let parts = trimmed.components(separatedBy: "#")
             let hostPart = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression)
             code = (parts.count > 1 ? parts[1] : "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             baseEndpoint = hostPart.hasPrefix("http") ? hostPart : "http://\(hostPart)"
         } else if trimmed.contains(":") && !trimmed.contains(" ") {
@@ -1155,42 +1178,101 @@ final class CollaborationService: ObservableObject {
     }
     
     // MARK: - Embedded Host HTTP / Sync Server
-    
-    private func startEmbeddedHostServer(shareCode: String, workspaceName: String, workspaceLang: String) {
+
+    /// Synchronously probes whether a local TCP port is 100% free on both 0.0.0.0 and 127.0.0.1
+    /// WITHOUT SO_REUSEADDR / SO_REUSEPORT, preventing any collision with Mobile Connect or dev servers.
+    nonisolated static func isTCPPortExclusivelyAvailable(_ port: UInt16) -> Bool {
+        for bindLoopbackOnly in [false, true] {
+            let fd = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+            guard fd >= 0 else { return false }
+            defer { Darwin.close(fd) }
+
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = port.bigEndian
+            addr.sin_addr.s_addr = bindLoopbackOnly ? inet_addr("127.0.0.1") : INADDR_ANY
+
+            let bindResult = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                    Darwin.bind(fd, saPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            if bindResult != 0 {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func startEmbeddedHostServer(
+        shareCode: String,
+        workspaceName: String,
+        workspaceLang: String,
+        startingPort: UInt16 = CollaborationService.collabPortRange.lowerBound,
+        attempt: Int = 0
+    ) {
         stopEmbeddedHostServer()
-        
-        for candidatePort in UInt16(8472)...UInt16(8485) {
+
+        let startAt = max(Self.collabPortRange.lowerBound, startingPort)
+        guard startAt <= Self.collabPortRange.upperBound else { return }
+
+        for candidatePort in startAt...Self.collabPortRange.upperBound {
+            guard Self.isTCPPortExclusivelyAvailable(candidatePort) else { continue }
             do {
                 let params = NWParameters.tcp
-                params.allowLocalEndpointReuse = true
+                params.allowLocalEndpointReuse = false
                 guard let nwPort = NWEndpoint.Port(rawValue: candidatePort) else { continue }
                 let newListener = try NWListener(using: params, on: nwPort)
-                
+
                 newListener.stateUpdateHandler = { [weak self] state in
                     Task { @MainActor in
-                        guard let self else { return }
+                        guard let self, self.listener === newListener else { return }
                         switch state {
                         case .ready:
+                            let actualPort = newListener.port?.rawValue ?? candidatePort
                             self.isServerRunning = true
-                            self.listeningPort = candidatePort
-                            self.publishBonjourService(port: candidatePort, shareCode: shareCode, workspaceName: workspaceName, workspaceLang: workspaceLang)
+                            self.listeningPort = actualPort
+                            if self.currentSession?.isHostingLocally == true {
+                                self.currentSession?.remoteEndpoint = "http://\(self.selectedLANAddress):\(actualPort)"
+                            }
+                            self.publishBonjourService(port: actualPort, shareCode: shareCode, workspaceName: workspaceName, workspaceLang: workspaceLang)
+                            if self.transportMode == .online && self.activeTunnelBoundPort != Int(actualPort) {
+                                self.startOnlineTunnel()
+                            }
                             self.regenerateQRCode()
-                        case .failed, .cancelled:
+                        case .failed:
+                            self.isServerRunning = false
+                            newListener.cancel()
+                            self.listener = nil
+                            if attempt < 20 && candidatePort < Self.collabPortRange.upperBound {
+                                self.startEmbeddedHostServer(
+                                    shareCode: shareCode,
+                                    workspaceName: workspaceName,
+                                    workspaceLang: workspaceLang,
+                                    startingPort: candidatePort + 1,
+                                    attempt: attempt + 1
+                                )
+                            }
+                        case .cancelled:
                             self.isServerRunning = false
                         default:
                             break
                         }
                     }
                 }
-                
+
                 newListener.newConnectionHandler = { [weak self] connection in
                     self?.acceptHostConnection(connection)
                 }
-                
+
                 newListener.start(queue: networkQueue)
                 self.listener = newListener
                 self.listeningPort = candidatePort
                 self.isServerRunning = true
+                if self.currentSession?.isHostingLocally == true {
+                    self.currentSession?.remoteEndpoint = "http://\(self.selectedLANAddress):\(candidatePort)"
+                }
                 break
             } catch {
                 continue
@@ -1338,8 +1420,43 @@ final class CollaborationService: ObservableObject {
         
         switch (method, path) {
         case ("GET", "/"), ("GET", "/index.html"):
-            let html = buildWebCollabPortalHTML()
-            sendHTTPResponse(connection: connection, status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(html.utf8))
+            let expectedCode = (currentSession?.shareCode ?? "").uppercased()
+            let queryCode = urlComps?.queryItems?.first(where: { $0.name == "code" })?.value?
+                .trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+            let cookieCode: String = {
+                guard let rawCookie = Self.parseHeaderValue("Cookie", from: headerStr) else { return "" }
+                for pair in rawCookie.components(separatedBy: ";") {
+                    let kv = pair.trimmingCharacters(in: .whitespaces).components(separatedBy: "=")
+                    if kv.count >= 2 && kv[0] == "mc_collab_code" {
+                        return kv[1].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                    }
+                }
+                return ""
+            }()
+
+            if expectedCode.isEmpty || queryCode == expectedCode || (queryCode.isEmpty && cookieCode == expectedCode) {
+                let html = buildWebCollabPortalHTML()
+                let setCookie = expectedCode.isEmpty ? nil : "mc_collab_code=\(expectedCode); Path=/; Max-Age=86400; SameSite=Lax"
+                sendHTTPResponse(
+                    connection: connection,
+                    status: "200 OK",
+                    contentType: "text/html; charset=utf-8",
+                    body: Data(html.utf8),
+                    extraHeaders: setCookie.map { ["Set-Cookie": $0] } ?? [:]
+                )
+            } else {
+                let wsName = currentSession?.workspaceName ?? "Workspace"
+                let gateHTML = buildRoomCodeEntryGateHTML(
+                    workspaceName: wsName,
+                    invalidAttempt: !queryCode.isEmpty
+                )
+                sendHTTPResponse(
+                    connection: connection,
+                    status: "200 OK",
+                    contentType: "text/html; charset=utf-8",
+                    body: Data(gateHTML.utf8)
+                )
+            }
             
         case ("POST", "/api/collab/join"):
             let body = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
@@ -1475,13 +1592,22 @@ final class CollaborationService: ObservableObject {
         }
     }
     
-    private func sendHTTPResponse(connection: NWConnection, status: String, contentType: String, body: Data) {
+    private func sendHTTPResponse(
+        connection: NWConnection,
+        status: String,
+        contentType: String,
+        body: Data,
+        extraHeaders: [String: String] = [:]
+    ) {
         var header = "HTTP/1.1 \(status)\r\n"
         header += "Content-Type: \(contentType)\r\n"
         header += "Content-Length: \(body.count)\r\n"
         header += "Access-Control-Allow-Origin: *\r\n"
         header += "Access-Control-Allow-Headers: Content-Type\r\n"
         header += "Cache-Control: no-store\r\n"
+        for (k, v) in extraHeaders {
+            header += "\(k): \(v)\r\n"
+        }
         header += "Connection: close\r\n\r\n"
         var payload = Data(header.utf8)
         payload.append(body)
@@ -2496,6 +2622,9 @@ final class CollaborationService: ObservableObject {
         
         var payload: [String: Any] = [
             "shareCode": currentSession?.shareCode ?? "",
+            "shareLink": getShareLink() ?? "",
+            "publicTunnelURL": publicTunnelURL ?? "",
+            "tunnelProvider": activeTunnelProvider,
             "workspaceName": currentSession?.workspaceName ?? "Workspace",
             "workspaceLang": currentSession?.workspaceLang ?? "code",
             "hostUserId": currentSession?.hostUserId ?? localUserId,
@@ -4016,23 +4145,302 @@ final class CollaborationService: ObservableObject {
         }
     }
     
-    // MARK: - Online Tunnel (Cloudflare / SSH Relay)
-    
+    // MARK: - Online HTTPS (100% Official Dotmini CloudAI Relay + Cloudflare/SSH Fallback)
+
+    nonisolated private static let collabRelayEpochKey = "microcode.collab.relayPatternEpoch"
+
+    nonisolated private static func localCollabRelaySecretURL() -> URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroCode", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("collab_relay_node.secret")
+    }
+
+    nonisolated private static func loadOrCreateCollabRelayNodeProof() -> String {
+        let url = localCollabRelaySecretURL()
+        var secret: String? = nil
+        if let data = try? Data(contentsOf: url),
+           let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           raw.count >= 32 {
+            secret = raw
+        }
+        if secret == nil {
+            var bytes = [UInt8](repeating: 0, count: 32)
+            _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+            let fresh = bytes.map { String(format: "%02x", $0) }.joined()
+            let data = Data(fresh.utf8)
+            _ = FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            secret = fresh
+        }
+        let appScope = Bundle.main.bundlePath
+        let digest = SHA256.hash(data: Data("dotmini-collab-relay-node-v2:\(secret ?? "")|\(appScope)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func currentCollabRelayUserHintHash() -> String {
+        let authIdent: String
+        if let sess = SupabaseAuthService.shared.session, !sess.userID.isEmpty {
+            authIdent = "collab:\(sess.userID)|\(sess.email.lowercased())"
+        } else {
+            authIdent = "collab:\(NSUserName())|\(localUserId)"
+        }
+        let digest = SHA256.hash(data: Data("dotmini-collab-user-hint-v2:\(authIdent)".utf8))
+        return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
     func setTransportMode(_ mode: TransportMode) {
         transportMode = mode
         if mode == .online {
-            startOnlineTunnel()
+            if currentSession?.isHostingLocally == true {
+                startOnlineTunnel()
+            }
         } else {
             stopOnlineTunnel()
         }
         regenerateQRCode()
     }
-    
+
     func startOnlineTunnel() {
         stopOnlineTunnel()
         tunnelStatus = .starting
         let port = Int(listeningPort)
-        
+        activeTunnelBoundPort = port
+        startOfficialDotminiCollabRelay(port: port)
+    }
+
+    private func startOfficialDotminiCollabRelay(port: Int) {
+        let nodeProof = Self.loadOrCreateCollabRelayNodeProof()
+        let epoch = String(UserDefaults.standard.integer(forKey: Self.collabRelayEpochKey))
+        let userHint = currentCollabRelayUserHintHash()
+        let bearer = SupabaseAuthService.shared.accessToken
+
+        collabRelayConnectTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let hosts = ["cloudai.dotmini.net", "api.dotmini.net"]
+            for host in hosts {
+                if Task.isCancelled { return }
+                guard let wsURL = URL(string: "wss://\(host)/api/v2/mobile-relay/uplink") else { continue }
+
+                var req = URLRequest(url: wsURL)
+                req.timeoutInterval = 8
+                req.setValue(nodeProof, forHTTPHeaderField: "X-Relay-Node-Proof")
+                req.setValue(epoch, forHTTPHeaderField: "X-Relay-Epoch")
+                req.setValue(userHint, forHTTPHeaderField: "X-Relay-User-Hint")
+                if let bearer, !bearer.isEmpty {
+                    req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+                }
+
+                let wsConfig = URLSessionConfiguration.ephemeral
+                wsConfig.waitsForConnectivity = false
+                let wsSession = URLSession(configuration: wsConfig)
+                let wsTask = wsSession.webSocketTask(with: req)
+
+                self.collabRelayWebSocketSession = wsSession
+                self.collabRelayWebSocketTask = wsTask
+                wsTask.resume()
+
+                do {
+                    let firstMsg = try await wsTask.receive()
+                    guard !Task.isCancelled, self.collabRelayWebSocketTask === wsTask else { return }
+
+                    let regData: Data
+                    switch firstMsg {
+                    case .string(let s): regData = Data(s.utf8)
+                    case .data(let d): regData = d
+                    @unknown default: regData = Data()
+                    }
+
+                    guard let json = try? JSONSerialization.jsonObject(with: regData) as? [String: Any],
+                          (json["type"] as? String) == "registered",
+                          let polyPrefix = json["poly_prefix"] as? String,
+                          !polyPrefix.isEmpty else {
+                        wsTask.cancel(with: .protocolError, reason: nil)
+                        wsSession.invalidateAndCancel()
+                        continue
+                    }
+
+                    let cleanPrefix = polyPrefix.hasSuffix("/") ? String(polyPrefix.dropLast()) : polyPrefix
+                    let publicBaseURL = "https://\(host)\(cleanPrefix)"
+
+                    self.isOfficialDotminiRelayActive = true
+                    self.activeTunnelProvider = host
+                    self.publicTunnelURL = publicBaseURL
+                    self.tunnelStatus = .active(publicBaseURL)
+                    self.regenerateQRCode()
+
+                    self.startCollabRelayKeepaliveTimer(for: wsTask)
+                    await self.receiveCollabDotminiRelayLoop(wsTask: wsTask)
+                    return
+                } catch {
+                    wsTask.cancel(with: .goingAway, reason: nil)
+                    wsSession.invalidateAndCancel()
+                    if self.collabRelayWebSocketTask === wsTask {
+                        self.collabRelayWebSocketTask = nil
+                        self.collabRelayWebSocketSession = nil
+                    }
+                    continue
+                }
+            }
+
+            guard !Task.isCancelled, self.transportMode == .online else { return }
+            self.launchCloudflaredOrSSHFallback(port: Int(self.listeningPort))
+        }
+    }
+
+    private func startCollabRelayKeepaliveTimer(for wsTask: URLSessionWebSocketTask) {
+        collabRelayPingTimer?.invalidate()
+        collabRelayPingTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.collabRelayWebSocketTask === wsTask else { return }
+                wsTask.sendPing { _ in }
+                wsTask.send(.string("{\"type\":\"ping\"}")) { _ in }
+            }
+        }
+    }
+
+    private func receiveCollabDotminiRelayLoop(wsTask: URLSessionWebSocketTask) async {
+        while !Task.isCancelled && self.collabRelayWebSocketTask === wsTask {
+            do {
+                let message = try await wsTask.receive()
+                let data: Data
+                switch message {
+                case .string(let s): data = Data(s.utf8)
+                case .data(let d): data = d
+                @unknown default: continue
+                }
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let msgType = json["type"] as? String else { continue }
+                if msgType == "http_request" {
+                    let targetLocalPort = Int(self.listeningPort)
+                    let session = self.collabRelayLoopbackSession
+                    Task.detached(priority: .userInitiated) {
+                        await Self.forwardCollabRelayHTTPRequest(
+                            payload: json,
+                            localPort: targetLocalPort,
+                            loopbackSession: session,
+                            wsTask: wsTask
+                        )
+                    }
+                }
+            } catch {
+                break
+            }
+        }
+
+        guard !Task.isCancelled,
+              self.collabRelayWebSocketTask === wsTask,
+              self.currentSession?.isHostingLocally == true,
+              self.transportMode == .online else {
+            return
+        }
+        self.collabRelayPingTimer?.invalidate()
+        self.collabRelayPingTimer = nil
+        self.collabRelayWebSocketTask = nil
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        guard !Task.isCancelled,
+              self.currentSession?.isHostingLocally == true,
+              self.transportMode == .online else { return }
+        self.startOnlineTunnel()
+    }
+
+    nonisolated private static func forwardCollabRelayHTTPRequest(
+        payload: [String: Any],
+        localPort: Int,
+        loopbackSession: URLSession,
+        wsTask: URLSessionWebSocketTask
+    ) async {
+        guard let reqID = payload["id"] as? String, !reqID.isEmpty else { return }
+        let method = ((payload["method"] as? String) ?? "GET").uppercased()
+        let rawTarget = (payload["target"] as? String) ?? "/"
+        let cleanTarget = rawTarget.hasPrefix("/") ? rawTarget : "/\(rawTarget)"
+
+        guard let localURL = URL(string: "http://127.0.0.1:\(localPort)\(cleanTarget)") else {
+            sendCollabRelayErrorResponse(id: reqID, status: 400, message: "Invalid target URI", wsTask: wsTask)
+            return
+        }
+
+        var urlReq = URLRequest(url: localURL)
+        urlReq.httpMethod = method
+        if let hdrs = payload["headers"] as? [String: String] {
+            for (k, v) in hdrs {
+                let lk = k.lowercased()
+                if lk == "host" || lk == "content-length" || lk == "connection" { continue }
+                urlReq.setValue(v, forHTTPHeaderField: k)
+            }
+        }
+        urlReq.setValue("1", forHTTPHeaderField: "X-Dotmini-Relay")
+
+        if let bodyB64 = payload["body_b64"] as? String, !bodyB64.isEmpty,
+           let bodyData = Data(base64Encoded: bodyB64) {
+            urlReq.httpBody = bodyData
+        }
+
+        do {
+            let (respData, rawResp) = try await loopbackSession.data(for: urlReq)
+            let httpResp = rawResp as? HTTPURLResponse
+            let statusCode = httpResp?.statusCode ?? 200
+
+            var outHeaders: [String: String] = [:]
+            var setCookies: [String] = []
+            if let allHeaders = httpResp?.allHeaderFields {
+                for (rawKey, rawVal) in allHeaders {
+                    let keyStr = String(describing: rawKey)
+                    let valStr = String(describing: rawVal)
+                    let lk = keyStr.lowercased()
+                    if lk == "set-cookie" {
+                        setCookies.append(valStr)
+                    } else if lk != "content-length" && lk != "connection" && lk != "transfer-encoding" {
+                        outHeaders[keyStr] = valStr
+                    }
+                }
+            }
+
+            var respObj: [String: Any] = [
+                "type": "http_response",
+                "id": reqID,
+                "status": statusCode,
+                "headers": outHeaders
+            ]
+            if !setCookies.isEmpty {
+                respObj["set_cookies"] = setCookies
+            }
+            if !respData.isEmpty {
+                respObj["body_b64"] = respData.base64EncodedString()
+            }
+
+            if let jsonBytes = try? JSONSerialization.data(withJSONObject: respObj),
+               let jsonText = String(data: jsonBytes, encoding: .utf8) {
+                try? await wsTask.send(.string(jsonText))
+            }
+        } catch {
+            sendCollabRelayErrorResponse(id: reqID, status: 502, message: "Local collaboration host unreachable", wsTask: wsTask)
+        }
+    }
+
+    nonisolated private static func sendCollabRelayErrorResponse(
+        id: String,
+        status: Int,
+        message: String,
+        wsTask: URLSessionWebSocketTask
+    ) {
+        let obj: [String: Any] = [
+            "type": "http_response",
+            "id": id,
+            "status": status,
+            "headers": ["Content-Type": "text/plain; charset=utf-8"],
+            "body_b64": Data(message.utf8).base64EncodedString()
+        ]
+        if let b = try? JSONSerialization.data(withJSONObject: obj),
+           let s = String(data: b, encoding: .utf8) {
+            wsTask.send(.string(s)) { _ in }
+        }
+    }
+
+    private func launchCloudflaredOrSSHFallback(port: Int) {
+        self.isOfficialDotminiRelayActive = false
+        self.activeTunnelProvider = "cloudflare"
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let cloudflaredPaths = [
             "/opt/homebrew/bin/cloudflared",
@@ -4058,8 +4466,21 @@ final class CollaborationService: ObservableObject {
             launchSSHTunnelFallback(port: port)
         }
     }
-    
+
     func stopOnlineTunnel() {
+        collabRelayConnectTask?.cancel()
+        collabRelayConnectTask = nil
+        collabRelayPingTimer?.invalidate()
+        collabRelayPingTimer = nil
+        if let ws = collabRelayWebSocketTask {
+            ws.cancel(with: .goingAway, reason: nil)
+        }
+        collabRelayWebSocketTask = nil
+        collabRelayWebSocketSession?.invalidateAndCancel()
+        collabRelayWebSocketSession = nil
+        isOfficialDotminiRelayActive = false
+        activeTunnelBoundPort = 0
+
         tunnelOutputPipe?.fileHandleForReading.readabilityHandler = nil
         tunnelOutputPipe = nil
         let proc = tunnelProcess
@@ -4088,7 +4509,7 @@ final class CollaborationService: ObservableObject {
             isSSHFallback: true
         )
     }
-    
+
     private func launchTunnelProcess(
         executable: String,
         arguments: [String],
@@ -4106,7 +4527,7 @@ final class CollaborationService: ObservableObject {
         }
         self.tunnelOutputPipe = pipe
         self.tunnelProcess = proc
-        
+
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
@@ -4140,7 +4561,7 @@ final class CollaborationService: ObservableObject {
                     if let fallbackPort = fallbackPortOnEarlyExit {
                         self.launchSSHTunnelFallback(port: fallbackPort)
                     } else {
-                        self.tunnelStatus = .failed("Could not establish online collaboration tunnel. Check your internet connection or use LAN / P2P mode.")
+                        self.tunnelStatus = .failed("Could not establish online collaboration relay. Check your internet connection or use LAN / P2P mode.")
                     }
                 } else if self.transportMode == .online {
                     self.publicTunnelURL = nil
@@ -4162,24 +4583,32 @@ final class CollaborationService: ObservableObject {
             }
         }
     }
-    
+
     // MARK: - Share Links & QR Code
-    
+
     func getShareLink() -> String? {
         guard let session = currentSession else { return nil }
-        if transportMode == .online, let pub = publicTunnelURL, !pub.isEmpty {
-            return "\(pub)/?code=\(session.shareCode)"
+        if transportMode == .online {
+            if let pub = publicTunnelURL, !pub.isEmpty {
+                let cleanPub = pub.hasSuffix("/") ? String(pub.dropLast()) : pub
+                return "\(cleanPub)/?code=\(session.shareCode)"
+            }
+            if session.isHostingLocally {
+                return "http://\(selectedLANAddress):\(listeningPort)/?code=\(session.shareCode)"
+            }
         }
         if session.isHostingLocally {
             return "http://\(selectedLANAddress):\(listeningPort)/?code=\(session.shareCode)"
         }
-        return "\(session.remoteEndpoint)/?code=\(session.shareCode)"
+        let cleanEndpoint = session.remoteEndpoint.hasSuffix("/") ? String(session.remoteEndpoint.dropLast()) : session.remoteEndpoint
+        return "\(cleanEndpoint)/?code=\(session.shareCode)"
     }
-    
+
     func getJoinToken() -> String {
         guard let session = currentSession else { return "" }
         if transportMode == .online, let pub = publicTunnelURL, !pub.isEmpty {
-            return "\(pub)/?code=\(session.shareCode)"
+            let cleanPub = pub.hasSuffix("/") ? String(pub.dropLast()) : pub
+            return "\(cleanPub)/?code=\(session.shareCode)"
         }
         if session.isHostingLocally {
             return "\(selectedLANAddress):\(listeningPort)#\(session.shareCode)"
@@ -4294,7 +4723,90 @@ final class CollaborationService: ObservableObject {
     }
     
     // MARK: - Zero-Install Web Collaboration Portal HTML
-    
+
+    private func buildRoomCodeEntryGateHTML(workspaceName: String, invalidAttempt: Bool) -> String {
+        let escapedWS = workspaceName
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let errHTML = invalidAttempt
+            ? #"<div class="err">Room Code does not match the active session. Check the 6-character Room Code shown in MicroCode → Team Collaboration on the Host Mac.</div>"#
+            : ""
+        return #"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Join Collaboration · \#(escapedWS)</title>
+          <style>
+            :root { color-scheme: dark; }
+            body {
+              margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+              background: #0b0d12; color: #f3f4f6;
+              font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+              padding: 20px; box-sizing: border-box;
+            }
+            .card {
+              width: 100%; max-width: 400px; background: #141720;
+              border: 1px solid rgba(255,255,255,0.10); border-radius: 14px;
+              padding: 28px 26px; box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+            }
+            .eyebrow {
+              font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+              color: #9ca3af; text-transform: uppercase; margin-bottom: 6px;
+            }
+            h1 { margin: 0 0 8px; font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+            p { margin: 0 0 18px; font-size: 13px; line-height: 1.5; color: #9ca3af; }
+            .code-input {
+              width: 100%; box-sizing: border-box; background: #0b0d12; color: #fff;
+              border: 1px solid rgba(255,255,255,0.16); border-radius: 10px;
+              padding: 13px 14px; font-size: 20px; font-weight: 700;
+              font-family: ui-monospace, "SF Mono", Menlo, monospace;
+              letter-spacing: 0.24em; text-align: center; text-transform: uppercase;
+              outline: none; margin-bottom: 12px;
+            }
+            .code-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.22); }
+            button {
+              width: 100%; background: #f3f4f6; color: #0b0d12; border: none;
+              border-radius: 10px; padding: 11px 14px; font-size: 13.5px; font-weight: 600;
+              cursor: pointer;
+            }
+            button:hover { background: #ffffff; }
+            .err {
+              margin-top: 12px; padding: 9px 11px; border-radius: 8px;
+              background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3);
+              color: #fca5a5; font-size: 12px; line-height: 1.45;
+            }
+            .hint { margin-top: 14px; font-size: 11.5px; color: #6b7280; text-align: center; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="eyebrow">MicroCode Team Collaboration</div>
+            <h1>Join Workspace “\#(escapedWS)”</h1>
+            <p>Enter the <b>6-character Room Code</b> displayed in <b>MicroCode → Settings → Team Collaboration</b> (or use the Direct Invite Link with <code>?code=...</code>).</p>
+            <form onsubmit="enterRoom(event)">
+              <input id="roomCodeBox" class="code-input" type="text" maxlength="8" placeholder="ABCD12" autocomplete="off" autofocus>
+              <button type="submit">Join Collaboration Room</button>
+            </form>
+            \#(errHTML)
+            <div class="hint">Tip: Clicking “Copy Invite Link” in MicroCode includes the Room Code automatically.</div>
+          </div>
+          <script>
+            function enterRoom(ev) {
+              ev.preventDefault();
+              const raw = (document.getElementById("roomCodeBox").value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+              if (!raw) return;
+              const base = location.pathname.replace(/\/+$/, "") || "";
+              location.href = base + "/?code=" + encodeURIComponent(raw);
+            }
+          </script>
+        </body>
+        </html>
+        """#
+    }
+
     private func buildWebCollabPortalHTML() -> String {
         let code = currentSession?.shareCode ?? ""
         let wsName = currentSession?.workspaceName ?? "Workspace"
@@ -4801,6 +5313,9 @@ final class CollaborationService: ObservableObject {
           <script>
             const ROOM_CODE = "\#(code)";
             const AI_USER_ID = "ai-agent-teammate";
+            const BASE_PATH = location.pathname.replace(/\/index\.html$/i, "").replace(/\/+$/, "");
+            function apiUrl(subpath) { return BASE_PATH + subpath; }
+            let wsFailCount = 0;
             let userId = localStorage.getItem("mc_collab_uid") || ("web-" + Math.random().toString(36).slice(2, 8));
             localStorage.setItem("mc_collab_uid", userId);
             let displayName = localStorage.getItem("mc_collab_name") || ("Teammate-" + userId.slice(-4));
@@ -5081,8 +5596,9 @@ final class CollaborationService: ObservableObject {
             function connectWS() {
               try {
                 const proto = location.protocol === "https:" ? "wss:" : "ws:";
-                ws = new WebSocket(`${proto}//${location.host}/ws/collab?code=${encodeURIComponent(ROOM_CODE)}`);
+                ws = new WebSocket(`${proto}//${location.host}${BASE_PATH}/ws/collab?code=${encodeURIComponent(ROOM_CODE)}`);
                 ws.onopen = () => {
+                  wsFailCount = 0;
                   document.getElementById("wsStatusBadge").textContent = "WS REALTIME";
                   ws.send(JSON.stringify({
                     type: "hello",
@@ -5143,8 +5659,11 @@ final class CollaborationService: ObservableObject {
                   } catch (e) {}
                 };
                 ws.onclose = () => {
-                  document.getElementById("wsStatusBadge").textContent = "SYNCING";
-                  setTimeout(connectWS, 1800);
+                  wsFailCount += 1;
+                  document.getElementById("wsStatusBadge").textContent = BASE_PATH ? "CLOUD RELAY LIVE" : "LIVE SYNC";
+                  if (wsFailCount < 3) {
+                    setTimeout(connectWS, 3500);
+                  }
                 };
               } catch (e) {}
             }
@@ -5206,7 +5725,7 @@ final class CollaborationService: ObservableObject {
 
             async function joinRoom() {
               try {
-                const res = await fetch("/api/collab/join", {
+                const res = await fetch(apiUrl("/api/collab/join"), {
                   method: "POST",
                   headers: {"Content-Type": "application/json"},
                   body: JSON.stringify({ code: ROOM_CODE, userId, displayName, color: myColor, role: "Web" })
@@ -5227,7 +5746,7 @@ final class CollaborationService: ObservableObject {
               document.getElementById("activeFileIcon").innerHTML = getFileIconSVG(shortName);
               document.getElementById("activeFileName").textContent = path;
               renderFileTree();
-              const res = await fetch("/api/collab/file?path=" + encodeURIComponent(path));
+              const res = await fetch(apiUrl("/api/collab/file?path=" + encodeURIComponent(path)));
               const d = await res.json();
               fileRevisions[path] = d.revision || 1;
               const area = document.getElementById("codeArea");
@@ -5256,7 +5775,7 @@ final class CollaborationService: ObservableObject {
                   baseRevision
                 }));
               }
-              const res = await fetch("/api/collab/edit", {
+              const res = await fetch(apiUrl("/api/collab/edit"), {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({ path: targetFile, content, baseRevision, userId, displayName })
@@ -5441,7 +5960,7 @@ final class CollaborationService: ObservableObject {
               const text = inp.value.trim();
               if (!text) return;
               inp.value = "";
-              await fetch("/api/collab/chat", {
+              await fetch(apiUrl("/api/collab/chat"), {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({ userId, displayName, color: myColor, message: text })
@@ -5453,7 +5972,7 @@ final class CollaborationService: ObservableObject {
               const title = prompt("Shared Task Title:");
               if (!title) return;
               const objective = prompt("Task Objective / Scope:") || "";
-              await fetch("/api/collab/task", {
+              await fetch(apiUrl("/api/collab/task"), {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({ action: "create", title, objective, scope: activeFile, author: displayName })
@@ -5463,7 +5982,7 @@ final class CollaborationService: ObservableObject {
 
             async function syncState() {
               try {
-                const res = await fetch("/api/collab/sync", {
+                const res = await fetch(apiUrl("/api/collab/sync"), {
                   method: "POST",
                   headers: {"Content-Type": "application/json"},
                   body: JSON.stringify({
@@ -5508,7 +6027,7 @@ final class CollaborationService: ObservableObject {
             }
 
             joinRoom();
-            setInterval(syncState, 2200);
+            setInterval(syncState, 1400);
           </script>
         </body>
         </html>

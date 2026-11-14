@@ -13,6 +13,14 @@
 import SwiftUI
 import AppKit
 
+private struct CollabContainerWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 640
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 10 { value = next }
+    }
+}
+
 struct CollaborationView: View {
     var isEmbeddedInSettings: Bool = false
     @StateObject private var collab = CollaborationService.shared
@@ -26,10 +34,16 @@ struct CollaborationView: View {
     @State private var chatInput: String = ""
     @State private var fileFilter: String = ""
     @State private var copiedLink: Bool = false
+    @State private var copiedRoomCode: Bool = false
     @State private var copiedToken: Bool = false
     @State private var showQRPopover: Bool = false
+    @State private var containerWidth: CGFloat = 640
     
     @Environment(\.dismiss) private var dismiss
+
+    private var useStackedSplitLayout: Bool {
+        containerWidth < 740
+    }
     
     enum CollabTab: String, CaseIterable, Identifiable {
         case overview = "Session & Peers"
@@ -56,6 +70,17 @@ struct CollaborationView: View {
                 standaloneSheetBody
             }
         }
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .preference(key: CollabContainerWidthKey.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(CollabContainerWidthKey.self) { width in
+            if abs(containerWidth - width) > 2 {
+                containerWidth = width
+            }
+        }
         .onAppear {
             collab.refreshNetworkAddresses()
             collab.startBonjourDiscovery()
@@ -68,7 +93,7 @@ struct CollaborationView: View {
     // MARK: - Embedded in Settings Layout (No Nested ScrollView / Box)
     
     private var embeddedSettingsBody: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             serviceHeaderCard
             
             if collab.currentSession != nil {
@@ -131,7 +156,7 @@ struct CollaborationView: View {
                 .padding(18)
             }
         }
-        .frame(minWidth: 820, maxWidth: 880, minHeight: 580, maxHeight: 680)
+        .frame(minWidth: 860, idealWidth: 940, maxWidth: 1120, minHeight: 600, idealHeight: 680, maxHeight: 820)
         .background(Color(nsColor: .windowBackgroundColor))
     }
     
@@ -165,14 +190,15 @@ struct CollaborationView: View {
             
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
-                    Text("Team Collaboration Service")
+                    Text("Team Collaboration")
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundColor(.primary)
+                        .lineLimit(1)
                     
                     statusBadge
                 }
                 
-                Text("Zero-setup P2P LAN & Online Tunnel co-editing, live cursor presence, and shared task contracts.")
+                Text("Real-time P2P LAN & Dotmini Official HTTPS co-editing, live multiplayer cursors, and shared tasks.")
                     .font(.system(size: 11.5))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -205,11 +231,11 @@ struct CollaborationView: View {
                         selectedTab = tab
                     }
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: tab.icon)
-                            .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                            .font(.system(size: 10.5, weight: isSelected ? .semibold : .regular))
                         Text(tab.rawValue)
-                            .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                         if tab == .tasks && !taskStore.tasks.isEmpty {
@@ -224,7 +250,7 @@ struct CollaborationView: View {
                     .foregroundColor(isSelected ? .primary : .secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, 6)
                     .background(isSelected ? Color.primary.opacity(0.08) : Color.clear)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
@@ -248,11 +274,12 @@ struct CollaborationView: View {
         HStack(spacing: 5) {
             Circle()
                 .fill(statusDotColor)
-                .frame(width: 5.5, height: 5.5)
+                .frame(width: 6, height: 6)
             Text(statusBadgeText)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundColor(.secondary)
                 .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 2)
@@ -266,17 +293,17 @@ struct CollaborationView: View {
     
     private var statusDotColor: Color {
         switch collab.connectionStatus {
-        case .connected: return Color.primary.opacity(0.8)
-        case .connecting, .reconnecting: return Color.primary.opacity(0.55)
+        case .connected: return Color.green
+        case .connecting, .reconnecting: return Color.orange
         case .disconnected: return Color.secondary.opacity(0.45)
-        case .error: return Color.secondary.opacity(0.6)
+        case .error: return Color.red.opacity(0.8)
         }
     }
     
     private var statusBadgeText: String {
         if let session = collab.currentSession {
             if session.isHostingLocally {
-                return "HOSTING · PORT \(collab.listeningPort)"
+                return "HOSTING · :\(collab.listeningPort)"
             }
             return "CONNECTED · \(session.shareCode)"
         }
@@ -292,17 +319,24 @@ struct CollaborationView: View {
     // MARK: - 2. Disconnected Overview Stack
     
     private var disconnectedOverviewStack: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             identityProfileCard
             
-            HStack(alignment: .top, spacing: 14) {
-                hostSessionCard
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                
-                joinSessionCard
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            if containerWidth < 620 {
+                VStack(alignment: .leading, spacing: 14) {
+                    hostSessionCard
+                    joinSessionCard
+                }
+            } else {
+                HStack(alignment: .top, spacing: 14) {
+                    hostSessionCard
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    
+                    joinSessionCard
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
             
             discoveredLANSessionsCard
         }
@@ -445,7 +479,7 @@ struct CollaborationView: View {
                 }
             }
             
-            Text("Starts an embedded collaboration host on this Mac. Teammates on the same Wi-Fi discover it automatically, or join via Online Tunnel.")
+            Text("Starts an embedded collaboration host on a dedicated isolated port. Teammates on Wi-Fi discover it automatically, or join anywhere via Dotmini Official HTTPS Relay.")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .lineLimit(3)
@@ -468,6 +502,7 @@ struct CollaborationView: View {
                             Text(mode.rawValue)
                                 .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
                                 .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .foregroundColor(isSelected ? .primary : .secondary)
                         .frame(maxWidth: .infinity)
@@ -538,7 +573,7 @@ struct CollaborationView: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Text("LAN / TUNNEL")
+                Text("LAN / HTTPS")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 6)
@@ -547,7 +582,7 @@ struct CollaborationView: View {
                     .cornerRadius(4)
             }
             
-            Text("Enter a teammate's Join Token (e.g. 192.168.1.50:8472#ABCD12), Online Tunnel URL, or 6-character Room Code.")
+            Text("Paste an Invite Link (https://cloudai.dotmini.net/.../?code=ABCD12), LAN Join Token (192.168.1.x:8490#ABCD12), or 6-character Room Code.")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .lineLimit(3)
@@ -564,7 +599,7 @@ struct CollaborationView: View {
             
             // Flat Theme-Matched Join Input Row with Inline Paste Action
             HStack(spacing: 6) {
-                TextField("192.168.1.x:8472#CODE or https://...", text: $joinInput)
+                TextField("https://cloudai.dotmini.net/... or Room Code", text: $joinInput)
                     .textFieldStyle(.plain)
                     .font(.system(size: 11.5, design: .monospaced))
                     .foregroundColor(.primary)
@@ -737,39 +772,73 @@ struct CollaborationView: View {
         )
     }
     
-    // MARK: - Active Session Banner Card
+    // MARK: - Active Session Banner & Credentials Card (Apple HIG, 100% Responsive)
     
     private var activeSessionBannerCard: some View {
         let session = collab.currentSession
+        let roomCode = session?.shareCode ?? ""
         let link = collab.getShareLink() ?? ""
         let token = collab.getJoinToken()
+        let isOnlineMode = (collab.transportMode == .online)
+        let isConnectingOnline = (isOnlineMode && collab.tunnelStatus == .starting)
+        let isRelayActive: Bool = {
+            if case .active = collab.tunnelStatus { return true }
+            return false
+        }()
         
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 12) {
+            // Tier 1: Workspace Identity + Transport Mode + End/Leave Action
             HStack(spacing: 10) {
-                ProgrammingLanguageIconView(fileName: session?.workspaceLang ?? "code", size: 16)
+                ProgrammingLanguageIconView(fileName: session?.workspaceLang ?? "code", size: 17)
                 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(session?.workspaceName ?? "Workspace")
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundColor(.primary)
-                        
-                        Text("ROOM \(session?.shareCode ?? "")")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.primary.opacity(0.85))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1.5)
-                            .background(Color.primary.opacity(0.07))
-                            .cornerRadius(4)
-                    }
-                    Text(link)
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundColor(.secondary)
+                Text(session?.workspaceName ?? "Workspace")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                
+                if isOnlineMode {
+                    HStack(spacing: 5) {
+                        if isConnectingOnline {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .scaleEffect(0.75)
+                        } else {
+                            Circle()
+                                .fill(isRelayActive ? Color.green : Color.orange)
+                                .frame(width: 6, height: 6)
+                        }
+                        Text(
+                            isConnectingOnline
+                                ? "Connecting cloudai.dotmini.net…"
+                                : (collab.isOfficialDotminiRelayActive ? "Dotmini Official Relay" : "Online HTTPS Relay")
+                        )
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(isRelayActive ? .green : .secondary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background((isRelayActive ? Color.green : Color.primary).opacity(0.10))
+                    .cornerRadius(5)
+                } else {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                        Text("LAN · :\(collab.listeningPort)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(5)
                 }
                 
-                Spacer()
+                Spacer(minLength: 8)
                 
                 if session?.isHostingLocally == true {
                     HStack(spacing: 2) {
@@ -778,65 +847,31 @@ struct CollaborationView: View {
                             Button {
                                 collab.setTransportMode(mode)
                             } label: {
-                                Text(mode.rawValue)
-                                    .font(.system(size: 10.5, weight: isSelected ? .semibold : .regular))
-                                    .foregroundColor(isSelected ? .primary : .secondary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(isSelected ? Color.primary.opacity(0.09) : Color.clear)
-                                    .cornerRadius(4)
+                                HStack(spacing: 4) {
+                                    Image(systemName: mode == .lan ? "wifi" : "globe")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                    Text(mode.rawValue)
+                                        .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                }
+                                .foregroundColor(isSelected ? .primary : .secondary)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4.5)
+                                .background(isSelected ? Color.primary.opacity(0.10) : Color.clear)
+                                .cornerRadius(5)
                             }
                             .buttonStyle(.plain)
                         }
                     }
                     .padding(2)
-                    .background(Color.primary.opacity(0.04))
+                    .background(Color.primary.opacity(0.045))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
                     .cornerRadius(6)
-                }
-                
-                formalActionButton(
-                    icon: copiedToken ? "checkmark" : "key",
-                    label: copiedToken ? "Copied" : "Copy Token"
-                ) {
-                    collab.copyJoinTokenToClipboard()
-                    copiedToken = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedToken = false }
-                }
-                .help("Copy IDE Join Token (\(token))")
-                
-                formalActionButton(
-                    icon: copiedLink ? "checkmark" : "doc.on.doc",
-                    label: copiedLink ? "Copied" : "Copy Link"
-                ) {
-                    collab.copyShareLinkToClipboard()
-                    copiedLink = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedLink = false }
-                }
-                
-                formalActionButton(icon: "qrcode", label: "QR") {
-                    showQRPopover.toggle()
-                }
-                .popover(isPresented: $showQRPopover) {
-                    VStack(spacing: 10) {
-                        Text("SCAN TO JOIN IN BROWSER")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.secondary)
-                        if let qr = collab.qrCodeImage {
-                            Image(nsImage: qr)
-                                .interpolation(.none)
-                                .resizable()
-                                .frame(width: 150, height: 150)
-                                .padding(8)
-                                .background(Color.white)
-                                .cornerRadius(8)
-                        }
-                        Text(link)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(14)
-                    .frame(width: 220)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 
                 formalActionButton(
@@ -846,14 +881,190 @@ struct CollaborationView: View {
                     Task { await collab.leaveSession() }
                 }
             }
+            
+            // Tier 2: Explicit Access Credentials (Room Access Code + Direct Invite Link — Zero Ambiguity)
+            if containerWidth < 600 {
+                VStack(alignment: .leading, spacing: 8) {
+                    roomCodeCredentialBox(roomCode: roomCode)
+                    directInviteLinkBox(link: link, roomCode: roomCode, token: token, isConnectingOnline: isConnectingOnline)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    roomCodeCredentialBox(roomCode: roomCode)
+                        .fixedSize(horizontal: true, vertical: false)
+                    directInviteLinkBox(link: link, roomCode: roomCode, token: token, isConnectingOnline: isConnectingOnline)
+                }
+            }
         }
-        .padding(12)
+        .padding(14)
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(10)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
+    }
+
+    private func roomCodeCredentialBox(roomCode: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("ROOM ACCESS CODE")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            HStack(spacing: 8) {
+                Text(roomCode)
+                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .tracking(1.6)
+                    .foregroundColor(.primary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(roomCode, forType: .string)
+                    copiedRoomCode = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedRoomCode = false }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: copiedRoomCode ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text(copiedRoomCode ? "Copied" : "Copy")
+                            .font(.system(size: 10, weight: .semibold))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .foregroundColor(copiedRoomCode ? .green : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3.5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Copy 6-character Room Access Code (\(roomCode))")
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.035))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+        )
+        .cornerRadius(7)
+    }
+
+    private func directInviteLinkBox(link: String, roomCode: String, token: String, isConnectingOnline: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text("DIRECT INVITE LINK (ROOM CODE INCLUDED · NO EXTRA PASSWORD)")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if collab.transportMode == .lan {
+                    Button {
+                        collab.copyJoinTokenToClipboard()
+                        copiedToken = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedToken = false }
+                    } label: {
+                        Text(copiedToken ? "✓ IDE Token Copied" : "Copy IDE Token")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy compact IDE Join Token (\(token))")
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text(isConnectingOnline ? "Establishing Dotmini Official HTTPS Relay (cloudai.dotmini.net)…" : link)
+                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(isConnectingOnline ? .secondary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    collab.copyShareLinkToClipboard()
+                    copiedLink = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedLink = false }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: copiedLink ? "checkmark" : "link")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(copiedLink ? "Copied Link" : "Copy Invite Link")
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4.5)
+                    .background(Color.primary.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+                    )
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .disabled(isConnectingOnline)
+
+                formalActionButton(icon: "qrcode", label: "QR") {
+                    showQRPopover.toggle()
+                }
+                .popover(isPresented: $showQRPopover) {
+                    VStack(spacing: 10) {
+                        Text("SCAN TO JOIN IN BROWSER")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        if let qr = collab.qrCodeImage {
+                            Image(nsImage: qr)
+                                .interpolation(.none)
+                                .resizable()
+                                .frame(width: 156, height: 156)
+                                .padding(8)
+                                .background(Color.white)
+                                .cornerRadius(8)
+                        }
+                        HStack(spacing: 6) {
+                            Text("ROOM CODE:")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Text(roomCode)
+                                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                .foregroundColor(.primary)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(5)
+
+                        Text(link)
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
+                    }
+                    .padding(14)
+                    .frame(width: 248)
+                }
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.035))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+        )
+        .cornerRadius(7)
     }
     
     private func formalActionButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
@@ -863,6 +1074,7 @@ struct CollaborationView: View {
                     .font(.system(size: 10, weight: .medium))
                 Text(label)
                     .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundColor(.primary)
@@ -876,6 +1088,7 @@ struct CollaborationView: View {
             .cornerRadius(5)
         }
         .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
     }
     
     // MARK: - Active Session Tab Content
@@ -898,138 +1111,200 @@ struct CollaborationView: View {
         }
     }
     
+    @ViewBuilder
     private var overviewSplitCard: some View {
-        HStack(alignment: .top, spacing: 14) {
-            // Left: Active Participants
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Text("PARTICIPANTS (\(collab.participants.count))")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.secondary)
-                    Spacer()
+        if useStackedSplitLayout {
+            VStack(alignment: .leading, spacing: 14) {
+                participantsOverviewCard
+                sharedWorkspaceFilesOverviewCard
+            }
+        } else {
+            HStack(alignment: .top, spacing: 14) {
+                participantsOverviewCard
+                sharedWorkspaceFilesOverviewCard
+            }
+        }
+    }
+
+    private var participantsOverviewCard: some View {
+        let isFollowingAI = collab.followingUserId == CollaborationService.aiTeammateUserId
+        let isFollowingOtherPeer = (collab.followingUserId != nil && !isFollowingAI)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("PARTICIPANTS (\(collab.participants.count))")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Spacer(minLength: 6)
+
+                Button {
+                    collab.setAITeammateEnabled(!collab.isAITeammateEnabled)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 9.5, weight: .bold))
+                        Text(collab.isAITeammateEnabled ? "AI Teammate · ON" : "AI Teammate · OFF")
+                            .font(.system(size: 10, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .foregroundColor(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97) : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.14) : Color.primary.opacity(0.05))
+                    )
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .help("เปิด/ปิด AI Agent เป็นเพื่อนร่วมทีมแบบ Real-Time ในโหมด Collab")
+
+                if collab.isAITeammateEnabled {
                     Button {
-                        collab.setAITeammateEnabled(!collab.isAITeammateEnabled)
+                        collab.toggleFollow(userId: CollaborationService.aiTeammateUserId)
                     } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 9.5, weight: .bold))
-                            Text(collab.isAITeammateEnabled ? "AI Teammate: ON" : "AI Teammate: OFF")
+                            Image(systemName: isFollowingAI ? "eye.fill" : "eye")
+                                .font(.system(size: 9.5, weight: .semibold))
+                            Text(isFollowingAI ? "Following AI" : "Follow AI")
                                 .font(.system(size: 10, weight: .semibold))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                        .foregroundColor(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97) : .secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
+                        .foregroundColor(isFollowingAI ? .white : Color(red: 0.66, green: 0.33, blue: 0.97))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
                         .background(
                             RoundedRectangle(cornerRadius: 5)
-                                .fill(collab.isAITeammateEnabled ? Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.14) : Color.primary.opacity(0.05))
+                                .fill(isFollowingAI ? Color(red: 0.66, green: 0.33, blue: 0.97) : Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
                         )
                     }
                     .buttonStyle(.plain)
-                    .help("เปิด/ปิด AI Agent เป็นเพื่อนร่วมทีมแบบ Real-Time ในโหมด Collab")
-
-                    if collab.isAITeammateEnabled {
-                        let isFollowingAI = collab.followingUserId == CollaborationService.aiTeammateUserId
-                        Button {
-                            collab.toggleFollow(userId: CollaborationService.aiTeammateUserId)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: isFollowingAI ? "eye.fill" : "eye")
-                                    .font(.system(size: 9.5, weight: .semibold))
-                                Text(isFollowingAI ? "Following AI" : "Follow AI")
-                                    .font(.system(size: 10, weight: .semibold))
-                            }
-                            .foregroundColor(isFollowingAI ? .white : Color(red: 0.66, green: 0.33, blue: 0.97))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(
-                                RoundedRectangle(cornerRadius: 5)
-                                    .fill(isFollowingAI ? Color(red: 0.66, green: 0.33, blue: 0.97) : Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .help("ติดตามดูไฟล์และบรรทัดที่ AI Agent กำลังอ่าน/แก้ไขแบบ Real-Time")
-                    }
-
-                    if collab.followingUserId != nil {
-                        Button("Stop Following") {
-                            collab.followingUserId = nil
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundColor(.primary)
-                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help(isFollowingAI ? "คลิกเพื่อหยุด Follow AI Agent" : "ติดตามดูไฟล์และบรรทัดที่ AI Agent กำลังอ่าน/แก้ไขแบบ Real-Time")
                 }
-                
-                Divider().opacity(0.4)
-                
-                if collab.participants.isEmpty {
-                    Text("No active participants.")
-                        .font(.system(size: 11.5))
-                        .foregroundColor(.secondary)
-                        .padding(.vertical, 8)
-                } else {
-                    VStack(spacing: 8) {
-                        ForEach(collab.participants) { participant in
-                            ParticipantRow(
-                                participant: participant,
-                                isSelf: participant.userId == collab.localUserId,
-                                isFollowing: collab.followingUserId == participant.userId,
-                                onToggleFollow: { collab.toggleFollow(userId: participant.userId) }
-                            )
-                        }
+
+                if isFollowingOtherPeer {
+                    Button {
+                        collab.followingUserId = nil
+                    } label: {
+                        Text("Unfollow")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3.5)
+                            .background(Color.primary.opacity(0.07))
+                            .cornerRadius(5)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            
+            Divider().opacity(0.4)
+            
+            if collab.participants.isEmpty {
+                Text("No active participants.")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(collab.participants) { participant in
+                        ParticipantRow(
+                            participant: participant,
+                            isSelf: participant.userId == collab.localUserId,
+                            isFollowing: collab.followingUserId == participant.userId,
+                            onToggleFollow: { collab.toggleFollow(userId: participant.userId) }
+                        )
                     }
                 }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-            
-            // Right: Shared Workspace Files
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("SHARED WORKSPACE FILES (\(collab.sharedFiles.count))")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.secondary)
-                    Spacer()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var prioritizedOverviewFiles: [SharedWorkspaceFile] {
+        collab.sharedFiles.sorted { lhs, rhs in
+            let lActive = (lhs.activeEditorName?.isEmpty == false) || lhs.isOpenOnHost
+            let rActive = (rhs.activeEditorName?.isEmpty == false) || rhs.isOpenOnHost
+            if lActive != rActive { return lActive && !rActive }
+            return lhs.relativePath < rhs.relativePath
+        }
+    }
+
+    private var sharedWorkspaceFilesOverviewCard: some View {
+        let previewFiles = Array(prioritizedOverviewFiles.prefix(8))
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("SHARED WORKSPACE FILES (\(collab.sharedFiles.count))")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer()
+                if collab.sharedFiles.count > 8 {
                     Button {
-                        collab.indexLocalWorkspaceFiles()
+                        selectedTab = .files
                     } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 10.5))
-                            .foregroundColor(.secondary)
+                        HStack(spacing: 3) {
+                            Text("Browse all \(collab.sharedFiles.count)")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
                 }
-                
-                Divider().opacity(0.4)
-                
-                if collab.sharedFiles.isEmpty {
-                    Text("Start or join a session to browse shared workspace files.")
-                        .font(.system(size: 11.5))
+                Button {
+                    collab.indexLocalWorkspaceFiles(forceDiskScan: true)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10.5))
                         .foregroundColor(.secondary)
-                        .padding(.vertical, 8)
-                } else {
-                    VStack(spacing: 6) {
-                        ForEach(collab.sharedFiles.prefix(15)) { file in
-                            sharedFileRow(file)
-                        }
+                }
+                .buttonStyle(.plain)
+                .help("Re-index workspace files")
+            }
+            
+            Divider().opacity(0.4)
+            
+            if collab.sharedFiles.isEmpty {
+                Text("Start or join a session to browse shared workspace files.")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(previewFiles) { file in
+                        sharedFileRow(file)
                     }
                 }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
     }
     
     private var sharedWorkspaceFilesCard: some View {
@@ -1045,6 +1320,8 @@ struct CollaborationView: View {
                 Text("\(collab.sharedDirectories.count) folders · \(filteredSharedFiles.count) files")
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Button {
                     collab.indexLocalWorkspaceFiles(forceDiskScan: true)
                 } label: {
@@ -1096,41 +1373,39 @@ struct CollaborationView: View {
     
     private func sharedFileRow(_ file: SharedWorkspaceFile) -> some View {
         let folderDir = (file.relativePath as NSString).deletingLastPathComponent
-        let depth = folderDir.isEmpty ? 0 : folderDir.split(separator: "/").count
         let peerColor = CollaborationColorHelper.swiftUIColor(fromHex: file.activeEditorColor ?? "#3B82F6")
         return HStack(spacing: 10) {
             ProgrammingLanguageIconView(fileName: file.name, size: 15)
-                .padding(.leading, CGFloat(min(depth, 5) * 10))
             
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 1.5) {
                 HStack(spacing: 6) {
-                    if !folderDir.isEmpty {
-                        Text(folderDir + "/")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
                     Text(file.name)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.primary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                     if file.isOpenOnHost {
                         Text("OPEN")
                             .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
                             .foregroundColor(.secondary)
-                            .padding(.horizontal, 4)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 4.5)
                             .padding(.vertical, 1)
                             .background(Color.primary.opacity(0.06))
                             .cornerRadius(3)
                     }
                 }
-                Text(file.relativePath)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary.opacity(0.8))
-                    .lineLimit(1)
+                if !folderDir.isEmpty {
+                    Text(file.relativePath)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary.opacity(0.82))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
             
-            Spacer()
+            Spacer(minLength: 8)
             
             if let editor = file.activeEditorName, !editor.isEmpty {
                 HStack(spacing: 4) {
@@ -1140,11 +1415,14 @@ struct CollaborationView: View {
                     Text(editor)
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(peerColor)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .padding(.horizontal, 7)
-                .padding(.vertical, 2.5)
+                .padding(.vertical, 3)
                 .background(peerColor.opacity(0.14))
                 .cornerRadius(4)
+                .fixedSize(horizontal: true, vertical: false)
             }
             
             formalActionButton(icon: "arrow.up.forward.square", label: "Open") {
@@ -1165,156 +1443,174 @@ struct CollaborationView: View {
     
     // MARK: - Chat & Activity Split Card
     
+    @ViewBuilder
     private var chatAndActivitySplitCard: some View {
-        HStack(alignment: .top, spacing: 14) {
-            // Left: Session Engineering Chat
-            VStack(alignment: .leading, spacing: 10) {
-                Text("SESSION CHAT")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.secondary)
-                
-                Divider().opacity(0.4)
-                
-                if collab.chatMessages.isEmpty {
-                    Text("No messages in this session yet.")
-                        .font(.system(size: 11.5))
-                        .foregroundColor(.secondary)
-                        .padding(.vertical, 16)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(collab.chatMessages.suffix(25)) { msg in
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(msg.displayName)
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundColor(.primary)
-                                    Spacer()
-                                    Text(msg.timestamp.formatted(date: .omitted, time: .shortened))
-                                        .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                }
-                                Text(msg.message)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.primary)
-                                    .textSelection(.enabled)
-                            }
-                            .padding(9)
-                            .background(Color.primary.opacity(0.03))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-                            )
-                        }
-                    }
-                }
-                
-                HStack(spacing: 8) {
-                    Button {
-                        if !chatInput.lowercased().hasPrefix("@ai ") {
-                            chatInput = "@ai " + chatInput
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 10, weight: .bold))
-                            Text("@ai")
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        }
-                        .foregroundColor(Color(red: 0.66, green: 0.33, blue: 0.97))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.35), lineWidth: 1)
-                        )
-                        .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                    .help("สั่งงาน AI Agent ร่วมกับทีมใน Session Chat (@ai ...)")
-
-                    TextField("Message collaborators or type @ai to command AI Agent…", text: $chatInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .background(Color.primary.opacity(0.035))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.primary.opacity(0.09), lineWidth: 1)
-                        )
-                        .cornerRadius(6)
-                        .onSubmit { submitChat() }
-                    
-                    formalActionButton(icon: "paperplane", label: "Send") {
-                        submitChat()
-                    }
-                    .disabled(chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
+        if useStackedSplitLayout {
+            VStack(alignment: .leading, spacing: 14) {
+                sessionChatCard
+                realtimeActivityCard
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
+        } else {
+            HStack(alignment: .top, spacing: 14) {
+                sessionChatCard
+                realtimeActivityCard
+            }
+        }
+    }
+
+    private var sessionChatCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SESSION CHAT")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(.secondary)
             
-            // Right: Realtime Audit Activity Feed
-            VStack(alignment: .leading, spacing: 10) {
-                Text("REALTIME ACTIVITY LOG")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            Divider().opacity(0.4)
+            
+            if collab.chatMessages.isEmpty {
+                Text("No messages in this session yet.")
+                    .font(.system(size: 11.5))
                     .foregroundColor(.secondary)
-                
-                Divider().opacity(0.4)
-                
-                if collab.activityLog.isEmpty {
-                    Text("Session events (joins, edits, tasks) appear here.")
-                        .font(.system(size: 11.5))
-                        .foregroundColor(.secondary)
-                        .padding(.vertical, 16)
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(collab.activityLog.suffix(25).reversed()) { item in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 4) {
-                                    Text(item.actorName)
-                                        .font(.system(size: 11.5, weight: .semibold))
-                                        .foregroundColor(.primary)
-                                    Text(item.action)
-                                        .font(.system(size: 11.5))
-                                        .foregroundColor(.secondary)
-                                    if !item.target.isEmpty {
-                                        Text(item.target)
-                                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                            .foregroundColor(.primary)
-                                            .lineLimit(1)
-                                    }
-                                }
-                                Text(item.timestamp.formatted(date: .omitted, time: .standard))
+                    .padding(.vertical, 16)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(collab.chatMessages.suffix(25)) { msg in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(msg.displayName)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                Spacer()
+                                Text(msg.timestamp.formatted(date: .omitted, time: .shortened))
                                     .font(.system(size: 9.5, design: .monospaced))
                                     .foregroundColor(.secondary)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.primary.opacity(0.025))
-                            .cornerRadius(5)
+                            Text(msg.message)
+                                .font(.system(size: 12))
+                                .foregroundColor(.primary)
+                                .textSelection(.enabled)
                         }
+                        .padding(9)
+                        .background(Color.primary.opacity(0.03))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                        )
                     }
                 }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
+            
+            HStack(spacing: 8) {
+                Button {
+                    if !chatInput.lowercased().hasPrefix("@ai ") {
+                        chatInput = "@ai " + chatInput
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("@ai")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .foregroundColor(Color(red: 0.66, green: 0.33, blue: 0.97))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color(red: 0.66, green: 0.33, blue: 0.97).opacity(0.35), lineWidth: 1)
+                    )
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .help("สั่งงาน AI Agent ร่วมกับทีมใน Session Chat (@ai ...)")
+
+                TextField("Message collaborators or type @ai to command AI Agent…", text: $chatInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.035))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+                    )
+                    .cornerRadius(6)
+                    .onSubmit { submitChat() }
+                
+                formalActionButton(icon: "paperplane", label: "Send") {
+                    submitChat()
+                }
+                .disabled(chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var realtimeActivityCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("REALTIME ACTIVITY LOG")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(.secondary)
+            
+            Divider().opacity(0.4)
+            
+            if collab.activityLog.isEmpty {
+                Text("Session events (joins, edits, tasks) appear here.")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 16)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(collab.activityLog.suffix(25).reversed()) { item in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                Text(item.actorName)
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                Text(item.action)
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                if !item.target.isEmpty {
+                                    Text(item.target)
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            Text(item.timestamp.formatted(date: .omitted, time: .standard))
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.primary.opacity(0.025))
+                        .cornerRadius(5)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
     }
     
     // MARK: - Actions
@@ -1376,20 +1672,23 @@ struct ParticipantRow: View {
                 }
             }
             
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 2.5) {
                 HStack(spacing: 6) {
                     Text(participant.displayName + (isSelf ? " (You)" : ""))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.primary)
                         .lineLimit(1)
+                        .layoutPriority(1)
                     
                     Text(participant.role.uppercased())
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .foregroundColor(isAITeammate ? peerColor : .secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 5.5)
+                        .padding(.vertical, 1.5)
                         .background(isAITeammate ? peerColor.opacity(0.14) : Color.primary.opacity(0.06))
-                        .cornerRadius(3)
+                        .cornerRadius(3.5)
                 }
                 
                 HStack(spacing: 5) {
@@ -1404,6 +1703,7 @@ struct ParticipantRow: View {
                         .font(.system(size: 10.5, weight: participant.cursorPosition?.isTyping == true ? .semibold : .regular, design: .monospaced))
                         .foregroundColor(participant.cursorPosition?.isTyping == true ? peerColor : .secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 
                 if participant.isAIActive, let aiText = participant.aiStatusText, !aiText.isEmpty {
@@ -1415,11 +1715,12 @@ struct ParticipantRow: View {
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
             }
             
-            Spacer()
+            Spacer(minLength: 8)
             
             if !isSelf, participant.cursorPosition != nil {
                 Button {
@@ -1432,20 +1733,25 @@ struct ParticipantRow: View {
                             .font(.system(size: 9))
                         Text("Jump")
                             .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .foregroundColor(peerColor)
-                    .padding(.horizontal, 7)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(peerColor.opacity(0.12))
                     .cornerRadius(5)
                 }
                 .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
             }
 
             if !isSelf, let onToggleFollow {
                 Button(action: onToggleFollow) {
                     Text(isFollowing ? "Following" : "Follow")
                         .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundColor(isFollowing ? peerColor : .primary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -1457,6 +1763,7 @@ struct ParticipantRow: View {
                         .cornerRadius(5)
                 }
                 .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
             }
             
             Circle()
@@ -1473,7 +1780,7 @@ struct ParticipantRow: View {
     }
 }
 
-// MARK: - Live Multiplayer Header Presence Bar
+// MARK: - Live Multiplayer Header Presence Bar (Compact Apple HIG Pill — Never Crushes Window Titlebar)
 
 struct HeaderCollaborationPresenceBar: View {
     @EnvironmentObject private var appState: AppState
@@ -1484,61 +1791,68 @@ struct HeaderCollaborationPresenceBar: View {
         if let session = collab.currentSession {
             let online = collab.onlineParticipants()
             let remotes = collab.remoteOnlineParticipants()
-            HStack(spacing: 6) {
+            let activeSummary: String = {
+                if let peer = remotes.first {
+                    return "Room \(session.shareCode) · \(peer.displayName): \(peer.liveActivitySummary)"
+                }
+                return "Room \(session.shareCode) · \(online.count) online"
+            }()
+
+            HStack(spacing: 5) {
                 Button {
                     appState.showingCollaborationView = true
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Circle()
                             .fill(Color.green)
                             .frame(width: 6, height: 6)
 
-                        // Stacked colorful participant avatars
-                        HStack(spacing: -5) {
-                            ForEach(Array(online.prefix(4))) { peer in
+                        HStack(spacing: -4) {
+                            ForEach(Array(online.prefix(3))) { peer in
                                 let c = CollaborationColorHelper.swiftUIColor(fromHex: peer.color)
                                 let isAI = peer.userId == CollaborationService.aiTeammateUserId || peer.role == "AI Agent"
                                 ZStack {
                                     Circle()
                                         .fill(c)
-                                        .frame(width: 18, height: 18)
+                                        .frame(width: 17, height: 17)
                                     if isAI {
                                         Image(systemName: "sparkles")
-                                            .font(.system(size: 9, weight: .bold))
+                                            .font(.system(size: 8.5, weight: .bold))
                                             .foregroundColor(.white)
                                     } else {
                                         Text(peer.displayName.prefix(1).uppercased())
-                                            .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                                            .font(.system(size: 9, weight: .bold, design: .rounded))
                                             .foregroundColor(.white)
                                     }
                                 }
                                 .overlay(
-                                    Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.4)
+                                    Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.3)
                                 )
-                                .help("\(peer.displayName) — \(peer.liveActivitySummary)")
                             }
                         }
 
                         Text(session.shareCode)
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(.primary.opacity(0.9))
+                            .foregroundColor(.primary.opacity(0.92))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                 }
                 .buttonStyle(.plain)
+                .help(activeSummary)
 
                 if collab.isAITeammateEnabled {
                     let isFollowingAI = collab.followingUserId == CollaborationService.aiTeammateUserId
-                    Divider()
-                        .frame(height: 12)
-                        .opacity(0.35)
                     Button {
                         collab.toggleFollow(userId: CollaborationService.aiTeammateUserId)
                     } label: {
                         HStack(spacing: 3) {
                             Image(systemName: isFollowingAI ? "eye.fill" : "sparkles")
-                                .font(.system(size: 9, weight: .bold))
-                            Text(isFollowingAI ? "Following AI" : "Follow AI")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: 8.5, weight: .bold))
+                            Text("AI")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .foregroundColor(isFollowingAI ? .white : Color(red: 0.66, green: 0.33, blue: 0.97))
                         .padding(.horizontal, 6)
@@ -1549,48 +1863,24 @@ struct HeaderCollaborationPresenceBar: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .help(isFollowingAI ? "คลิกเพื่อหยุด Follow AI Agent" : "คลิกเพื่อ Follow ดูไฟล์และบรรทัดที่ AI Agent กำลังทำแบบ Real-Time")
-                }
-
-                if let activePeer = remotes.first {
-                    let peerColor = CollaborationColorHelper.swiftUIColor(fromHex: activePeer.color)
-                    Divider()
-                        .frame(height: 12)
-                        .opacity(0.35)
-
-                    Button {
-                        Task {
-                            await collab.jumpToParticipant(activePeer)
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(peerColor)
-                                .frame(width: 5.5, height: 5.5)
-                            Text("\(activePeer.displayName): \(activePeer.liveActivitySummary)")
-                                .font(.system(size: 10.5, weight: .medium))
-                                .foregroundColor(.primary.opacity(0.88))
-                                .lineLimit(1)
-                                .frame(maxWidth: 185, alignment: .leading)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help("คลิกเพื่อกระโดดไปยังไฟล์และบรรทัดที่ \(activePeer.displayName) กำลังแก้")
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help(isFollowingAI ? "Following MicroCode AI — click to stop" : "Follow MicroCode AI in real time")
                 }
 
                 Menu {
-                    Section("Live Session · Room \(session.shareCode)") {
+                    Section("Room \(session.shareCode) · \(online.count) Online") {
                         Button {
-                            collab.copyJoinTokenToClipboard()
+                            collab.copyShareLinkToClipboard()
                             copiedFeedback = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedFeedback = false }
                         } label: {
-                            Label(copiedFeedback ? "Copied Join Token!" : "Copy Join Token", systemImage: "doc.on.doc")
+                            Label(copiedFeedback ? "Copied Direct Invite Link!" : "Copy Direct Invite Link (No Password)", systemImage: "link")
                         }
                         Button {
-                            collab.copyShareLinkToClipboard()
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(session.shareCode, forType: .string)
                         } label: {
-                            Label("Copy Share Link / Web Portal", systemImage: "link")
+                            Label("Copy Room Access Code (\(session.shareCode))", systemImage: "number")
                         }
                     }
 
@@ -1636,8 +1926,9 @@ struct HeaderCollaborationPresenceBar: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3.5)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .fixedSize(horizontal: true, vertical: false)
             .background(
                 Capsule(style: .continuous)
                     .fill(Color.green.opacity(0.10))
@@ -1696,6 +1987,8 @@ private struct CollabMouseMonitorAnchorView: NSViewRepresentable {
         weak var hostView: NSView?
         var onLocalMouseEvent: (_ normalizedX: Double, _ normalizedY: Double, _ localPoint: CGPoint, _ isInside: Bool, _ isPressing: Bool) -> Void
         private var eventMonitor: Any?
+        private var lastDispatchedTimestamp: TimeInterval = 0
+        private var lastDispatchedPressing: Bool = false
 
         init(onLocalMouseEvent: @escaping (_ normalizedX: Double, _ normalizedY: Double, _ localPoint: CGPoint, _ isInside: Bool, _ isPressing: Bool) -> Void) {
             self.onLocalMouseEvent = onLocalMouseEvent
@@ -1703,7 +1996,13 @@ private struct CollabMouseMonitorAnchorView: NSViewRepresentable {
 
         deinit {
             if let monitor = eventMonitor {
-                NSEvent.removeMonitor(monitor)
+                if Thread.isMainThread {
+                    NSEvent.removeMonitor(monitor)
+                } else {
+                    DispatchQueue.main.async {
+                        NSEvent.removeMonitor(monitor)
+                    }
+                }
             }
         }
 
@@ -1716,18 +2015,31 @@ private struct CollabMouseMonitorAnchorView: NSViewRepresentable {
                     guard let self,
                           let view = self.hostView,
                           let win = view.window,
+                          win.attachedSheet == nil,
                           event.window === win else {
                         return event
                     }
                     let bounds = view.bounds
                     guard bounds.width > 1, bounds.height > 1 else { return event }
+                    let pressing = NSEvent.pressedMouseButtons != 0 || event.type == .leftMouseDown || event.type == .leftMouseDragged
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if pressing == self.lastDispatchedPressing && (now - self.lastDispatchedTimestamp) < 0.033 {
+                        return event
+                    }
+                    self.lastDispatchedTimestamp = now
+                    self.lastDispatchedPressing = pressing
+
                     let pt = view.convert(event.locationInWindow, from: nil)
                     let flippedY = view.isFlipped ? pt.y : (bounds.height - pt.y)
                     let inside = pt.x >= 0 && pt.x <= bounds.width && flippedY >= 0 && flippedY <= bounds.height
                     let nx = max(0.0, min(1.0, Double(pt.x / bounds.width)))
                     let ny = max(0.0, min(1.0, Double(flippedY / bounds.height)))
-                    let pressing = NSEvent.pressedMouseButtons != 0 || event.type == .leftMouseDown || event.type == .leftMouseDragged
-                    self.onLocalMouseEvent(nx, ny, CGPoint(x: pt.x, y: flippedY), inside, pressing)
+                    let localPt = CGPoint(x: pt.x, y: flippedY)
+
+                    // Dispatch outside AppKit's synchronous NSWindow.sendEvent: to prevent SwiftUI AttributeGraph re-entrancy crashes
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onLocalMouseEvent(nx, ny, localPt, inside, pressing)
+                    }
                     return event
                 }
             } else if let monitor = eventMonitor {
