@@ -4,7 +4,7 @@ description: Quality bar that keeps agent output from reading as generic AI fill
 license: MIT
 metadata:
   owner: MicroCode
-  always_on: "true"
+  always_on: "false"
   tool: slop_check
   lint: "slop:ignore-file"
 ---
@@ -39,4 +39,4 @@ Start from the subject, not a template; the frontend-design skill carries the fu
 - Real copy only. Name an action the same way through the whole flow: "Save changes" then "Saved".
 
 ## Process
-Before you finalise: run `slop_check` on the text and files you produced, fix every finding or say why it is intentional, then re-read your reply once and delete anything that carries no information.
+When authoring substantial new UI copy, documentation, or landing pages, you may optionally run `slop_check` on the files you produced and refine generic phrasing before finalising. Do not run `slop_check` on normal conversational turns or small code patches.

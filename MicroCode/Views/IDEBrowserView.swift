@@ -50,6 +50,7 @@ struct ActiveLocalPortProcess: Identifiable, Equatable {
     let pid: Int
     let processName: String
     let commandLine: String
+    var cwd: String = ""
 }
 
 // MARK: - Promoted Live WebApp Screenshot Model
@@ -779,9 +780,25 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
 
     func scanActivePorts() {
         guard !isScanningPorts else { return }
+        Task { @MainActor in
+            await self.scanActivePortsNow()
+        }
+    }
+
+    func scanActivePortsNow() async {
+        if isScanningPorts {
+            // Wait briefly for an in-flight scan to finish so callers always observe fresh results
+            for _ in 0..<12 {
+                if !isScanningPorts { return }
+                try? await Task.sleep(nanoseconds: 40_000_000)
+            }
+            return
+        }
         isScanningPorts = true
         let selfPid = ProcessInfo.processInfo.processIdentifier
-        Task.detached(priority: .utility) {
+        let companionPort = Int(PhoneCompanionService.shared.listeningPort)
+        let llmGatewayPort = Int(LocalLLMGatewayService.shared.listeningPort)
+        let finalDiscovered = await Task.detached(priority: .utility) { () -> [ActiveLocalPortProcess] in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
             proc.arguments = ["-iTCP", "-sTCP:LISTEN", "-P", "-n"]
@@ -789,10 +806,24 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             proc.standardOutput = pipe
             proc.standardError = FileHandle.nullDevice
             var discovered: [ActiveLocalPortProcess] = []
+            let nonWebPorts: Set<Int> = [
+                companionPort, llmGatewayPort, 8470, 8471, 8472, 11436, 18888, 20128,
+                5432, 3306, 6379, 27017, 11434, 5037, 3283, 22
+            ]
+            let ignoredSubstrings = [
+                "rapportd", "controlce", "airplayxp", "sharingd", "homed", "identitys",
+                "onedrive", "dropbox", "spotify", "figma", "slack", "discord",
+                "chrome", "safari", "webkit", "postgres", "mysqld", "mariadbd",
+                "redis-ser", "mongod", "ollama", "lmstudio", "llama-ser",
+                "docker", "vpnkit", "orbstack", "cloudflar", "tailscale",
+                "syncthing", "mdnsrespo", "cupsd", "sshd", "cursor",
+                "microcode", "code help", "antigravi", "language_",
+                "ardagent", "adb", "dartvm", "sourcekit", "lldb"
+            ]
             do {
                 try proc.run()
-                proc.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
                 if let out = String(data: data, encoding: .utf8) {
                     var seenPorts = Set<Int>()
                     for line in out.components(separatedBy: .newlines).dropFirst() {
@@ -800,14 +831,13 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
                         guard parts.count >= 9 else { continue }
                         let cmdName = parts[0]
                         guard let pid = Int(parts[1]), pid != Int(selfPid) else { continue }
-                        let addrField = parts[parts.count - 2] // e.g. *:3000 or 127.0.0.1:8080
+                        let addrField = parts[parts.count - 2] // e.g. *:5173 or 127.0.0.1:8080
                         if let colonIdx = addrField.lastIndex(of: ":"),
                            let port = Int(addrField[addrField.index(after: colonIdx)...]),
-                           port >= 1024 && port <= 65535 {
-                            // Filter out common macOS system/background processes
+                           port >= 1024 && port <= 65535,
+                           !nonWebPorts.contains(port) {
                             let lowerCmd = cmdName.lowercased()
-                            let ignored = ["rapportd", "controlce", "airplayxp", "sharingd", "homed", " identitys", "onedrive", "dropbox", "spotify", "figma", "slack", "discord", "chrome", "safari", "webkit"]
-                            if ignored.contains(where: { lowerCmd.contains($0) }) { continue }
+                            if ignoredSubstrings.contains(where: { lowerCmd.contains($0) }) { continue }
                             if !seenPorts.contains(port) {
                                 seenPorts.insert(port)
                                 discovered.append(ActiveLocalPortProcess(
@@ -821,12 +851,255 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
                     }
                 }
             } catch {}
-            discovered.sort { $0.port < $1.port }
-            let finalDiscovered = discovered
-            await MainActor.run {
-                self.activePortProcesses = finalDiscovered
-                self.isScanningPorts = false
+
+            // Resolve CWD for discovered PIDs in a single fast lsof call so workspace-owned servers win automatically
+            if !discovered.isEmpty {
+                let uniquePIDs = Array(Set(discovered.map { String($0.pid) })).joined(separator: ",")
+                let cwdProc = Process()
+                cwdProc.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+                cwdProc.arguments = ["-a", "-p", uniquePIDs, "-d", "cwd", "-Fn"]
+                let cwdPipe = Pipe()
+                cwdProc.standardOutput = cwdPipe
+                cwdProc.standardError = FileHandle.nullDevice
+                var pidToCwd: [Int: String] = [:]
+                if (try? cwdProc.run()) != nil {
+                    let cwdData = cwdPipe.fileHandleForReading.readDataToEndOfFile()
+                    cwdProc.waitUntilExit()
+                    if let cwdText = String(data: cwdData, encoding: .utf8) {
+                        var currentPID: Int? = nil
+                        for rawLine in cwdText.components(separatedBy: .newlines) {
+                            if rawLine.hasPrefix("p"), let p = Int(rawLine.dropFirst()) {
+                                currentPID = p
+                            } else if rawLine.hasPrefix("n"), let p = currentPID {
+                                let rawPath = String(rawLine.dropFirst())
+                                if rawPath.hasPrefix("/") {
+                                    pidToCwd[p] = URL(fileURLWithPath: rawPath).standardizedFileURL.path
+                                }
+                            }
+                        }
+                    }
+                }
+                for idx in discovered.indices {
+                    if let resolvedCwd = pidToCwd[discovered[idx].pid] {
+                        discovered[idx].cwd = resolvedCwd
+                    }
+                }
             }
+
+            discovered.sort { $0.port < $1.port }
+            return discovered
+        }.value
+
+        self.activePortProcesses = finalDiscovered
+        self.isScanningPorts = false
+        self.reconcileRuntimePreviewPort(with: finalDiscovered)
+    }
+
+    func bestActivePort(forWorkspace workspacePath: String? = nil, in processes: [ActiveLocalPortProcess]? = nil) -> Int? {
+        let list = processes ?? activePortProcesses
+        guard !list.isEmpty else { return nil }
+        let rawWs = workspacePath
+            ?? AgentToolBox.shared.effectiveWorkspaceRoot
+            ?? AppState.shared?.workspaceFolder?.path
+            ?? ""
+        let canonicalWs = rawWs.isEmpty ? "" : URL(fileURLWithPath: rawWs).standardizedFileURL.path
+
+        // 1. Exact or subdirectory CWD match with the active workspace
+        if !canonicalWs.isEmpty {
+            let wsMatches = list.filter { proc in
+                guard !proc.cwd.isEmpty else { return false }
+                return proc.cwd == canonicalWs
+                    || proc.cwd.hasPrefix(canonicalWs + "/")
+                    || canonicalWs.hasPrefix(proc.cwd + "/")
+            }
+            if !wsMatches.isEmpty {
+                if let configured = Self.detectWorkspaceConfiguredPort(workspacePath: canonicalWs),
+                   wsMatches.contains(where: { $0.port == configured }) {
+                    return configured
+                }
+                let preferredFrontend = [5173, 5174, 4173, 3000, 3001, 4321, 4200, 8080, 8000, 8501, 7860]
+                if let hit = preferredFrontend.first(where: { p in wsMatches.contains(where: { $0.port == p }) }) {
+                    return hit
+                }
+                return wsMatches[0].port
+            }
+
+            // 2. Active port matching configured workspace port (.env / package.json / vite.config / go / rust)
+            if let configured = Self.detectWorkspaceConfiguredPort(workspacePath: canonicalWs),
+               list.contains(where: { $0.port == configured }) {
+                return configured
+            }
+        }
+
+        // 3. Otherwise pick well-known live web server ports
+        let openPorts = Set(list.map(\.port))
+        let preferredPorts = [5173, 5174, 4173, 3000, 3001, 8080, 8000, 4200, 4321, 5000, 8501, 7860]
+        return preferredPorts.first(where: { openPorts.contains($0) }) ?? list.first?.port
+    }
+
+    private func reconcileRuntimePreviewPort(with processes: [ActiveLocalPortProcess]) {
+        let runtime = DeviceRuntimeService.shared
+        let liveSet = Set(processes.map(\.port))
+        let bridgeBusy = UniversalAppPreviewBridge.shared.isBuilding || (UniversalAppPreviewBridge.shared.activeProcess?.isRunning == true)
+
+        // Evict stale/dead localhost port when process is no longer listening
+        if let prevPort = runtime.lastDetectedDevServerPort, !liveSet.contains(prevPort), !bridgeBusy {
+            runtime.lastDetectedDevServerPort = nil
+            if let tURL = runtime.targetWebURL,
+               let host = tURL.host?.lowercased(),
+               (host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0"),
+               tURL.port == prevPort {
+                runtime.targetWebURL = nil
+            }
+        }
+
+        if let bestPort = bestActivePort(in: processes) {
+            if runtime.lastDetectedDevServerPort == nil || (!liveSet.contains(runtime.lastDetectedDevServerPort!) && !bridgeBusy) {
+                runtime.lastDetectedDevServerPort = bestPort
+            }
+            if let tURL = runtime.targetWebURL,
+               let host = tURL.host?.lowercased(),
+               (host == "localhost" || host == "127.0.0.1"),
+               let curP = tURL.port,
+               !liveSet.contains(curP),
+               !bridgeBusy {
+                runtime.targetWebURL = URL(string: "http://127.0.0.1:\(bestPort)")
+            }
+        }
+        PhoneCompanionService.shared.broadcastSSEStateNow()
+    }
+
+    nonisolated static func detectWorkspaceConfiguredPort(workspacePath: String?) -> Int? {
+        guard let ws = workspacePath, !ws.isEmpty else { return nil }
+        let folder = URL(fileURLWithPath: ws)
+        let fm = FileManager.default
+
+        for envFile in [".env.local", ".env", "backend/.env"] {
+            let envURL = folder.appendingPathComponent(envFile)
+            if let text = try? String(contentsOf: envURL, encoding: .utf8) {
+                for rawLine in text.components(separatedBy: .newlines) {
+                    let line = rawLine.trimmingCharacters(in: .whitespaces)
+                    if line.hasPrefix("#") || !line.contains("=") { continue }
+                    let kv = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    if kv.count == 2, ["PORT", "VITE_PORT", "APP_PORT", "HTTP_PORT", "SERVER_PORT"].contains(kv[0].uppercased()) {
+                        let cleaned = kv[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                        if let p = Int(cleaned), (1024...65535).contains(p) {
+                            return p
+                        }
+                    }
+                }
+            }
+        }
+
+        let pkgURL = folder.appendingPathComponent("package.json")
+        if let data = try? Data(contentsOf: pkgURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let scripts = json["scripts"] as? [String: String] {
+                for key in ["dev", "start", "serve", "preview"] {
+                    if let cmd = scripts[key],
+                       let m = cmd.range(of: #"(?:--port|-p)\s*=?\s*(\d{4,5})"#, options: .regularExpression) {
+                        let digits = cmd[m].components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                        if let p = Int(digits), (1024...65535).contains(p) {
+                            return p
+                        }
+                    }
+                }
+            }
+            let content = (String(data: data, encoding: .utf8) ?? "").lowercased()
+            if content.contains("\"vite\"") || content.contains("\"@sveltejs/kit\"") {
+                for viteCfg in ["vite.config.ts", "vite.config.js", "vite.config.mjs"] {
+                    if let vText = try? String(contentsOf: folder.appendingPathComponent(viteCfg), encoding: .utf8),
+                       let m = vText.range(of: #"port\s*:\s*(\d{4,5})"#, options: .regularExpression) {
+                        let digits = vText[m].components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                        if let p = Int(digits), (1024...65535).contains(p) { return p }
+                    }
+                }
+                return 5173
+            }
+            if content.contains("\"astro\"") { return 4321 }
+            if content.contains("\"@angular/core\"") { return 4200 }
+            if content.contains("\"next\"") || content.contains("\"nuxt\"") { return 3000 }
+        }
+
+        for viteCfg in ["vite.config.ts", "vite.config.js", "vite.config.mjs", "svelte.config.js"] {
+            if fm.fileExists(atPath: folder.appendingPathComponent(viteCfg).path) { return 5173 }
+        }
+        if fm.fileExists(atPath: folder.appendingPathComponent("astro.config.mjs").path) { return 4321 }
+        if fm.fileExists(atPath: folder.appendingPathComponent("angular.json").path) { return 4200 }
+        if fm.fileExists(atPath: folder.appendingPathComponent("go.mod").path) {
+            if let mainGo = try? String(contentsOf: folder.appendingPathComponent("main.go"), encoding: .utf8),
+               let m = mainGo.range(of: #":(\d{4,5})""#, options: .regularExpression) {
+                let digits = mainGo[m].components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                if let p = Int(digits), (1024...65535).contains(p) { return p }
+            }
+            return 8080
+        }
+        if fm.fileExists(atPath: folder.appendingPathComponent("manage.py").path) { return 8000 }
+        return nil
+    }
+
+    nonisolated static func extractLiveServerURL(from rawText: String) -> URL? {
+        guard !rawText.isEmpty else { return nil }
+        let clean: String = {
+            if let ansi = try? NSRegularExpression(pattern: #"\x1B\[[0-9;]*[A-Za-z]"#, options: []) {
+                let ns = rawText as NSString
+                return ansi.stringByReplacingMatches(in: rawText, options: [], range: NSRange(location: 0, length: ns.length), withTemplate: "")
+            }
+            return rawText
+        }()
+
+        if let urlRegex = try? NSRegularExpression(
+            pattern: #"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{2,5})(/[^\s"'<>)]*)?"#,
+            options: .caseInsensitive
+        ) {
+            let ns = clean as NSString
+            let matches = urlRegex.matches(in: clean, options: [], range: NSRange(location: 0, length: ns.length))
+            for match in matches.reversed() {
+                let full = ns.substring(with: match.range)
+                let portStr = ns.substring(with: match.range(at: 1))
+                if let port = Int(portStr), (1024...65535).contains(port), port != 8472, port != 11434 {
+                    let normalized = full
+                        .replacingOccurrences(of: "0.0.0.0", with: "127.0.0.1")
+                        .replacingOccurrences(of: "[::]", with: "127.0.0.1")
+                        .replacingOccurrences(of: "[::1]", with: "localhost")
+                    if let url = URL(string: normalized) {
+                        return url
+                    }
+                }
+            }
+        }
+
+        if let portRegex = try? NSRegularExpression(
+            pattern: #"(?:listening\s+on(?:\s+port)?|server\s+(?:running|started)\s+(?:on|at)(?:\s+port)?|serving\s+http\s+on\s+[^\n]*?\bport|ready\s+on)\s*:?\s*(\d{4,5})\b"#,
+            options: .caseInsensitive
+        ) {
+            let ns = clean as NSString
+            if let m = portRegex.matches(in: clean, options: [], range: NSRange(location: 0, length: ns.length)).last {
+                let portStr = ns.substring(with: m.range(at: 1))
+                if let port = Int(portStr), (1024...65535).contains(port), port != 8472 {
+                    return URL(string: "http://127.0.0.1:\(port)/")
+                }
+            }
+        }
+        return nil
+    }
+
+    func notifyHarnessServerOutput(_ outputText: String, cwd: String? = nil) {
+        if let detectedURL = Self.extractLiveServerURL(from: outputText) {
+            let runtime = DeviceRuntimeService.shared
+            if let p = detectedURL.port {
+                runtime.lastDetectedDevServerPort = p
+            }
+            runtime.targetWebURL = detectedURL
+            runtime.webRefreshTrigger.toggle()
+            PhoneCompanionService.shared.broadcastSSEStateNow()
+        }
+        scanActivePorts()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.scanActivePorts()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            self?.scanActivePorts()
         }
     }
 
@@ -914,14 +1187,8 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
         if let targetURL = DeviceRuntimeService.shared.targetWebURL, targetURL.absoluteString != "about:blank" {
             return targetURL
         }
-        if let port = DeviceRuntimeService.shared.lastDetectedDevServerPort {
-            return URL(string: "http://localhost:\(port)")
-        }
-        if !activePortProcesses.isEmpty {
-            let preferredPorts = [5173, 5174, 3000, 8080, 4200, 4321, 8000]
-            let openPorts = Set(activePortProcesses.map(\.port))
-            let chosen = preferredPorts.first(where: { openPorts.contains($0) }) ?? activePortProcesses[0].port
-            return URL(string: "http://localhost:\(chosen)")
+        if let bestPort = bestActivePort() ?? DeviceRuntimeService.shared.lastDetectedDevServerPort {
+            return URL(string: "http://127.0.0.1:\(bestPort)")
         }
         if let ws = AgentToolBox.shared.workspaceRoot ?? AppState.shared?.workspaceFolder?.path {
             let wsURL = URL(fileURLWithPath: ws)

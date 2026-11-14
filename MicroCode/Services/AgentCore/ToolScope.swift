@@ -48,11 +48,12 @@ struct ToolScope {
         
         let deviceAndWebHits = [
             "preview", "browser", "simulator", "emulator", "screenshot", "inspect", "device",
+            "computer_use", "computer use", "window", "click", "double_click", "right_click", "hover", "drag", "scroll", "shortcut", "zoom",
             "webapp", "frontend", "localhost", "127.0.0.1", "http://", "https://", "dom", "css", "html",
             "ui", "ux", "layout", "button", "modal", "navbar", "sidebar", "vite", "next", "react", "vue",
             "android", "ios", "adb", "simctl",
-            "หน้าเว็บ", "หน้าจอ", "พรีวิว", "เปิดเว็บ", "เบราว์เซอร์", "บราวเซอร์", "มือถือ", "จำลอง",
-            "แอนดรอยด์", "ไอโฟน", "เช็คหน้า", "ดูหน้า", "ปุ่ม", "แสดงผล", "ดีไซน์", "บัง", "เพี้ยน", "คลิก"
+            "หน้าเว็บ", "หน้าจอ", "หน้าต่าง", "พรีวิว", "เปิดเว็บ", "เบราว์เซอร์", "บราวเซอร์", "มือถือ", "จำลอง",
+            "แอนดรอยด์", "ไอโฟน", "เช็คหน้า", "ดูหน้า", "ปุ่ม", "แสดงผล", "ดีไซน์", "บัง", "เพี้ยน", "คลิก", "กด", "ควบคุม", "แคปจอ"
         ]
         if hasMobilePreview || deviceAndWebHits.contains(where: { lower.contains($0) }) {
             tiers.insert(.device)
@@ -68,6 +69,7 @@ struct ToolScope {
         
         let multimodalHits = [
             "image", "video", "music", "audio", "pdf", "docx", "xlsx", "pptx", "csv", "voice", "picture",
+            ".png", ".jpg", ".jpeg", ".webp", ".heic", ".svg", ".gif", ".bmp", ".tiff",
             "รูป", "ภาพ", "สกรีนช็อต", "แคปจอ", "วิดีโอ", "เพลง", "เสียง", "เอกสาร", "ไฟล์แนบ"
         ]
         if hasMediaAttachments || multimodalHits.contains(where: { lower.contains($0) }) {
@@ -153,10 +155,10 @@ struct ToolScope {
         // Science
         "science_inspect": .science, "alphafold_validate": .science,
         "alphafold_input_validate": .science,
-        // Multimodal & Media Generation
+        // Multimodal & Media Generation (inspect_image & extract_pdf in .core so 100% of models can inspect files anytime)
+        "inspect_image": .core, "extract_pdf": .core,
         "generate_image": .multimodal, "generate_video": .multimodal,
-        "generate_music": .multimodal, "inspect_image": .multimodal,
-        "extract_pdf": .multimodal, "voice_coding": .multimodal,
+        "generate_music": .multimodal, "voice_coding": .multimodal,
         // Studio
         "api_studio": .studio, "database_studio": .studio,
         // Embedded / HIL

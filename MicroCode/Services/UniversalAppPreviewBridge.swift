@@ -90,7 +90,7 @@ public final class UniversalAppPreviewBridge: ObservableObject {
 
     // MARK: - Internal Process & Watcher State
 
-    private var activeProcess: Process?
+    private(set) var activeProcess: Process?
     private var activeStdinHandle: FileHandle?
     private var activeProcessPID: pid_t = 0
     private var framePollTimer: Timer?
@@ -801,16 +801,40 @@ public final class UniversalAppPreviewBridge: ObservableObject {
         }
 
         if let ws = workspace {
+            let fm = FileManager.default
+            // If workspace already has an active listening server in this directory, attach immediately!
+            if let existingPort = IDEBrowserAutomationService.shared.bestActivePort(forWorkspace: ws.path),
+               IDEBrowserAutomationService.shared.activePortProcesses.contains(where: { $0.port == existingPort && ($0.cwd == ws.standardizedFileURL.path || $0.cwd.hasPrefix(ws.standardizedFileURL.path + "/")) }) {
+                if let liveURL = URL(string: "http://127.0.0.1:\(existingPort)") {
+                    DeviceRuntimeService.shared.lastDetectedDevServerPort = existingPort
+                    DeviceRuntimeService.shared.targetWebURL = liveURL
+                    DeviceRuntimeService.shared.webRefreshTrigger.toggle()
+                    isBuilding = false
+                    isRunning = true
+                    statusText = "Attached to Live Server :\(existingPort)"
+                    return
+                }
+            }
+
             let pkgURL = ws.appendingPathComponent("package.json")
             if let data = try? Data(contentsOf: pkgURL),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let scripts = json["scripts"] as? [String: Any] {
                 let scriptName = scripts["dev"] != nil ? "dev" : (scripts["start"] != nil ? "start" : nil)
                 if let scriptName {
-                    let port = allocatePort(preferred: 5173)
+                    let configured = IDEBrowserAutomationService.detectWorkspaceConfiguredPort(workspacePath: ws.path) ?? 5173
+                    let port = allocatePort(preferred: configured)
+                    let scriptBody = ((scripts[scriptName] as? String) ?? "").lowercased()
+                    let usesPnpm = fm.fileExists(atPath: ws.appendingPathComponent("pnpm-lock.yaml").path)
+                    let usesBun = fm.fileExists(atPath: ws.appendingPathComponent("bun.lockb").path) || fm.fileExists(atPath: ws.appendingPathComponent("bun.lock").path)
+                    let runner = usesPnpm ? "pnpm" : (usesBun ? "bun" : "npm")
+                    var args = [runner, "run", scriptName]
+                    if scriptBody.contains("vite") || scriptBody.contains("astro") {
+                        args += (runner == "npm" ? ["--", "--port", "\(port)", "--host", "127.0.0.1"] : ["--port", "\(port)", "--host", "127.0.0.1"])
+                    }
                     launchManagedProcess(
                         executable: "/usr/bin/env",
-                        arguments: ["npm", "run", scriptName, "--", "--port", "\(port)"],
+                        arguments: args,
                         workingDir: ws,
                         targetWebPort: port,
                         frameworkLabel: "Web Dev Server"
@@ -819,10 +843,38 @@ public final class UniversalAppPreviewBridge: ObservableObject {
                 }
             }
 
+            // Go HTTP server workspace (e.g. go.mod + main.go)
+            if fm.fileExists(atPath: ws.appendingPathComponent("go.mod").path) {
+                let configured = IDEBrowserAutomationService.detectWorkspaceConfiguredPort(workspacePath: ws.path) ?? 8080
+                let port = allocatePort(preferred: configured)
+                launchManagedProcess(
+                    executable: "/usr/bin/env",
+                    arguments: ["go", "run", "."],
+                    workingDir: ws,
+                    targetWebPort: port,
+                    frameworkLabel: "Go Server"
+                )
+                return
+            }
+
+            // Rust web server workspace (Cargo.toml)
+            if fm.fileExists(atPath: ws.appendingPathComponent("Cargo.toml").path) {
+                let configured = IDEBrowserAutomationService.detectWorkspaceConfiguredPort(workspacePath: ws.path) ?? 8080
+                let port = allocatePort(preferred: configured)
+                launchManagedProcess(
+                    executable: "/usr/bin/env",
+                    arguments: ["cargo", "run"],
+                    workingDir: ws,
+                    targetWebPort: port,
+                    frameworkLabel: "Rust Server"
+                )
+                return
+            }
+
             let htmlCandidates = ["index.html", "public/index.html", "src/index.html", "dist/index.html"]
             for rel in htmlCandidates {
                 let candidate = ws.appendingPathComponent(rel)
-                if FileManager.default.fileExists(atPath: candidate.path) {
+                if fm.fileExists(atPath: candidate.path) {
                     DeviceRuntimeService.shared.targetWebURL = candidate
                     DeviceRuntimeService.shared.webRefreshTrigger.toggle()
                     isBuilding = false
@@ -855,23 +907,58 @@ public final class UniversalAppPreviewBridge: ObservableObject {
         proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = arguments
         proc.currentDirectoryURL = workingDir
+
+        // Ensure GUI-launched MicroCode.app has full developer toolchain PATH (Homebrew, NVM, Bun, Cargo, Go, Portable Runtimes)
+        var env = ProcessInfo.processInfo.environment
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+        let portableBins = RuntimeManager.shared.allRuntimeBinDirectories()
+        let extraPaths = (portableBins + [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            "\(homeDir)/.bun/bin",
+            "\(homeDir)/.cargo/bin",
+            "\(homeDir)/.dotnet/tools",
+            "\(homeDir)/.local/bin",
+            "\(homeDir)/.nvm/current/bin",
+            "\(homeDir)/go/bin"
+        ]).joined(separator: ":")
+        env["PATH"] = "\(extraPaths):\(env["PATH"] ?? "")"
+        env["PORT"] = "\(targetWebPort)"
+        env["BROWSER"] = "none"
+        env["CI"] = "false"
+        proc.environment = env
+
         proc.standardInput = stdinPipe
         proc.standardOutput = outPipe
         proc.standardError = outPipe
 
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.appendLog(chunk)
-                if let detectedURL = self.extractLocalhostURL(from: chunk) {
+                if let detectedURL = IDEBrowserAutomationService.extractLiveServerURL(from: chunk) ?? self.extractLocalhostURL(from: chunk) {
                     self.isUsingNativeCanvas = false
+                    if let p = detectedURL.port {
+                        DeviceRuntimeService.shared.lastDetectedDevServerPort = p
+                    }
                     DeviceRuntimeService.shared.targetWebURL = detectedURL
                     DeviceRuntimeService.shared.webRefreshTrigger.toggle()
                     self.isBuilding = false
                     self.isRunning = true
-                    self.statusText = "⚡ \(frameworkLabel) Live (\(detectedURL.host ?? "localhost"):\(detectedURL.port ?? targetWebPort))"
+                    self.statusText = "\(frameworkLabel) Live (\(detectedURL.host ?? "127.0.0.1"):\(detectedURL.port ?? targetWebPort))"
+                    IDEBrowserAutomationService.shared.scanActivePorts()
+                    PhoneCompanionService.shared.broadcastSSEStateNow()
                 }
             }
         }
@@ -884,19 +971,29 @@ public final class UniversalAppPreviewBridge: ObservableObject {
             statusText = "Starting \(frameworkLabel) on :\(targetWebPort)..."
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
-                guard let self, self.isBuilding else { return }
+                guard let self else { return }
+                IDEBrowserAutomationService.shared.scanActivePorts()
+                guard self.isBuilding, self.activeProcess?.isRunning == true else {
+                    if self.activeProcess?.isRunning != true {
+                        self.isBuilding = false
+                    }
+                    return
+                }
                 self.isBuilding = false
                 self.isRunning = true
-                if let url = URL(string: "http://127.0.0.1:\(targetWebPort)") {
+                let livePort = IDEBrowserAutomationService.shared.bestActivePort(forWorkspace: workingDir.path) ?? targetWebPort
+                if let url = URL(string: "http://127.0.0.1:\(livePort)") {
+                    DeviceRuntimeService.shared.lastDetectedDevServerPort = livePort
                     DeviceRuntimeService.shared.targetWebURL = url
                     DeviceRuntimeService.shared.webRefreshTrigger.toggle()
-                    self.statusText = "⚡ \(frameworkLabel) · :\(targetWebPort)"
+                    self.statusText = "\(frameworkLabel) · :\(livePort)"
+                    PhoneCompanionService.shared.broadcastSSEStateNow()
                 }
             }
         } catch {
             isBuilding = false
             statusText = "Build failed: \(error.localizedDescription)"
-            appendLog("❌ Failed to start \(frameworkLabel): \(error.localizedDescription)")
+            appendLog("Failed to start \(frameworkLabel): \(error.localizedDescription)")
         }
     }
 

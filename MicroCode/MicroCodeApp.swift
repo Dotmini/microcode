@@ -399,6 +399,25 @@ struct MicroCodeApp: App {
             return
         }
 
+        // 1-Click Dotmini Platform Connect Deep Link (e.g. microcode://platform-connect?code=otc_...)
+        if (url.scheme?.lowercased() == "microcode" || url.scheme?.lowercased() == "codetuner"),
+           ["platform-connect", "platform_connect", "platform"].contains(url.host?.lowercased() ?? "") {
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: true)
+            let code = components?.queryItems?.first(where: { $0.name.lowercased() == "code" })?.value ?? ""
+            Task { @MainActor in
+                appState.settingsSelectedTab = 6
+                appState.showingSettingsDialog = true
+                if !code.isEmpty {
+                    let ok = await DotminiPlatformKeyService.shared.redeemConnectCode(code)
+                    if ok {
+                        await SupabaseAuthService.shared.refreshEntitlement()
+                        await AIModelCatalog.shared.refreshIfNeeded(force: true)
+                    }
+                }
+            }
+            return
+        }
+
         // 1-Click Enterprise Team Setup Deep Link (e.g. microcode://enterprise?config=<base64url>)
         if (url.scheme?.lowercased() == "microcode" || url.scheme?.lowercased() == "codetuner"),
            (url.host?.lowercased() == "enterprise" || url.host?.lowercased() == "enterprise-connect") {

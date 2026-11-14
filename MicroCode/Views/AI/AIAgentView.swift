@@ -5483,11 +5483,13 @@ struct AIAgentView: View {
             if !currentAttachments.isEmpty {
                 let targetChatId = agent.activeChatId
                 let targetMsgId = preparedUser.id
+                let detectedChatProvider = StreamableAIProvider(rawValue: providerString) ?? StreamableAIProvider.detect(from: model)
+                let chatNeedsImageOCR = (providerString == "local") || !detectedChatProvider.supportsNativeImageInput(model: model)
                 Task { @MainActor in
                     let staged = await UniversalAttachmentEngine.shared.ensureIngested(
                         currentAttachments,
                         chatId: targetChatId,
-                        requireImageOCR: false
+                        requireImageOCR: chatNeedsImageOCR
                     )
                     let digest = UniversalAttachmentEngine.shared.buildFollowUpHistoryDigest(attachments: staged)
                     let items = staged.map { SentAttachmentItem.from($0) }

@@ -63,6 +63,7 @@ enum StreamableAIProvider: String, CaseIterable {
         let clean = urlString.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
         let configured = Self.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
         return clean == configured
+            || clean == "https://platform.dotmini.net/v1"
             || clean == "https://microcode.dotmini.net/v1"
             || clean == "https://api.dotmini.net/v1"
             || clean == "https://microai.dotmini.net/v1"
@@ -288,23 +289,62 @@ enum StreamableAIProvider: String, CaseIterable {
         return detect(from: model)
     }
 
+    /// Authoritative check whether a model identifier natively supports multimodal image inputs (`image_url` / `inlineData`).
+    static func isKnownVisionModel(_ model: String) -> Bool {
+        let m = model.lowercased()
+        if m.isEmpty { return false }
+        // Explicit text-only exclusions (even if hosted on multimodal gateways)
+        if m.contains("o1-mini") || m.contains("o3-mini") || m.contains("gpt-3.5") ||
+           m.contains("codestral") || m.contains("qwen2.5-coder") || m.contains("qwen3-coder") ||
+           m.contains("deepseek-coder") || m.contains("deepseek-chat") || m.contains("deepseek-reasoner") ||
+           m.contains("deepseek-r1") || m.contains("deepseek-v3") || m.contains("deepseek-v4") ||
+           m.contains("qwq") || m.contains("typhoon") || m.contains("llama-3.1") || m.contains("llama-3.3") {
+            return m.contains("vl") || m.contains("vision")
+        }
+        if m.contains("gpt-4o") || m.contains("gpt-4-turbo") || m.contains("gpt-4.1") ||
+           m.contains("gpt-4.5") || m.contains("gpt-5") || m.contains("gpt-6") ||
+           m.hasPrefix("o1") || m.hasPrefix("o3") || m.hasPrefix("o4") ||
+           m.contains("/o1") || m.contains("/o3") || m.contains("/o4") ||
+           m.contains("vision") || m.contains("gemini") || m.contains("gemma-3") || m.contains("gemma3") ||
+           m.contains("gemma-4") || m.contains("gemma4") || m.contains("claude") || m.contains("omni") ||
+           m.contains("llava") || m.contains("pixtral") || m.contains("kimi") || m.contains("moonshot-v1") ||
+           m.contains("grok-2-vision") || m.contains("grok-3") || m.contains("grok-4") ||
+           m.contains("qvq") || m.contains("-vl") || m.contains("_vl") || m.contains("/vl") || m.hasSuffix("vl") ||
+           m.contains("glm-4v") || m.contains("glm-4.6v") || m.contains("cogvlm") ||
+           m.contains("minicpm-v") || m.contains("moondream") || m.contains("internvl") ||
+           m.contains("llama-4") || m.contains("4o") {
+            return true
+        }
+        return false
+    }
+
     /// Returns true when the provider + model natively accepts inline multimodal image bytes (`inlineData` / `image_url`).
     /// Text-only models return false so `UniversalAttachmentEngine` automatically enriches images with Apple Vision OCR.
     func supportsNativeImageInput(model: String) -> Bool {
         let m = model.lowercased()
         switch self {
-        case .gemini, .openai, .anthropic, .grok, .copilot, .aipass, .tokenme, .perch, .openrouter, .ninerouter, .omni, .glm, .kimi, .custom:
+        case .gemini, .anthropic, .omni:
+            return !m.isEmpty ? (Self.isKnownVisionModel(m) || m.contains("gemini") || m.contains("claude") || m.contains("omni")) : true
+        case .openai, .copilot:
+            if m.contains("o1-mini") || m.contains("o3-mini") || m.contains("gpt-3.5") {
+                return false
+            }
             return true
+        case .grok:
+            return m.contains("vision") || m.contains("grok-3") || m.contains("grok-4") || Self.isKnownVisionModel(m)
+        case .glm:
+            return m.contains("4v") || m.contains("4.6v") || m.contains("vl") || m.contains("vision") || m.contains("cogvlm")
+        case .kimi:
+            return m.contains("vision") || m.contains("kimi-k2.5") || m.contains("kimi-latest") || m.contains("vl")
         case .qwen:
-            return m.contains("vl") || m.contains("qvq") || m.contains("omni") || m.contains("qwen3") || m.contains("qwen2.5")
+            return m.contains("vl") || m.contains("qvq") || m.contains("omni")
         case .mistral:
-            return m.contains("pixtral") || m.contains("mistral-medium") || m.contains("mistral-small-3") || m.contains("mistral-large")
-        case .groq, .together, .fireworks, .nvidia, .minimax:
-            return m.contains("vision") || m.contains("vl") || m.contains("llama-4") || m.contains("pixtral") || m.contains("gemma-3")
-        case .local:
-            return m.contains("vl") || m.contains("vision") || m.contains("llava") || m.contains("gemma3") || m.contains("gemma-3") || m.contains("pixtral") || m.contains("minicpm-v")
+            return m.contains("pixtral") || m.contains("mistral-medium-3") || m.contains("mistral-small-3")
+        case .openrouter, .tokenme, .aipass, .perch, .ninerouter, .custom,
+             .groq, .together, .fireworks, .nvidia, .minimax, .local:
+            return Self.isKnownVisionModel(m)
         case .deepseek, .typhoon, .cerebras, .perplexity:
-            return false
+            return m.contains("vl") || m.contains("vision")
         }
     }
 }
@@ -447,16 +487,53 @@ struct AIAttachment: Identifiable {
 
     var base64String: String { data.base64EncodedString() }
 
-    /// Universal Vision-ready image bytes (transcoded to JPEG/PNG when source is HEIC/TIFF/BMP/SVG/ICNS or >2048px)
+    /// Universal Vision-ready image bytes (loads from staged disk if RAM buffer was cleared, and auto-downscales >1920px / >1.2MB Retina screenshots to crisp JPEG so gateways never choke)
     var effectiveVisionData: Data {
-        if let norm = normalizedVisionData, !norm.isEmpty {
-            return norm
+        let candidate: Data = {
+            if let norm = normalizedVisionData, !norm.isEmpty {
+                return norm
+            }
+            if !data.isEmpty {
+                return data
+            }
+            return loadRawBinaryData(maxBytes: 15_000_000) ?? Data()
+        }()
+        guard !candidate.isEmpty else { return Data() }
+        // Keep animated GIFs intact; downscale oversized static PNG/JPEG/HEIC/TIFF screenshots (>1.2MB or >1920px)
+        if candidate.starts(with: [0x47, 0x49, 0x46]) {
+            return candidate
         }
-        return data
+        if candidate.count > 1_200_000,
+           let src = CGImageSourceCreateWithData(candidate as CFData, nil) {
+            let thumbOpts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1920
+            ]
+            if let cgImg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) {
+                let jpgBuf = NSMutableData()
+                if let dest = CGImageDestinationCreateWithData(jpgBuf as CFMutableData, "public.jpeg" as CFString, 1, nil) {
+                    let encOpts: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.86]
+                    CGImageDestinationAddImage(dest, cgImg, encOpts as CFDictionary)
+                    if CGImageDestinationFinalize(dest), jpgBuf.length > 0 {
+                        return jpgBuf as Data
+                    }
+                }
+            }
+        }
+        return candidate
     }
 
-    /// Universal API-safe Vision MIME type (`image/jpeg`, `image/png`, `image/gif`, `image/webp`)
+    /// Universal API-safe Vision MIME type (`image/jpeg`, `image/png`, `image/gif`, `image/webp`) matching exact encoded magic bytes
     var effectiveVisionMimeType: String {
+        let bytes = effectiveVisionData
+        if bytes.count >= 4 {
+            if bytes.starts(with: [0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
+            if bytes.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "image/png" }
+            if bytes.starts(with: [0x47, 0x49, 0x46]) { return "image/gif" }
+            if bytes.starts(with: [0x52, 0x49, 0x46, 0x46]) { return "image/webp" }
+        }
         if let mime = normalizedVisionMimeType?.lowercased(),
            ["image/jpeg", "image/png", "image/gif", "image/webp"].contains(mime) {
             return mime
@@ -1896,9 +1973,33 @@ final class AIClient: ObservableObject {
                 } else {
                     requestKey = actualKey
                 }
-                let resolvedAttachments = attachments.isEmpty
+                let needsVisionTextGrounding = (provider == .local || keyMode == "local")
+                    || !provider.supportsNativeImageInput(model: initialResolvedModel)
+                    || !self.isVisionCapableModel(initialResolvedModel)
+                var candidateAttachments = attachments
+                if !safePrompt.contains("[ATTACHED FILES MANIFEST") {
+                    let activeWS = await MainActor.run { AppState.shared?.workspaceFolder?.path }
+                    let autoURLs = UniversalAttachmentEngine.shared.extractReferencedMediaAndDocURLs(
+                        from: safePrompt,
+                        workspaceRoot: activeWS,
+                        existingAttachments: candidateAttachments
+                    )
+                    if !autoURLs.isEmpty {
+                        let autoIngested = await UniversalAttachmentEngine.shared.ingest(
+                            urls: autoURLs,
+                            chatId: callerChatId,
+                            eagerImageOCR: needsVisionTextGrounding
+                        )
+                        candidateAttachments.append(contentsOf: autoIngested)
+                    }
+                }
+                let resolvedAttachments = candidateAttachments.isEmpty
                     ? []
-                    : await UniversalAttachmentEngine.shared.ensureIngested(attachments, chatId: callerChatId)
+                    : await UniversalAttachmentEngine.shared.ensureIngested(
+                        candidateAttachments,
+                        chatId: callerChatId,
+                        requireImageOCR: needsVisionTextGrounding
+                    )
                 var retryCount = 0
                 let maxRetries = 3
                 
@@ -2512,14 +2613,15 @@ final class AIClient: ObservableObject {
                 "content": [["type": "input_text", "text": finalUserPrompt]] + codexImageItems
             ])
         } else {
-            appendTurn(role: "user", content: finalUserPrompt)
-            if !codexImageItems.isEmpty {
-                inputItems.append([
-                    "type": "message",
-                    "role": "user",
-                    "content": codexImageItems
-                ])
+            if !codexImageItems.isEmpty,
+               let origIdx = inputItems.lastIndex(where: { ($0["type"] as? String) == "message" && ($0["role"] as? String) == "user" }) {
+                var existingContent = (inputItems[origIdx]["content"] as? [[String: Any]]) ?? []
+                if !existingContent.contains(where: { ($0["type"] as? String) == "input_image" }) {
+                    existingContent.append(contentsOf: codexImageItems)
+                    inputItems[origIdx]["content"] = existingContent
+                }
             }
+            appendTurn(role: "user", content: finalUserPrompt)
         }
         
         let instructions = (systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
@@ -3238,6 +3340,7 @@ final class AIClient: ObservableObject {
             }
         }
 
+        var geminiMediaParts: [[String: Any]] = []
         var geminiInlineBytesUsed = 0
         let maxGeminiInlineBytes = 18_000_000
         let supportedGeminiMediaMimes: Set<String> = [
@@ -3250,7 +3353,7 @@ final class AIClient: ObservableObject {
                 let vData = attachment.effectiveVisionData
                 let vMime = attachment.effectiveVisionMimeType
                 if !vData.isEmpty && (geminiInlineBytesUsed + vData.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": vMime, "data": vData.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": vMime, "data": vData.base64EncodedString()]])
                     geminiInlineBytesUsed += vData.count
                 }
             case .pdf:
@@ -3258,7 +3361,7 @@ final class AIClient: ObservableObject {
                    let pdfData = attachment.loadRawBinaryData(maxBytes: 15_000_000),
                    !pdfData.isEmpty,
                    (geminiInlineBytesUsed + pdfData.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": "application/pdf", "data": pdfData.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": "application/pdf", "data": pdfData.base64EncodedString()]])
                     geminiInlineBytesUsed += pdfData.count
                 }
             case .text:
@@ -3267,15 +3370,35 @@ final class AIClient: ObservableObject {
                    let mediaData = attachment.loadRawBinaryData(maxBytes: 14_000_000),
                    !mediaData.isEmpty,
                    (geminiInlineBytesUsed + mediaData.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": mediaMime, "data": mediaData.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": mediaMime, "data": mediaData.base64EncodedString()]])
                     geminiInlineBytesUsed += mediaData.count
                 } else if attachment.semanticCategory == .video,
                           let kf = attachment.normalizedVisionData,
                           !kf.isEmpty,
                           (geminiInlineBytesUsed + kf.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": attachment.normalizedVisionMimeType ?? "image/jpeg", "data": kf.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": attachment.normalizedVisionMimeType ?? "image/jpeg", "data": kf.base64EncodedString()]])
                     geminiInlineBytesUsed += kf.count
                 }
+            }
+        }
+        let isGeminiToolResultTurn: Bool = {
+            if case .toolResults = AIStructuredTurnCodec.decode(trimmedPrompt) { return true }
+            return false
+        }()
+        if !geminiMediaParts.isEmpty {
+            if isGeminiToolResultTurn,
+               let origIdx = rawContents.lastIndex(where: { item in
+                   guard (item["role"] as? String) == "user",
+                         let p = item["parts"] as? [[String: Any]] else { return false }
+                   return !p.contains(where: { $0["functionResponse"] != nil })
+               }) {
+                var existingParts = (rawContents[origIdx]["parts"] as? [[String: Any]]) ?? []
+                if !existingParts.contains(where: { $0["inlineData"] != nil }) {
+                    existingParts.append(contentsOf: geminiMediaParts)
+                    rawContents[origIdx]["parts"] = existingParts
+                }
+            } else {
+                userParts.append(contentsOf: geminiMediaParts)
             }
         }
         
@@ -4025,12 +4148,20 @@ final class AIClient: ObservableObject {
         }
 
         // If user explicitly requested `Gemini 4 Argon` (`gemini-4-argon*`) or Claude 5.5, but only has `@google/gemini-cli` OAuth
-        // (`cloudcode-pa` does NOT host Argon or Claude 5.5), prefer Thai AI Gemini Enterprise / TH-AI Passport / AGY CLI first!
+        // (`cloudcode-pa` does NOT host Argon or Claude 5.5), prefer real multimodal TH-AI Passport (`de.aipass.net`) or AGY CLI first.
+        // CRITICAL: NEVER divert requests containing binary image/PDF attachments into text-only `thai_gemini_enterprise` (Vertex AI Search)!
+        let hasBinaryAttachments = attachments.contains {
+            if case .image = $0.type { return true }
+            if case .pdf = $0.type { return true }
+            return $0.nativeMediaMimeType != nil
+        }
         if session.kind == .geminiCLI && (model.lowercased().contains("argon") || model.lowercased().contains("claude")) {
-            let hasThaiOrAiPass = await MainActor.run {
-                SubscriptionAuthManager.shared.isConnected(.thai_gemini_enterprise) || SubscriptionAuthManager.shared.isConnected(.aipass)
+            let canFailoverSafely = await MainActor.run {
+                if SubscriptionAuthManager.shared.isConnected(.aipass) { return true }
+                if !hasBinaryAttachments && SubscriptionAuthManager.shared.isConnected(.thai_gemini_enterprise) { return true }
+                return false
             }
-            if hasThaiOrAiPass || ACPHostService.resolveAgentBinary(for: .agy) != nil {
+            if canFailoverSafely || (!hasBinaryAttachments && ACPHostService.resolveAgentBinary(for: .agy) != nil) {
                 if try await failOverFromBrokenCodeAssist(
                     reason: "Routing \(model) to Argon-capable provider",
                     prompt: prompt,
@@ -4209,6 +4340,7 @@ final class AIClient: ObservableObject {
             }
         }
 
+        var geminiMediaParts: [[String: Any]] = []
         var geminiInlineBytesUsed = 0
         let maxGeminiInlineBytes = 18_000_000
         let supportedGeminiMediaMimes: Set<String> = [
@@ -4221,7 +4353,7 @@ final class AIClient: ObservableObject {
                 let vData = attachment.effectiveVisionData
                 let vMime = attachment.effectiveVisionMimeType
                 if !vData.isEmpty && (geminiInlineBytesUsed + vData.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": vMime, "data": vData.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": vMime, "data": vData.base64EncodedString()]])
                     geminiInlineBytesUsed += vData.count
                 }
             case .pdf:
@@ -4229,7 +4361,7 @@ final class AIClient: ObservableObject {
                    let pdfData = attachment.loadRawBinaryData(maxBytes: 15_000_000),
                    !pdfData.isEmpty,
                    (geminiInlineBytesUsed + pdfData.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": "application/pdf", "data": pdfData.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": "application/pdf", "data": pdfData.base64EncodedString()]])
                     geminiInlineBytesUsed += pdfData.count
                 }
             case .text:
@@ -4238,15 +4370,35 @@ final class AIClient: ObservableObject {
                    let mediaData = attachment.loadRawBinaryData(maxBytes: 14_000_000),
                    !mediaData.isEmpty,
                    (geminiInlineBytesUsed + mediaData.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": mediaMime, "data": mediaData.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": mediaMime, "data": mediaData.base64EncodedString()]])
                     geminiInlineBytesUsed += mediaData.count
                 } else if attachment.semanticCategory == .video,
                           let kf = attachment.normalizedVisionData,
                           !kf.isEmpty,
                           (geminiInlineBytesUsed + kf.count) <= maxGeminiInlineBytes {
-                    userParts.append(["inlineData": ["mimeType": attachment.normalizedVisionMimeType ?? "image/jpeg", "data": kf.base64EncodedString()]])
+                    geminiMediaParts.append(["inlineData": ["mimeType": attachment.normalizedVisionMimeType ?? "image/jpeg", "data": kf.base64EncodedString()]])
                     geminiInlineBytesUsed += kf.count
                 }
+            }
+        }
+        let isGeminiToolResultTurn: Bool = {
+            if case .toolResults = AIStructuredTurnCodec.decode(trimmedPrompt) { return true }
+            return false
+        }()
+        if !geminiMediaParts.isEmpty {
+            if isGeminiToolResultTurn,
+               let origIdx = rawContents.lastIndex(where: { item in
+                   guard (item["role"] as? String) == "user",
+                         let p = item["parts"] as? [[String: Any]] else { return false }
+                   return !p.contains(where: { $0["functionResponse"] != nil })
+               }) {
+                var existingParts = (rawContents[origIdx]["parts"] as? [[String: Any]]) ?? []
+                if !existingParts.contains(where: { $0["inlineData"] != nil }) {
+                    existingParts.append(contentsOf: geminiMediaParts)
+                    rawContents[origIdx]["parts"] = existingParts
+                }
+            } else {
+                userParts.append(contentsOf: geminiMediaParts)
             }
         }
         
@@ -4485,21 +4637,7 @@ final class AIClient: ObservableObject {
     // MARK: - Vision Model Detection
     
     private func isVisionCapableModel(_ model: String) -> Bool {
-        let m = model.lowercased()
-        if m.contains("o1-mini") || m.contains("o3-mini") {
-            return false
-        }
-        if m.contains("gpt-4o") || m.contains("gpt-4-turbo") || m.contains("gpt-4.1") ||
-           m.contains("gpt-4.5") || m.contains("gpt-5") || m.contains("gpt-6") ||
-           m.hasPrefix("o1") || m.hasPrefix("o3") || m.hasPrefix("o4") ||
-           m.contains("/o1") || m.contains("/o3") || m.contains("/o4") ||
-           m.contains("vision") || m.contains("gemini") || m.contains("gemma-3") ||
-           m.contains("gemma-4") || m.contains("claude") || m.contains("omni") ||
-           m.contains("llava") || m.contains("pixtral") || m.contains("kimi") ||
-           m.contains("grok") || m.contains("vl") || m.contains("4o") {
-            return true
-        }
-        return false
+        StreamableAIProvider.isKnownVisionModel(model)
     }
     
     // MARK: - OpenAI/DeepSeek Streaming
@@ -4515,6 +4653,7 @@ final class AIClient: ObservableObject {
         tools: [[String: Any]]?,
         maxTokensOverride: Int? = nil,
         omitToolChoice: Bool = false,
+        forceDisableVision: Bool = false,
         customEndpointURL: URL? = nil,
         customSession: URLSession? = nil,
         customHeadersHook: ((inout URLRequest) -> Void)? = nil,
@@ -4640,7 +4779,7 @@ final class AIClient: ObservableObject {
             }
         }
 
-        let isVision = isVisionCapableModel(model)
+        let isVision = !forceDisableVision && isVisionCapableModel(model)
         var visionImageParts: [[String: Any]] = []
         if isVision && !attachments.isEmpty {
             var inlineBinaryBytesUsed = 0
@@ -4671,7 +4810,18 @@ final class AIClient: ObservableObject {
             }
         }
 
-        if visionImageParts.isEmpty {
+        let isOpenAIToolResultTurn: Bool = {
+            if case .toolResults = AIStructuredTurnCodec.decode(combinedUserPrompt) { return true }
+            return false
+        }()
+        if visionImageParts.isEmpty || isOpenAIToolResultTurn {
+            if isOpenAIToolResultTurn,
+               !visionImageParts.isEmpty,
+               let origIdx = messages.lastIndex(where: { ($0["role"] as? String) == "user" }) {
+                if let textStr = messages[origIdx]["content"] as? String {
+                    messages[origIdx]["content"] = [["type": "text", "text": textStr]] + visionImageParts
+                }
+            }
             let safePrompt = combinedUserPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? (attachments.isEmpty ? "Continue." : "Analyze attachment.")
                 : combinedUserPrompt
@@ -4698,7 +4848,7 @@ final class AIClient: ObservableObject {
         let isLocalTarget = StreamableAIProvider.isLocalEndpoint(baseURL)
         // TokenMe enforces a tiny ~512-token default cap (shared with `reasoning`) when `max_tokens` is omitted,
         // and supports up to 32,768 output tokens across all chat models. Always send an explicit budget.
-        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : (isLocalTarget ? 1024 : maxOutputTokens(for: effectiveModel)))
+        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : (isLocalTarget ? (attachments.isEmpty ? 2048 : 4096) : maxOutputTokens(for: effectiveModel)))
         if isOpenAIReasoning {
             body["max_completion_tokens"] = requestedMaxTokens
         } else if isReasoningNoTemp {
@@ -4878,6 +5028,70 @@ final class AIClient: ObservableObject {
                 if errText.count > 800 { break }
             }
             let lowerErrText = errText.lowercased()
+            let visionPayloadRejected =
+                !visionImageParts.isEmpty &&
+                !forceDisableVision &&
+                (code == 400 || code == 415 || code == 422 || code == 500) &&
+                (lowerErrText.contains("image") ||
+                 lowerErrText.contains("vision") ||
+                 lowerErrText.contains("multimodal") ||
+                 lowerErrText.contains("mmproj") ||
+                 lowerErrText.contains("image_url") ||
+                 lowerErrText.contains("content must be a string") ||
+                 lowerErrText.contains("expected string") ||
+                 lowerErrText.contains("unsupported"))
+            if visionPayloadRejected {
+                NSLog("⚠️ [streamOpenAI] HTTP %d vision payload rejected on %@ (%@) — auto-grounding via AppleVisionEngine ANE OCR and retrying text-only", code, effectiveModel, baseURL)
+                let promptAlreadyGrounded = prompt.contains("ATTACHED FILES") || prompt.contains("[Image:")
+                var fallbackAttachments: [AIAttachment] = []
+                fallbackAttachments.reserveCapacity(attachments.count)
+                for att in attachments {
+                    var copy = att
+                    if case .image = copy.type {
+                        let existingText = copy.extractedFullText ?? ""
+                        let needsLiveOCR = existingText.isEmpty ||
+                            existingText.contains("Delivered directly as native multimodal") ||
+                            existingText.contains("FAST_IMAGE_READY")
+                        if needsLiveOCR {
+                            let imgData = copy.effectiveVisionData.isEmpty ? copy.data : copy.effectiveVisionData
+                            if !imgData.isEmpty {
+                                let vision = await AppleVisionEngine.shared.analyzeImage(
+                                    data: imgData,
+                                    filename: copy.name,
+                                    fastPreview: false,
+                                    includeSceneClassification: true
+                                )
+                                copy.extractedFullText = vision.formattedSummary
+                                copy.includeInlineTextInProviderPayload = true
+                            }
+                        } else if !promptAlreadyGrounded {
+                            copy.includeInlineTextInProviderPayload = true
+                        }
+                    } else if !promptAlreadyGrounded {
+                        copy.includeInlineTextInProviderPayload = true
+                    }
+                    fallbackAttachments.append(copy)
+                }
+                try await streamOpenAI(
+                    prompt: prompt,
+                    attachments: fallbackAttachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: model,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    tools: tools,
+                    maxTokensOverride: maxTokensOverride,
+                    omitToolChoice: omitToolChoice,
+                    forceDisableVision: true,
+                    customEndpointURL: customEndpointURL,
+                    customSession: customSession,
+                    customHeadersHook: customHeadersHook,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
+            }
             if (code == 400 || code == 422),
                requestedMaxTokens > 2048,
                (lowerErrText.contains("max_tokens") ||
@@ -5310,10 +5524,30 @@ final class AIClient: ObservableObject {
             }
         }
         let safePrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Continue." : prompt
-        if !messageContent.isEmpty {
-            appendAnthropicBlocks(role: "user", blocks: messageContent)
+        let isAnthropicToolResultTurn: Bool = {
+            if case .toolResults = AIStructuredTurnCodec.decode(safePrompt) { return true }
+            return false
+        }()
+        if isAnthropicToolResultTurn {
+            // Preserve strict Anthropic ordering (`tool_use` -> immediate `tool_result`), and pin vision blocks to the originating user turn
+            if !messageContent.isEmpty,
+               let origIdx = allMessages.lastIndex(where: { msg in
+                   guard (msg["role"] as? String) == "user",
+                         let blocks = msg["content"] as? [[String: Any]] else { return false }
+                   return !blocks.contains(where: { ($0["type"] as? String) == "tool_result" })
+               }),
+               var origBlocks = allMessages[origIdx]["content"] as? [[String: Any]],
+               !origBlocks.contains(where: { ["image", "document"].contains($0["type"] as? String ?? "") }) {
+                origBlocks.insert(contentsOf: messageContent, at: 0)
+                allMessages[origIdx]["content"] = origBlocks
+            }
+            appendAnthropicTurn(role: "user", content: safePrompt)
+        } else {
+            if !messageContent.isEmpty {
+                appendAnthropicBlocks(role: "user", blocks: messageContent)
+            }
+            appendAnthropicTurn(role: "user", content: safePrompt)
         }
-        appendAnthropicTurn(role: "user", content: safePrompt)
         
         // Anthropic Multi-Turn Dual-Breakpoint Prompt Caching:
         // Place ephemeral cache breakpoints on BOTH the penultimate user turn (to hit Turn N-1's cache)
@@ -6966,10 +7200,24 @@ final class AIClient: ObservableObject {
                 )
                 return
             } catch let entErr as NSError {
+                self.currentStreamedText = ""
+                self.pendingStreamTokens = ""
                 let fallbackAiPassCookie = SubscriptionAuthManager.shared.token(for: .aipass) ?? ""
                 if !fallbackAiPassCookie.isEmpty && !SubscriptionAuthManager.isThaiGeminiEnterpriseSession(fallbackAiPassCookie) {
-                    self.currentStreamedText = ""
-                    self.pendingStreamTokens = ""
+                    // Proceed to de.aipass.net stream below
+                } else if (try? await Self.resolveGoogleCodeAssistSession(fallbackRefreshToken: "")) != nil {
+                    try await streamGoogleCodeAssist(
+                        prompt: prompt,
+                        attachments: attachments,
+                        systemPrompt: systemPrompt,
+                        conversationHistory: conversationHistory,
+                        model: "gemini-2.5-pro",
+                        refreshToken: "",
+                        tools: tools,
+                        onToken: onToken,
+                        onToolCall: onToolCall
+                    )
+                    return
                 } else {
                     throw entErr
                 }
@@ -7160,11 +7408,27 @@ final class AIClient: ObservableObject {
 
         let decodedPrompt = decodeTurnContent(role: "user", content: prompt)
         var finalUserText = decodedPrompt.text
-        let inlineTextAttachments = attachments.filter { $0.includeInlineTextInProviderPayload }
-        if !inlineTextAttachments.isEmpty {
+        // VertexAISearchWebBridge is text-only: if image attachments were passed without inline text, extract bilingual Thai+English Vision OCR automatically!
+        var enrichedForVertex: [AIAttachment] = []
+        for att in attachments {
+            var copy = att
+            copy.includeInlineTextInProviderPayload = true
+            if case .image = copy.type {
+                let existingTxt = copy.extractedFullText ?? ""
+                if existingTxt.isEmpty || existingTxt.contains("Delivered directly as native multimodal image input") {
+                    let vBytes = copy.effectiveVisionData
+                    if !vBytes.isEmpty {
+                        let ocr = await AppleVisionEngine.shared.analyzeImage(data: vBytes, filename: copy.name)
+                        copy.extractedFullText = ocr.formattedSummary
+                    }
+                }
+            }
+            enrichedForVertex.append(copy)
+        }
+        if !enrichedForVertex.isEmpty {
             let groundedPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
-                attachments: inlineTextAttachments,
-                maxInlineChars: 28_000
+                attachments: enrichedForVertex,
+                maxInlineChars: 24_000
             )
             if !groundedPackage.isEmpty {
                 finalUserText = finalUserText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -7178,7 +7442,9 @@ final class AIClient: ObservableObject {
 
         var envelopeSections: [String] = []
         if !combinedSystem.isEmpty {
-            envelopeSections.append("<microcode_ide_context>\n\(combinedSystem)\n</microcode_ide_context>")
+            // Keep Vertex AI Search query envelope within safe server limits so it never triggers canned refusal!
+            let safeSystem = combinedSystem.count > 14_000 ? String(combinedSystem.prefix(14_000)) : combinedSystem
+            envelopeSections.append("<microcode_ide_context>\n\(safeSystem)\n</microcode_ide_context>")
         }
         if !rawTurns.isEmpty {
             let historyTranscript = rawTurns.map { turn in
@@ -7190,15 +7456,42 @@ final class AIClient: ObservableObject {
         envelopeSections.append("<current_request>\n\(finalUserText)\n</current_request>")
         let unifiedUserText = envelopeSections.joined(separator: "\n\n")
 
+        // Buffer initial ~140 chars to intercept Vertex AI Search canned refusal BEFORE polluting UI chat stream!
+        var initialBuffer = ""
+        var headerChecked = false
         let fullRawText = try await VertexAISearchWebBridge.shared.streamPrompt(
             prompt: unifiedUserText,
             model: targetModel,
             rawTokenOrConfig: sessionConfigRaw,
             hasTools: hasTools,
             onToken: { delta in
-                self.appendStreamToken(delta, onToken: onToken)
+                if !headerChecked {
+                    initialBuffer += delta
+                    if initialBuffer.count >= 140 {
+                        headerChecked = true
+                        let low = initialBuffer.lowercased()
+                        if !low.contains("ขออภัย ไม่สามารถตอบคำถามนี้ได้") && !low.contains("sorry, i could not respond to this request") {
+                            self.appendStreamToken(initialBuffer, onToken: onToken)
+                        }
+                    }
+                } else {
+                    self.appendStreamToken(delta, onToken: onToken)
+                }
             }
         )
+        let lowerFull = fullRawText.lowercased()
+        if lowerFull.contains("ขออภัย ไม่สามารถตอบคำถามนี้ได้") || lowerFull.contains("sorry, i could not respond to this request") {
+            self.currentStreamedText = ""
+            self.pendingStreamTokens = ""
+            throw NSError(
+                domain: "ThaiGeminiEnterprise",
+                code: 422,
+                userInfo: [NSLocalizedDescriptionKey: "Vertex AI Search returned canned refusal on complex/multimodal turn — failing over to native multimodal endpoint"]
+            )
+        }
+        if !headerChecked && !initialBuffer.isEmpty {
+            self.appendStreamToken(initialBuffer, onToken: onToken)
+        }
 
         if hasTools {
             let extractedCalls = Self.extractAiPassToolCalls(from: fullRawText)

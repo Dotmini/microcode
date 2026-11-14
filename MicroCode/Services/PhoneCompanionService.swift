@@ -15,8 +15,21 @@ import AppKit
 import Combine
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import CryptoKit
 import Darwin
 import Security
+
+private final class RelayLoopbackNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
 
 // MARK: - Models
 
@@ -29,17 +42,17 @@ enum PhoneConnectionMode: String, CaseIterable, Identifiable {
     
     var title: String {
         switch self {
-        case .lan: return "Same Wi-Fi / LAN"
-        case .tailscale: return "Tailscale / VPN"
-        case .online: return "Cellular / Online"
+        case .lan: return "Wi-Fi / LAN"
+        case .tailscale: return "Tailscale"
+        case .online: return "Cellular"
         }
     }
     
     var subtitle: String {
         switch self {
-        case .lan: return "Instant (<2ms) • Same Wi-Fi or Personal Hotspot"
-        case .tailscale: return "Permanent URL • Private WireGuard Mesh"
-        case .online: return "4G / 5G / Any Network • HTTPS Tunnel"
+        case .lan: return "Same Wi-Fi or Personal Hotspot"
+        case .tailscale: return "Private WireGuard Mesh"
+        case .online: return "4G / 5G · Anywhere via HTTPS"
         }
     }
     
@@ -47,7 +60,7 @@ enum PhoneConnectionMode: String, CaseIterable, Identifiable {
         switch self {
         case .lan: return "wifi"
         case .tailscale: return "network.badge.shield.half.filled"
-        case .online: return "globe"
+        case .online: return "antenna.radiowaves.left.and.right"
         }
     }
 }
@@ -107,7 +120,7 @@ final class PhoneCompanionService: ObservableObject {
             UserDefaults.standard.set(connectionMode.rawValue, forKey: "microcode.phoneCompanion.mode")
             if connectionMode == .online && isEnabled {
                 if case .connected = tunnelState {
-                    // Already connected
+                    // Already connected to cloudai.dotmini.net
                 } else {
                     startOnlineTunnel()
                 }
@@ -139,16 +152,6 @@ final class PhoneCompanionService: ObservableObject {
     }
     @Published var isHoldingSleepAssertion: Bool = false
     @Published var tailscaleInfo: TailscaleNodeInfo = TailscaleNodeInfo()
-    @Published var cloudflareNamedTunnelToken: String = "" {
-        didSet {
-            UserDefaults.standard.set(cloudflareNamedTunnelToken, forKey: "microcode.phoneCompanion.cfNamedToken")
-        }
-    }
-    @Published var cloudflareNamedPublicHostname: String = "" {
-        didSet {
-            UserDefaults.standard.set(cloudflareNamedPublicHostname, forKey: "microcode.phoneCompanion.cfNamedHost")
-        }
-    }
     @Published var pushSettings: MobilePushSettings = MobilePushSettings.load() {
         didSet {
             pushSettings.save()
@@ -178,7 +181,20 @@ final class PhoneCompanionService: ObservableObject {
     private var listener: NWListener?
     private var secondaryListener: NWListener?
     private let networkQueue = DispatchQueue(label: "com.dotmini.microcode.phone-companion", qos: .userInitiated)
-    private var tunnelProcess: Process?
+    private var relayWebSocketTask: URLSessionWebSocketTask?
+    private var relayWebSocketSession: URLSession?
+    private var relayConnectTask: Task<Void, Never>?
+    private var relayPingTimer: Timer?
+    private let relayNoRedirectDelegate = RelayLoopbackNoRedirectDelegate()
+    private lazy var relayLoopbackSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.timeoutIntervalForRequest = 40
+        cfg.timeoutIntervalForResource = 45
+        return URLSession(configuration: cfg, delegate: relayNoRedirectDelegate, delegateQueue: nil)
+    }()
+    @Published private(set) var activeRelayShapeID: Int? = nil
     private var networkRefreshTimer: Timer?
     private var backgroundMonitorTimer: Timer?
     private var lastGeneratedQRURL: String = ""
@@ -213,14 +229,10 @@ final class PhoneCompanionService: ObservableObject {
     
     private init() {
         self.isEnabled = (UserDefaults.standard.object(forKey: "microcode.phoneCompanion.enabled") as? Bool) ?? true
-        // Default to zero-overhead LAN mode on cold launch; public online tunnels (cloudflared)
-        // are started strictly on-demand when the user selects Worldwide/Online mode in Settings.
         let savedMode = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.mode") ?? "lan"
-        self.connectionMode = (savedMode == "tailscale") ? .tailscale : .lan
+        self.connectionMode = PhoneConnectionMode(rawValue: savedMode) ?? .lan
         self.requireMacApprovalForNewDevices = (UserDefaults.standard.object(forKey: Self.requireApprovalDefaultsKey) as? Bool) ?? true
         self.preventMacSleepWhileActive = (UserDefaults.standard.object(forKey: "microcode.phoneCompanion.preventSleep") as? Bool) ?? true
-        self.cloudflareNamedTunnelToken = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.cfNamedToken") ?? ""
-        self.cloudflareNamedPublicHostname = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.cfNamedHost") ?? ""
         if let savedApproved = UserDefaults.standard.stringArray(forKey: Self.approvedDevicesDefaultsKey) {
             self.approvedDeviceIDs = Set(savedApproved)
         }
@@ -421,11 +433,16 @@ final class PhoneCompanionService: ObservableObject {
         oneTimePairingCode = Self.generateSecureToken()
         sixDigitPairingPIN = Self.generateRandomSixDigitPIN()
         Self.persistPairingToken(newToken)
+        _ = Self.incrementRelayPatternEpoch()
         connectedDevices.removeAll()
         approvedDeviceIDs.removeAll()
         promptedPendingDeviceIDs.removeAll()
         UserDefaults.standard.removeObject(forKey: Self.approvedDevicesDefaultsKey)
-        regenerateQRCode()
+        if isEnabled && connectionMode == .online {
+            startOnlineTunnel()
+        } else {
+            regenerateQRCode()
+        }
     }
 
     func approveDevice(id: String) {
@@ -681,148 +698,303 @@ final class PhoneCompanionService: ObservableObject {
         isServerRunning = false
     }
     
-    // MARK: - Zero-Setup Online HTTPS Tunnel (Cloudflare Quick Tunnel + SSH Fallback)
-    
+    // MARK: - Official Dotmini CloudAI Relay (Polymorphic Per-User HTTPS) + Cloudflare/SSH Fallbacks
+
+    nonisolated private static let relayEpochDefaultsKey = "microcode.phoneCompanion.relayPatternEpoch"
+
+    nonisolated private static func localRelayNodeSecretURL() -> URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroCode", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("companion_relay_node.secret")
+    }
+
+    nonisolated private static func loadOrCreateRelayNodeProof() -> String {
+        let url = localRelayNodeSecretURL()
+        var secret: String? = nil
+        if let data = try? Data(contentsOf: url),
+           let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           raw.count >= 32 {
+            secret = raw
+        }
+        if secret == nil {
+            let fresh = generateSecureToken() + generateSecureToken()
+            let data = Data(fresh.utf8)
+            _ = FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            secret = fresh
+        }
+        let appScope = Bundle.main.bundlePath
+        let digest = SHA256.hash(data: Data("dotmini-relay-node-v2:\(secret ?? "")|\(appScope)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func currentRelayPatternEpoch() -> Int {
+        UserDefaults.standard.integer(forKey: relayEpochDefaultsKey)
+    }
+
+    @discardableResult
+    nonisolated private static func incrementRelayPatternEpoch() -> Int {
+        let next = UserDefaults.standard.integer(forKey: relayEpochDefaultsKey) + 1
+        UserDefaults.standard.set(next, forKey: relayEpochDefaultsKey)
+        return next
+    }
+
+    private func currentRelayUserHintHash() -> String {
+        let authIdent: String
+        if let sess = SupabaseAuthService.shared.session, !sess.userID.isEmpty {
+            authIdent = "\(sess.userID)|\(sess.email.lowercased())"
+        } else {
+            authIdent = "macuser:\(NSUserName())|\(cachedMacName)"
+        }
+        let digest = SHA256.hash(data: Data("dotmini-user-hint-v2:\(authIdent)".utf8))
+        return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
     func startOnlineTunnel() {
         stopOnlineTunnel()
-        tunnelState = .starting("Initializing HTTPS tunnel…")
-        
-        let port = Int(listeningPort)
-        
-        // Check for cloudflared binary first (fastest, highest reliability)
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let cloudflaredCandidates = [
-            "/opt/homebrew/bin/cloudflared",
-            "/usr/local/bin/cloudflared",
-            "\(home)/Library/Application Support/MicroCode/bin/cloudflared"
+        tunnelState = .starting("Connecting to cloudai.dotmini.net…")
+        startCloudAITunnel(port: Int(listeningPort))
+    }
+
+    private func startCloudAITunnel(port: Int) {
+        let nodeProof = Self.loadOrCreateRelayNodeProof()
+        let epoch = String(Self.currentRelayPatternEpoch())
+        let userHint = currentRelayUserHintHash()
+        let bearer = SupabaseAuthService.shared.accessToken
+
+        relayConnectTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+
+            let hosts = ["cloudai.dotmini.net", "api.dotmini.net"]
+            for host in hosts {
+                if Task.isCancelled { return }
+                guard let wsURL = URL(string: "wss://\(host)/api/v2/mobile-relay/uplink") else { continue }
+
+                var req = URLRequest(url: wsURL)
+                req.timeoutInterval = 8
+                req.setValue(nodeProof, forHTTPHeaderField: "X-Relay-Node-Proof")
+                req.setValue(epoch, forHTTPHeaderField: "X-Relay-Epoch")
+                req.setValue(userHint, forHTTPHeaderField: "X-Relay-User-Hint")
+                if let bearer, !bearer.isEmpty {
+                    req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+                }
+
+                let wsConfig = URLSessionConfiguration.ephemeral
+                wsConfig.waitsForConnectivity = false
+                let wsSession = URLSession(configuration: wsConfig)
+                let wsTask = wsSession.webSocketTask(with: req)
+
+                self.relayWebSocketSession = wsSession
+                self.relayWebSocketTask = wsTask
+                wsTask.resume()
+
+                do {
+                    let firstMsg = try await wsTask.receive()
+                    guard !Task.isCancelled, self.relayWebSocketTask === wsTask else { return }
+
+                    let regData: Data
+                    switch firstMsg {
+                    case .string(let s): regData = Data(s.utf8)
+                    case .data(let d): regData = d
+                    @unknown default: regData = Data()
+                    }
+
+                    guard let json = try? JSONSerialization.jsonObject(with: regData) as? [String: Any],
+                          (json["type"] as? String) == "registered",
+                          let polyPrefix = json["poly_prefix"] as? String,
+                          !polyPrefix.isEmpty else {
+                        wsTask.cancel(with: .protocolError, reason: nil)
+                        wsSession.invalidateAndCancel()
+                        continue
+                    }
+
+                    self.activeRelayShapeID = json["shape_id"] as? Int
+                    let publicBaseURL = "https://\(host)\(polyPrefix)"
+
+                    self.tunnelState = .connected(
+                        url: publicBaseURL,
+                        provider: host
+                    )
+                    self.startRelayKeepaliveTimer(for: wsTask)
+                    await self.receiveDotminiRelayLoop(wsTask: wsTask, localPort: port)
+                    return
+                } catch {
+                    wsTask.cancel(with: .goingAway, reason: nil)
+                    wsSession.invalidateAndCancel()
+                    if self.relayWebSocketTask === wsTask {
+                        self.relayWebSocketTask = nil
+                        self.relayWebSocketSession = nil
+                    }
+                    continue
+                }
+            }
+
+            guard !Task.isCancelled, self.isEnabled, self.connectionMode == .online else { return }
+            self.tunnelState = .failed("Unable to reach cloudai.dotmini.net. Retrying automatically…")
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled, self.isEnabled, self.connectionMode == .online else { return }
+            self.startOnlineTunnel()
+        }
+    }
+
+    private func startRelayKeepaliveTimer(for wsTask: URLSessionWebSocketTask) {
+        relayPingTimer?.invalidate()
+        relayPingTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.relayWebSocketTask === wsTask else { return }
+                wsTask.sendPing { _ in }
+                wsTask.send(.string("{\"type\":\"ping\"}")) { _ in }
+            }
+        }
+    }
+
+    private func receiveDotminiRelayLoop(wsTask: URLSessionWebSocketTask, localPort: Int) async {
+        while !Task.isCancelled && self.relayWebSocketTask === wsTask {
+            do {
+                let message = try await wsTask.receive()
+                let data: Data
+                switch message {
+                case .string(let s): data = Data(s.utf8)
+                case .data(let d): data = d
+                @unknown default: continue
+                }
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let msgType = json["type"] as? String else { continue }
+                if msgType == "http_request" {
+                    let session = self.relayLoopbackSession
+                    Task.detached(priority: .userInitiated) {
+                        await Self.forwardRelayHTTPRequestToLocalServer(
+                            payload: json,
+                            localPort: localPort,
+                            loopbackSession: session,
+                            wsTask: wsTask
+                        )
+                    }
+                }
+            } catch {
+                break
+            }
+        }
+
+        // Auto-reconnect if dropped unexpectedly while Online mode remains active
+        guard !Task.isCancelled, self.relayWebSocketTask === wsTask, self.isEnabled, self.connectionMode == .online else {
+            return
+        }
+        self.relayPingTimer?.invalidate()
+        self.relayPingTimer = nil
+        self.relayWebSocketTask = nil
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        guard !Task.isCancelled, self.isEnabled, self.connectionMode == .online else { return }
+        self.startOnlineTunnel()
+    }
+
+    nonisolated private static func forwardRelayHTTPRequestToLocalServer(
+        payload: [String: Any],
+        localPort: Int,
+        loopbackSession: URLSession,
+        wsTask: URLSessionWebSocketTask
+    ) async {
+        guard let reqID = payload["id"] as? String, !reqID.isEmpty else { return }
+        let method = ((payload["method"] as? String) ?? "GET").uppercased()
+        let rawTarget = (payload["target"] as? String) ?? "/"
+        let cleanTarget = rawTarget.hasPrefix("/") ? rawTarget : "/\(rawTarget)"
+
+        guard let localURL = URL(string: "http://127.0.0.1:\(localPort)\(cleanTarget)") else {
+            sendRelayErrorResponse(id: reqID, status: 400, message: "Invalid target URI", wsTask: wsTask)
+            return
+        }
+
+        var urlReq = URLRequest(url: localURL)
+        urlReq.httpMethod = method
+        if let hdrs = payload["headers"] as? [String: String] {
+            for (k, v) in hdrs {
+                let lk = k.lowercased()
+                if lk == "host" || lk == "content-length" || lk == "connection" { continue }
+                urlReq.setValue(v, forHTTPHeaderField: k)
+            }
+        }
+        urlReq.setValue("1", forHTTPHeaderField: "X-Dotmini-Relay")
+
+        if let bodyB64 = payload["body_b64"] as? String, !bodyB64.isEmpty,
+           let bodyData = Data(base64Encoded: bodyB64) {
+            urlReq.httpBody = bodyData
+        }
+
+        do {
+            let (respData, rawResp) = try await loopbackSession.data(for: urlReq)
+            let httpResp = rawResp as? HTTPURLResponse
+            let statusCode = httpResp?.statusCode ?? 200
+
+            var outHeaders: [String: String] = [:]
+            var setCookies: [String] = []
+            if let allHeaders = httpResp?.allHeaderFields {
+                for (rawKey, rawVal) in allHeaders {
+                    let keyStr = String(describing: rawKey)
+                    let valStr = String(describing: rawVal)
+                    let lk = keyStr.lowercased()
+                    if lk == "set-cookie" {
+                        setCookies.append(valStr)
+                    } else if lk != "content-length" && lk != "connection" && lk != "transfer-encoding" {
+                        outHeaders[keyStr] = valStr
+                    }
+                }
+            }
+
+            var respObj: [String: Any] = [
+                "type": "http_response",
+                "id": reqID,
+                "status": statusCode,
+                "headers": outHeaders
+            ]
+            if !setCookies.isEmpty {
+                respObj["set_cookies"] = setCookies
+            }
+            if !respData.isEmpty {
+                respObj["body_b64"] = respData.base64EncodedString()
+            }
+
+            if let jsonBytes = try? JSONSerialization.data(withJSONObject: respObj),
+               let jsonText = String(data: jsonBytes, encoding: .utf8) {
+                try? await wsTask.send(.string(jsonText))
+            }
+        } catch {
+            sendRelayErrorResponse(id: reqID, status: 502, message: "Local companion error", wsTask: wsTask)
+        }
+    }
+
+    nonisolated private static func sendRelayErrorResponse(
+        id: String,
+        status: Int,
+        message: String,
+        wsTask: URLSessionWebSocketTask
+    ) {
+        let obj: [String: Any] = [
+            "type": "http_response",
+            "id": id,
+            "status": status,
+            "headers": ["Content-Type": "text/plain; charset=utf-8"],
+            "body_b64": Data(message.utf8).base64EncodedString()
         ]
-        
-        if let cfBin = cloudflaredCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            let namedToken = cloudflareNamedTunnelToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            let namedHost = cloudflareNamedPublicHostname.trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "https://", with: "")
-                .replacingOccurrences(of: "http://", with: "")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if !namedToken.isEmpty && !namedHost.isEmpty {
-                launchCloudflaredNamedTunnel(binaryPath: cfBin, token: namedToken, publicHost: namedHost, fallbackPort: port)
-            } else {
-                launchCloudflaredQuickTunnel(binaryPath: cfBin, port: port)
-            }
-        } else {
-            // Fallback to macOS built-in /usr/bin/ssh with localhost.run (100% zero install)
-            launchSSHReverseTunnel(port: port)
+        if let b = try? JSONSerialization.data(withJSONObject: obj),
+           let s = String(data: b, encoding: .utf8) {
+            wsTask.send(.string(s)) { _ in }
         }
     }
 
-    private func launchCloudflaredNamedTunnel(binaryPath: String, token: String, publicHost: String, fallbackPort: Int) {
-        tunnelState = .starting("Starting Permanent Cloudflare Named Tunnel (\(publicHost))…")
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binaryPath)
-        proc.arguments = ["tunnel", "--no-autoupdate", "run", "--token", token]
-
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-            if line.contains("Registered tunnel connection") || line.contains("Connection ") {
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    if case .connected = self.tunnelState { return }
-                    self.tunnelState = .connected(url: "https://\(publicHost)", provider: "Cloudflare Named Tunnel")
-                }
-            }
-        }
-
-        proc.terminationHandler = { [weak self] _ in
-            pipe.fileHandleForReading.readabilityHandler = nil
-            Task { @MainActor [weak self] in
-                guard let self = self, self.tunnelProcess === proc else { return }
-                if case .starting = self.tunnelState {
-                    self.launchCloudflaredQuickTunnel(binaryPath: binaryPath, port: fallbackPort)
-                } else if self.connectionMode == .online {
-                    self.tunnelState = .stopped
-                }
-            }
-        }
-
-        do {
-            try proc.run()
-            self.tunnelProcess = proc
-            // Optimistic activation after 3.2s if cloudflared stays running quietly
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 3_200_000_000)
-                guard let self = self, self.tunnelProcess === proc, proc.isRunning else { return }
-                if case .starting = self.tunnelState {
-                    self.tunnelState = .connected(url: "https://\(publicHost)", provider: "Cloudflare Named Tunnel")
-                }
-            }
-        } catch {
-            launchCloudflaredQuickTunnel(binaryPath: binaryPath, port: fallbackPort)
-        }
-    }
-    
     func stopOnlineTunnel() {
-        if let proc = tunnelProcess, proc.isRunning {
-            proc.terminate()
+        relayConnectTask?.cancel()
+        relayConnectTask = nil
+        relayPingTimer?.invalidate()
+        relayPingTimer = nil
+        if let ws = relayWebSocketTask {
+            ws.cancel(with: .goingAway, reason: nil)
         }
-        tunnelProcess = nil
+        relayWebSocketTask = nil
+        relayWebSocketSession?.invalidateAndCancel()
+        relayWebSocketSession = nil
+        activeRelayShapeID = nil
         tunnelState = .stopped
-    }
-    
-    private func launchCloudflaredQuickTunnel(binaryPath: String, port: Int) {
-        tunnelState = .starting("Starting Cloudflare Quick Tunnel (HTTPS)…")
-        // Reap any orphaned cloudflared quick tunnel bound to this exact loopback port from prior crashes/restarts
-        let reap = Process()
-        reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        reap.arguments = ["-f", "cloudflared tunnel --url http://127.0.0.1:\(port)"]
-        try? reap.run()
-        reap.waitUntilExit()
-        
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binaryPath)
-        proc.arguments = ["tunnel", "--url", "http://127.0.0.1:\(port)", "--no-autoupdate"]
-        
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-            
-            // Match https://xxx-xxx.trycloudflare.com
-            if let range = line.range(of: #"https://[a-zA-Z0-9-]+\.trycloudflare\.com"#, options: .regularExpression) {
-                let publicURL = String(line[range])
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    if case .connected = self.tunnelState { return }
-                    self.tunnelState = .connected(url: publicURL, provider: "Cloudflare Quick Tunnel")
-                }
-            }
-        }
-        
-        proc.terminationHandler = { [weak self] _ in
-            pipe.fileHandleForReading.readabilityHandler = nil
-            Task { @MainActor [weak self] in
-                guard let self = self, self.tunnelProcess === proc else { return }
-                if case .starting = self.tunnelState {
-                    // If cloudflared exited before connecting, auto-fallback to SSH tunnel
-                    self.launchSSHReverseTunnel(port: port)
-                } else if self.connectionMode == .online {
-                    self.tunnelState = .stopped
-                }
-            }
-        }
-        
-        do {
-            try proc.run()
-            self.tunnelProcess = proc
-        } catch {
-            launchSSHReverseTunnel(port: port)
-        }
     }
     
     nonisolated static let pinnedLocalhostRunHostKeys = """
@@ -839,61 +1011,6 @@ final class PhoneCompanionService: ObservableObject {
         FileManager.default.createFile(atPath: knownHostsURL.path, contents: pinnedData, attributes: [.posixPermissions: 0o600])
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: knownHostsURL.path)
         return knownHostsURL
-    }
-
-    private func launchSSHReverseTunnel(port: Int) {
-        tunnelState = .starting("Starting macOS Native SSH HTTPS Tunnel…")
-        
-        // SECURITY: Pin the verified Ed25519 and RSA host keys of localhost.run and enforce StrictHostKeyChecking=yes
-        // so even the very first connection rejects any MITM impostor (eliminating the TOFU window).
-        let knownHostsURL = Self.ensurePinnedKnownHostsFile()
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        proc.arguments = [
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", "UserKnownHostsFile=\(knownHostsURL.path)",
-            "-o", "ServerAliveInterval=30",
-            "-o", "ExitOnForwardFailure=yes",
-            "-R", "80:127.0.0.1:\(port)",
-            "nokey@localhost.run"
-        ]
-        
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        proc.standardInput = Pipe()
-        
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            
-            if let range = text.range(of: #"https://[a-zA-Z0-9-]+\.lhr\.life"#, options: .regularExpression) {
-                let publicURL = String(text[range])
-                Task { @MainActor [weak self] in
-                    guard let self = self, self.tunnelProcess === proc else { return }
-                    if case .connected = self.tunnelState { return }
-                    self.tunnelState = .connected(url: publicURL, provider: "SSH Quick Tunnel")
-                }
-            }
-        }
-        
-        proc.terminationHandler = { [weak self] _ in
-            pipe.fileHandleForReading.readabilityHandler = nil
-            Task { @MainActor [weak self] in
-                guard let self = self, self.tunnelProcess === proc else { return }
-                if case .starting = self.tunnelState {
-                    self.tunnelState = .failed("Could not establish online tunnel. Check your internet connection or use Same Wi-Fi / LAN mode. If this keeps happening after it worked before, the tunnel host key changed: do not connect on an untrusted network.")
-                }
-            }
-        }
-        
-        do {
-            try proc.run()
-            self.tunnelProcess = proc
-        } catch {
-            tunnelState = .failed("Failed to launch tunnel: \(error.localizedDescription)")
-        }
     }
     
     // MARK: - HTTP Connection Handling
@@ -1034,6 +1151,20 @@ final class PhoneCompanionService: ObservableObject {
         // Wi-Fi / office LAN, must present either the one-time QR pairing code (`?pair=`) or the `mc_token` session token.
         let isLocalMac = !isForwardedTunnel && (remoteIP == "127.0.0.1" || remoteIP == "::1")
 
+        // Public static brand icon asset route (contains zero user/workspace data; ensures <img> tags always render crisply)
+        if method == "GET" && path == "/api/icon/provider" {
+            let provId = queryItems.first(where: { $0.name == "id" })?.value ?? "microcode"
+            if let png = AIProviderBrandIcon.pngData(for: provId) {
+                return makeHTTPResponse(
+                    status: "200 OK",
+                    contentType: "image/png",
+                    extraHeaders: ["Cache-Control": "public, max-age=86400"],
+                    body: png
+                )
+            }
+            return makeHTTPResponse(status: "404 Not Found", contentType: "text/plain", body: Data())
+        }
+
         // 6-Digit Pairing PIN verification endpoint (rate-limited per IP, rotates PIN on success)
         if method == "POST" && path == "/api/pair/verify-pin" {
             let json = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
@@ -1041,7 +1172,7 @@ final class PhoneCompanionService: ObservableObject {
             let result = verifySixDigitPINAttempt(suppliedPIN: suppliedPIN, remoteIP: remoteIP, headers: headers)
             if result.ok {
                 let viaHTTPS = (headers["x-forwarded-proto"]?.lowercased() == "https")
-                let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Strict; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
+                let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Lax; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
                 let body = (try? JSONSerialization.data(withJSONObject: ["ok": true, "token": pairingToken])) ?? Data("{\"ok\":true}".utf8)
                 return makeHTTPResponse(status: "200 OK", contentType: "application/json; charset=utf-8", extraHeaders: extraHeaders, body: body)
             } else {
@@ -1059,7 +1190,7 @@ final class PhoneCompanionService: ObservableObject {
             input{width:100%;box-sizing:border-box;background:#0d0f14;color:#fff;border:1px solid rgba(255,255,255,0.18);border-radius:10px;padding:12px;font-size:22px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0.28em;text-align:center;outline:none;margin-bottom:10px}
             button{width:100%;background:#f3f4f6;color:#0d0f14;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:600;cursor:pointer}
             #err{color:#f87171;font-size:12.5px;margin-top:10px;min-height:18px}</style></head>
-            <body><div class="card"><h2>🔒 Pair MicroCode Mobile</h2>
+            <body><div class="card"><div style="display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);margin-bottom:12px;color:#e5e7eb"><svg width="17" height="17" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="1.8" stroke="currentColor" stroke-width="1.4"/><path d="M5 7V5a3 3 0 1 1 6 0v2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></div><h2>Pair MicroCode Mobile</h2>
             <p>Scan the QR code in <b>MicroCode → Phone</b> on your Mac, or enter the <b>6-Digit Pairing PIN</b> displayed below the QR code:</p>
             <input id="pinBox" type="tel" inputmode="numeric" maxlength="7" placeholder="000 000" autocomplete="one-time-code">
             <button onclick="unlockPIN()">Unlock with PIN</button>
@@ -1099,10 +1230,17 @@ final class PhoneCompanionService: ObservableObject {
             return nil
         }
 
-        // State-changing `/api/*` requests must carry the token in the custom `X-Companion-Token` header.
-        // Reverse-proxied dev servers under `/preview/*` are already authenticated by `matchedSessionToken || isLocalMac`.
+        // State-changing `/api/*` companion requests must carry the token in the custom `X-Companion-Token` header.
+        // Reverse-proxied dev servers under `/preview/*` (and root-escaped sub-requests from a `/preview/*` iframe) are authenticated by `matchedSessionToken || isLocalMac`.
         let postCustomToken = headers["x-companion-token"] ?? ""
-        if method == "POST" && !path.hasPrefix("/preview/"),
+        let refererPreviewTarget = Self.extractPreviewTargetFromReferer(headers["referer"])
+        let isCompanionControlAPI = path.hasPrefix("/api/") && (
+            path == "/api/send" || path == "/api/stop" || path.hasPrefix("/api/preview/") ||
+            path.hasPrefix("/api/git/") || path.hasPrefix("/api/terminal/") || path.hasPrefix("/api/model/") ||
+            path.hasPrefix("/api/plan/") || path.hasPrefix("/api/tool/") || path.hasPrefix("/api/workspace/") ||
+            path.hasPrefix("/api/session/") || path.hasPrefix("/api/run") || path.hasPrefix("/api/pair/")
+        )
+        if method == "POST" && !path.hasPrefix("/preview/") && (isCompanionControlAPI || refererPreviewTarget == nil),
            !(Self.constantTimeEquals(postCustomToken, pairingToken) || Self.constantTimeEquals(postCustomToken, LocalLLMGatewayService.shared.apiToken)) {
             return makeJSONResponse(["ok": false, "error": "Missing X-Companion-Token header"], status: "403 Forbidden")
         }
@@ -1126,7 +1264,7 @@ final class PhoneCompanionService: ObservableObject {
                 promptMacApprovalIfNeeded(for: device)
                 if method == "GET" && path == "/" {
                     let viaHTTPS = (headers["x-forwarded-proto"]?.lowercased() == "https")
-                    let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Strict; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
+                    let extraHeaders = ["Set-Cookie": "mc_token=\(pairingToken); Path=/; SameSite=Lax; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
                     let pendingHTML = buildPendingApprovalHTML(device: device, token: pairingToken)
                     return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", extraHeaders: extraHeaders, body: Data(pendingHTML.utf8))
                 }
@@ -1148,6 +1286,16 @@ final class PhoneCompanionService: ObservableObject {
             cookieName: "mc_token",
             localLLMGatewayInfo: nil
         )
+    }
+
+    nonisolated static func extractPreviewTargetFromReferer(_ referer: String?) -> String? {
+        guard let ref = referer, let range = ref.range(of: "/preview/") else { return nil }
+        let after = ref[range.upperBound...]
+        let segEnd = after.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? after.endIndex
+        let seg = String(after[..<segEnd])
+        if seg == "local" { return "local" }
+        if let port = Int(seg), (1...65535).contains(port) { return String(port) }
+        return nil
     }
 
     func handleAuthenticatedRoute(
@@ -1185,11 +1333,11 @@ final class PhoneCompanionService: ObservableObject {
                     selectRemoteModel(mode: "local", provider: "local", modelId: targetModel)
                 }
             }
+            IDEBrowserAutomationService.shared.scanActivePorts()
             let html = buildMobileCompanionHTML(token: sessionToken, localLLMGatewayInfo: localLLMGatewayInfo)
-            // HttpOnly: the page never reads the cookie from JS. Secure whenever the request arrived over the HTTPS tunnel.
+            // HttpOnly: the page never reads the cookie from JS. SameSite=Lax allows 1-Click SSO links & iframe sub-resources cleanly.
             let viaHTTPS = (headers["x-forwarded-proto"]?.lowercased() == "https")
-            let sameSite = (cookieName == "mc_llm_token") ? "Lax" : "Strict"
-            let extraHeaders = ["Set-Cookie": "\(cookieName)=\(sessionToken); Path=/; SameSite=\(sameSite); HttpOnly" + (viaHTTPS ? "; Secure" : "")]
+            let extraHeaders = ["Set-Cookie": "\(cookieName)=\(sessionToken); Path=/; SameSite=Lax; HttpOnly" + (viaHTTPS ? "; Secure" : "")]
             return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", extraHeaders: extraHeaders, body: Data(html.utf8))
 
         case ("GET", "/manifest.json"):
@@ -1211,6 +1359,17 @@ final class PhoneCompanionService: ObservableObject {
             return makeHTTPResponse(status: "200 OK", contentType: "application/json; charset=utf-8", body: statePayload)
             
         case ("GET", "/api/stream"):
+            if headers["x-dotmini-relay"] == "1" {
+                let statePayload = buildCompanionStateJSON()
+                let stateStr = String(data: statePayload, encoding: .utf8) ?? "{}"
+                let sseFrame = "retry: 1200\ndata: \(stateStr)\n\n"
+                return makeHTTPResponse(
+                    status: "200 OK",
+                    contentType: "text/event-stream; charset=utf-8",
+                    extraHeaders: ["Cache-Control": "no-cache"],
+                    body: Data(sseFrame.utf8)
+                )
+            }
             if let conn = connection {
                 registerSSEConnection(conn)
                 return nil
@@ -1253,6 +1412,35 @@ final class PhoneCompanionService: ObservableObject {
             return makeJSONResponse(["ok": false, "error": "Empty prompt and no attachments"], status: "400 Bad Request")
 
         case ("GET", "/api/preview/ports"):
+            await IDEBrowserAutomationService.shared.scanActivePortsNow()
+            return makeJSONResponse(buildPreviewPortsPayload())
+
+        case ("POST", "/api/preview/start"):
+            let wsPath = currentCompanionWorkspacePath()
+            if !wsPath.isEmpty && wsPath != "__general__" {
+                let wsURL = URL(fileURLWithPath: wsPath)
+                if AppState.shared?.workspaceFolder?.standardizedFileURL.path != wsURL.standardizedFileURL.path {
+                    AppState.shared?.workspaceFolder = wsURL
+                }
+            }
+            AppState.shared?.showPreviewInspector(tab: "web")
+            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+            DeviceRuntimeService.shared.embeddedDockMode = .web
+            PreviewDockService.shared.isDockVisible = true
+            PreviewDockService.shared.selectTab(id: "web")
+
+            await UniversalAppPreviewBridge.shared.buildAndPreview()
+            await IDEBrowserAutomationService.shared.scanActivePortsNow()
+            for _ in 0..<12 {
+                if DeviceRuntimeService.shared.lastDetectedDevServerPort != nil
+                    || DeviceRuntimeService.shared.targetWebURL != nil
+                    || !IDEBrowserAutomationService.shared.activePortProcesses.isEmpty {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                await IDEBrowserAutomationService.shared.scanActivePortsNow()
+            }
+            broadcastSSEStateNow()
             return makeJSONResponse(buildPreviewPortsPayload())
 
         case ("POST", "/api/preview/tunnel"):
@@ -1386,6 +1574,27 @@ final class PhoneCompanionService: ObservableObject {
             return makeJSONResponse(["ok": true])
             
         default:
+            // Transparently proxy root-escaped Vite/Next/React/SvelteKit/API requests originating from a `/preview/<port|local>/` iframe
+            if let refTarget = Self.extractPreviewTargetFromReferer(headers["referer"]) {
+                let targetWithPrefix = "/preview/\(refTarget)\(rawTarget ?? path)"
+                return await handlePreviewReverseProxy(
+                    method: method,
+                    rawTarget: targetWithPrefix,
+                    headers: headers,
+                    bodyData: bodyData
+                )
+            }
+            if path.hasPrefix("/@vite/") || path.hasPrefix("/@fs/") || path.hasPrefix("/@id/") || path.hasPrefix("/@react-refresh") || path.hasPrefix("/_next/") {
+                if let fallbackPort = IDEBrowserAutomationService.shared.bestActivePort(forWorkspace: currentCompanionWorkspacePath()) ?? DeviceRuntimeService.shared.lastDetectedDevServerPort {
+                    let targetWithPrefix = "/preview/\(fallbackPort)\(rawTarget ?? path)"
+                    return await handlePreviewReverseProxy(
+                        method: method,
+                        rawTarget: targetWithPrefix,
+                        headers: headers,
+                        bodyData: bodyData
+                    )
+                }
+            }
             return makeJSONResponse(["ok": false, "error": "Not found"], status: "404 Not Found")
         }
     }
@@ -1442,7 +1651,8 @@ final class PhoneCompanionService: ObservableObject {
         }
     }
     
-    private func broadcastSSEStateNow() {
+    func broadcastSSEStateNow() {
+        cachedStateFingerprint = ""
         guard !sseConnections.isEmpty else { return }
         tickSSEBroadcast(force: true)
     }
@@ -1775,23 +1985,46 @@ final class PhoneCompanionService: ObservableObject {
         }
     }
     
+    private static func inferBrandIconId(fromModelId rawModelId: String, fallbackProvider: String? = nil) -> String? {
+        let m = rawModelId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if m.contains("claude") || m.contains("anthropic") { return "claude" }
+        if m.contains("gemini") || m.contains("gemma") { return "gemini" }
+        if m.hasPrefix("gpt") || m.hasPrefix("o1") || m.hasPrefix("o3") || m.hasPrefix("o4") || m.contains("chatgpt") || m.contains("codex") || m.contains("openai") { return "openai" }
+        if m.contains("deepseek") { return "deepseek" }
+        if m.contains("grok") || m.contains("xai") { return "grok" }
+        if m.contains("qwen") { return "qwen" }
+        if m.contains("glm") || m.contains("zhipu") { return "glm" }
+        if m.contains("omni") || m.contains("dotmini") { return "omni" }
+        if let fb = fallbackProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !fb.isEmpty {
+            return fb
+        }
+        return nil
+    }
+
     private func currentProviderBrandId() -> String {
         let state = appState ?? AppState.shared
+        let activeModelId = state?.aiModel ?? ""
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "subscription"
         if keyMode == "enterprise" {
+            if let inferred = Self.inferBrandIconId(fromModelId: activeModelId) {
+                return inferred
+            }
             return EnterpriseAIAuthService.shared.activeProfile?.dialect.brandIconKey ?? "microcode"
         } else if keyMode == "acp" || ACPHostService.shared.activeAgentId != nil {
             if let cfg = ACPHostService.shared.registeredConfigs.first(where: { $0.id == ACPHostService.shared.activeAgentId }) {
                 return cfg.type.engineId
             }
-            return state?.aiProvider ?? "microcode"
+            return Self.inferBrandIconId(fromModelId: activeModelId, fallbackProvider: state?.aiProvider) ?? "microcode"
         } else if keyMode == "subscription" {
-            if let sub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"), !sub.isEmpty {
-                return sub
-            }
-            if let activeModelId = state?.aiModel,
+            if !activeModelId.isEmpty,
                let info = SubscriptionAuthManager.shared.findModel(id: activeModelId) {
                 return info.provider.rawValue
+            }
+            if let inferred = Self.inferBrandIconId(fromModelId: activeModelId) {
+                return inferred
+            }
+            if let sub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"), !sub.isEmpty {
+                return sub
             }
             return "gemini"
         } else if keyMode == "local" {
@@ -1799,7 +2032,7 @@ final class PhoneCompanionService: ObservableObject {
         } else if keyMode == "cloud" {
             return "omni"
         }
-        return state?.aiProvider ?? "gemini"
+        return Self.inferBrandIconId(fromModelId: activeModelId, fallbackProvider: state?.aiProvider) ?? "gemini"
     }
     
     private func buildAvailableModelsPayload() -> [[String: Any]] {
@@ -1820,7 +2053,7 @@ final class PhoneCompanionService: ObservableObject {
                     "group": groupTitle,
                     "mode": "enterprise",
                     "provider": prof.id,
-                    "iconId": prof.dialect.brandIconKey,
+                    "iconId": Self.inferBrandIconId(fromModelId: mId) ?? prof.dialect.brandIconKey,
                     "modelId": mId,
                     "name": AIModelCatalog.formatModelName(mId),
                     "badge": prof.dialect.shortTitle,
@@ -2314,10 +2547,13 @@ final class PhoneCompanionService: ObservableObject {
                 ]
             }
             
+            let wsLang = detectWorkspaceLanguageInfo(path: canonicalPath)
             result.append([
                 "id": group.id,
                 "name": group.projectName,
                 "path": canonicalPath,
+                "lang": wsLang.primary,
+                "langLabel": wsLang.label,
                 "active": isGroupActive,
                 "chatCount": group.chats.count,
                 "chats": chatsPayload
@@ -2329,10 +2565,13 @@ final class PhoneCompanionService: ObservableObject {
             guard let canonicalPath = AgentService.canonicalWorkspacePath(url.path),
                   !seenPaths.contains(canonicalPath) else { continue }
             seenPaths.insert(canonicalPath)
+            let wsLang = detectWorkspaceLanguageInfo(path: canonicalPath)
             result.append([
                 "id": canonicalPath,
                 "name": url.lastPathComponent,
                 "path": canonicalPath,
+                "lang": wsLang.primary,
+                "langLabel": wsLang.label,
                 "active": canonicalPath == canonicalCurrent,
                 "chatCount": 0,
                 "chats": []
@@ -2360,9 +2599,26 @@ final class PhoneCompanionService: ObservableObject {
         }()
         
         let lastMsg = agent.messages.last
-        let activePort = DeviceRuntimeService.shared.targetWebURL?.port
-            ?? DeviceRuntimeService.shared.lastDetectedDevServerPort
-            ?? IDEBrowserAutomationService.shared.activePortProcesses.first?.port
+        let browserAuto = IDEBrowserAutomationService.shared
+        let livePortSet = Set(browserAuto.activePortProcesses.map(\.port))
+        let bridgeRunning = UniversalAppPreviewBridge.shared.activeProcess?.isRunning == true
+        let activePort: Int? = {
+            if let tPort = DeviceRuntimeService.shared.targetWebURL?.port,
+               (livePortSet.contains(tPort) || bridgeRunning) {
+                return tPort
+            }
+            if let best = browserAuto.bestActivePort(forWorkspace: currentWsPath.isEmpty ? nil : currentWsPath) {
+                return best
+            }
+            if let dPort = DeviceRuntimeService.shared.lastDetectedDevServerPort,
+               (livePortSet.contains(dPort) || bridgeRunning) {
+                return dPort
+            }
+            return nil
+        }()
+        let hasLocalPreview = (activePort == nil) && ((resolveLocalStaticPreviewEntryFile() != nil) || UniversalAppPreviewBridge.shared.isUsingNativeCanvas)
+        let reloadSeq = DeviceRuntimeService.shared.previewReloadSeq
+        let providerBrand = currentProviderBrandId()
         let modelLabel = currentModelDisplayLabel()
         
         let activeChatIdStr: String = agent.activeChatId ?? ""
@@ -2374,6 +2630,7 @@ final class PhoneCompanionService: ObservableObject {
         let planCompletedCount: Int = planMgr.currentPlan?.completedSteps ?? 0
         let pendingReqIdStr: String = toolMgr.pendingRequest?.id.uuidString ?? ""
         let activePortInt: Int = activePort ?? 0
+        let livePortsSig = browserAuto.activePortProcesses.map { "\($0.port)" }.joined(separator: ",")
 
         let fingerprintParts: [String] = [
             currentWsPath,
@@ -2389,10 +2646,14 @@ final class PhoneCompanionService: ObservableObject {
             currentToolStr,
             String(agent.messageQueue.count),
             modelLabel,
+            providerBrand,
             planStateStr,
             String(planCompletedCount),
             pendingReqIdStr,
-            String(activePortInt)
+            String(activePortInt),
+            String(hasLocalPreview),
+            String(reloadSeq),
+            livePortsSig
         ]
         let fingerprint = fingerprintParts.joined(separator: "|")
         
@@ -2484,16 +2745,26 @@ final class PhoneCompanionService: ObservableObject {
         var webPreviewLANURL: String? = nil
         var webPreviewProxyURL: String? = nil
         if let port = activePort {
-            let subPath = DeviceRuntimeService.shared.targetWebURL?.path ?? "/"
-            let normalizedSub = subPath.hasPrefix("/") ? subPath : "/\(subPath)"
+            let subPath = (DeviceRuntimeService.shared.targetWebURL?.port == port)
+                ? (DeviceRuntimeService.shared.targetWebURL?.path ?? "/")
+                : "/"
+            let normalizedSub = subPath.isEmpty ? "/" : (subPath.hasPrefix("/") ? subPath : "/\(subPath)")
             webPreviewProxyURL = "/preview/\(port)\(normalizedSub)"
             if activeLANHost != "127.0.0.1" {
                 webPreviewLANURL = "http://\(activeLANHost):\(port)\(normalizedSub)"
             }
+        } else if hasLocalPreview {
+            webPreviewProxyURL = "/preview/local/"
         }
         
         let latestStepCount = lastMsg?.toolResults.count ?? 0
         let activeWsLang = detectWorkspaceLanguageInfo(path: currentWsPath)
+        let detectedPortsSummary: [[String: Any]] = browserAuto.activePortProcesses.prefix(12).map { p in
+            [
+                "port": p.port,
+                "name": p.processName
+            ]
+        }
         
         var payload: [String: Any] = [
             "macName": cachedMacName,
@@ -2504,7 +2775,10 @@ final class PhoneCompanionService: ObservableObject {
             "workspaceLangs": activeWsLang.langs,
             "sessionTitle": activeSessionName,
             "modelLabel": modelLabel,
-            "providerId": currentProviderBrandId(),
+            "providerId": providerBrand,
+            "previewReloadSeq": reloadSeq,
+            "hasLocalPreview": hasLocalPreview,
+            "detectedPorts": detectedPortsSummary,
             "isLoading": agent.isLoading,
             "phase": agent.agentPhase.displayText,
             "currentTool": agent.currentToolExecution ?? "",
@@ -2622,53 +2896,104 @@ final class PhoneCompanionService: ObservableObject {
             -webkit-font-smoothing: antialiased;
           }
 
-          /* 1. Top IDE Header */
+          /* 1. Formal Single-Row IDE Navigation Header */
           header {
-            padding: max(10px, env(safe-area-inset-top)) 12px 8px;
-            background: var(--panel);
+            padding: max(8px, env(safe-area-inset-top)) 10px 8px;
+            background: rgba(20, 20, 23, 0.94);
+            -webkit-backdrop-filter: blur(16px);
+            backdrop-filter: blur(16px);
             border-bottom: 1px solid var(--border);
-            display: flex; flex-direction: column; gap: 7px;
             z-index: 20;
           }
-          .ide-titlebar {
-            display: flex; align-items: center; justify-content: space-between; gap: 8px;
-            min-height: 24px;
+          .ide-navbar {
+            display: flex; align-items: center; justify-content: space-between; gap: 6px;
+            min-height: 32px;
           }
-          .ide-brand {
-            display: flex; align-items: center; gap: 6px;
-            font-size: 13px; font-weight: 600; color: var(--text);
-            white-space: nowrap;
+          .nav-left {
+            display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1;
+          }
+          .nav-right {
+            display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+          }
+          .nav-icon-btn {
+            width: 32px; height: 32px; border-radius: 7px;
+            background: transparent; color: var(--secondary);
+            border: 1px solid transparent;
+            display: inline-flex; align-items: center; justify-content: center;
+            cursor: pointer; flex-shrink: 0; padding: 0;
+            transition: background 0.12s ease, color 0.12s ease;
+          }
+          .nav-icon-btn:active {
+            background: var(--surface-hover); color: var(--text);
+          }
+          .nav-icon-btn.active-state {
+            color: var(--text);
           }
           .conn-indicator {
             width: 6px; height: 6px; border-radius: 50%;
             background: var(--green); flex-shrink: 0;
           }
-          .ide-breadcrumb {
-            display: flex; align-items: center; gap: 5px;
-            font-size: 12px; color: var(--secondary);
-            min-width: 0; flex: 1; overflow: hidden;
-            cursor: pointer; padding: 3px 6px; border-radius: 5px;
+          .nav-context-btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            min-width: 0; max-width: 100%;
+            background: transparent; border: none;
+            padding: 5px 7px; border-radius: 7px;
+            cursor: pointer; text-align: left;
           }
-          .ide-breadcrumb:active { background: var(--surface-hover); }
-          .ide-breadcrumb span {
+          .nav-context-btn:active { background: var(--surface-hover); }
+          .nav-ws-name {
+            font-size: 13px; font-weight: 600; color: var(--text);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            max-width: 125px;
+          }
+          .nav-sep {
+            font-size: 12px; color: var(--muted); flex-shrink: 0;
+          }
+          .nav-chat-name {
+            font-size: 12.5px; font-weight: 400; color: var(--secondary);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            min-width: 0; flex: 1;
+          }
+          .nav-port-chip {
+            display: none; align-items: center; gap: 5px;
+            font-family: var(--mono); font-size: 11px; font-weight: 500;
+            color: var(--text); background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: 6px; padding: 4px 8px;
+            cursor: pointer; flex-shrink: 0;
+          }
+          .nav-port-chip:active { background: var(--surface-hover); }
+          .nav-port-dot {
+            width: 5.5px; height: 5.5px; border-radius: 50%; background: var(--green); flex-shrink: 0;
+          }
+          .tools-grid {
+            display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px; padding: 12px;
+          }
+          .tool-tile {
+            display: flex; align-items: center; gap: 10px;
+            padding: 11px 12px; border-radius: 9px;
+            background: var(--surface); border: 1px solid var(--border);
+            color: var(--text); text-align: left; cursor: pointer;
+            min-width: 0;
+          }
+          .tool-tile:active { background: var(--surface-hover); border-color: var(--border-strong); }
+          .tool-tile-icon {
+            width: 30px; height: 30px; border-radius: 7px;
+            background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+            display: inline-flex; align-items: center; justify-content: center;
+            color: var(--secondary); flex-shrink: 0;
+          }
+          .tool-tile-body {
+            display: flex; flex-direction: column; gap: 1.5px; min-width: 0; flex: 1;
+          }
+          .tool-tile-title {
+            font-size: 12.5px; font-weight: 600; color: var(--text);
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
           }
-          .ide-subbar {
-            display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
-          }
-          .ws-select-wrap {
-            flex: 0 1 46%; min-width: 112px;
-            display: flex; align-items: center; gap: 5px;
-            background: var(--surface); color: var(--text);
-            border: 1px solid var(--border-strong); border-radius: 6px;
-            padding: 0 6px;
-          }
-          .ws-select {
-            flex: 1; min-width: 0;
-            background: transparent; color: var(--text);
-            border: none;
-            padding: 5px 2px; font-size: 12px; font-weight: 600;
-            font-family: var(--sans); outline: none;
+          .tool-tile-sub {
+            font-family: var(--mono); font-size: 10.5px; color: var(--secondary);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
           }
           .lang-icon-badge {
             display: inline-flex; align-items: center; justify-content: center;
@@ -2683,19 +3008,12 @@ final class PhoneCompanionService: ObservableObject {
             background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.06);
             flex-shrink: 0;
           }
-          .session-select {
-            flex: 1 1 56%; min-width: 0;
-            background: var(--surface); color: var(--text);
-            border: 1px solid var(--border); border-radius: 6px;
-            padding: 5px 7px; font-size: 12px; font-weight: 500;
-            font-family: var(--sans); outline: none;
-          }
           .tb-btn {
             flex-shrink: 0; white-space: nowrap;
             background: var(--surface); color: var(--text);
             border: 1px solid var(--border); border-radius: 6px;
             padding: 5px 9px; font-size: 11.5px; font-weight: 500;
-            display: inline-flex; align-items: center; gap: 4px;
+            display: inline-flex; align-items: center; gap: 5px;
             cursor: pointer; text-decoration: none;
           }
           .tb-btn:active { background: var(--surface-hover); }
@@ -3162,48 +3480,63 @@ final class PhoneCompanionService: ObservableObject {
           .git-status-badge.A, .git-status-badge.U { color: #4ade80; background: rgba(74,222,128,0.14); }
           .git-status-badge.D { color: #f87171; background: rgba(248,113,113,0.14); }
           .preview-iframe-wrap {
-            flex: 1; background: #fff; position: relative; overflow: hidden;
+            flex: 1; background: #0d0d10; position: relative; overflow: hidden;
           }
           .preview-iframe-wrap iframe {
             width: 100%; height: 100%; border: none; background: #fff;
+          }
+          .assistant-brand-hdr {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 11px; font-weight: 500; color: var(--secondary);
+            margin-bottom: 4px;
+          }
+          .assistant-brand-hdr img {
+            width: 14px; height: 14px; border-radius: 3.5px; object-fit: contain; flex-shrink: 0;
+          }
+          .port-pill {
+            display: inline-flex; align-items: center; gap: 5px;
+            background: var(--surface); color: var(--secondary);
+            border: 1px solid var(--border); border-radius: 6px;
+            padding: 4px 8px; font-family: var(--mono); font-size: 11px;
+            cursor: pointer; flex-shrink: 0;
+          }
+          .port-pill.active {
+            color: #86efac; border-color: rgba(34,197,94,0.48); background: rgba(34,197,94,0.12);
           }
         </style>
         </head>
         <body>
           <header>
-            <div class="ide-titlebar">
-              <div class="ide-brand">
-                <button class="tb-btn" onclick="openWorkspaceModal()" style="padding:4px 7px" title="Projects & Workspaces">
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>
+            <div class="ide-navbar">
+              <div class="nav-left">
+                <button class="nav-icon-btn" onclick="openWorkspaceModal()" title="Workspaces &amp; Conversations">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.75" y="2.5" width="12.5" height="11" rx="2" stroke="currentColor" stroke-width="1.35"/><path d="M5.75 2.5v11" stroke="currentColor" stroke-width="1.35"/></svg>
                 </button>
-                <span class="conn-indicator" id="connDot"></span>
-                <span>\#(brandTitle)</span>
+                <button class="nav-context-btn" onclick="openWorkspaceModal()" title="Switch Workspace or Conversation">
+                  <span class="conn-indicator" id="connDot"></span>
+                  <span id="wsLangIcon" style="display:inline-flex;align-items:center;flex-shrink:0"></span>
+                  <span class="nav-ws-name" id="wsNameLabel">Workspace</span>
+                  <span class="nav-sep">/</span>
+                  <span class="nav-chat-name" id="chatNameLabel">Chat</span>
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0;color:var(--muted)"><path d="M3 4.5 6 7.5l3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
               </div>
-              <div class="ide-breadcrumb" onclick="openWorkspaceModal()" title="Switch Workspace or Chat">
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>
-                <span id="wsBreadcrumb">Workspace / Chat</span>
-                <span style="font-size:10px;color:var(--muted)">▾</span>
+              <div class="nav-right">
+                <button class="nav-port-chip" id="livePortChip" style="display:none" onclick="openPreviewModal()" title="Open Live Preview">
+                  <span class="nav-port-dot"></span>
+                  <span id="livePortText"></span>
+                </button>
+                <button class="nav-icon-btn" id="navPreviewBtn" onclick="openPreviewModal()" title="Live Preview">
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1.75" y="2.5" width="12.5" height="11" rx="2" stroke="currentColor" stroke-width="1.35"/><path d="M1.75 5.75h12.5" stroke="currentColor" stroke-width="1.35"/><circle cx="3.9" cy="4.15" r="0.65" fill="currentColor"/><circle cx="6.1" cy="4.15" r="0.65" fill="currentColor"/></svg>
+                </button>
+                <button class="nav-icon-btn" id="toolsMenuBtn" onclick="openToolsModal()" title="Workspace Tools">
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.35"/><rect x="9" y="2" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.35"/><rect x="2" y="9" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.35"/><rect x="9" y="9" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.35"/></svg>
+                </button>
+                <button class="nav-icon-btn" id="notifToggleBtn" onclick="toggleBrowserAlerts()" title="Notifications"></button>
+                <button class="nav-icon-btn" onclick="newSession()" title="New Conversation">
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 3.25v9.5M3.25 8h9.5" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/></svg>
+                </button>
               </div>
-              <button class="tb-btn" id="notifToggleBtn" onclick="toggleBrowserAlerts()" title="Enable Mobile Alerts &amp; Sound" style="padding:4px 7px">🔔</button>
-            </div>
-            <div class="ide-subbar">
-              <div class="ws-select-wrap">
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>
-                <select class="ws-select" id="workspaceSelect" onchange="switchWorkspace(this.value)" title="Workspace"></select>
-              </div>
-              <div class="ws-select-wrap" style="flex:1 1 54%;border-color:var(--border)">
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M2.5 3h11A1.5 1.5 0 0 1 15 4.5v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5V12A1.5 1.5 0 0 1 1 10.5v-6A1.5 1.5 0 0 1 2.5 3Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-                <select class="ws-select" id="sessionSelect" onchange="switchSession(this.value)" title="Chat in Workspace" style="font-weight:500"></select>
-              </div>
-              <button class="tb-btn" onclick="newSession()">+ Chat</button>
-            </div>
-            <div class="ide-actions-strip">
-              <button class="tb-btn" id="previewBtn" onclick="openPreviewModal()">Preview</button>
-              <button class="tb-btn" id="gitBtn" onclick="openGitModal()">Git</button>
-              <button class="tb-btn" onclick="openTermModal()">Term</button>
-              <button class="tb-btn" onclick="openFilesModal()">Files</button>
-              <button class="tb-btn" onclick="openRunModal()">Run</button>
-              <button class="tb-btn" onclick="openApiModal()">API /v1</button>
             </div>
           </header>
 
@@ -3232,9 +3565,9 @@ final class PhoneCompanionService: ObservableObject {
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M10.5 4.5 5.8 9.2a1.5 1.5 0 1 0 2.1 2.1l5-5a3 3 0 1 0-4.24-4.24l-5.2 5.2a4.5 4.5 0 0 0 6.36 6.36l4.4-4.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
                   </button>
                   <button class="model-pill-btn" onclick="openModelModal()">
-                    <img id="modelPillIcon" src="/api/icon/provider?id=gemini&token=\#(token)" width="13" height="13" style="border-radius:3px;flex-shrink:0;object-fit:contain" alt="">
-                    <span id="modelPillText">Subscription · Gemini</span>
-                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M3 4.5L6 1.5l3 3M3 7.5l3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <img id="modelPillIcon" src="/api/icon/provider?id=gemini" width="14" height="14" alt="" style="width:14px;height:14px;border-radius:3.5px;object-fit:contain;flex-shrink:0">
+                    <span id="modelPillText">Select Model</span>
+                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" style="flex-shrink:0;color:var(--muted)"><path d="M3 4.5 6 7.5l3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   </button>
                 </div>
                 <div class="composer-right">
@@ -3251,6 +3584,72 @@ final class PhoneCompanionService: ObservableObject {
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 10V2M6 2L2.5 5.5M6 2l3.5 3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Formal Workspace Tools Sheet -->
+          <div class="modal-backdrop" id="toolsModal" onclick="if(event.target===this)closeToolsModal()">
+            <div class="modal-sheet">
+              <div class="modal-header">
+                <span style="font-family:var(--mono);font-size:11px;letter-spacing:0.04em;color:var(--secondary)">WORKSPACE TOOLS</span>
+                <button class="tb-btn" onclick="closeToolsModal()">Close</button>
+              </div>
+              <div class="tools-grid">
+                <button class="tool-tile" onclick="closeToolsModal();openPreviewModal()">
+                  <span class="tool-tile-icon">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1.75" y="2.5" width="12.5" height="11" rx="2" stroke="currentColor" stroke-width="1.35"/><path d="M1.75 5.75h12.5" stroke="currentColor" stroke-width="1.35"/></svg>
+                  </span>
+                  <span class="tool-tile-body">
+                    <span class="tool-tile-title">Live Preview</span>
+                    <span class="tool-tile-sub" id="toolsPreviewSub">Auto-detect &amp; Run</span>
+                  </span>
+                </button>
+                <button class="tool-tile" onclick="closeToolsModal();openGitModal()">
+                  <span class="tool-tile-icon">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="4.5" cy="4" r="1.6" stroke="currentColor" stroke-width="1.35"/><circle cx="4.5" cy="12" r="1.6" stroke="currentColor" stroke-width="1.35"/><circle cx="11.5" cy="6" r="1.6" stroke="currentColor" stroke-width="1.35"/><path d="M4.5 5.6v4.8M11.5 7.6c0 2.2-1.8 2.8-7 2.8" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>
+                  </span>
+                  <span class="tool-tile-body">
+                    <span class="tool-tile-title">Source Control</span>
+                    <span class="tool-tile-sub" id="toolsGitSub">Diff, commit, push</span>
+                  </span>
+                </button>
+                <button class="tool-tile" onclick="closeToolsModal();openTermModal()">
+                  <span class="tool-tile-icon">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1.75" y="2.5" width="12.5" height="11" rx="2" stroke="currentColor" stroke-width="1.35"/><path d="m4.5 6 2.5 2-2.5 2M8.25 10h3" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="tool-tile-body">
+                    <span class="tool-tile-title">Terminal</span>
+                    <span class="tool-tile-sub">Shell &amp; scripts</span>
+                  </span>
+                </button>
+                <button class="tool-tile" onclick="closeToolsModal();openFilesModal()">
+                  <span class="tool-tile-icon">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M4 2h5.2L12.5 5.3V13a1.25 1.25 0 0 1-1.25 1.25h-7.25A1.25 1.25 0 0 1 2.75 13V3.25A1.25 1.25 0 0 1 4 2Z" stroke="currentColor" stroke-width="1.35"/><path d="M9 2v3.5h3.5" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="tool-tile-body">
+                    <span class="tool-tile-title">Files</span>
+                    <span class="tool-tile-sub">Browse &amp; inspect</span>
+                  </span>
+                </button>
+                <button class="tool-tile" onclick="closeToolsModal();openRunModal()">
+                  <span class="tool-tile-icon">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M4.5 3.25 12.25 8 4.5 12.75V3.25Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="tool-tile-body">
+                    <span class="tool-tile-title">Build &amp; Run</span>
+                    <span class="tool-tile-sub">Device &amp; simulator</span>
+                  </span>
+                </button>
+                <button class="tool-tile" onclick="closeToolsModal();openApiModal()">
+                  <span class="tool-tile-icon">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="4" rx="1.2" stroke="currentColor" stroke-width="1.35"/><rect x="2" y="9" width="12" height="4" rx="1.2" stroke="currentColor" stroke-width="1.35"/><circle cx="4.5" cy="5" r="0.75" fill="currentColor"/><circle cx="4.5" cy="11" r="0.75" fill="currentColor"/></svg>
+                  </span>
+                  <span class="tool-tile-body">
+                    <span class="tool-tile-title">API Gateway</span>
+                    <span class="tool-tile-sub">OpenAI /v1 endpoint</span>
+                  </span>
+                </button>
               </div>
             </div>
           </div>
@@ -3283,17 +3682,24 @@ final class PhoneCompanionService: ObservableObject {
           <div class="modal-backdrop" id="previewModal" onclick="if(event.target===this)closePreviewModal()">
             <div class="modal-sheet tall">
               <div class="modal-header">
-                <span id="previewTitle">Live Dev Preview</span>
+                <span id="previewTitle">Live Preview</span>
                 <div style="display:flex;gap:6px;align-items:center">
+                  <button class="btn-allow" id="runPreviewBtn" style="flex:0 0 auto;padding:4px 9px;font-size:11px;display:inline-flex;align-items:center;gap:4px" onclick="startWorkspacePreview()">
+                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M3 2l7 4-7 4V2Z" fill="currentColor"/></svg>
+                    <span id="runPreviewBtnText">Run Preview</span>
+                  </button>
                   <button class="tb-btn" onclick="reloadPreviewFrame()">Reload</button>
                   <a class="tb-btn" id="previewExternalLink" href="#" target="_blank">Full Tab ↗</a>
                   <button class="tb-btn" onclick="closePreviewModal()">Close</button>
                 </div>
               </div>
               <div class="git-toolbar" id="previewPortsBar">
-                <input id="customPreviewPort" type="number" min="1" max="65535" placeholder="Port (e.g. 3000)" style="width:128px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11.5px;font-family:var(--mono)">
-                <button class="tb-btn" onclick="openCustomPreviewPort()">Open Port</button>
-                <button class="tb-btn" id="publicPortTunnelBtn" onclick="togglePublicPortTunnel()">🌐 Public HTTPS Link</button>
+                <div id="detectedPortsList" style="display:flex;gap:5px;align-items:center;flex-wrap:wrap"></div>
+                <div style="display:flex;gap:5px;align-items:center;margin-left:auto">
+                  <input id="customPreviewPort" type="number" min="1" max="65535" placeholder="Port (auto)" style="width:96px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11.5px;font-family:var(--mono)">
+                  <button class="tb-btn" onclick="openCustomPreviewPort()">Open</button>
+                  <button class="tb-btn" id="publicPortTunnelBtn" onclick="togglePublicPortTunnel()">Public HTTPS</button>
+                </div>
               </div>
               <div id="publicTunnelBanner" style="display:none;padding:6px 12px;background:rgba(34,197,94,0.1);border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;align-items:center;justify-content:space-between;gap:8px"></div>
               <div class="preview-iframe-wrap">
@@ -3314,7 +3720,7 @@ final class PhoneCompanionService: ObservableObject {
               </div>
               <div class="git-toolbar">
                 <input id="gitCommitInput" type="text" placeholder="Commit message…" style="flex:1;min-width:150px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:12px;outline:none">
-                <button class="tb-btn" onclick="generateAICommitMsg()" id="aiCommitBtn">✨ AI Msg</button>
+                <button class="tb-btn" onclick="generateAICommitMsg()" id="aiCommitBtn">Generate</button>
                 <button class="btn-allow" style="flex:0 0 auto;padding:6px 11px" onclick="runGitAction('commit')">Commit All</button>
                 <button class="tb-btn" onclick="runGitAction('push')">Push ↑</button>
                 <button class="tb-btn" onclick="runGitAction('pull')">Pull ↓</button>
@@ -3385,7 +3791,7 @@ final class PhoneCompanionService: ObservableObject {
                   <code id="apiKeyBox" style="flex:1;background:var(--surface);padding:7px 9px;border-radius:6px;border:1px solid var(--border);font-family:var(--mono);font-size:11px;overflow-x:auto;white-space:nowrap">\#(apiKeyForDrawer)</code>
                   <button class="tb-btn" onclick="navigator.clipboard&&navigator.clipboard.writeText('\#(apiKeyForDrawer)')">Copy Key</button>
                 </div>
-                <button class="btn-allow" style="padding:9px 12px;margin-top:4px" onclick="connectRemoteMicroCodeIDE()">⚡ Connect Remote MicroCode IDE</button>
+                <button class="btn-allow" style="padding:9px 12px;margin-top:4px" onclick="connectRemoteMicroCodeIDE()">Open in MicroCode IDE</button>
               </div>
             </div>
           </div>
@@ -3394,6 +3800,12 @@ final class PhoneCompanionService: ObservableObject {
           const TOKEN = "\#(token)";
           const GATEWAY_API_KEY = "\#(apiKeyForDrawer)";
           const GATEWAY_NODE_NAME = "\#(nodeNameForDrawer)";
+          function openToolsModal() {
+            document.getElementById("toolsModal").style.display = "flex";
+          }
+          function closeToolsModal() {
+            document.getElementById("toolsModal").style.display = "none";
+          }
           function openApiModal() {
             document.getElementById("apiBaseUrlBox").textContent = window.location.origin + "/v1";
             document.getElementById("apiModal").style.display = "flex";
@@ -3429,11 +3841,18 @@ final class PhoneCompanionService: ObservableObject {
           const chatEl = document.getElementById("chat");
           const promptInput = document.getElementById("promptInput");
 
+          const BELL_ON_SVG = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2.25a3.75 3.75 0 0 0-3.75 3.75v2.35c0 .53-.21 1.04-.59 1.41l-.66.66h10l-.66-.66a2 2 0 0 1-.59-1.41V6A3.75 3.75 0 0 0 8 2.25Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/><path d="M6.5 12.25a1.5 1.5 0 0 0 3 0" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>`;
+          const BELL_OFF_SVG = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2.25a3.75 3.75 0 0 1 3.75 3.75v2.1M4.25 5.6v2.75c0 .53-.21 1.04-.59 1.41l-.66.66h7.6M6.5 12.25a1.5 1.5 0 0 0 3 0M2.5 2.5l11 11" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+          const SPEAKER_SVG = `<svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.75L8.75 3v10l-3.5-3H2.5V6Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>`;
+          const STOP_SQ_SVG = `<svg width="9" height="9" viewBox="0 0 12 12" fill="none"><rect x="2" y="2" width="8" height="8" rx="1.4" fill="currentColor"/></svg>`;
+          const CLIP_INLINE_SVG = `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" style="flex-shrink:0"><path d="M10.5 4.5 5.8 9.2a1.5 1.5 0 1 0 2.1 2.1l5-5a3 3 0 1 0-4.24-4.24l-5.2 5.2a4.5 4.5 0 0 0 6.36 6.36l4.4-4.4" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>`;
+
           function syncAlertBtnUI() {
             const b = document.getElementById("notifToggleBtn");
             if (!b) return;
-            b.style.opacity = browserAlertsEnabled ? "1" : "0.55";
-            b.textContent = browserAlertsEnabled ? "🔔" : "🔕";
+            b.classList.toggle("active-state", browserAlertsEnabled);
+            b.style.opacity = browserAlertsEnabled ? "1" : "0.65";
+            b.innerHTML = browserAlertsEnabled ? BELL_ON_SVG : BELL_OFF_SVG;
           }
           syncAlertBtnUI();
 
@@ -3939,27 +4358,89 @@ final class PhoneCompanionService: ObservableObject {
             }
           }
 
+          let lastSeenReloadSeq = -1;
+          let lastSeenActivePort = 0;
+
+          function providerIconURL(id) {
+            return "/api/icon/provider?id=" + encodeURIComponent(id || "microcode");
+          }
+
           function applyStatePayload(s) {
             try {
               document.getElementById("connDot").style.background = "#22c55e";
-              document.getElementById("wsBreadcrumb").textContent = (s.workspace || "Workspace") + " / " + (s.sessionTitle || "Chat");
-              document.getElementById("modelPillText").textContent = s.modelLabel || "Select Model";
-              const provIconEl = document.getElementById("modelPillIcon");
-              if (provIconEl && s.providerId && provIconEl.dataset.prov !== s.providerId) {
-                provIconEl.dataset.prov = s.providerId;
-                provIconEl.src = "/api/icon/provider?id=" + encodeURIComponent(s.providerId) + "&token=" + encodeURIComponent(TOKEN);
+              const wsLabelEl = document.getElementById("wsNameLabel");
+              const chatLabelEl = document.getElementById("chatNameLabel");
+              const wsIconEl = document.getElementById("wsLangIcon");
+              if (wsLabelEl) wsLabelEl.textContent = s.workspace || "Workspace";
+              if (chatLabelEl) chatLabelEl.textContent = s.sessionTitle || "Chat";
+              const wsLangKey = s.workspaceLang || "code";
+              if (wsIconEl && wsIconEl.getAttribute("data-lang") !== wsLangKey) {
+                wsIconEl.setAttribute("data-lang", wsLangKey);
+                wsIconEl.innerHTML = renderLangIcon("", wsLangKey, 14);
               }
 
-              const prevBtn = document.getElementById("previewBtn");
-              if (s.webPreviewProxyURL || s.activeDevPort) {
-                activePreviewPort = s.activeDevPort || activePreviewPort;
-                activePreviewPath = s.webPreviewProxyURL || ("/preview/" + activePreviewPort + "/");
-                prevBtn.classList.add("live-accent");
-                prevBtn.textContent = "Preview :" + activePreviewPort;
-              } else {
-                prevBtn.classList.remove("live-accent");
-                prevBtn.textContent = "Preview";
+              const cleanModelLabel = String(s.modelLabel || "Select Model").replace(/^(Subscription|Enterprise|API|BYOK|Local|Local LLM|Sovereign AI|ACP)\s*·\s*/i, "");
+              document.getElementById("modelPillText").textContent = cleanModelLabel;
+              const pillIconEl = document.getElementById("modelPillIcon");
+              const activeBrandId = s.providerId || "gemini";
+              if (pillIconEl && pillIconEl.getAttribute("data-pid") !== activeBrandId) {
+                pillIconEl.setAttribute("data-pid", activeBrandId);
+                pillIconEl.src = providerIconURL(activeBrandId);
               }
+
+              const portChip = document.getElementById("livePortChip");
+              const portText = document.getElementById("livePortText");
+              const navPrevBtn = document.getElementById("navPreviewBtn");
+              const toolsPrevSub = document.getElementById("toolsPreviewSub");
+              const livePort = parseInt(s.activeDevPort || 0, 10) || 0;
+              const hasLocalPrev = !!s.hasLocalPreview;
+
+              if (livePort > 0) {
+                activePreviewPort = livePort;
+                activePreviewPath = s.webPreviewProxyURL || ("/preview/" + livePort + "/");
+                if (portChip) portChip.style.display = "inline-flex";
+                if (navPrevBtn) navPrevBtn.style.display = "none";
+                if (portText) portText.textContent = ":" + livePort;
+                if (toolsPrevSub) toolsPrevSub.textContent = "Live on :" + livePort;
+              } else if (hasLocalPrev) {
+                activePreviewPort = 0;
+                activePreviewPath = s.webPreviewProxyURL || "/preview/local/";
+                if (portChip) portChip.style.display = "inline-flex";
+                if (navPrevBtn) navPrevBtn.style.display = "none";
+                if (portText) portText.textContent = "Local";
+                if (toolsPrevSub) toolsPrevSub.textContent = "Workspace HTML / Canvas";
+              } else {
+                activePreviewPort = 0;
+                activePreviewPath = "";
+                if (portChip) portChip.style.display = "none";
+                if (navPrevBtn) navPrevBtn.style.display = "inline-flex";
+                if (toolsPrevSub) toolsPrevSub.textContent = "Auto-detect & Run";
+              }
+
+              // Smart Harness Sync: auto-switch/reload open Preview modal when port or reloadSeq changes
+              const reloadSeq = (typeof s.previewReloadSeq === "number") ? s.previewReloadSeq : 0;
+              const prevModalOpen = (document.getElementById("previewModal").style.display === "flex");
+              if (livePort > 0 && livePort !== lastSeenActivePort) {
+                lastSeenActivePort = livePort;
+                if (prevModalOpen) {
+                  loadPreviewPort(livePort);
+                  refreshPreviewPorts(false);
+                }
+              } else if (livePort === 0 && lastSeenActivePort !== 0) {
+                lastSeenActivePort = 0;
+                if (prevModalOpen) {
+                  refreshPreviewPorts(true);
+                }
+              }
+              if (lastSeenReloadSeq >= 0 && reloadSeq !== lastSeenReloadSeq && prevModalOpen) {
+                if (livePort > 0 && currentPreviewPort !== livePort) {
+                  loadPreviewPort(livePort);
+                } else {
+                  reloadPreviewFrame();
+                }
+                refreshPreviewPorts(false);
+              }
+              lastSeenReloadSeq = reloadSeq;
 
               // Instant Mobile Notifications, Haptics & Subtle Audio Chime
               if (s.pendingTool && s.pendingTool.id) {
@@ -3981,33 +4462,8 @@ final class PhoneCompanionService: ObservableObject {
 
               // Workspaces list (ordered 100% like Mac IDE Projects -> Chats)
               availableWorkspaces = s.workspaces || [];
-              const wsSel = document.getElementById("workspaceSelect");
-              const wsKey = JSON.stringify(availableWorkspaces.map(w => ({ p: w.path, n: w.name, a: w.active, c: w.chatCount })));
-              if (wsSel.dataset.key !== wsKey) {
-                wsSel.dataset.key = wsKey;
-                wsSel.innerHTML = availableWorkspaces.map(w => {
-                  const n = w.chatCount || 0;
-                  const countText = n > 0 ? ` (${n} chat${n === 1 ? "" : "s"})` : "";
-                  return `<option value="${esc(w.path)}" ${w.active ? "selected" : ""}>${esc(w.name)}${countText}</option>`;
-                }).join("");
-              }
               if (document.getElementById("workspaceModal").style.display === "flex") {
                 renderWorkspaceList();
-              }
-
-              // Chats dropdown strictly for the active workspace
-              const sel = document.getElementById("sessionSelect");
-              const sessKey = JSON.stringify(s.sessions || []);
-              if (sel.dataset.key !== sessKey) {
-                sel.dataset.key = sessKey;
-                const sessions = s.sessions || [];
-                if (sessions.length === 0) {
-                  sel.innerHTML = `<option value="">New Chat</option>`;
-                } else {
-                  sel.innerHTML = sessions.map(item =>
-                    `<option value="${esc(item.id)}" ${item.active ? "selected" : ""}>${esc(item.name)}</option>`
-                  ).join("");
-                }
               }
 
               // Live Task Activity Bar & Composer State
@@ -4054,20 +4510,31 @@ final class PhoneCompanionService: ObservableObject {
               if (bannersEl.innerHTML !== bannersHTML) bannersEl.innerHTML = bannersHTML;
 
               // Chat Messages
-              const msgKey = JSON.stringify(s.messages || []) + "|" + isAgentLoading + "|" + (s.currentTool || "") + "|" + (s.workspacePath || "");
+              const msgKey = JSON.stringify(s.messages || []) + "|" + isAgentLoading + "|" + (s.currentTool || "") + "|" + (s.workspacePath || "") + "|" + activeBrandId + "|" + cleanModelLabel;
               if (msgKey !== lastRenderKey) {
                 lastRenderKey = msgKey;
                 const msgs = s.messages || [];
+                const brandIconSrc = providerIconURL(activeBrandId);
                 if (msgs.length === 0) {
-                  chatEl.innerHTML = `<div style="text-align:center;color:var(--secondary);margin-top:28vh;font-size:13px">MicroCode AI · ${esc(s.workspace)}<br><span style="color:var(--muted);font-size:12px">Synchronized with ${esc(s.macName)}</span></div>`;
+                  chatEl.innerHTML = `<div style="text-align:center;color:var(--secondary);margin-top:26vh;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:8px">
+                    <div style="display:inline-flex;align-items:center;gap:8px;padding:6px 11px;border-radius:9px;background:var(--surface);border:1px solid var(--border)">
+                      ${renderLangIcon("", wsLangKey, 16)}
+                      <span style="color:var(--text);font-weight:600">${esc(s.workspace)}</span>
+                      <span style="color:var(--muted)">·</span>
+                      <img src="${brandIconSrc}" width="15" height="15" alt="" style="width:15px;height:15px;border-radius:3.5px;object-fit:contain">
+                      <span style="font-size:12px">${esc(cleanModelLabel)}</span>
+                    </div>
+                    <span style="color:var(--muted);font-size:12px">Synchronized with ${esc(s.macName)}</span>
+                  </div>`;
                 } else {
                   chatEl.innerHTML = msgs.map((m, mIdx) => {
                     if (m.role === "user") {
                       const atts = (m.attachments && m.attachments.length)
-                        ? `<div class="user-att-row">` + m.attachments.map(a => `<span class="user-att-pill">📎 ${esc(a.name)}</span>`).join("") + `</div>`
+                        ? `<div class="user-att-row">` + m.attachments.map(a => `<span class="user-att-pill">${CLIP_INLINE_SVG} ${esc(a.name)}</span>`).join("") + `</div>`
                         : "";
                       return `<div class="turn-user">${atts}${esc(m.content)}</div>`;
                     }
+                    const brandHdr = `<div class="assistant-brand-hdr"><img src="${brandIconSrc}" width="14" height="14" alt=""><span>${esc(cleanModelLabel)}</span></div>`;
                     const tId = `thought-${m.id || mIdx}`;
                     const thoughtOpen = (m.thoughtStreaming || openDrawerIds.has(tId)) ? "open" : "";
                     const thoughtLabel = m.thoughtStreaming ? "Thinking…" : "Thought process";
@@ -4084,9 +4551,9 @@ final class PhoneCompanionService: ObservableObject {
 
                     const bodyHTML = m.content ? parseMessageContent(m.content) : "";
                     const ttsHTML = (m.content && !isAgentLoading)
-                      ? `<div class="turn-footer"><button class="tts-btn" data-raw="${encodeURIComponent(m.content.slice(0, 1800))}" onclick="speakAssistantTurn(this)">🔊 Read</button></div>`
+                      ? `<div class="turn-footer"><button class="tts-btn" data-raw="${encodeURIComponent(m.content.slice(0, 1800))}" onclick="speakAssistantTurn(this)">${SPEAKER_SVG}<span>Read</span></button></div>`
                       : "";
-                    return `<div class="turn-assistant">${thoughtHTML}${toolsHTML}${bodyHTML}${ttsHTML}</div>`;
+                    return `<div class="turn-assistant">${brandHdr}${thoughtHTML}${toolsHTML}${bodyHTML}${ttsHTML}</div>`;
                   }).join("");
                   if (autoScroll) chatEl.scrollTop = chatEl.scrollHeight;
                 }
@@ -4150,16 +4617,19 @@ final class PhoneCompanionService: ObservableObject {
           function renderWorkspaceList() {
             const q = (document.getElementById("workspaceSearch").value || "").toLowerCase().trim();
             const listEl = document.getElementById("workspaceList");
-            const folderSVG = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.146H13A1.5 1.5 0 0 1 14.5 4.914V12.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.3"/></svg>`;
             const chatSVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;color:var(--secondary)"><path d="M2.5 3h11A1.5 1.5 0 0 1 15 4.5v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5V12A1.5 1.5 0 0 1 1 10.5v-6A1.5 1.5 0 0 1 2.5 3Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
             let html = "";
             for (let i = 0; i < availableWorkspaces.length; i++) {
               const w = availableWorkspaces[i];
               const chats = w.chats || [];
-              const matchWs = !q || (w.name || "").toLowerCase().includes(q) || (w.path || "").toLowerCase().includes(q);
+              const matchWs = !q || (w.name || "").toLowerCase().includes(q) || (w.path || "").toLowerCase().includes(q) || (w.langLabel || "").toLowerCase().includes(q);
               const matchingChats = matchWs ? chats : chats.filter(c => (c.name || "").toLowerCase().includes(q));
               if (!matchWs && matchingChats.length === 0) continue;
 
+              const wsIconHTML = renderLangIcon("", w.lang || "code", 15);
+              const langBadge = (w.langLabel && w.langLabel !== "Workspace" && w.langLabel !== "Code")
+                ? `<span class="ws-group-count">${esc(w.langLabel)}</span>`
+                : "";
               const activeBadge = w.active ? `<span class="model-badge" style="color:var(--green)">Active</span>` : "";
               const chatCountNum = w.chatCount || chats.length || 0;
               const countBadge = `<span class="ws-group-count">${chatCountNum} chat${chatCountNum === 1 ? "" : "s"}</span>`;
@@ -4178,8 +4648,9 @@ final class PhoneCompanionService: ObservableObject {
               html += `<div class="ws-group-card ${w.active ? 'active' : ''}">
                 <div class="ws-group-header" data-widx="${i}" onclick="selectWorkspaceGroup(this)">
                   <div class="ws-group-left">
-                    ${folderSVG}
+                    ${wsIconHTML}
                     <span class="ws-group-name">${esc(w.name)}</span>
+                    ${langBadge}
                     ${activeBadge}
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
@@ -4271,12 +4742,13 @@ final class PhoneCompanionService: ObservableObject {
                 currentGroup = m.group;
                 html += `<div class="model-group-title">${esc(currentGroup)}</div>`;
               }
+              const iconSrc = providerIconURL(m.iconId || m.provider || "microcode");
+              const iconImg = `<img src="${iconSrc}" width="16" height="16" alt="" style="width:16px;height:16px;border-radius:4px;object-fit:contain;flex-shrink:0">`;
               const badge = m.badge ? `<span class="model-badge">${esc(m.badge)}</span>` : "";
-              const check = m.active ? "✓ " : "";
-              const provIcon = `/api/icon/provider?id=${encodeURIComponent(m.iconId || m.provider || "gemini")}&token=${encodeURIComponent(TOKEN)}`;
+              const check = m.active ? `<span style="color:var(--green);font-weight:700;font-size:12px;flex-shrink:0">✓</span>` : "";
               html += `<div class="model-option ${m.active ? 'active' : ''}" data-midx="${i}" onclick="selectModelByIndex(this)">
-                <span style="display:inline-flex;align-items:center;gap:8px;min-width:0"><img src="${provIcon}" width="15" height="15" style="border-radius:3px;flex-shrink:0;object-fit:contain" alt=""><span>${check}${esc(m.name)}</span></span>
-                ${badge}
+                <span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${iconImg}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.name)}</span></span>
+                <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0">${badge}${check}</span>
               </div>`;
             }
             listEl.innerHTML = html || `<div style="padding:14px;color:var(--secondary);font-size:12px">No matching models</div>`;
@@ -4572,9 +5044,10 @@ final class PhoneCompanionService: ObservableObject {
 
           function speakAssistantTurn(btn) {
             if (!("speechSynthesis" in window)) return;
+            const resetBtn = (b) => { b.classList.remove("speaking"); b.innerHTML = `${SPEAKER_SVG}<span>Read</span>`; };
             if (window.speechSynthesis.speaking) {
               window.speechSynthesis.cancel();
-              document.querySelectorAll(".tts-btn.speaking").forEach(b => { b.classList.remove("speaking"); b.textContent = "🔊 Read"; });
+              document.querySelectorAll(".tts-btn.speaking").forEach(resetBtn);
               return;
             }
             const raw = decodeURIComponent(btn.getAttribute("data-raw") || "").replace(/```[\s\S]*?```/g, " [code block] ").replace(/[#*`_]/g, "");
@@ -4582,15 +5055,22 @@ final class PhoneCompanionService: ObservableObject {
             const u = new SpeechSynthesisUtterance(raw);
             u.lang = /[\u0E00-\u0E7F]/.test(raw) ? "th-TH" : "en-US";
             btn.classList.add("speaking");
-            btn.textContent = "⏹ Stop";
-            u.onend = () => { btn.classList.remove("speaking"); btn.textContent = "🔊 Read"; };
-            u.onerror = () => { btn.classList.remove("speaking"); btn.textContent = "🔊 Read"; };
+            btn.innerHTML = `${STOP_SQ_SVG}<span>Stop</span>`;
+            u.onend = () => resetBtn(btn);
+            u.onerror = () => resetBtn(btn);
             window.speechSynthesis.speak(u);
           }
 
-          // Live Preview Reverse Proxy & 1-Tap Public Port Tunnel
+          // Live Preview Reverse Proxy, Auto-Port Detection & 1-Tap Run Preview
           let currentPreviewPort = 0;
+          let currentPreviewIsLocal = false;
           let currentPublicTunnelURL = "";
+
+          window.addEventListener("message", (ev) => {
+            if (ev && ev.data && ev.data.type === "mc_run_preview") {
+              startWorkspacePreview();
+            }
+          });
 
           async function openPreviewModal() {
             document.getElementById("previewModal").style.display = "flex";
@@ -4601,37 +5081,124 @@ final class PhoneCompanionService: ObservableObject {
             document.getElementById("previewModal").style.display = "none";
           }
 
+          async function startWorkspacePreview() {
+            const btn = document.getElementById("runPreviewBtn");
+            const txt = document.getElementById("runPreviewBtnText");
+            if (txt) txt.textContent = "Starting…";
+            if (btn) btn.style.opacity = "0.75";
+            try {
+              const res = await api("/api/preview/start", {});
+              const startedPort = parseInt((res && res.recommendedPort) || 0, 10) || 0;
+              if (startedPort > 0) {
+                loadPreviewPort(startedPort);
+              } else if (res && res.hasLocalStaticPreview) {
+                loadLocalPreview(res.localPreviewPath || "/preview/local/");
+              }
+              await refreshPreviewPorts(!startedPort);
+              setTimeout(() => { pollState(); refreshPreviewPorts(currentPreviewPort === 0); }, 1400);
+              setTimeout(() => { pollState(); refreshPreviewPorts(currentPreviewPort === 0); }, 3200);
+            } catch (_) {}
+            if (txt) txt.textContent = "Run Preview";
+            if (btn) btn.style.opacity = "1";
+          }
+
           async function refreshPreviewPorts(loadDefault) {
             try {
               const res = await api("/api/preview/ports");
               const ports = (res && res.ports) || [];
-              if (loadDefault && !currentPreviewPort) {
-                currentPreviewPort = activePreviewPort || (ports[0] && ports[0].port) || 3000;
+              const recPort = parseInt((res && res.recommendedPort) || 0, 10) || 0;
+              const hasLocal = !!(res && res.hasLocalStaticPreview);
+              const localPath = (res && res.localPreviewPath) || "/preview/local/";
+
+              // Evict dead currentPreviewPort if it is no longer among live ports (unless user typed custom port manually)
+              const liveSet = new Set(ports.map(p => p.port));
+              if (loadDefault) {
+                if (recPort > 0) {
+                  currentPreviewPort = recPort;
+                  currentPreviewIsLocal = false;
+                } else if (activePreviewPort > 0 && liveSet.has(activePreviewPort)) {
+                  currentPreviewPort = activePreviewPort;
+                  currentPreviewIsLocal = false;
+                } else if (ports.length > 0) {
+                  currentPreviewPort = ports[0].port;
+                  currentPreviewIsLocal = false;
+                } else {
+                  currentPreviewPort = 0;
+                  currentPreviewIsLocal = hasLocal;
+                }
               }
-              document.getElementById("customPreviewPort").value = currentPreviewPort || "";
+
+              document.getElementById("customPreviewPort").value = currentPreviewPort > 0 ? currentPreviewPort : "";
+
+              // Render live detected port pills
+              const listEl = document.getElementById("detectedPortsList");
+              if (listEl) {
+                let pillsHTML = ports.map(p => {
+                  const isAct = (!currentPreviewIsLocal && p.port === currentPreviewPort);
+                  const procLabel = p.name ? ` · ${esc(p.name)}` : "";
+                  const dot = p.isWorkspace
+                    ? `<span style="width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0"></span>`
+                    : `<span style="width:5px;height:5px;border-radius:50%;background:var(--secondary);flex-shrink:0"></span>`;
+                  return `<button class="port-pill ${isAct ? 'active' : ''}" onclick="loadPreviewPort(${p.port});refreshPreviewPorts(false)">${dot}<span>:${p.port}${procLabel}</span></button>`;
+                }).join("");
+                if (hasLocal) {
+                  pillsHTML += `<button class="port-pill ${currentPreviewIsLocal ? 'active' : ''}" onclick="loadLocalPreview('${esc(localPath)}');refreshPreviewPorts(false)"><span>Local</span></button>`;
+                }
+                if (!pillsHTML) {
+                  pillsHTML = `<span style="font-size:11px;color:var(--muted);font-family:var(--mono)">No active port detected</span>`;
+                }
+                listEl.innerHTML = pillsHTML;
+              }
+
               const matched = ports.find(p => p.port === currentPreviewPort);
               currentPublicTunnelURL = (matched && matched.publicTunnelURL) || "";
               const banner = document.getElementById("publicTunnelBanner");
               const tBtn = document.getElementById("publicPortTunnelBtn");
+              if (tBtn) {
+                tBtn.style.display = currentPreviewPort > 0 ? "inline-flex" : "none";
+              }
               if (currentPublicTunnelURL) {
                 banner.style.display = "flex";
                 banner.innerHTML = `<a href="${esc(currentPublicTunnelURL)}" target="_blank" style="color:#86efac;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(currentPublicTunnelURL)}</a>
                   <button class="tb-btn" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(currentPublicTunnelURL)}')">Copy</button>`;
-                tBtn.textContent = "⏹ Stop Public Link";
+                if (tBtn) tBtn.textContent = "Stop Public Link";
               } else {
                 banner.style.display = "none";
-                tBtn.textContent = "🌐 Public HTTPS Link";
+                if (tBtn) tBtn.textContent = "Public HTTPS";
               }
-              if (loadDefault && currentPreviewPort) {
-                loadPreviewPort(currentPreviewPort);
+
+              if (loadDefault) {
+                if (currentPreviewPort > 0) {
+                  loadPreviewPort(currentPreviewPort);
+                } else {
+                  loadLocalPreview(localPath);
+                }
               }
             } catch (_) {}
           }
 
           function loadPreviewPort(port) {
             currentPreviewPort = port;
-            const proxyUrl = `/preview/${port}/?token=${encodeURIComponent(TOKEN)}`;
+            currentPreviewIsLocal = false;
+            document.getElementById("customPreviewPort").value = port || "";
+            const subPath = (activePreviewPort === port && activePreviewPath && activePreviewPath.startsWith(`/preview/${port}/`))
+              ? activePreviewPath
+              : `/preview/${port}/`;
+            const sep = subPath.includes("?") ? "&" : "?";
+            const proxyUrl = `${subPath}${sep}token=${encodeURIComponent(TOKEN)}`;
             document.getElementById("previewTitle").textContent = `Live Preview · :${port}`;
+            document.getElementById("previewExternalLink").href = proxyUrl;
+            document.getElementById("previewFrame").src = proxyUrl;
+          }
+
+          function loadLocalPreview(localPath) {
+            currentPreviewPort = 0;
+            currentPreviewIsLocal = true;
+            document.getElementById("customPreviewPort").value = "";
+            const base = (localPath && localPath.startsWith("/preview/")) ? localPath : "/preview/local/";
+            const sep = base.includes("?") ? "&" : "?";
+            const proxyUrl = `${base}${sep}token=${encodeURIComponent(TOKEN)}`;
+            document.getElementById("previewTitle").textContent = "Live Preview · Workspace";
             document.getElementById("previewExternalLink").href = proxyUrl;
             document.getElementById("previewFrame").src = proxyUrl;
           }
@@ -4646,11 +5213,16 @@ final class PhoneCompanionService: ObservableObject {
 
           function reloadPreviewFrame() {
             const f = document.getElementById("previewFrame");
-            if (f && f.src && f.src !== "about:blank") f.src = f.src;
+            if (f && f.src && f.src !== "about:blank") {
+              const clean = f.src.replace(/([?&])_r=\d+/, "");
+              const sep = clean.includes("?") ? "&" : "?";
+              f.src = clean + sep + "_r=" + Date.now();
+            }
           }
 
           async function togglePublicPortTunnel() {
-            const p = currentPreviewPort || parseInt(document.getElementById("customPreviewPort").value, 10) || 3000;
+            const p = currentPreviewPort || parseInt(document.getElementById("customPreviewPort").value, 10);
+            if (!p || p < 1 || p > 65535) return;
             const tBtn = document.getElementById("publicPortTunnelBtn");
             tBtn.textContent = currentPublicTunnelURL ? "Stopping…" : "Starting HTTPS Tunnel…";
             try {
@@ -4682,7 +5254,8 @@ final class PhoneCompanionService: ObservableObject {
               const syncInfo = (res.ahead || res.behind) ? ` · ↑${res.ahead || 0} ↓${res.behind || 0}` : "";
               document.getElementById("gitHeaderTitle").textContent = `Git · ${res.branch}${syncInfo}`;
               const files = res.files || [];
-              document.getElementById("gitBtn").textContent = files.length ? `Git (${files.length})` : "Git";
+              const gitSubEl = document.getElementById("toolsGitSub");
+              if (gitSubEl) gitSubEl.textContent = files.length ? `${files.length} changed · ${res.branch}` : `${res.branch} · clean`;
               if (!files.length) {
                 listEl.innerHTML = `<div style="padding:16px;text-align:center;color:var(--secondary);font-size:12.5px">Working tree clean ✓</div>`;
                 return;
@@ -4694,6 +5267,7 @@ final class PhoneCompanionService: ObservableObject {
                   <div class="git-file-row">
                     <div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1;cursor:pointer" data-gpath="${esc(f.path)}" data-gstaged="${f.staged ? '1' : '0'}" data-gidx="${idx}" onclick="toggleGitFileDiff(this)">
                       <span class="git-status-badge ${esc(f.status)}">${esc(f.status)}</span>
+                      ${renderLangIcon(f.path, "", 14)}
                       <span style="font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.path)}</span>
                     </div>
                     <div style="display:flex;gap:4px;flex-shrink:0">
@@ -4747,7 +5321,7 @@ final class PhoneCompanionService: ObservableObject {
                 showGitBanner(res.error, true);
               }
             } catch (_) {}
-            btn.textContent = "✨ AI Msg";
+            btn.textContent = "Generate";
           }
 
           function showGitBanner(msg, isErr) {
@@ -4804,6 +5378,8 @@ final class PhoneCompanionService: ObservableObject {
               const res = await api("/api/terminal/exec", { command: cmd });
               const hdr = `$ ${cmd}  [exit ${res.exitCode ?? "?"}, ${res.durationMs ?? 0}ms]\n\n`;
               out.textContent = hdr + (res.output || res.error || "");
+              pollState();
+              setTimeout(pollState, 1200);
             } catch (_) {
               out.textContent = `$ ${cmd}\nError reaching Mac Companion.`;
             }

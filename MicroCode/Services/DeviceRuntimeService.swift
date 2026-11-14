@@ -355,9 +355,34 @@ final class DeviceRuntimeService: ObservableObject {
             }
         }
     }
-    @Published var lastDetectedDevServerPort: Int? = 3000
-    @Published var targetWebURL: URL? = URL(string: "http://localhost:3000")
-    @Published var webRefreshTrigger: Bool = false
+    @Published var lastDetectedDevServerPort: Int? = nil {
+        didSet {
+            if oldValue != lastDetectedDevServerPort {
+                previewReloadSeq &+= 1
+                PhoneCompanionService.shared.broadcastSSEStateNow()
+            }
+        }
+    }
+    @Published var targetWebURL: URL? = nil {
+        didSet {
+            if let port = targetWebURL?.port, (1...65535).contains(port) {
+                if lastDetectedDevServerPort != port {
+                    lastDetectedDevServerPort = port
+                }
+            }
+            if oldValue != targetWebURL {
+                previewReloadSeq &+= 1
+                PhoneCompanionService.shared.broadcastSSEStateNow()
+            }
+        }
+    }
+    @Published var webRefreshTrigger: Bool = false {
+        didSet {
+            previewReloadSeq &+= 1
+            PhoneCompanionService.shared.broadcastSSEStateNow()
+        }
+    }
+    @Published var previewReloadSeq: Int = 0
     @Published var targetViewport: String = "responsive"
     @Published var showingEmbeddedDeviceDock = false {
         didSet {

@@ -338,8 +338,8 @@ struct EmbeddedWebAppPreviewView: View {
     var canvasColor: Color = Color(nsColor: .windowBackgroundColor)
     var onHide: (() -> Void)? = nil
     
-    @State private var urlString: String = "http://localhost:3000"
-    @State private var currentURL: URL? = URL(string: "http://localhost:3000")
+    @State private var urlString: String = ""
+    @State private var currentURL: URL? = nil
     @State private var pageTitle: String = "WebApp Preview"
     @State private var isLoading: Bool = false
     @State private var canGoBack: Bool = false
@@ -364,7 +364,7 @@ struct EmbeddedWebAppPreviewView: View {
     @ObservedObject private var portTunnels = DevPortTunnelService.shared
     @State private var inspectInstructionText: String = ""
     @State private var showPortRadarPopover: Bool = false
-    @State private var customTunnelPortText: String = "3000"
+    @State private var customTunnelPortText: String = ""
     @State private var qrPreviewPort: Int? = nil
     @State private var copiedTunnelPort: Int? = nil
     @State private var inspectPopupDragOffset: CGSize = .zero
@@ -414,8 +414,8 @@ struct EmbeddedWebAppPreviewView: View {
                 handleTargetViewportChange(newVP)
             }
             .onChange(of: runtime.lastDetectedDevServerPort) { newPort in
-                if let port = newPort, runtime.targetWebURL == nil, currentURL?.isFileURL != true {
-                    sanitizeAndSetURL("http://localhost:\(port)")
+                if let port = newPort, (currentURL == nil || (currentURL?.isFileURL != true && currentURL?.port != port)) {
+                    sanitizeAndSetURL("http://127.0.0.1:\(port)")
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
@@ -423,6 +423,7 @@ struct EmbeddedWebAppPreviewView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeEditorFolderOpened"))) { _ in
                 runtime.targetWebURL = nil
+                runtime.lastDetectedDevServerPort = nil
                 detectLocalWorkspaceIndex()
                 resolveInitialURL()
                 browserAutomation.scanActivePorts()
@@ -432,17 +433,13 @@ struct EmbeddedWebAppPreviewView: View {
 
     private func handleActivePortProcessesChange(_ processes: [ActiveLocalPortProcess]) {
         guard !processes.isEmpty else { return }
-        let preferredPorts = [5173, 5174, 4173, 3000, 8080, 4200, 4321, 8000]
         let activePorts = Set(processes.map(\.port))
         let currentPort = currentURL?.port
         let isDeadLocalhostPort = (currentPort != nil && !activePorts.contains(currentPort!))
         let isBundlerFileURL = (currentURL?.isFileURL == true && workspaceRequiresDevServer())
-        if isDeadLocalhostPort || isBundlerFileURL || urlString.isEmpty {
-            let wsPort = detectPreferredWorkspacePort()
-            if activePorts.contains(wsPort) {
-                sanitizeAndSetURL("http://localhost:\(wsPort)")
-            } else if let match = preferredPorts.first(where: { activePorts.contains($0) }) ?? processes.first?.port {
-                sanitizeAndSetURL("http://localhost:\(match)")
+        if isDeadLocalhostPort || isBundlerFileURL || urlString.isEmpty || currentURL == nil {
+            if let bestPort = browserAutomation.bestActivePort(forWorkspace: appState.workspaceFolder?.path, in: processes) {
+                sanitizeAndSetURL("http://127.0.0.1:\(bestPort)")
             }
         }
     }
@@ -2410,32 +2407,7 @@ struct EmbeddedWebAppPreviewView: View {
     }
 
     private func detectPreferredWorkspacePort() -> Int {
-        guard let folder = appState.workspaceFolder else { return 3000 }
-        let fm = FileManager.default
-        for viteCfg in ["vite.config.ts", "vite.config.js", "vite.config.mjs", "svelte.config.js"] {
-            if fm.fileExists(atPath: folder.appendingPathComponent(viteCfg).path) {
-                return 5173
-            }
-        }
-        if fm.fileExists(atPath: folder.appendingPathComponent("angular.json").path) {
-            return 4200
-        }
-        if fm.fileExists(atPath: folder.appendingPathComponent("astro.config.mjs").path) {
-            return 4321
-        }
-        let pkgURL = folder.appendingPathComponent("package.json")
-        if let content = try? String(contentsOf: pkgURL, encoding: .utf8).lowercased() {
-            if content.contains("\"vite\"") || content.contains("vite ") {
-                return 5173
-            }
-            if content.contains("\"astro\"") {
-                return 4321
-            }
-            if content.contains("\"@angular/core\"") {
-                return 4200
-            }
-        }
-        return 3000
+        IDEBrowserAutomationService.detectWorkspaceConfiguredPort(workspacePath: appState.workspaceFolder?.path) ?? 5173
     }
 
     private func detectLocalWorkspaceIndex() {
@@ -2475,20 +2447,15 @@ struct EmbeddedWebAppPreviewView: View {
             }
         }
         if let detectedPort = runtime.lastDetectedDevServerPort {
-            sanitizeAndSetURL("http://localhost:\(detectedPort)")
-        } else if !browserAutomation.activePortProcesses.isEmpty {
-            let preferredPorts = [5173, 5174, 4173, 3000, 8080, 4200, 4321, 8000]
-            let activePorts = Set(browserAutomation.activePortProcesses.map(\.port))
-            let wsPort = detectPreferredWorkspacePort()
-            let chosen = activePorts.contains(wsPort)
-                ? wsPort
-                : (preferredPorts.first(where: { activePorts.contains($0) }) ?? browserAutomation.activePortProcesses[0].port)
-            sanitizeAndSetURL("http://localhost:\(chosen)")
+            sanitizeAndSetURL("http://127.0.0.1:\(detectedPort)")
+        } else if let bestPort = browserAutomation.bestActivePort(forWorkspace: appState.workspaceFolder?.path) {
+            sanitizeAndSetURL("http://127.0.0.1:\(bestPort)")
         } else if let localIndex = localWorkspaceIndexURL {
             sanitizeAndSetURL(localIndex.absoluteString)
         } else {
-            let defaultPort = detectPreferredWorkspacePort()
-            sanitizeAndSetURL("http://localhost:\(defaultPort)")
+            // Do NOT inject a fake dead localhost:3000 URL when no server is running yet.
+            urlString = ""
+            currentURL = nil
         }
     }
     
@@ -2498,6 +2465,7 @@ struct EmbeddedWebAppPreviewView: View {
     
     private func sanitizeAndSetURL(_ raw: String) {
         var str = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !str.isEmpty else { return }
         while str.hasPrefix("http://file://") {
             str = String(str.dropFirst(7))
         }

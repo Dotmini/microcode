@@ -672,6 +672,10 @@ public final class EnterpriseAIAuthService: ObservableObject {
 
     /// Applies Enterprise governance headers (Zero Data Retention, Org ID, Product, Custom Headers) to outgoing requests
     public func applyEnterpriseHeaders(to request: inout URLRequest) {
+        if let host = request.url?.host?.lowercased(),
+           host == "platform.dotmini.net" || host == "api.dotmini.net" || host == "microcode.dotmini.net" || host == "microai.dotmini.net" {
+            request.setValue(AppEdition.isStandaloneAI ? "microcode-ai" : "microcode", forHTTPHeaderField: "X-Dotmini-Client")
+        }
         guard isEnterpriseActive else { return }
         request.setValue("true", forHTTPHeaderField: "X-Dotmini-Enterprise")
         if zeroDataRetention {

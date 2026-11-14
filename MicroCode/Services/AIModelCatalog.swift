@@ -97,8 +97,11 @@ final class AIModelCatalog: ObservableObject {
             result.append(m)
         }
         if cloudGatewayModels.isEmpty {
-            // Only models the live Dotmini gateway serves (api.dotmini.net/v1/models); the live refresh adds anything new.
+            // Include live frontier models including Gemini 4 Hydrogen & Orchestra and DeepSeek V4 Pro
             let defaultCloudFrontier: [AIModelDefinition] = [
+                AIModelDefinition(id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen (Flagship Reasoning)", provider: "gemini", badge: "FLAGSHIP"),
+                AIModelDefinition(id: "gemini-4-orchestra", name: "Gemini 4 Orchestra (Multi-Modal Orchestrator)", provider: "gemini", badge: "FLAGSHIP"),
+                AIModelDefinition(id: "gemini-4-argon", name: "Gemini 4 Argon (Pro / Ultra)", provider: "gemini", badge: "FLAGSHIP"),
                 AIModelDefinition(id: "deepseek-flash", name: "DeepSeek Flash", provider: "deepseek", badge: "FAST"),
                 AIModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", badge: "CLOUD")
             ]
@@ -1898,7 +1901,10 @@ final class AIModelCatalog: ObservableObject {
 
     static let fallbackProviders: [AIProviderDefinition] = [
         AIProviderDefinition(id: "gemini", name: "Google Gemini", icon: "sparkles", endpoint: "generativelanguage.googleapis.com", models: [
+        AIModelDefinition(id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen (Flagship Reasoning)", provider: "gemini", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gemini-4-orchestra", name: "Gemini 4 Orchestra (Multi-Modal Orchestrator)", provider: "gemini", badge: "FLAGSHIP"),
             AIModelDefinition(id: "gemini-4-argon", name: "Gemini 4 Argon (Pro / Ultra)", provider: "gemini", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gemini-4-argon-extra", name: "Gemini 4 Argon (Extra Thinking)", provider: "gemini", badge: "THINKING"),
             AIModelDefinition(id: "gemini-4-argon-high", name: "Gemini 4 Argon (High Thinking)", provider: "gemini", badge: "THINKING"),
             AIModelDefinition(id: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium Thinking)", provider: "gemini", badge: "THINKING"),
             AIModelDefinition(id: "gemini-4-argon-low", name: "Gemini 4 Argon (Low Thinking)", provider: "gemini", badge: "FAST"),
@@ -1956,12 +1962,12 @@ final class AIModelCatalog: ObservableObject {
             AIModelDefinition(id: "deepseek-r1:32b", name: "DeepSeek R1 32B (Tunnel)", provider: "custom", badge: "TUNNEL"),
             AIModelDefinition(id: "llama3.3:70b", name: "Llama 3.3 70B (Tunnel)", provider: "custom", badge: "TUNNEL")
         ]),
-        AIProviderDefinition(id: "deepseek", name: "DeepSeek", icon: "water.waves", endpoint: "api.deepseek.com", models: [
-            AIModelDefinition(id: "deepseek-flash", name: "DeepSeek V4.1 Flash", provider: "deepseek", badge: "FAST"),
-            AIModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", badge: "FLAGSHIP"),
-            AIModelDefinition(id: "deepseek-v3.2", name: "DeepSeek V3.2", provider: "deepseek", badge: "CHAT"),
-            AIModelDefinition(id: "deepseek-chat", name: "DeepSeek V3.2 Chat", provider: "deepseek", badge: "CHAT"),
-            AIModelDefinition(id: "deepseek-reasoner", name: "DeepSeek R1 Reasoner", provider: "deepseek", badge: "REASONING")
+        AIProviderDefinition(id: "deepseek", name: "DeepSeek (Dotmini Direct Bridge - Free Lifetime)", icon: "water.waves", endpoint: "api.deepseek.com", models: [
+            AIModelDefinition(id: "deepseek-flash", name: "DeepSeek V4.1 Flash", provider: "deepseek", badge: "FREE"),
+            AIModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", badge: "FREE"),
+            AIModelDefinition(id: "deepseek-v3.2", name: "DeepSeek V3.2", provider: "deepseek", badge: "FREE"),
+            AIModelDefinition(id: "deepseek-chat", name: "DeepSeek V3.2 Chat", provider: "deepseek", badge: "FREE"),
+            AIModelDefinition(id: "deepseek-reasoner", name: "DeepSeek R1 Reasoner", provider: "deepseek", badge: "FREE")
         ]),
         AIProviderDefinition(id: "omni", name: "Dotmini Sovereign AI", icon: "sparkles", endpoint: "api.dotmini.net/v1", models: [
             AIModelDefinition(id: "omni-o1x-pro", name: "Omni O1X Pro (3B MoE)", provider: "omni", badge: "SOVEREIGN"),

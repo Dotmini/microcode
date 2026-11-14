@@ -73,6 +73,7 @@ struct ProjectToolbar: View {
                 }
                 .buttonStyle(.bordered)
                 .help("Run on a real Apple Simulator or Android Emulator")
+                .hidden() // Hidden to keep top toolbar uncluttered when mobile connect is active
             }
             
             Spacer()

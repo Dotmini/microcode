@@ -55,7 +55,32 @@ struct AgentExecutionEvidence {
         name.replacingOccurrences(of: "mcp__local__", with: "")
     }
 
-    static func taskRequiresMutation(_ task: String) -> Bool {
+    static func workspaceHasProjectFiles(_ workspaceRoot: String?) -> Bool {
+        guard let root = workspaceRoot, !root.isEmpty else { return false }
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: root) else { return false }
+        let ignoredTopLevel: Set<String> = [
+            ".git", ".microcode", ".DS_Store", "task.md", "agent.md", ".cursor", ".vscode", ".claude"
+        ]
+        return items.contains { !ignoredTopLevel.contains($0) && !$0.hasPrefix("._") }
+    }
+
+    static func taskExplicitlyRequestsNewProjectScaffold(_ task: String) -> Bool {
+        let lower = task.lowercased()
+        let scaffoldPhrases = [
+            "สร้างโปรเจกต์", "สร้างเว็บ", "สร้างหน้าเว็บ", "สร้างแอป", "สร้างไฟล์", "เขียนโค้ด", "เขียนโปรแกรม",
+            "ทำเว็บ", "ทำหน้าเว็บ", "ทำแอป", "ทำระบบ", "ขึ้นโปรเจกต์",
+            "create a ", "create new ", "build a ", "scaffold", "initialize project", "init project",
+            "generate index.html", "write index.html", "new file", "implement a "
+        ]
+        return scaffoldPhrases.contains(where: lower.contains)
+    }
+
+    static func taskRequiresMutation(
+        _ task: String,
+        workspaceRoot: String? = nil,
+        hasMediaAttachments: Bool = false
+    ) -> Bool {
         var value = task.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         // Strip [PLAN MODE] boilerplate ("do not edit or modify any files until the user explicitly clicks Approve")
         // so we evaluate the actual user objective rather than the pre-approval safety rule.
@@ -64,11 +89,47 @@ struct AgentExecutionEvidence {
         let readOnly = ["read-only", "read only", "do not modify", "don't modify", "do not edit", "don't edit",
                         "do not change", "don't change", "plan only", "ห้ามแก้", "อย่าแก้", "ไม่ต้องแก้", "ตรวจอย่างเดียว", "วางแผนอย่างเดียว"]
         if readOnly.contains(where: value.contains) { return false }
-        let pureQuestionOrReview = ["ทำไม", "เพราะอะไร", "คืออะไร", "อธิบาย", "เล่าให้ฟัง", "วิเคราะห์", "รีวิว", "explain", "why ", "what is", "what does", "how does"]
-        let explicitAction = ["ช่วยแก้", "เริ่มปรับ", "เริ่มเปลี่ยน", "แก้ไข", "สร้างไฟล์", "เขียนโค้ด", "implement", "refactor", "fix ", "patch "]
+
+        // MCP / Skill / Capability / Setup queries must NEVER force workspace source-file mutations
+        let mcpOrCapabilityIntent = [
+            "เชื่อม ", "เชื่อมต่อ", "ต่อ mcp", "canva mcp", "mcp server", "คุณทำไรได้", "ทำไรได้บ้าง", "ทำอะไรได้บ้าง",
+            "connect mcp", "setup mcp", "install mcp", "what can you do", "list skills", "list tools"
+        ]
+        let explicitCodeTarget = [
+            ".swift", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".go", ".html", ".css", ".vue", ".dart",
+            "แก้ไฟล์", "สร้างไฟล์", "เขียนโค้ด", "ในโค้ด", "ในโปรเจกต์"
+        ]
+        if mcpOrCapabilityIntent.contains(where: value.contains) && !explicitCodeTarget.contains(where: value.contains) {
+            return false
+        }
+
+        let pureQuestionOrReview = [
+            "ทำไม", "เพราะอะไร", "คืออะไร", "อธิบาย", "เล่าให้ฟัง", "วิเคราะห์", "รีวิว", "ช่วยดู", "เป็นไง", "ดีไหม",
+            "research", "explain", "why ", "what is", "what does", "how does", "review ", "critique"
+        ]
+        let explicitAction = ["ช่วยแก้โค้ด", "เริ่มปรับโค้ด", "แก้ไขไฟล์", "สร้างไฟล์", "เขียนโค้ด", "implement", "refactor", "fix bug", "patch "]
         if pureQuestionOrReview.contains(where: value.contains) && !explicitAction.contains(where: value.contains) {
             return false
         }
+
+        // Multimodal image/design attachment guard: short vague prompts like "ปรับปรุงหน่อย" with an attached screenshot
+        // in an empty workspace or without naming any code file/scaffold target are visual critique/MCP tasks, NOT blind file generation!
+        if hasMediaAttachments && value.count < 80 && !explicitCodeTarget.contains(where: value.contains) && !taskExplicitlyRequestsNewProjectScaffold(value) {
+            if let ws = workspaceRoot, !workspaceHasProjectFiles(ws) {
+                return false
+            }
+            let vagueVisualPrompts = ["ปรับปรุงหน่อย", "ปรับปรุงหน่อน", "ปรับหน่อย", "แก้หน่อย", "ดูหน่อย", "improve this", "improve it", "feedback"]
+            if vagueVisualPrompts.contains(where: { value == $0 || value.hasPrefix($0) }) && !workspaceHasProjectFiles(workspaceRoot) {
+                return false
+            }
+        }
+
+        // Empty workspace guard: never force source file edits when the workspace has 0 project files
+        // unless the user explicitly asked to create/scaffold a new project, app, webpage, or file.
+        if let ws = workspaceRoot, !ws.isEmpty, !workspaceHasProjectFiles(ws) {
+            return taskExplicitlyRequestsNewProjectScaffold(value) || explicitCodeTarget.contains(where: value.contains)
+        }
+
         return ["fix", "implement", "add", "create", "edit", "modify", "change", "redesign", "refactor",
                 "rewrite", "patch", "remove", "delete", "write", "update", "convert", "transform",
                 "แก้", "ทำให้", "เพิ่ม", "สร้าง", "เขียน", "เปลี่ยน", "ออกแบบใหม่", "ลบ", "อัปเดต",

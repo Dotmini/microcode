@@ -1731,7 +1731,8 @@ struct PreviewControlTool: AgentTool {
                 }
                 let visible = runtime.showingEmbeddedDeviceDock ? "Visible" : "Hidden"
                 let currentMode = runtime.embeddedDockMode.rawValue
-                let currentURL = runtime.targetWebURL?.absoluteString ?? "http://localhost:3000"
+                let fallbackPort = IDEBrowserAutomationService.shared.bestActivePort()
+                let currentURL = runtime.targetWebURL?.absoluteString ?? (fallbackPort.map { "http://127.0.0.1:\($0)" } ?? "None (no server active)")
                 let portsInfo = activePorts.isEmpty ? "None detected yet" : activePorts.joined(separator: ", ")
                 return "Live Preview Dock: \(visible) | Mode: \(currentMode) | URL: \(currentURL) | Active Ports: [\(portsInfo)] | Viewport: \(runtime.targetViewport)\(livePreviewDiagnosticsSuffix())"
 
@@ -2455,6 +2456,8 @@ struct FileReadTool: AgentTool {
             "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp", "tiff", "tif", "icns"
         ]
         if richContainerExtensions.contains(ext) || lowerName.hasSuffix(".tar.gz") || lowerName.hasSuffix(".tar.bz2") || lowerName.hasSuffix(".tar.xz") {
+            let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp", "tiff", "tif", "icns"]
+            let shouldForceOCR = forceOCR || imageExts.contains(ext)
             return await UniversalAttachmentEngine.shared.readAttachmentSlice(
                 path: url.path,
                 pageStart: pageStart,
@@ -2463,7 +2466,7 @@ struct FileReadTool: AgentTool {
                 startLine: startParam,
                 endLine: endParam,
                 query: query,
-                forceOCR: forceOCR
+                forceOCR: shouldForceOCR
             )
         }
         
@@ -4180,13 +4183,48 @@ struct ShellCommandTool: AgentTool {
         let pid = process.processIdentifier
         DevServerRegistry.shared.register(process: process, command: command, workspacePath: targetCwd)
         
-        stdoutHandle.readabilityHandler = nil
-        stderrHandle.readabilityHandler = nil
+        // Keep draining stdout/stderr asynchronously so long-running dev servers never block on a full 64KB pipe,
+        // and auto-sync delayed port readiness banners (e.g. Next.js / Go / Cargo / Flutter) straight to Preview & Mobile Connect!
+        stdoutHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let str = String(data: chunk, encoding: .utf8),
+               IDEBrowserAutomationService.extractLiveServerURL(from: str) != nil {
+                Task { @MainActor in
+                    IDEBrowserAutomationService.shared.notifyHarnessServerOutput(str, cwd: targetCwd)
+                }
+            }
+        }
+        stderrHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let str = String(data: chunk, encoding: .utf8),
+               IDEBrowserAutomationService.extractLiveServerURL(from: str) != nil {
+                Task { @MainActor in
+                    IDEBrowserAutomationService.shared.notifyHarnessServerOutput(str, cwd: targetCwd)
+                }
+            }
+        }
         
         let cleanBanner = collector.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        await MainActor.run {
+            IDEBrowserAutomationService.shared.notifyHarnessServerOutput(cleanBanner, cwd: targetCwd)
+        }
+        let detectedHint: String = {
+            if let u = IDEBrowserAutomationService.extractLiveServerURL(from: cleanBanner) {
+                return "\nDetected Live Preview URL: \(u.absoluteString)"
+            }
+            return ""
+        }()
         let resultMsg = """
         ✅ [Process running in background (PID: \(pid))]
-        \(cleanBanner.isEmpty ? "Process active." : cleanBanner)
+        \(cleanBanner.isEmpty ? "Process active." : cleanBanner)\(detectedHint)
         
         The application/server has been launched in the background and is active.
         """
@@ -4330,6 +4368,18 @@ struct ShellCommandTool: AgentTool {
             throw ToolBoxError.executionFailed(boundedOutput.isEmpty
                 ? "Command exited with status \(exitCode)."
                 : boundedOutput)
+        }
+        let lowerCmd = command.lowercased()
+        if IDEBrowserAutomationService.extractLiveServerURL(from: boundedOutput) != nil
+            || lowerCmd.contains("nohup ")
+            || lowerCmd.contains("pm2 ")
+            || lowerCmd.contains("docker ")
+            || lowerCmd.contains("kill ")
+            || lowerCmd.contains("pkill ")
+            || lowerCmd.contains("lsof ") {
+            await MainActor.run {
+                IDEBrowserAutomationService.shared.notifyHarnessServerOutput(boundedOutput, cwd: targetCwd)
+            }
         }
         return boundedOutput
     }
@@ -6146,10 +6196,14 @@ struct SkillEngineTool: AgentTool {
 
 struct MCPOrchestratorTool: AgentTool {
     let name = "mcp_orchestrator"
-    let description = "Hyper-Mesh MCP Engine 2.0: Inspect connected external MCP servers and telemetry ('status'), search all external MCP tools across 8 IDE ecosystems ('search_tools'), restart a server ('restart'), or autonomously synthesize & hot-mount a brand-new Python JSON-RPC 2.0 MCP server on the fly ('synthesize')."
+    let description = "Hyper-Mesh MCP Engine 2.0: Discover & inspect external MCP servers across MicroCode, Antigravity plugins, Claude, Cursor & Codex ('status' / 'discover'), connect or authenticate a remote HTTP or local stdio MCP server ('connect'), search external MCP tools ('search_tools'), restart a server ('restart'), or synthesize a custom Python MCP server ('synthesize')."
     let parameters = [
-        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'search_tools', 'restart', or 'synthesize'", required: true),
-        ToolParameter(name: "server_name", type: "string", description: "Target or new MCP server name", required: false),
+        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'discover', 'connect', 'search_tools', 'restart', or 'synthesize'", required: true),
+        ToolParameter(name: "server_name", type: "string", description: "Target or new MCP server name (e.g. 'canva', 'github', 'figma')", required: false),
+        ToolParameter(name: "url", type: "string", description: "Remote Streamable HTTP MCP URL for 'connect' (e.g. 'https://mcp.canva.com/mcp')", required: false),
+        ToolParameter(name: "command", type: "string", description: "Local executable command for stdio 'connect' (e.g. 'npx')", required: false),
+        ToolParameter(name: "args", type: "string", description: "Space-separated arguments for stdio 'connect'", required: false),
+        ToolParameter(name: "bearer_token", type: "string", description: "Optional OAuth/Bearer access token for 'connect' on authenticated HTTP MCP endpoints", required: false),
         ToolParameter(name: "query", type: "string", description: "Keyword query for 'search_tools'", required: false),
         ToolParameter(name: "description", type: "string", description: "Description of the new MCP server (for 'synthesize')", required: false),
         ToolParameter(name: "tools_spec_json", type: "string", description: "JSON array of MCP tool definitions [{\"name\":\"...\",\"description\":\"...\",\"inputSchema\":{...}}] (for 'synthesize')", required: false),
@@ -6161,11 +6215,32 @@ struct MCPOrchestratorTool: AgentTool {
         let ws = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot }
         
         switch action {
-        case "status", "list":
+        case "status", "list", "discover":
+            if action == "discover" {
+                await MainActor.run {
+                    MultiPlatformRulesEngine.shared.refresh(workspaceRoot: ws ?? NSHomeDirectory())
+                }
+                try? await Task.sleep(nanoseconds: 350_000_000)
+            }
             await ExternalMCPManager.shared.probeServersNowIfNeeded()
             return await MainActor.run {
                 ExternalMCPManager.shared.meshStatusSummary()
             }
+        case "connect", "configure":
+            let serverName = (params["server_name"] as? String) ?? (params["query"] as? String) ?? ""
+            let remoteURL = params["url"] as? String
+            let cmd = params["command"] as? String
+            let rawArgs = params["args"] as? String ?? ""
+            let parsedArgs = rawArgs.isEmpty ? [] : rawArgs.components(separatedBy: " ").filter { !$0.isEmpty }
+            let bearer = params["bearer_token"] as? String
+            return await ExternalMCPManager.shared.connectOrConfigureServer(
+                name: serverName,
+                remoteURL: remoteURL,
+                command: cmd,
+                args: parsedArgs,
+                bearerToken: bearer,
+                workspacePath: ws
+            )
         case "search_tools", "search":
             let q = (params["query"] as? String ?? "").lowercased()
             await ExternalMCPManager.shared.probeServersNowIfNeeded(matching: q)

@@ -19,7 +19,8 @@ metadata:
 
 ## Context discipline
 - Search, then read ranges. Do not dump whole files or logs into the conversation; keep the few lines you depend on.
-- Put long-running state in files, not in chat: a progress note (done / next / blockers) and a checklist where every item starts as `passes: false`. Work one item at a time, flip it only with evidence, commit working increments, and at the start of a session read the progress note and `git log` and run a smoke check before changing anything.
+- Only use `.microcode/task.md` when executing a multi-step engineering implementation across 3+ files; skip scratchpads for direct questions, MCP configuration, or visual/design reviews.
+- NEVER run `git init`, `git commit`, or `git push` unless the user explicitly asks to initialize Git or commit changes.
 - Delegate to a sub-agent when work is parallel or isolated. Give it a goal, the files it may touch, the done-criteria, and what to return (a short summary plus paths). Do not delegate understanding of the problem.
 
 ## Tool discipline

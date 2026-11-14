@@ -1085,7 +1085,21 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 """
                 webView.evaluateJavaScript(js, completionHandler: nil)
             }
-            scanAll(webView: webView)
+            if self.parent.provider == .gemini {
+                let js = """
+                (function() {
+                    const btns = Array.from(document.querySelectorAll('button, div[role="button"], a')).filter(el => 
+                        el.textContent && (el.textContent.includes('Sign in with Google') || el.textContent.includes('Log in with Google') || el.textContent.includes('Continue with Google'))
+                    );
+                    if (btns.length > 0) {
+                        btns[0].click();
+                        return 'clicked_google';
+                    }
+                    return 'none';
+                })();
+                """
+                webView.evaluateJavaScript(js, completionHandler: nil)
+            }
         }
         
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

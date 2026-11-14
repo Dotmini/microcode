@@ -17,8 +17,56 @@ struct ThemePickerView: View {
     private let festiveThemes: [AppTheme] = [.happyNewYear2026, .happyNewYear2026Light, .christmas, .christmasLight]
     private let specialThemes: [AppTheme] = [.transparent, .crystalClear, .obsidianGlass, .extraClear, .wwdc, .wwdcLight, .keynote, .keynoteLight, .xnuDark]
     
+    // Downloaded theme extensions
+    private var downloadedThemeExtensions: [InstalledExtension] {
+        let extManager = ExtensionManager.shared
+        return extManager.installedExtensions.filter { ext in
+            ext.isEnabled && (ext.effectiveType == .theme || ext.manifest.type == .theme || ext.manifest.id.contains("theme") || ext.manifest.id.contains("owl") || ext.manifest.id.contains("dracula") || ext.manifest.id.contains("nord") || ext.manifest.id.contains("tokyo") || ext.manifest.id.contains("catppuccin") || ext.manifest.id.contains("one-dark") || ext.manifest.id.contains("material"))
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
+            if !downloadedThemeExtensions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("DOWNLOADED THEME EXTENSIONS 🧩")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.accentColor)
+                    
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(downloadedThemeExtensions) { ext in
+                                Button(action: {
+                                    ExtensionManager.shared.applyThemeExtension(ext)
+                                }) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "paintpalette.fill")
+                                            .foregroundColor(.accentColor)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(ext.manifest.name)
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundColor(.primary)
+                                            Text("v\(ext.manifest.version) • \(ext.manifest.author)")
+                                                .font(.system(size: 9))
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(Color.secondary.opacity(0.1))
+                                    .cornerRadius(8)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(Color.accentColor.opacity(0.4), lineWidth: 1)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+            }
+            
             ThemeSection(title: "Festive Season 🎆", themes: festiveThemes, selection: $selectedTheme)
             ThemeSection(title: "Modern & Sleek", themes: modernThemes, selection: $selectedTheme)
             ThemeSection(title: "Classic & Familiar", themes: classicThemes, selection: $selectedTheme)

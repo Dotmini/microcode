@@ -139,6 +139,7 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
     public let args: [String]
     public let env: [String: String]
     public let url: String?
+    public let headers: [String: String]
 
     public init(
         id: String = UUID().uuidString,
@@ -147,7 +148,8 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
         command: String,
         args: [String],
         env: [String: String] = [:],
-        url: String? = nil
+        url: String? = nil,
+        headers: [String: String] = [:]
     ) {
         self.id = id
         self.name = name
@@ -156,6 +158,7 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
         self.args = args
         self.env = env
         self.url = url
+        self.headers = headers
     }
 }
 
@@ -429,11 +432,11 @@ public final class MultiPlatformRulesEngine: ObservableObject {
             // 8B. Scan Lifecycle Hooks (pre_tool, post_tool, pre_finish)
             self.scanLifecycleHooks(rootURL: rootURL, into: &hooks)
 
-            // 9. Scan Universal MCP servers across MicroCode, Antigravity, Claude, Cursor, Windsurf, VS Code, and Codex
+            // 9. Scan Universal MCP servers across MicroCode, Antigravity (+ Plugins), Claude (+ Plugins), Cursor, Windsurf, VS Code, and Codex
             var mcpServers: [DiscoveredMCPServer] = []
             let homeURL = self.fileManager.homeDirectoryForCurrentUser
             let isolatedWorkspaceMCP = WorkspaceStoragePaths.managedStateFile(named: "mcp.json", workspacePath: rootURL.path)
-            let mcpCandidates: [(URL, String)] = [
+            var mcpCandidates: [(URL, String)] = [
                 (isolatedWorkspaceMCP, "MicroCode Workspace State (~/.microcode/workspaces/.../mcp.json)"),
                 (rootURL.appendingPathComponent(".microcode/mcp.json"), "MicroCode Workspace (.microcode/mcp.json)"),
                 (rootURL.appendingPathComponent(".mcp.json"), "MCP Standard (.mcp.json)"),
@@ -445,8 +448,30 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                 (homeURL.appendingPathComponent(".codex/mcp.json"), "Codex (~/.codex/mcp.json)"),
                 (homeURL.appendingPathComponent(".gemini/antigravity/mcp_config.json"), "Antigravity (~/.gemini/antigravity/mcp_config.json)"),
                 (homeURL.appendingPathComponent(".gemini/settings.json"), "Antigravity (~/.gemini/settings.json)"),
+                (homeURL.appendingPathComponent(".claude.json"), "Claude Code (~/.claude.json)"),
                 (homeURL.appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json"), "Claude Desktop")
             ]
+
+            // Auto-discover installed plugin MCP configs across Antigravity (~/.gemini/config/plugins/*) & Claude (~/.claude/plugins/*)
+            let pluginRoots: [(URL, String)] = [
+                (homeURL.appendingPathComponent(".gemini/config/plugins"), "Antigravity Plugin"),
+                (homeURL.appendingPathComponent(".claude/plugins"), "Claude Plugin")
+            ]
+            for (pluginRoot, prefixLabel) in pluginRoots {
+                if let pluginDirs = try? self.fileManager.contentsOfDirectory(at: pluginRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                    for pDir in pluginDirs {
+                        guard (try? pDir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                        let pName = pDir.lastPathComponent
+                        for cfgName in ["mcp_config.json", ".mcp.json", "mcp.json"] {
+                            let cfgURL = pDir.appendingPathComponent(cfgName)
+                            if self.fileManager.fileExists(atPath: cfgURL.path) {
+                                mcpCandidates.append((cfgURL, "\(prefixLabel) (\(pName))"))
+                            }
+                        }
+                    }
+                }
+            }
+
             for (fileURL, label) in mcpCandidates {
                 if let data = try? Data(contentsOf: fileURL),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -459,6 +484,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                             let cmd = spec["command"] as? String ?? ""
                             let args = spec["args"] as? [String] ?? []
                             let env = spec["env"] as? [String: String] ?? [:]
+                            let headers = spec["headers"] as? [String: String] ?? [:]
                             let remoteUrl = (spec["url"] as? String) ?? (spec["serverUrl"] as? String)
                             // Skip servers with unconfigured placeholder credentials (e.g. YOUR_SLACK_BOT_TOKEN)
                             if env.values.contains(where: { $0.hasPrefix("YOUR_") }) { continue }
@@ -469,7 +495,8 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                                     command: cmd.isEmpty ? (remoteUrl ?? "") : cmd,
                                     args: args,
                                     env: env,
-                                    url: remoteUrl
+                                    url: remoteUrl,
+                                    headers: headers
                                 ))
                             }
                         }

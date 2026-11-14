@@ -211,7 +211,7 @@ class VoiceCodingService: ObservableObject {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         if #available(macOS 13.0, *) {
-            request.requiresOnDeviceRecognition = false
+            request.requiresOnDeviceRecognition = true
             request.addsPunctuation = true
         }
         self.recognitionRequest = request

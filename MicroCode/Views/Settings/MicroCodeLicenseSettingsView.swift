@@ -2,9 +2,8 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// Account settings backed exclusively by the self-hosted Supabase instance.
-/// Plans are server-side entitlements; there is intentionally no editable or
-/// client-generated "license key" field in this view.
+/// Account & Cloud Billing settings backed by the self-hosted Supabase instance.
+/// Designed strictly to macOS Human Interface Guidelines — clean surfaces, clear hierarchy, zero visual clutter.
 struct MicroCodeLicenseSettingsView: View {
     @ObservedObject private var auth = SupabaseAuthService.shared
     @EnvironmentObject private var appState: AppState
@@ -18,7 +17,6 @@ struct MicroCodeLicenseSettingsView: View {
     @State private var isWorking = false
     @State private var status = ""
     @State private var platformKeyInput = ""
-    @State private var showServiceAccountEditor = false
     @State private var selectedTelemetryTab = 0
     @State private var isCheckingOut = false
     @State private var checkoutStatus = ""
@@ -26,27 +24,27 @@ struct MicroCodeLicenseSettingsView: View {
     @State private var customTopupTHB = ""
     @State private var isCreatingAccount = false
     @State private var displayName = ""
+    @State private var showAdminTelemetry = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header
-                if auth.session != nil {
-                    accountCard
-                } else {
-                    signInCard
-                }
-                entitlementCard
-                if auth.isAdminProvider {
-                    installRegistryCard
-                }
-                platformKeyCard
-                EnterpriseConnectHubView()
-                architectureNote
+        VStack(alignment: .leading, spacing: 16) {
+            serviceHeaderSection
+
+            if auth.session != nil {
+                accountCard
+            } else {
+                signInCard
             }
-            .padding(20)
+
+            entitlementCard
+            platformKeyCard
+
+            if auth.isAdminProvider {
+                adminDisclosureSection
+            }
         }
         .task {
+            MCPServer.shared.startLocalHttpBridge(port: 18888)
             if email.isEmpty && !persistedEmail.isEmpty {
                 email = persistedEmail
             }
@@ -56,6 +54,9 @@ struct MicroCodeLicenseSettingsView: View {
             }
             _ = await auth.refreshAccessTokenIfNeeded()
             await auth.refreshEntitlement()
+            if platformKey.isConfigured {
+                _ = await platformKey.validate()
+            }
             if auth.isAdminProvider {
                 await telemetry.fetchAllInstallsAndHistory()
             } else {
@@ -63,6 +64,8 @@ struct MicroCodeLicenseSettingsView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeAccountLoggedIn"))) { _ in
+            isWorking = false
+            status = ""
             Task {
                 _ = await auth.refreshAccessTokenIfNeeded(force: true)
                 await auth.refreshEntitlement()
@@ -75,39 +78,103 @@ struct MicroCodeLicenseSettingsView: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "person.badge.key.fill")
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 42, height: 42)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.12)))
-            VStack(alignment: .leading, spacing: 3) {
-                Text("MicroCode Account")
-                    .font(.system(size: 16, weight: .bold))
-                Text("Self-hosted Supabase authentication and server-issued access.")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+    // MARK: - 1. Service Header (Matches PhoneCompanionSettingsView & AI Settings)
+
+    private var serviceHeaderSection: some View {
+        let isSignedIn = auth.session != nil
+        let rawPlan = auth.entitlement.plan.trimmingCharacters(in: .whitespacesAndNewlines)
+        let planLabel = isSignedIn
+            ? (rawPlan.isEmpty ? "FREE PLAN" : "\(rawPlan.uppercased()) PLAN")
+            : "NOT SIGNED IN"
+
+        return HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+                    .frame(width: 38, height: 38)
+                AIProviderBrandIcon(provider: "microcode", size: 20)
             }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text("Dotmini ID & Cloud Billing")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundColor(.primary)
+
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(isSignedIn ? Color.green.opacity(0.85) : Color.secondary.opacity(0.45))
+                            .frame(width: 5.5, height: 5.5)
+                        Text(planLabel)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.05))
+                    .cornerRadius(4)
+
+                    if auth.entitlement.role.lowercased() == "admin" {
+                        Text("ADMIN")
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.12))
+                            .cornerRadius(4)
+                    }
+                }
+
+                Text("Sign in with Google or your Dotmini ID to sync Cloud AI credits, monthly subscriptions, and devices across MicroCode.")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer()
+
+            Button {
+                NSWorkspace.shared.open(auth.authenticatedPortalURL(path: "/dashboard"))
+            } label: {
+                Label("Web Portal", systemImage: "arrow.up.right.square")
+                    .font(.system(size: 11.5, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
+        .cardStyle()
     }
 
+    // MARK: - 2a. Signed-In Account Card
+
     private var accountCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.15))
-                    .frame(width: 40, height: 40)
-                    .overlay(Text(String(accountEmail.prefix(1)).uppercased()).font(.system(size: 16, weight: .bold)))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(accountEmail.isEmpty ? "Signed in" : accountEmail)
-                        .font(.system(size: 13, weight: .semibold))
-                    Label("Supabase session active", systemImage: "checkmark.circle.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.green)
+                ZStack {
+                    Circle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 36, height: 36)
+                    Text(String((accountEmail.isEmpty ? "U" : accountEmail).prefix(1)).uppercased())
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
                 }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(accountEmail.isEmpty ? "Signed in with Dotmini ID" : accountEmail)
+                        .font(.system(size: 13, weight: .semibold))
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.green)
+                        Text("Authenticated session active in macOS Keychain")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 Spacer()
-                Button("Refresh") {
+
+                Button {
                     Task {
                         isWorking = true
                         _ = await auth.refreshAccessTokenIfNeeded(force: true)
@@ -119,8 +186,14 @@ struct MicroCodeLicenseSettingsView: View {
                         }
                         isWorking = false
                     }
+                } label: {
+                    Label(isWorking ? "Syncing…" : "Sync", systemImage: "arrow.clockwise")
+                        .font(.system(size: 11.5, weight: .medium))
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 .disabled(isWorking)
+
                 Button("Sign Out", role: .destructive) {
                     auth.signOut()
                     AuthService.shared.signOut()
@@ -128,16 +201,21 @@ struct MicroCodeLicenseSettingsView: View {
                     persistedEmail = ""
                     status = "Signed out from this Mac."
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            if !status.isEmpty { statusText }
+
+            if !status.isEmpty {
+                statusText
+            }
         }
         .cardStyle()
     }
 
+    // MARK: - 2b. Clean Sign-In Card (Google OAuth + Browser Sync + Compact Email Form)
+
     private var signInCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Sign in")
-                .font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: 14) {
             if !auth.reauthReason.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -148,199 +226,291 @@ struct MicroCodeLicenseSettingsView: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.14)))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.28), lineWidth: 1))
             }
-            Button {
-                isWorking = true
-                status = "Opening secure browser sign-in…"
-                Task { @MainActor in
-                    do {
-                        try await auth.startOAuth(provider: "google")
-                        isWorking = false
-                    } catch {
-                        status = error.localizedDescription
-                        isWorking = false
+
+            // Primary OAuth Row
+            HStack(spacing: 10) {
+                Button {
+                    isWorking = true
+                    status = "Opening Google sign-in…"
+                    Task { @MainActor in
+                        do {
+                            try await auth.startOAuth(provider: "google")
+                            isWorking = false
+                        } catch {
+                            status = error.localizedDescription
+                            isWorking = false
+                        }
                     }
-                }
-            } label: {
-                Label("Continue with Google", systemImage: "globe")
+                } label: {
+                    HStack(spacing: 8) {
+                        GoogleBrandMark(size: 15)
+                        Text("Continue with Google")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
                     .frame(maxWidth: .infinity)
+                    .frame(height: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.primary.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.primary.opacity(0.16), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isWorking)
+
+                Button {
+                    status = "Opened default web browser. Completing sign-in will sync back to MicroCode automatically."
+                    auth.startBrowserSignIn(provider: "google")
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "safari")
+                            .font(.system(size: 12.5, weight: .medium))
+                        Text("Sign in via Web Browser")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.primary.opacity(0.04))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Use your default browser (Safari/Chrome) if you are already signed in to microcode.dotmini.net")
             }
-            .buttonStyle(.bordered)
-            .disabled(isWorking)
+
+            HStack(spacing: 10) {
+                Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
+                Text(isCreatingAccount ? "or create a Dotmini ID with email" : "or sign in with email")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundColor(.secondary)
+                Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
+            }
+
+            if isCreatingAccount {
+                TextField("Display Name (optional)", text: $displayName)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.regular)
+            }
+
+            // Compact side-by-side Email + Password + Submit row
+            HStack(spacing: 8) {
+                TextField("Email address", text: $email)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.regular)
+
+                SecureField("Password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.regular)
+                    .onSubmit {
+                        guard !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty, !isWorking else { return }
+                        Task { isCreatingAccount ? await createAccount() : await signInWithPassword() }
+                    }
+
+                Button(isWorking ? (isCreatingAccount ? "Creating…" : "Signing in…") : (isCreatingAccount ? "Create Account" : "Sign In")) {
+                    Task { isCreatingAccount ? await createAccount() : await signInWithPassword() }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .disabled(email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty || isWorking)
+            }
 
             HStack {
-                Rectangle().fill(Color.secondary.opacity(0.2)).frame(height: 1)
-                Text("or email and password").font(.caption).foregroundColor(.secondary)
-                Rectangle().fill(Color.secondary.opacity(0.2)).frame(height: 1)
-            }
-            TextField("Email", text: $email)
-                .textFieldStyle(.roundedBorder)
-            SecureField("Password", text: $password)
-                .textFieldStyle(.roundedBorder)
-            if isCreatingAccount {
-                TextField("Name (optional)", text: $displayName)
-                    .textFieldStyle(.roundedBorder)
-            }
-            Button(isWorking ? (isCreatingAccount ? "Creating account…" : "Signing in…") : (isCreatingAccount ? "Create account" : "Sign In")) {
-                Task { isCreatingAccount ? await createAccount() : await signInWithPassword() }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty || isWorking)
-            HStack {
-                Button(isCreatingAccount ? "Already have an account? Sign in" : "New here? Create an account") {
+                Button(isCreatingAccount ? "Already have an account? Sign in" : "Create a new account") {
                     isCreatingAccount.toggle()
                     status = ""
                 }
                 .buttonStyle(.link)
+                .font(.system(size: 11.5))
+
                 Spacer()
+
                 if !isCreatingAccount {
-                    Button("Forgot password?") { Task { await resetPassword() } }
-                        .buttonStyle(.link)
-                        .disabled(isWorking)
+                    Button("Forgot password?") {
+                        Task { await resetPassword() }
+                    }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11.5))
+                    .disabled(isWorking)
                 }
             }
-            .font(.system(size: 11))
-            if !status.isEmpty { statusText }
+
+            if !status.isEmpty {
+                statusText
+            }
         }
         .cardStyle()
     }
+
+    // MARK: - 3. Cloud AI Credit & Monthly Subscription Plans
 
     private var entitlementCard: some View {
         let activePlan = auth.entitlement.plan.lowercased()
         let limitTHB = auth.entitlement.creditLimitTHB
         let remTHB = auth.entitlement.creditRemainingTHB
         let ratioRemaining: Double = limitTHB > 0 ? min(1.0, max(0.0, remTHB / limitTHB)) : 0
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Cloud Subscription & Token-Metered AI Credit")
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Cloud AI Credit & Monthly Plans")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("Metered per token at Upstream API Cost + \(Int(auth.entitlement.marginPct))% margin (Input / Cached / Output) — never flat-rate.")
-                        .font(.system(size: 11))
+                    Text("Token-metered billing across Claude, GPT, Gemini, DeepSeek, and Omni AI. Top-up wallet credits never expire.")
+                        .font(.system(size: 11.5))
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                if auth.entitlement.role.lowercased() == "admin" {
-                    Text("ADMIN")
-                        .font(.system(size: 10, weight: .bold))
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Capsule().fill(Color.orange.opacity(0.18)))
-                }
-                Text(auth.entitlement.isLoaded
-                     ? (auth.entitlement.plan.isEmpty ? "FREE" : auth.entitlement.plan.uppercased())
-                     : "UNAVAILABLE")
-                    .font(.system(size: 10, weight: .bold))
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.15)))
-            }
-            Divider()
-            if auth.entitlement.isLoaded {
-                HStack(spacing: 18) {
-                    metric("Total Available AI Credit", auth.entitlement.formattedAvailableCredit)
-                    Spacer()
-                    metric("Monthly Plan Pool Left", auth.entitlement.formattedPlanCreditSummary)
-                    Spacer()
-                    metric("AI Top-Up Wallet", String(format: "฿%.2f", auth.entitlement.aiTopupBalanceTHB))
-                    Spacer()
-                    metric("Metered Tokens", NumberFormatter.localizedString(from: NSNumber(value: auth.entitlement.totalTokensUsed), number: .decimal))
-                }
-                if limitTHB > 0 {
-                    VStack(alignment: .leading, spacing: 4) {
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.secondary.opacity(0.16))
-                                Capsule()
-                                    .fill(ratioRemaining > 0.2 ? Color.accentColor : Color.orange)
-                                    .frame(width: max(4, geo.size.width * ratioRemaining))
-                            }
-                        }
-                        .frame(height: 6)
-                        Text(String(format: "Monthly Plan Allowance: ฿%.2f used of ฿%.0f · When monthly credit hits ฿0.00, usage automatically draws from your non-expiring AI Top-Up Wallet.", auth.entitlement.creditUsedTHB, limitTHB))
-                            .font(.system(size: 10.5))
-                            .foregroundColor(.secondary)
+                Button {
+                    Task {
+                        isCheckingOut = true
+                        let res = await auth.verifyLatestPayment()
+                        checkoutVerified = res.verified
+                        checkoutStatus = res.message
+                        isCheckingOut = false
                     }
+                } label: {
+                    Label(isCheckingOut ? "Verifying…" : "Verify Payment", systemImage: "checkmark.seal")
+                        .font(.system(size: 11.5, weight: .medium))
                 }
-            } else {
-                Text(auth.session == nil ? "Sign in to load your Cloud AI Credit balance and purchase a subscription." : "Could not load your cloud entitlement. Try Refresh.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isCheckingOut || auth.session == nil)
             }
 
-            Divider()
+            // Credit Balance Strip
+            if auth.entitlement.isLoaded {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 0) {
+                        metric("Available Credit", auth.entitlement.formattedAvailableCredit)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Divider().frame(height: 28).padding(.horizontal, 12)
+                        metric("Monthly Plan Pool", auth.entitlement.formattedPlanCreditSummary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Divider().frame(height: 28).padding(.horizontal, 12)
+                        metric("Top-Up Wallet", String(format: "฿%.2f", auth.entitlement.aiTopupBalanceTHB))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Divider().frame(height: 28).padding(.horizontal, 12)
+                        metric("Metered Tokens", NumberFormatter.localizedString(from: NSNumber(value: auth.entitlement.totalTokensUsed), number: .decimal))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    if limitTHB > 0 {
+                        VStack(alignment: .leading, spacing: 4) {
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    Capsule().fill(Color.primary.opacity(0.08))
+                                    Capsule()
+                                        .fill(ratioRemaining > 0.2 ? Color.accentColor : Color.orange)
+                                        .frame(width: max(4, geo.size.width * ratioRemaining))
+                                }
+                            }
+                            .frame(height: 5)
+
+                            Text(String(format: "฿%.2f used of ฿%.0f monthly plan pool · Automatically draws from Top-Up Wallet when monthly pool reaches ฿0.00.", auth.entitlement.creditUsedTHB, limitTHB))
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.03)))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+            }
+
+            // Monthly Plans 4-Column Grid
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("On-Demand Cloud AI Credit Top-Up (Non-Expiring)")
+                    Text("Monthly Subscriptions")
                         .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(.primary)
                     Spacer()
-                    Text("AI CREDIT WALLET ONLY · 100% SEPARATE FROM CLOUD GPU WALLET")
-                        .font(.system(size: 9, weight: .bold))
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(Capsule().fill(Color.purple.opacity(0.16)))
-                        .foregroundStyle(.purple)
+                    Text("PromptPay QR / Credit Card via Beam Checkout")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
                 }
-                HStack(spacing: 8) {
-                    aiCreditTopupButton(label: "+ ฿100", planKey: "ai_topup_100")
-                    aiCreditTopupButton(label: "+ ฿300", planKey: "ai_topup_300")
-                    aiCreditTopupButton(label: "+ ฿500", planKey: "ai_topup_500")
-                    aiCreditTopupButton(label: "+ ฿1,000", planKey: "ai_topup_1000")
-                    Spacer()
-                    TextField("Custom ฿ (≥20)", text: $customTopupTHB)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 115)
-                    Button("Top Up") {
-                        let amt = Double(customTopupTHB.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-                        guard amt >= 20 else {
-                            checkoutVerified = false
-                            checkoutStatus = "กรุณาระบุยอดเติมเครดิต Cloud AI ขั้นต่ำ ฿20"
-                            return
-                        }
-                        Task { await startAITopup(planKey: "ai_topup_custom", customAmountTHB: amt, title: "฿\(Int(amt))") }
-                    }
-                    .buttonStyle(.borderedProminent)
+
+                HStack(spacing: 10) {
+                    subscriptionTierTile(
+                        title: "Lite",
+                        price: "฿179",
+                        period: "/mo",
+                        quota: "฿179 AI Credit Pool",
+                        planKey: "microai_lite",
+                        isCurrent: activePlan == "lite" || activePlan == "microai_lite"
+                    )
+                    subscriptionTierTile(
+                        title: "Pro",
+                        price: "฿529",
+                        period: "/mo",
+                        quota: "฿529 AI Credit Pool",
+                        planKey: "microai_pro",
+                        isCurrent: activePlan == "pro" || activePlan == "microai_pro"
+                    )
+                    subscriptionTierTile(
+                        title: "Advanced",
+                        price: "฿990",
+                        period: "/mo",
+                        quota: "฿990 AI Credit Pool",
+                        planKey: "microai_advanced",
+                        isCurrent: activePlan == "advanced" || activePlan == "microai_advanced"
+                    )
+                    subscriptionTierTile(
+                        title: "Bundle Pro",
+                        price: "฿1,365",
+                        period: "/mo",
+                        quota: "฿1,365 Credit + IDE",
+                        planKey: "bundle_pro",
+                        isCurrent: activePlan == "bundle_pro" || activePlan == "bundle"
+                    )
+                }
+            }
+
+            // Compact Single-Row Top-Up Bar
+            HStack(spacing: 8) {
+                Text("Top-Up Wallet:")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(.secondary)
+
+                aiCreditTopupButton(label: "+฿100", planKey: "ai_topup_100")
+                aiCreditTopupButton(label: "+฿300", planKey: "ai_topup_300")
+                aiCreditTopupButton(label: "+฿500", planKey: "ai_topup_500")
+                aiCreditTopupButton(label: "+฿1,000", planKey: "ai_topup_1000")
+
+                Spacer()
+
+                TextField("Custom ฿ (≥20)", text: $customTopupTHB)
+                    .textFieldStyle(.roundedBorder)
                     .controlSize(.small)
-                    .disabled(isCheckingOut || auth.session == nil)
+                    .frame(width: 108)
+
+                Button("Top Up") {
+                    let amt = Double(customTopupTHB.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                    guard amt >= 20 else {
+                        checkoutVerified = false
+                        checkoutStatus = "กรุณาระบุยอดเติมเครดิต Cloud AI ขั้นต่ำ ฿20"
+                        return
+                    }
+                    Task { await startAITopup(planKey: "ai_topup_custom", customAmountTHB: amt, title: "฿\(Int(amt))") }
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isCheckingOut || auth.session == nil)
             }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.06)))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-
-            Divider()
-            Text("Monthly Subscription Plans (Includes Full Monthly THB AI Credit Pool · QR PromptPay / Card)")
-                .font(.system(size: 11.5, weight: .semibold))
-
-            HStack(spacing: 10) {
-                subscriptionTierTile(
-                    title: "Lite",
-                    price: "฿179/mo",
-                    quota: "฿179 AI Credit Pool",
-                    planKey: "microai_lite",
-                    isCurrent: activePlan == "lite" || activePlan == "microai_lite"
-                )
-                subscriptionTierTile(
-                    title: "Pro",
-                    price: "฿529/mo",
-                    quota: "฿529 AI Credit Pool",
-                    planKey: "microai_pro",
-                    isCurrent: activePlan == "pro" || activePlan == "microai_pro"
-                )
-                subscriptionTierTile(
-                    title: "Advanced",
-                    price: "฿990/mo",
-                    quota: "฿990 AI Credit Pool",
-                    planKey: "microai_advanced",
-                    isCurrent: activePlan == "advanced" || activePlan == "microai_advanced"
-                )
-                subscriptionTierTile(
-                    title: "Bundle Pro",
-                    price: "฿1,365/mo",
-                    quota: "฿1,365 AI Credit + IDE",
-                    planKey: "bundle_pro",
-                    isCurrent: activePlan == "bundle_pro" || activePlan == "bundle"
-                )
-            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.03)))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
 
             if !checkoutStatus.isEmpty {
                 Text(checkoutStatus)
@@ -360,30 +530,6 @@ struct MicroCodeLicenseSettingsView: View {
                             .controlSize(.small)
                     }
                 }
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    Task {
-                        isCheckingOut = true
-                        let res = await auth.verifyLatestPayment()
-                        checkoutVerified = res.verified
-                        checkoutStatus = res.message
-                        isCheckingOut = false
-                    }
-                } label: {
-                    Label(isCheckingOut ? "Verifying…" : "Verify Payment & Sync Credit", systemImage: "checkmark.seal.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isCheckingOut || auth.session == nil)
-
-                Button {
-                    NSWorkspace.shared.open(auth.authenticatedPortalURL(path: "/dashboard"))
-                } label: {
-                    Label("Open Subscription Portal", systemImage: "safari")
-                }
-                .buttonStyle(.bordered)
-                Spacer()
             }
         }
         .cardStyle()
@@ -417,7 +563,7 @@ struct MicroCodeLicenseSettingsView: View {
         checkoutStatus = "กำลังสร้างลิงก์เติมเครดิต Cloud AI (\(title)) ผ่าน Beam Checkout…"
         do {
             let session = try await auth.createAICreditTopupCheckout(planKey: planKey, customAmountTHB: customAmountTHB)
-            checkoutStatus = "เปิดหน้าชำระเงินเติมเครดิต Cloud AI (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment & Sync Credit"
+            checkoutStatus = "เปิดหน้าชำระเงินเติมเครดิต Cloud AI (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment"
             NSWorkspace.shared.open(session.checkoutURL)
             auth.beginPaymentWatch()
         } catch {
@@ -429,6 +575,7 @@ struct MicroCodeLicenseSettingsView: View {
     private func subscriptionTierTile(
         title: String,
         price: String,
+        period: String,
         quota: String,
         planKey: String,
         isCurrent: Bool
@@ -436,30 +583,41 @@ struct MicroCodeLicenseSettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 if isCurrent {
                     Text("ACTIVE")
-                        .font(.system(size: 8.5, weight: .heavy))
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(Capsule().fill(Color.green.opacity(0.2)))
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.green.opacity(0.18)))
                         .foregroundStyle(.green)
                 }
             }
-            Text(price)
-                .font(.system(size: 14, weight: .bold, design: .rounded))
+
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(price)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                Text(period)
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+            }
+
             Text(quota)
-                .font(.system(size: 10))
+                .font(.system(size: 10.5))
                 .foregroundColor(.secondary)
                 .lineLimit(1)
-            Button(isCurrent ? "Current Plan" : "Subscribe") {
+
+            Spacer(minLength: 2)
+
+            Button {
                 Task {
                     isCheckingOut = true
                     checkoutVerified = false
                     checkoutStatus = "กำลังสร้างลิงก์ชำระเงินจริงผ่าน Beam Checkout (\(title))…"
                     do {
                         let session = try await auth.createSubscriptionCheckout(plan: planKey)
-                        checkoutStatus = "เปิดหน้าชำระเงิน Beam Checkout (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment & Sync Plan"
+                        checkoutStatus = "เปิดหน้าชำระเงิน Beam Checkout (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment"
                         NSWorkspace.shared.open(session.checkoutURL)
                         auth.beginPaymentWatch()
                     } catch {
@@ -467,79 +625,168 @@ struct MicroCodeLicenseSettingsView: View {
                     }
                     isCheckingOut = false
                 }
+            } label: {
+                Text(isCurrent ? "Current Plan" : "Subscribe")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(isCurrent || isCheckingOut || auth.session == nil)
         }
-        .padding(10)
+        .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(isCurrent ? Color.green.opacity(0.45) : Color.primary.opacity(0.08), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.03)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isCurrent ? Color.green.opacity(0.45) : Color.primary.opacity(0.08), lineWidth: 1)
+        )
     }
 
-    private var installRegistryCard: some View {
+    // MARK: - 4. Developer Platform API Key Card
+
+    private var platformKeyCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Dotmini Platform (Unified Omni AI + MicroCode)")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("SHA-256 hashed developer credential shared across Omni AI, MicroCode Cloud Runtime, and API Gateway. Stored only in macOS Keychain.")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                HStack(spacing: 6) {
+                    if auth.session != nil {
+                        Button(platformKey.isProvisioning ? "Connecting…" : (platformKey.isConfigured ? "Rotate Key" : "1-Click Auto-Connect")) {
+                            Task {
+                                let ok = await platformKey.autoConnectFromSignedInAccount()
+                                if ok {
+                                    await AIModelCatalog.shared.refreshIfNeeded(force: true)
+                                }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(platformKey.isProvisioning || platformKey.isValidating)
+                    }
+                    Button("Open Platform") {
+                        NSWorkspace.shared.open(URL(string: DotminiPlatformKeyService.platformOrigin)!)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            if platformKey.isConfigured {
+                HStack(spacing: 8) {
+                    Label(platformKey.maskedKey, systemImage: "checkmark.shield.fill")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.green)
+
+                    if let thb = platformKey.availableTHB {
+                        Text(String(format: "Shared Pool: ฿%.2f", thb))
+                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.blue.opacity(0.14)))
+                            .foregroundStyle(.blue)
+                    }
+
+                    if !platformKey.omniAIPlan.isEmpty || !platformKey.microCodePlan.isEmpty {
+                        Text("Omni: \(platformKey.omniAIPlan.isEmpty ? "FREE" : platformKey.omniAIPlan) · MC: \(platformKey.microCodePlan.isEmpty ? "FREE" : platformKey.microCodePlan)")
+                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+
+                    Spacer()
+                    Button(platformKey.isValidating ? "Checking…" : "Verify") {
+                        Task { _ = await platformKey.validate() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(platformKey.isValidating || platformKey.isProvisioning)
+                    Button("Remove", role: .destructive) { platformKey.remove() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(platformKey.isProvisioning)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    SecureField("sk-dotmini-live-… or mci-live-…", text: $platformKeyInput)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.regular)
+                    Button("Save Key") {
+                        if platformKey.save(platformKeyInput) {
+                            platformKeyInput = ""
+                            Task { _ = await platformKey.validate() }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .disabled(platformKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+
+            if !platformKey.validationMessage.isEmpty {
+                Text(platformKey.validationMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(
+                        platformKey.validationMessage.lowercased().contains("rejected") ||
+                        platformKey.validationMessage.lowercased().contains("failed") ||
+                        platformKey.validationMessage.lowercased().contains("invalid") ||
+                        platformKey.validationMessage.lowercased().contains("could not") ? .red : .secondary
+                    )
+            }
+        }
+        .cardStyle()
+    }
+
+    // MARK: - 5. Admin Telemetry Disclosure Section (Admin-Only, Collapsed by Default)
+
+    private var adminDisclosureSection: some View {
+        DisclosureGroup(isExpanded: $showAdminTelemetry) {
+            installRegistryContent
+                .padding(.top, 10)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "desktopcomputer.and.arrow.down")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                Text("Admin Telemetry & Installation Registry")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text("\(telemetry.downloadLeads.count) Leads · \(telemetry.cloudUsersHistory.count) Users · \(telemetry.installedDevices.count) Macs")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+        }
+        .cardStyle()
+    }
+
+    private var installRegistryContent: some View {
         let current = telemetry.buildCurrentInstallRecord()
         return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Label("Installations & Download History", systemImage: "desktopcomputer.and.arrow.down")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("ADMIN PROVIDER ONLY")
-                            .font(.system(size: 8.5, weight: .heavy))
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Capsule().fill(Color.red.opacity(0.18)))
-                            .foregroundStyle(.red)
-                        Text("\(telemetry.downloadLeads.count) PORTAL DL")
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(Capsule().fill(Color.orange.opacity(0.18)))
-                            .foregroundStyle(.orange)
-                        Text("\(telemetry.totalGitHubDownloads) GITHUB DL")
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(Capsule().fill(Color.purple.opacity(0.18)))
-                            .foregroundStyle(.purple)
-                        Text("\(telemetry.cloudUsersHistory.count) USERS")
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(Capsule().fill(Color.blue.opacity(0.18)))
-                            .foregroundStyle(.blue)
-                        Text("\(telemetry.installedDevices.count) MAC\(telemetry.installedDevices.count == 1 ? "" : "S")")
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(Capsule().fill(Color.green.opacity(0.18)))
-                            .foregroundStyle(.green)
-                    }
-                    Text("Visible strictly to Admin Provider accounts. Live records from microcode.dotmini.net (`microcode_downloads` & `users`), GitHub Releases (`Dotmini/microcode`), and active Mac telemetry (`microcode_installs/*`).")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+            HStack {
+                HStack(spacing: 14) {
+                    metric("Portal Leads", "\(telemetry.downloadLeads.count)")
+                    Divider().frame(height: 24)
+                    metric("GitHub DMG/PKG", "\(telemetry.totalGitHubDownloads)")
+                    Divider().frame(height: 24)
+                    metric("Portal Users", "\(telemetry.cloudUsersHistory.count)")
+                    Divider().frame(height: 24)
+                    metric("This Mac Launches", "\(current.launchCount)")
                 }
                 Spacer()
                 Button {
                     Task { await telemetry.fetchAllInstallsAndHistory() }
                 } label: {
-                    Label(telemetry.isFetchingInstalls ? "Syncing…" : "Sync & Refresh", systemImage: "arrow.triangle.2.circlepath")
+                    Label(telemetry.isFetchingInstalls ? "Syncing…" : "Refresh", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
                 .disabled(telemetry.isFetchingInstalls)
             }
-
-            HStack(spacing: 14) {
-                metric("Portal Leads", "\(telemetry.downloadLeads.count)")
-                Divider().frame(height: 28)
-                metric("GitHub DMG/PKG", "\(telemetry.totalGitHubDownloads)")
-                Divider().frame(height: 28)
-                metric("Portal Users", "\(telemetry.cloudUsersHistory.count)")
-                Divider().frame(height: 28)
-                metric("This Mac Launches", "\(current.launchCount)")
-                Divider().frame(height: 28)
-                metric("Hardware", "\(current.device.cpu) · \(current.device.memoryGB)GB")
-                Spacer()
-            }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.07)))
 
             Picker("View", selection: $selectedTelemetryTab) {
                 Text("Portal Downloads (\(telemetry.downloadLeads.count))").tag(0)
@@ -549,517 +796,77 @@ struct MicroCodeLicenseSettingsView: View {
             .pickerStyle(.segmented)
 
             if selectedTelemetryTab == 0 {
-                if telemetry.downloadLeads.isEmpty {
-                    Text(telemetry.isFetchingInstalls ? "Syncing microcode_downloads from microcode.dotmini.net…" : "Sign in with your admin account and click Sync & Refresh to load download leads.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(telemetry.downloadLeads) { lead in
-                            VStack(alignment: .leading, spacing: 5) {
-                                HStack {
-                                    Image(systemName: lead.eventType == "macapp_active" ? "laptopcomputer.and.iphone" : "arrow.down.circle.fill")
-                                        .foregroundStyle(lead.eventType == "macapp_active" ? .green : .orange)
-                                    Text("#\(lead.id) \(lead.name.isEmpty ? "Anonymous" : lead.name)")
-                                        .font(.system(size: 12, weight: .semibold))
-                                    Text("(\(lead.email))")
-                                        .font(.system(size: 11))
-                                        .foregroundColor(.secondary)
-                                    Spacer()
-                                    Text("\(lead.version) · \(lead.platform)/\(lead.arch)")
-                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                        .padding(.horizontal, 6).padding(.vertical, 2)
-                                        .background(Capsule().fill(Color.orange.opacity(0.16)))
-                                }
-                                HStack(spacing: 12) {
-                                    Label("IP: \(lead.ipAddress)", systemImage: "network")
-                                    Label(lead.sourceLabel, systemImage: "tag.fill")
-                                    Spacer()
-                                    Text(String(lead.downloadedAt.prefix(19)).replacingOccurrences(of: "T", with: " "))
-                                }
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                if !lead.activeFeature.isEmpty || !lead.aiProvider.isEmpty || !lead.aiModel.isEmpty {
-                                    HStack(spacing: 8) {
-                                        if !lead.activeFeature.isEmpty {
-                                            Label(lead.activeFeature, systemImage: "sparkles.rectangle.stack")
-                                                .font(.system(size: 10, weight: .semibold))
-                                                .padding(.horizontal, 7).padding(.vertical, 2)
-                                                .background(Capsule().fill(Color.cyan.opacity(0.16)))
-                                                .foregroundStyle(.cyan)
-                                        }
-                                        if !lead.aiProvider.isEmpty || !lead.aiModel.isEmpty {
-                                            Label("\(lead.aiProvider.isEmpty ? "AI" : lead.aiProvider) · \(lead.aiModel.isEmpty ? "default" : lead.aiModel)", systemImage: "cpu.fill")
-                                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                                .padding(.horizontal, 7).padding(.vertical, 2)
-                                                .background(Capsule().fill(Color.purple.opacity(0.16)))
-                                                .foregroundStyle(.purple)
-                                        }
-                                        if lead.aiRequests > 0 {
-                                            Text("\(lead.aiRequests) reqs")
-                                                .font(.system(size: 9.5, design: .monospaced))
-                                                .foregroundColor(.secondary)
-                                        }
-                                        Spacer()
-                                    }
-                                }
-                                Text(lead.machineInfo.isEmpty ? lead.userAgent : "\(lead.machineInfo) — \(lead.userAgent)")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                            }
-                            .padding(10)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
-                        }
-
-                        if !telemetry.githubReleaseDownloads.isEmpty {
-                            Divider().padding(.vertical, 2)
-                            Text("GitHub Release Installer Downloads (Dotmini/microcode)")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(.secondary)
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(telemetry.githubReleaseDownloads) { asset in
-                                        HStack(spacing: 4) {
-                                            Text("\(asset.assetName):")
-                                                .font(.system(size: 10, design: .monospaced))
-                                            Text("\(asset.downloadCount)")
-                                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                                .foregroundStyle(.purple)
-                                        }
-                                        .fixedSize(horizontal: true, vertical: false)
-                                        .padding(.horizontal, 8).padding(.vertical, 4)
-                                        .background(Capsule().fill(Color.purple.opacity(0.12)))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if selectedTelemetryTab == 1 {
-                if telemetry.cloudUsersHistory.isEmpty {
-                    Text(telemetry.isFetchingInstalls ? "Loading registered users from microcode.dotmini.net…" : "Sign in and click Sync & Refresh to view registered MicroCode users.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(telemetry.cloudUsersHistory) { user in
-                            VStack(alignment: .leading, spacing: 5) {
-                                HStack {
-                                    Image(systemName: user.role == "admin" ? "person.badge.key.fill" : "person.crop.circle.fill")
-                                        .foregroundStyle(user.role == "admin" ? .orange : .accentColor)
-                                    Text(user.fullName)
-                                        .font(.system(size: 12, weight: .semibold))
-                                    if !user.email.isEmpty {
-                                        Text("(\(user.email))")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(.secondary)
-                                    }
-                                    Spacer()
-                                    Text(user.role.uppercased())
-                                        .font(.system(size: 9, weight: .bold))
-                                        .padding(.horizontal, 6).padding(.vertical, 2)
-                                        .background(Capsule().fill(user.role == "admin" ? Color.orange.opacity(0.18) : Color.secondary.opacity(0.14)))
-                                    Text(user.plan.uppercased())
-                                        .font(.system(size: 9, weight: .bold))
-                                        .padding(.horizontal, 6).padding(.vertical, 2)
-                                        .background(Capsule().fill(Color.accentColor.opacity(0.16)))
-                                }
-                                HStack(spacing: 12) {
-                                    Label("\(user.downloadCount) Portal Download(s)", systemImage: "arrow.down.circle")
-                                    Label("Version: \(user.lastVersion)", systemImage: "shippingbox")
-                                    Label("Last IP: \(user.lastIP)", systemImage: "network")
-                                    Spacer()
-                                    if !user.lastActiveAt.isEmpty {
-                                        Text("Last seen: \(String(user.lastActiveAt.prefix(19)).replacingOccurrences(of: "T", with: " "))")
-                                    }
-                                }
-                                .font(.system(size: 10.5))
-                                .foregroundColor(.secondary)
-                                Text(user.latestActivity)
-                                    .font(.system(size: 10.5))
-                                    .foregroundColor(.primary.opacity(0.85))
-                                    .lineLimit(1)
-                            }
-                            .padding(10)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
-                        }
-                    }
-                }
-            } else {
-                if telemetry.installedDevices.isEmpty {
-                    Text(telemetry.isFetchingInstalls ? "Syncing installation registry with Supabase…" : "No installation records synced yet. Click Sync & Refresh.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(telemetry.installedDevices) { dev in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Image(systemName: "laptopcomputer")
-                                        .foregroundStyle(.tint)
-                                    Text("\(dev.displayName) — \(dev.hostname)")
-                                        .font(.system(size: 12, weight: .semibold))
-                                    if dev.installID == telemetry.currentInstallID {
-                                        Text("THIS MAC")
-                                            .font(.system(size: 9, weight: .bold))
-                                            .padding(.horizontal, 6).padding(.vertical, 2)
-                                            .background(Capsule().fill(Color.accentColor.opacity(0.2)))
-                                    }
-                                    Spacer()
-                                    Text("Launches: \(dev.launchCount)")
-                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                }
-                                HStack(spacing: 10) {
-                                    Text("\(dev.device.hardwareModel) • \(dev.device.cpu) • \(dev.device.memoryGB)GB RAM • \(dev.device.operatingSystem)")
-                                    Spacer()
-                                    Text("v\(dev.appVersion)")
-                                }
-                                .font(.system(size: 10.5))
-                                .foregroundColor(.secondary)
-                                HStack(spacing: 10) {
-                                    Text("User: \(dev.email.isEmpty ? "Anonymous" : dev.email)")
-                                    Spacer()
-                                    Text("First install: \(String(dev.firstInstalledAt.prefix(19)).replacingOccurrences(of: "T", with: " "))")
-                                    Text("Last seen: \(String(dev.lastSeenAt.prefix(19)).replacingOccurrences(of: "T", with: " "))")
-                                }
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                if !dev.activeFeature.isEmpty || !dev.aiProvider.isEmpty || !dev.aiModel.isEmpty {
-                                    HStack(spacing: 8) {
-                                        if !dev.activeFeature.isEmpty {
-                                            Label("Feature: \(dev.activeFeature)", systemImage: "sparkles.rectangle.stack")
-                                                .font(.system(size: 10, weight: .semibold))
-                                                .padding(.horizontal, 7).padding(.vertical, 2)
-                                                .background(Capsule().fill(Color.cyan.opacity(0.16)))
-                                                .foregroundStyle(.cyan)
-                                        }
-                                        if !dev.aiProvider.isEmpty || !dev.aiModel.isEmpty {
-                                            Label("\(dev.aiProvider.isEmpty ? "AI" : dev.aiProvider) · \(dev.aiModel.isEmpty ? "default" : dev.aiModel)", systemImage: "cpu.fill")
-                                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                                .padding(.horizontal, 7).padding(.vertical, 2)
-                                                .background(Capsule().fill(Color.purple.opacity(0.16)))
-                                                .foregroundStyle(.purple)
-                                        }
-                                        if dev.aiRequests > 0 {
-                                            Text("\(dev.aiRequests) AI reqs · \(dev.aiTokens) tokens")
-                                                .font(.system(size: 9.5, design: .monospaced))
-                                                .foregroundColor(.secondary)
-                                        }
-                                        Spacer()
-                                    }
-                                }
-                                if !dev.installedAgents.isEmpty {
-                                    HStack(spacing: 6) {
-                                        Text("CLI Agents:")
-                                            .font(.system(size: 10, weight: .medium))
-                                            .foregroundColor(.secondary)
-                                        ForEach(dev.installedAgents, id: \.self) { agent in
-                                            Text(agent)
-                                                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                                                .padding(.horizontal, 6).padding(.vertical, 2)
-                                                .background(Capsule().fill(Color.secondary.opacity(0.14)))
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(10)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
-                        }
-                    }
-                }
-            }
-
-            if !telemetry.lastSyncStatus.isEmpty {
-                Text(telemetry.lastSyncStatus)
-                    .font(.system(size: 10.5))
-                    .foregroundColor(.secondary)
-            }
-        }
-        .cardStyle()
-    }
-
-    private var platformKeyCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Dotmini Platform key")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("One developer key for Omni models and MicroCode Cloud Runtime. Stored only in macOS Keychain.")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Button("Open Platform") {
-                    NSWorkspace.shared.open(URL(string: "https://microai.dotmini.net/platform")!)
-                }
-                .buttonStyle(.bordered)
-            }
-
-            if platformKey.isConfigured {
-                HStack {
-                    Label(platformKey.maskedKey, systemImage: "checkmark.circle.fill")
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.green)
-                    Spacer()
-                    Button(platformKey.isValidating ? "Checking…" : "Verify") {
-                        Task { _ = await platformKey.validate() }
-                    }
-                    .disabled(platformKey.isValidating)
-                    Button("Remove", role: .destructive) { platformKey.remove() }
-                }
-            } else {
-                HStack(spacing: 8) {
-                    SecureField("sk-dotmini-live-… or mci-live-…", text: $platformKeyInput)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Save key") {
-                        if platformKey.save(platformKeyInput) { platformKeyInput = "" }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(platformKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            if !platformKey.validationMessage.isEmpty {
-                Text(platformKey.validationMessage)
-                    .font(.system(size: 11))
-                    .foregroundColor(platformKey.validationMessage.lowercased().contains("rejected") || platformKey.validationMessage.lowercased().contains("could not") ? .red : .secondary)
-            }
-        }
-        .cardStyle()
-    }
-
-    private var enterpriseCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Label("Enterprise AI & Governance", systemImage: "building.2.crop.circle.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                        if enterprise.isEnterpriseActive {
-                            Text("ACTIVE")
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.green.opacity(0.2)))
-                                .foregroundStyle(.green)
-                        }
-                        if enterprise.isMDMManaged {
-                            Text("MDM MANAGED")
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.blue.opacity(0.2)))
-                                .foregroundStyle(.blue)
-                        }
-                    }
-                    Text("Connect directly to Google Gemini Enterprise (Vertex AI BYOC), Dotmini Cloud Enterprise (Sovereign ZDR Gateway), or a private corporate gateway.")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-
-            Picker("Enterprise Mode", selection: $enterprise.mode) {
-                ForEach(EnterpriseAIMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.menu)
-
-            Text(enterprise.mode.subtitle)
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-
-            if enterprise.mode == .dotminiEnterprise {
-                Divider()
-                VStack(alignment: .leading, spacing: 10) {
-                    TextField("Organization ID (e.g. org-scb-thailand)", text: $enterprise.dotminiOrganizationId)
-                        .textFieldStyle(.roundedBorder)
-                    SecureField("Dotmini Enterprise Key (sk-dotmini-ent-…)", text: $enterprise.dotminiEnterpriseKey)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Enterprise Gateway URL", text: $enterprise.dotminiEnterpriseGatewayURL)
-                        .textFieldStyle(.roundedBorder)
-                }
-            } else if enterprise.mode == .geminiVertex {
-                Divider()
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Google Cloud Project ID").font(.caption).foregroundColor(.secondary)
-                            TextField("my-enterprise-gcp-project", text: $enterprise.vertexProjectId)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Vertex AI Region").font(.caption).foregroundColor(.secondary)
-                            Picker("", selection: $enterprise.vertexLocation) {
-                                Text("asia-southeast1 (Singapore)").tag("asia-southeast1")
-                                Text("asia-northeast1 (Tokyo)").tag("asia-northeast1")
-                                Text("us-central1 (Iowa)").tag("us-central1")
-                                Text("europe-west4 (Netherlands)").tag("europe-west4")
-                                Text("global (Global Endpoint)").tag("global")
-                            }
-                            .labelsHidden()
-                        }
-                    }
-
-                    Picker("Vertex Authentication", selection: $enterprise.vertexAuthMode) {
-                        ForEach(VertexAuthMode.allCases) { authMode in
-                            Text(authMode.title).tag(authMode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    if enterprise.vertexAuthMode == .serviceAccountJSON {
-                        HStack(spacing: 8) {
-                            Button {
-                                importServiceAccountFile()
-                            } label: {
-                                Label(enterprise.vertexServiceAccountJSON.isEmpty ? "Import Service Account JSON…" : "Replace Service Account JSON…", systemImage: "doc.badge.key")
-                            }
-                            .buttonStyle(.bordered)
-
-                            Button(showServiceAccountEditor ? "Hide JSON" : "Paste JSON") {
-                                showServiceAccountEditor.toggle()
-                            }
-                            .buttonStyle(.bordered)
-
-                            if !enterprise.vertexServiceAccountJSON.isEmpty {
-                                Label("Service Account Loaded", systemImage: "checkmark.seal.fill")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(.green)
-                            }
-                        }
-
-                        if showServiceAccountEditor {
-                            TextEditor(text: $enterprise.vertexServiceAccountJSON)
-                                .font(.system(size: 11, design: .monospaced))
-                                .frame(height: 90)
-                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
-                        }
-                    } else if enterprise.vertexAuthMode == .apiKey {
-                        SecureField("Vertex AI Express / Enterprise API Key", text: $enterprise.vertexAPIKey)
-                            .textFieldStyle(.roundedBorder)
-                    } else {
-                        Text("Uses ~/.config/gcloud/application_default_credentials.json or `gcloud auth print-access-token` automatically.")
+                ForEach(telemetry.downloadLeads.prefix(25)) { lead in
+                    HStack {
+                        Text("#\(lead.id) \(lead.name.isEmpty ? "Anonymous" : lead.name)")
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Text("(\(lead.email))")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(lead.version) · \(lead.platform)/\(lead.arch)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
                     }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.03)))
                 }
-            } else if enterprise.mode == .customGateway {
-                Divider()
-                VStack(alignment: .leading, spacing: 10) {
-                    TextField("Custom Gateway Base URL (https://llm-gateway.corp.internal/v1)", text: $enterprise.customGatewayBaseURL)
-                        .textFieldStyle(.roundedBorder)
-                    SecureField("Gateway Bearer API Key", text: $enterprise.customGatewayAPIKey)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Organization / Cost Center ID (optional)", text: $enterprise.dotminiOrganizationId)
-                        .textFieldStyle(.roundedBorder)
-                }
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Label("Sovereign DLP, Command Firewall & Policy Engine", systemImage: "lock.shield.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer()
-                    HStack(spacing: 8) {
-                        Text("Vaulted: \(AgentPrivacyGuard.vaultedSecretCount)")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.green.opacity(0.15)))
-                            .foregroundStyle(.green)
-                        Text("Blocked Cmds: \(enterprise.blockedCommandsCount)")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.orange.opacity(0.15)))
-                            .foregroundStyle(.orange)
+            } else if selectedTelemetryTab == 1 {
+                ForEach(telemetry.cloudUsersHistory.prefix(25)) { user in
+                    HStack {
+                        Text(user.fullName)
+                            .font(.system(size: 11.5, weight: .semibold))
+                        if !user.email.isEmpty {
+                            Text("(\(user.email))")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Text(user.plan.uppercased())
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
                     }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.03)))
                 }
-
-                Toggle("Zero Data Retention (ZDR) — Enforce X-Dotmini-ZDR no-training / no-logging header", isOn: $enterprise.zeroDataRetention)
-                    .font(.system(size: 12, weight: .medium))
-                Toggle("Reversible Secret Vault (Bidirectional DLP) — Tokenize secrets (<VAULT_…>) in prompts & restore on disk writes", isOn: $enterprise.localDLPRedaction)
-                    .font(.system(size: 12, weight: .medium))
-                Toggle("Confidential Split-Routing — Route turns accessing .env / *.pem / *.key to Local LLM or Enterprise VPC", isOn: $enterprise.enforceConfidentialSplitRouting)
-                    .font(.system(size: 12, weight: .medium))
-                Toggle("Enterprise Shell Command Firewall — Block destructive commands (rm -rf /, curl | sh, terraform destroy, DROP DATABASE)", isOn: $enterprise.commandFirewallEnabled)
-                    .font(.system(size: 12, weight: .medium))
-                Toggle("Air-Gapped Sovereign Lockdown — Block all public cloud AI calls (Local LLM / Internal VPC only)", isOn: $enterprise.isAirGappedLockdownEnabled)
-                    .font(.system(size: 12, weight: .medium))
-            }
-
-            HStack(spacing: 8) {
-                if enterprise.isEnterpriseActive {
-                    Button(enterprise.isVerifying ? "Verifying…" : "Verify Enterprise Connection") {
-                        Task { _ = await enterprise.verifyConnection() }
+            } else {
+                ForEach(telemetry.installedDevices.prefix(25)) { dev in
+                    HStack {
+                        Text("\(dev.displayName) — \(dev.hostname)")
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Spacer()
+                        Text("v\(dev.appVersion) · \(dev.launchCount) launches")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(enterprise.isVerifying)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.03)))
                 }
-
-                Button {
-                    let wsPath = UserDefaults.standard.string(forKey: "lastOpenedWorkspacePath")
-                    _ = enterprise.exportWorkspacePolicyTemplate(workspacePath: wsPath)
-                } label: {
-                    Label("Generate enterprise-policy.json", systemImage: "doc.badge.gearshape")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    _ = FlightRecorder.shared.saveComplianceReportWithPanel()
-                } label: {
-                    Label("Export Compliance Report (SOC2 / PDPA)", systemImage: "checkmark.shield")
-                }
-                .buttonStyle(.bordered)
             }
-
-            if !enterprise.statusMessage.isEmpty {
-                Text(enterprise.statusMessage)
-                    .font(.system(size: 11))
-                    .foregroundColor(enterprise.statusMessage.contains("✓") || enterprise.statusMessage.contains("Saved") ? .green : .secondary)
-            }
-        }
-        .cardStyle()
-    }
-
-    private func importServiceAccountFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "Select your Google Cloud Service Account JSON key file for Vertex AI Gemini Enterprise"
-        if panel.runModal() == .OK, let url = panel.url,
-           let content = try? String(contentsOf: url, encoding: .utf8) {
-            enterprise.vertexServiceAccountJSON = content
-            enterprise.statusMessage = "Loaded Service Account JSON (\(url.lastPathComponent))"
         }
     }
 
-    private var architectureNote: some View {
-        Label("Firebase is not used for account sign-in, tokens, licenses, or quota. Sessions are stored in macOS Keychain and refreshed with your self-hosted Supabase Auth service.", systemImage: "lock.shield")
-            .font(.system(size: 11))
-            .foregroundColor(.secondary)
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.08)))
-    }
+    // MARK: - Helpers & Actions
 
     private var statusText: some View {
         Text(status)
             .font(.system(size: 11))
-            .foregroundColor(status.lowercased().contains("failed") || status.lowercased().contains("not configured") ? .red : .secondary)
+            .foregroundColor(
+                status.lowercased().contains("failed") ||
+                status.lowercased().contains("not configured") ||
+                status.lowercased().contains("ไม่สำเร็จ") ? .red : .secondary
+            )
     }
 
     private var accountEmail: String { auth.currentEmail }
 
     private func metric(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(value).font(.system(size: 17, weight: .bold, design: .rounded))
-            Text(label).font(.caption).foregroundColor(.secondary)
+            Text(value)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+            Text(label)
+                .font(.system(size: 10.5))
+                .foregroundColor(.secondary)
         }
     }
 
@@ -1071,13 +878,17 @@ struct MicroCodeLicenseSettingsView: View {
         defer { isWorking = false }
         do {
             let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let session = try await auth.signUp(email: cleanEmail, password: password, displayName: name.isEmpty ? (cleanEmail.components(separatedBy: "@").first ?? "MicroCode User") : name)
+            let session = try await auth.signUp(
+                email: cleanEmail,
+                password: password,
+                displayName: name.isEmpty ? (cleanEmail.components(separatedBy: "@").first ?? "MicroCode User") : name
+            )
             if session != nil {
                 persistedEmail = cleanEmail
                 password = ""
                 status = "สร้างบัญชีสำเร็จ เข้าสู่ระบบแล้ว"
             } else {
-                status = "ส่งอีเมลยืนยันไปที่ \(cleanEmail) แล้ว กรุณากดลิงก์ในอีเมล จากนั้นกลับมากด Sign In (ตรวจโฟลเดอร์ Spam ด้วย)"
+                status = "ส่งอีเมลยืนยันไปที่ \(cleanEmail) แล้ว กรุณากดลิงก์ในอีเมล จากนั้นกลับมากด Sign In"
                 isCreatingAccount = false
             }
         } catch {
@@ -1087,7 +898,7 @@ struct MicroCodeLicenseSettingsView: View {
 
     private func resetPassword() async {
         let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cleanEmail.contains("@") else { status = "กรอกอีเมลก่อน แล้วกด “ลืมรหัสผ่าน”"; return }
+        guard cleanEmail.contains("@") else { status = "กรอกอีเมลก่อน แล้วกด Forgot password?"; return }
         isWorking = true
         defer { isWorking = false }
         do {
@@ -1105,24 +916,55 @@ struct MicroCodeLicenseSettingsView: View {
         do {
             let session = try await auth.signIn(email: email, password: password)
             persistedEmail = session.email
-            AuthService.shared.syncWithWebSession(email: session.email, token: session.accessToken, displayName: session.email.components(separatedBy: "@").first ?? "User")
+            AuthService.shared.syncWithWebSession(
+                email: session.email,
+                token: session.accessToken,
+                displayName: session.email.components(separatedBy: "@").first ?? "User"
+            )
             TelemetryService.shared.record(name: "account_signed_in", mode: "password")
             if auth.isAdminProvider {
                 await TelemetryService.shared.fetchAllInstallsAndHistory()
             } else {
                 TelemetryService.shared.clearAdminCache()
             }
-            status = "Signed in securely with Supabase."
+            status = "Signed in securely."
         } catch {
             status = error.localizedDescription
         }
     }
 }
 
+/// Crisp vector Google "G" mark for the native macOS sign-in button.
+private struct GoogleBrandMark: View {
+    var size: CGFloat = 15
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.white)
+                .frame(width: size + 4, height: size + 4)
+            Text("G")
+                .font(.system(size: size * 0.78, weight: .heavy, design: .rounded))
+                .foregroundStyle(
+                    AngularGradient(
+                        colors: [
+                            Color(red: 0.26, green: 0.52, blue: 0.96),
+                            Color(red: 0.20, green: 0.66, blue: 0.33),
+                            Color(red: 0.98, green: 0.74, blue: 0.02),
+                            Color(red: 0.92, green: 0.26, blue: 0.21),
+                            Color(red: 0.26, green: 0.52, blue: 0.96)
+                        ],
+                        center: .center
+                    )
+                )
+        }
+    }
+}
+
 private extension View {
     func cardStyle() -> some View {
-        padding(16)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        padding(14)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
     }
 }

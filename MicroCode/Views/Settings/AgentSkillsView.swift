@@ -60,10 +60,12 @@ final class AgentSkillsStore: ObservableObject {
     @Published var jitAutoRouterEnabled: Bool = true
     
     private let enabledKey = "microcode.enabledSkills.real.v2"
+    /// Opt-out set for discovered ecosystem/plugin/built-in skills (v3): all valid skills are enabled by default unless explicitly disabled by the user.
+    private let disabledSkillsKey = "microcode.disabledSkills.v3"
     /// Built-in skills are on by default; only an explicit opt-out is stored.
     private let disabledBuiltinKey = "microcode.disabledBuiltinSkills.v1"
-    /// Skills injected into every agent turn (harness protocol and quality bar).
-    static let coreSkillIds = ["microcode-harness-core", "microcode-anti-slop"]
+    /// Lean core operating protocol injected concisely; heavy specialized skills use AAIF 3-Tier Progressive Disclosure.
+    static let coreSkillIds = ["microcode-harness-core"]
 
     static var builtinRootPath: String? {
         guard let url = Bundle.main.resourceURL?.appendingPathComponent("BuiltinSkills"),
@@ -85,16 +87,25 @@ final class AgentSkillsStore: ObservableObject {
         var searchRoots = [
             "\(home)/.microcode/skills",
             "\(home)/.agents/skills",
+            "\(home)/.claude/skills",
+            "\(home)/.claude/plugins",
             "\(home)/.codex/skills",
             "\(home)/.codex/plugins/cache",
             "\(home)/.gemini/config/skills",
             "\(home)/.gemini/config/plugins",
-            "\(home)/.gemini/antigravity/builtin/skills"
+            "\(home)/.gemini/antigravity/builtin/skills",
+            "\(home)/Documents/dotminiid/skills",
+            "\(home)/Documents/SX/codetunner-native/skills"
         ]
         
         if let builtinRoot { searchRoots.append(builtinRoot) }
 
-        // Scan active workspace (both isolated ~/.microcode/workspaces/<id>/skills and optional repo folders)
+        // Scan user custom skill directory explicitly
+        let customUserSkillsDir = "\(home)/.microcode/skills"
+        if !fm.fileExists(atPath: customUserSkillsDir) {
+            try? fm.createDirectory(atPath: customUserSkillsDir, withIntermediateDirectories: true)
+        }
+        searchRoots.append(customUserSkillsDir)
         if let ws = AgentToolBox.shared.workspaceRoot, !ws.isEmpty {
             searchRoots.append(WorkspaceStoragePaths.managedStateFile(named: "skills", workspacePath: ws).path)
             searchRoots.append("\(ws)/.microcode/skills")
@@ -118,7 +129,7 @@ final class AgentSkillsStore: ObservableObject {
         
         var foundPaths: [String] = []
         let ignoredDirectoryNames: Set<String> = [
-            ".git", ".build", "target", "node_modules", "DerivedData", "dist", "build"
+            ".git", ".build", "target", "node_modules", "DerivedData", "dist", "build", "inactive-skills"
         ]
         
         for root in searchRoots {
@@ -144,13 +155,7 @@ final class AgentSkillsStore: ObservableObject {
             return lhs < rhs
         }
         let disabledBuiltin = Set(UserDefaults.standard.stringArray(forKey: disabledBuiltinKey) ?? [])
-        
-        let enabledSet = Set(UserDefaults.standard.stringArray(forKey: enabledKey) ?? [
-            "antigravity-guide", "agy-customizations", "modern-web-guidance",
-            "chrome-devtools", "bigquery-sql", "runpod-orchestrator",
-            "dotmini-omni-ai", "alphafold_database_fetch_and_analyze", "pubmed_database",
-            "accidental-data-loss-prevention"
-        ])
+        let disabledAll = Set(UserDefaults.standard.stringArray(forKey: disabledSkillsKey) ?? [])
         
         for path in foundPaths {
             guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
@@ -158,10 +163,19 @@ final class AgentSkillsStore: ObservableObject {
             // Extract skill name & description
             let url = URL(fileURLWithPath: path)
             let folderName = url.deletingLastPathComponent().lastPathComponent
-            let skillId = folderName == "skills" ? url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent : folderName
+            let parentName = url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+            let grandParentName = url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+            var rawSkillId = folderName == "skills" ? parentName : folderName
+            if parentName == "skills" && !grandParentName.isEmpty && grandParentName != "config" && grandParentName != "builtin" && !rawSkillId.lowercased().hasPrefix(grandParentName.lowercased()) {
+                rawSkillId = "\(grandParentName)-\(rawSkillId)"
+            }
             
             let isBuiltin = builtinRoot.map { path.hasPrefix($0) } ?? false
-            var (name, desc, category, tags) = parseSkillMeta(skillId: skillId, content: content, path: path)
+            var (name, desc, category, tags) = parseSkillMeta(skillId: rawSkillId, content: content, path: path)
+            let yamlSlug = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let skillId: String = (!isBuiltin && !yamlSlug.contains(" ") && yamlSlug.count >= 2 && yamlSlug.count <= 64)
+                ? yamlSlug.lowercased()
+                : rawSkillId
             var (icon, color, provider) = categorizeSkillMeta(category: category, skillId: skillId, path: path)
             if isBuiltin {
                 category = Self.builtinCategory(for: skillId)
@@ -170,6 +184,7 @@ final class AgentSkillsStore: ObservableObject {
                 (icon, color, _) = categorizeSkillMeta(category: category, skillId: skillId, path: path)
             }
             
+            let isSkillEnabled = !disabledAll.contains(skillId) && (!isBuiltin || !disabledBuiltin.contains(skillId))
             let item = AgentSkillItem(
                 id: skillId,
                 name: name,
@@ -181,7 +196,7 @@ final class AgentSkillsStore: ObservableObject {
                 filePath: path,
                 instructions: content,
                 tags: tags,
-                isEnabled: enabledSet.contains(skillId) || (isBuiltin && !disabledBuiltin.contains(skillId)),
+                isEnabled: isSkillEnabled,
                 isBuiltin: isBuiltin
             )
             
@@ -325,7 +340,9 @@ final class AgentSkillsStore: ObservableObject {
     
     private func saveEnabled() {
         let enabled = skills.filter { $0.isEnabled }.map { $0.id }
+        let disabled = skills.filter { !$0.isEnabled }.map { $0.id }
         UserDefaults.standard.set(enabled, forKey: enabledKey)
+        UserDefaults.standard.set(disabled, forKey: disabledSkillsKey)
         UserDefaults.standard.set(skills.filter { $0.isBuiltin && !$0.isEnabled }.map { $0.id }, forKey: disabledBuiltinKey)
     }
     
@@ -352,16 +369,15 @@ final class AgentSkillsStore: ObservableObject {
         }
     }
 
-    /// Always-on protocol: the harness operating rules and the anti-slop quality bar.
-    /// Returned even when no other skill matches, so every agent turn starts from the same baseline.
+    /// Lean always-on operating baseline (kept compact so it never pollutes context or fights user intent).
     func coreProtocolSnippet() -> String {
         var parts: [String] = []
         for id in Self.coreSkillIds {
             guard let skill = skills.first(where: { $0.id == id && $0.isEnabled }) else { continue }
-            parts.append(distilledInstructions(for: skill, maxChars: 4200))
+            parts.append(distilledInstructions(for: skill, maxChars: 1600))
         }
         guard !parts.isEmpty else { return "" }
-        return "\n\n## MICROCODE CORE PROTOCOL (always active)\n" + parts.joined(separator: "\n\n") + "\n"
+        return "\n\n## MICROCODE CORE HARNESS\n" + parts.joined(separator: "\n\n") + "\n"
     }
 
     /// Intent-based boost for bundled skills; keyword lists are deliberately specific so a skill is not injected on unrelated turns.
@@ -370,24 +386,29 @@ final class AgentSkillsStore: ObservableObject {
         let hasThai = prompt.unicodeScalars.contains { (0x0E00...0x0E7F).contains($0.value) }
         switch id {
         case "frontend-design":
-            if has(["ui ", " ux", "design", "landing", "website", "web page", "webpage", "css", "html", "layout", "frontend", "front-end", "redesign", "hero", "component", "สวย", "หน้าเว็บ", "ดีไซน์", "ออกแบบ", "หน้าตา"]) ||
+            if has(["landing page", "website", "web page", "webpage", "frontend", "front-end", "redesign", "หน้าเว็บ", "ออกแบบเว็บ"]) ||
                 !openExts.isDisjoint(with: ["html", "css", "scss", "tsx", "jsx", "vue", "svelte"]) { return (34, "UI / frontend design task") }
+        case "microcode-anti-slop":
+            if has(["landing page", "copywriting", "anti-slop", "no slop", "เขียนบทความ", "หน้าเว็บ"]) { return (28, "Anti-slop quality guard") }
         case "theme-factory":
             if has(["theme", "palette", "slides", "deck", "color scheme", "colour scheme", "ธีม", "โทนสี", "ชุดสี"]) { return (30, "Theme / palette task") }
         case "microcode-swift-macos-ui":
             if has(["swiftui", "appkit", "macos", "nsview", "nswindow", "xcode", "toolbar", "sidebar", "swift "]) || openExts.contains("swift") { return (30, "Swift / macOS UI") }
         case "microcode-thai-ui-typography":
             let explicit = has(["thai", "ภาษาไทย", "th_th", "th-th", "localiz", "i18n", "พ.ศ."])
-            let textIntent = has(["ui", "form", "report", "label", "copy", "font", "text", "document", "pdf", "translate", "แปล", "ฟอนต์", "ตัวอักษร", "ฟอร์ม", "รายงาน", "เอกสาร", "ข้อความ", "ปุ่ม", "หน้า"])
-            if explicit || (hasThai && textIntent) { return (40, "Thai text / UI") }
+            let textIntent = has(["ui", "form", "report", "label", "copy", "font", "text", "document", "pdf", "translate", "แปล", "ฟอนต์", "ตัวอักษร", "ฟอร์ม", "รายงาน", "เอกสาร", "ข้อความ", "ปุ่ม"])
+            if explicit || (hasThai && textIntent) { return (36, "Thai text / UI") }
         case "microcode-security-baseline":
             if has(["security", "secure", "auth", "token", "secret", "password", "vulnerab", "injection", "xss", "csrf", "encrypt", "keychain", "oauth", "credential", "ช่องโหว่", "ความปลอดภัย", "รหัสผ่าน"]) { return (32, "Security-sensitive change") }
         case "mcp-builder":
-            if has(["mcp", "model context protocol"]) { return (45, "MCP server work") }
+            // ONLY trigger mcp-builder when the user asks to BUILD/WRITE/IMPLEMENT an MCP server in code — NEVER when connecting/using an existing MCP like Canva!
+            let isConnectingExistingMCP = has(["เชื่อม", "ต่อ mcp", "connect", "install", "login", "enable", "canva", "figma", "github", "gmail", "notion", "supabase"])
+            let isBuildingNewMCPServer = has(["build mcp", "create mcp", "write mcp", "develop mcp", "fastmcp", "mcp sdk", "สร้าง mcp server", "เขียน mcp", "พัฒนา mcp"])
+            if isBuildingNewMCPServer && !isConnectingExistingMCP { return (48, "Authoring new MCP server") }
         case "webapp-testing":
-            if has(["playwright", "e2e", "browser test", "webapp", "web app test", "screenshot", "ทดสอบเว็บ"]) { return (38, "Web app testing") }
+            if has(["playwright", "e2e", "browser test", "web app test", "ทดสอบเว็บ"]) { return (38, "Web app testing") }
         case "microcode-skill-authoring":
-            if has(["skill.md", "crystalliz", "write a skill", "create a skill", "new skill", "สร้าง skill", "สกิล"]) { return (42, "Skill authoring") }
+            if has(["skill.md", "crystalliz", "write a skill", "create a skill", "new skill", "สร้าง skill"]) { return (44, "Skill authoring") }
         default: break
         }
         return nil
@@ -520,8 +541,12 @@ final class AgentSkillsStore: ObservableObject {
         return String(body.prefix(maxChars)) + "\n... [Full skill at \(skill.filePath)]"
     }
     
-    /// Returns the active instruction prompt of matched & enabled skills to inject into AgentService.
-    /// Automatically pre-injects full distilled instructions for Top-2 high-confidence JIT matches (Zero Extra Round-Trip).
+    /// AAIF 3-Tier Progressive Disclosure Skill Router:
+    /// - Tier 1 (Always lightweight): Injects a compact `<available_skills>` table-of-contents (ID + 1-line description + path)
+    ///   for the top relevant enabled skills (~40 tokens/skill, zero prompt bloat).
+    /// - Tier 2 (On-Demand Activation): The LLM reads full `SKILL.md` via `skill_engine(action: "read", query: "<id>")` or `file_read`
+    ///   ONLY when user intent genuinely requires that skill (plus at most 1 ultra-high-precision match `score >= 58` pre-warmed).
+    /// - Tier 3 (Executable Resources): Bundled `scripts/` and `references/` are invoked on demand via `skill_engine(action: "run_script")`.
     func activeSkillsPromptSnippet(
         forPrompt prompt: String = "",
         workspacePath: String? = nil,
@@ -530,41 +555,42 @@ final class AgentSkillsStore: ObservableObject {
         let core = coreProtocolSnippet()
         let coreIds = Set(Self.coreSkillIds)
         let ranked = rankSkills(forPrompt: prompt, workspacePath: workspacePath, openFiles: openFiles)
-            .filter { !coreIds.contains($0.skill.id) }
+            .filter { $0.skill.isEnabled && !coreIds.contains($0.skill.id) }
         guard !ranked.isEmpty else { return core }
         
-        // Top 2 high-confidence skills get Zero-Round-Trip JIT full instruction pre-loading
-        let jitPreloaded = jitAutoRouterEnabled ? Array(ranked.filter { $0.score >= 24 }.prefix(2)) : []
+        // Only pre-warm 1 unambiguous exact-intent skill (score >= 58); everything else uses Progressive Disclosure!
+        let jitPreloaded = jitAutoRouterEnabled ? Array(ranked.filter { $0.score >= 58 }.prefix(1)) : []
         let jitIds = Set(jitPreloaded.map { $0.skill.id })
         if autoActivatedSkillIds != jitIds {
             autoActivatedSkillIds = jitIds
         }
         
-        let catalogSkills = Array(ranked.filter { !jitIds.contains($0.skill.id) }.prefix(8))
+        let catalogSkills = Array(ranked.filter { !jitIds.contains($0.skill.id) }.prefix(14))
         
-        var snippet = core + "\n\n## MICROCODE AUTONOMOUS SKILL ENGINE (JIT Context-Aware Router)\n"
-        snippet += "- Tool `skill_engine` is available (`recommend`, `activate`, `run_script`, `crystallize`).\n"
+        var snippet = core + "\n\n## AVAILABLE AGENT SKILLS (Progressive Disclosure)\n"
+        snippet += "- If a listed skill clearly applies to the user's request, MUST read its `SKILL.md` instructions first via `skill_engine(action: \"read\", query: \"<skill_id>\")` or `file_read` before executing.\n"
+        snippet += "- Do NOT activate unrelated skills. You can also search all \(skills.count) installed skills via `skill_engine(action: \"match\", query: \"...\")`.\n"
         
         if !jitPreloaded.isEmpty {
-            snippet += "\n### ⚡ JIT AUTO-ACTIVATED SKILLS (Pre-Loaded — Execute Immediately Without Extra file_read):\n"
             for entry in jitPreloaded {
                 let s = entry.skill
                 let scripts = availableScripts(forSkill: s)
-                snippet += "#### [JIT ACTIVE] \(s.name) (`\(s.id)`) — Match: \(entry.reason)\n"
-                snippet += "- Path: `\(s.filePath)`\n"
+                snippet += "\n### Active Skill: `\(s.id)` (\(s.name)) — Path: `\(s.filePath)`\n"
                 if !scripts.isEmpty {
-                    snippet += "- Bundled Helper Scripts (run via `skill_engine(action: \"run_script\", skill_id: \"\(s.id)\", script: ...)`): `\(scripts.joined(separator: "`, `"))`\n"
+                    snippet += "- Helper Scripts (`skill_engine(action: \"run_script\", query: \"\(s.id)\", script: ...)`): `\(scripts.joined(separator: "`, `"))`\n"
                 }
-                snippet += "```markdown\n\(distilledInstructions(for: s, maxChars: 1400))\n```\n\n"
+                snippet += "\(distilledInstructions(for: s, maxChars: 1100))\n"
             }
         }
         
         if !catalogSkills.isEmpty {
-            snippet += "### Active Skill Catalog (Use `skill_engine(action: \"activate\", skill_id: ...)` or `file_read` when needed):\n"
+            snippet += "\n<available_skills>\n"
             for entry in catalogSkills {
                 let s = entry.skill
-                snippet += "- **`\(s.id)`** (\(s.name)): \(s.description.prefix(160)) [Path: `\(s.filePath)`]\n"
+                let oneLineDesc = s.description.replacingOccurrences(of: "\n", with: " ").prefix(150)
+                snippet += "- \(s.id) (\(s.filePath)): \(oneLineDesc)\n"
             }
+            snippet += "</available_skills>\n"
         }
         
         return snippet
@@ -724,6 +750,41 @@ struct AgentSkillsView: View {
                         Label("Rescan Disk", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {
+                        let panel = NSOpenPanel()
+                        panel.title = "Import Custom .skill or .md / Folder"
+                        panel.canChooseFiles = true
+                        panel.canChooseDirectories = true
+                        panel.allowsMultipleSelection = true
+                        panel.allowedFileTypes = ["md", "skill", "zip"]
+                        if panel.runModal() == .OK {
+                            for url in panel.urls {
+                                do {
+                                    if url.hasDirectoryPath {
+                                        let fm = FileManager.default
+                                        let home = NSHomeDirectory()
+                                        let targetDir = URL(fileURLWithPath: "\(home)/.microcode/skills/\(url.lastPathComponent)")
+                                        if fm.fileExists(atPath: targetDir.path) { try fm.removeItem(at: targetDir) }
+                                        try fm.copyItem(at: url, to: targetDir)
+                                    } else {
+                                       let content = try String(contentsOf: url, encoding: .utf8)
+                                       let filename = url.lastPathComponent
+                                       let cleanName = filename.hasSuffix(".md") ? String(filename.dropLast(3)) : (filename.hasSuffix(".skill") ? String(filename.dropLast(6)) : filename)
+                                       let skillId = cleanName.lowercased().replacingOccurrences(of: " ", with: "-")
+                                       let _ = try store.crystallizeSkill(id: skillId, name: cleanName, description: "Imported custom skill from \(filename)", instructions: content)
+                                    }
+                                } catch {
+                                    print("Failed to import skill: \(error)")
+                                }
+                            }
+                            store.loadAndScanSkills()
+                        }
+                    } label: {
+                        Label("Import Skill / .md...", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     
                     Button("Enable All") { store.enableAll() }

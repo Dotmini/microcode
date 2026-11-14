@@ -133,6 +133,8 @@ extension PhoneCompanionService {
 
     // MARK: - Keep-Awake Sync & Push Event Watcher
 
+    private static var portScanTickCounter: Int = 0
+
     func syncSleepAssertionAndPushEvents() {
         let agent = AgentService.shared
         let hasMobileClients = !sseConnections.isEmpty || connectedDevices.contains(where: {
@@ -142,6 +144,13 @@ extension PhoneCompanionService {
         let holding = MobileSleepGuard.shared.update(shouldHold: shouldHoldSleep)
         if isHoldingSleepAssertion != holding {
             isHoldingSleepAssertion = holding
+        }
+
+        if isEnabled && (hasMobileClients || agent.isLoading) {
+            Self.portScanTickCounter = (Self.portScanTickCounter + 1) % 2
+            if Self.portScanTickCounter == 0 {
+                IDEBrowserAutomationService.shared.scanActivePorts()
+            }
         }
 
         evaluateAndDispatchPushEventsIfNeeded()
@@ -168,7 +177,7 @@ extension PhoneCompanionService {
                 lastPushedEventKey = key
                 Task {
                     await sendExternalPushNotification(
-                        title: "⚠️ MicroCode Approval Needed (\(wsName))",
+                        title: "MicroCode · Approval Required (\(wsName))",
                         body: "Tool '\(req.toolName)' is waiting for your approval: \(req.description.prefix(120))",
                         priority: "high",
                         tags: "warning,wrench"
@@ -186,7 +195,7 @@ extension PhoneCompanionService {
                 lastPushedEventKey = key
                 Task {
                     await sendExternalPushNotification(
-                        title: "📋 Plan Ready for Review (\(wsName))",
+                        title: "MicroCode · Plan Ready (\(wsName))",
                         body: "\(plan.title) (\(plan.totalSteps) steps) — tap to review and proceed.",
                         priority: "high",
                         tags: "clipboard"
@@ -207,7 +216,7 @@ extension PhoneCompanionService {
                 lastPushedEventKey = finishKey
                 Task {
                     await sendExternalPushNotification(
-                        title: "✅ MicroCode Task Complete (\(wsName))",
+                        title: "MicroCode · Task Completed (\(wsName))",
                         body: snippet,
                         priority: "default",
                         tags: "white_check_mark"
@@ -271,7 +280,7 @@ extension PhoneCompanionService {
             var req = URLRequest(url: url, timeoutInterval: 10)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let textPayload = clickURL.isEmpty ? "\(title)\n\n\(body)" : "\(title)\n\n\(body)\n\n🔗 \(clickURL)"
+            let textPayload = clickURL.isEmpty ? "\(title)\n\n\(body)" : "\(title)\n\n\(body)\n\n\(clickURL)"
             let payload: [String: Any] = [
                 "chat_id": chat,
                 "text": textPayload,
@@ -456,13 +465,139 @@ extension PhoneCompanionService {
 
     // MARK: - Authenticated Live Preview Reverse Proxy (/preview/<port>/*)
 
+    func resolveLocalStaticPreviewEntryFile() -> URL? {
+        if let target = DeviceRuntimeService.shared.targetWebURL, target.isFileURL,
+           FileManager.default.fileExists(atPath: target.path) {
+            return target
+        }
+        let wsPath = currentCompanionWorkspacePath()
+        guard !wsPath.isEmpty, wsPath != "__general__" else { return nil }
+        let folder = URL(fileURLWithPath: wsPath)
+        let fm = FileManager.default
+        let bundlerConfigs = ["vite.config.ts", "vite.config.js", "vite.config.mjs", "next.config.js", "next.config.mjs", "next.config.ts", "nuxt.config.ts", "svelte.config.js", "astro.config.mjs", "angular.json"]
+        if bundlerConfigs.contains(where: { fm.fileExists(atPath: folder.appendingPathComponent($0).path) }) {
+            return nil
+        }
+        for rel in ["index.html", "public/index.html", "dist/index.html", "src/index.html"] {
+            let candidate = folder.appendingPathComponent(rel)
+            if fm.fileExists(atPath: candidate.path) {
+                if let html = try? String(contentsOf: candidate, encoding: .utf8),
+                   (html.contains("/src/main.") || html.contains("/@vite/")) {
+                    continue
+                }
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func mimeTypeForPreviewExtension(_ ext: String) -> String {
+        switch ext.lowercased() {
+        case "html", "htm": return "text/html; charset=utf-8"
+        case "css": return "text/css; charset=utf-8"
+        case "js", "mjs", "cjs": return "application/javascript; charset=utf-8"
+        case "json", "map": return "application/json; charset=utf-8"
+        case "svg": return "image/svg+xml"
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "webp": return "image/webp"
+        case "gif": return "image/gif"
+        case "ico": return "image/x-icon"
+        case "woff2": return "font/woff2"
+        case "woff": return "font/woff"
+        case "ttf": return "font/ttf"
+        case "wasm": return "application/wasm"
+        default: return "application/octet-stream"
+        }
+    }
+
+    private func serveLocalWorkspacePreview(subPathWithQuery: String) -> Data {
+        if UniversalAppPreviewBridge.shared.isUsingNativeCanvas, UniversalAppPreviewBridge.shared.renderedNativeImage != nil {
+            if subPathWithQuery.hasPrefix("/__canvas.png") {
+                if let img = UniversalAppPreviewBridge.shared.renderedNativeImage,
+                   let tiff = img.tiffRepresentation,
+                   let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    return makeHTTPResponse(status: "200 OK", contentType: "image/png", body: png)
+                }
+                return makeHTTPResponse(status: "404 Not Found", contentType: "text/plain", body: Data())
+            }
+            let canvasHTML = """
+            <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{margin:0;background:#0d0d0f;display:flex;align-items:center;justify-content:center;min-height:100vh}
+            img{max-width:100%;max-height:100vh;object-fit:contain}</style></head>
+            <body><img id="c" src="/preview/local/__canvas.png?t=0" alt="Live Canvas">
+            <script>setInterval(()=>{const i=document.getElementById('c');if(i)i.src='/preview/local/__canvas.png?t='+Date.now();},750);</script></body></html>
+            """
+            return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(canvasHTML.utf8))
+        }
+
+        guard let entryFile = resolveLocalStaticPreviewEntryFile() else {
+            let emptyHTML = """
+            <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{background:#0d0d0f;color:#e4e4e7;font-family:-apple-system,sans-serif;padding:28px;text-align:center}
+            .box{max-width:380px;margin:12vh auto;background:#16161a;border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:22px}
+            button{margin-top:12px;background:#f3f4f6;color:#0d0d0f;border:none;border-radius:8px;padding:9px 16px;font-weight:600;font-size:13px;cursor:pointer}</style></head>
+            <body><div class="box"><h3>No Active Preview Yet</h3>
+            <p style="color:#a1a1aa;font-size:13px">Tap <b>Run Preview</b> to build and start your workspace preview on Mac.</p>
+            <button onclick="window.parent.postMessage({type:'mc_run_preview'},'*')">Run Preview</button></div></body></html>
+            """
+            return makeHTTPResponse(status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(emptyHTML.utf8))
+        }
+
+        let cleanRelPath: String = {
+            let withoutQuery = subPathWithQuery.components(separatedBy: "?").first ?? "/"
+            let decoded = withoutQuery.removingPercentEncoding ?? withoutQuery
+            return decoded.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }()
+
+        let baseDir = entryFile.deletingLastPathComponent().standardizedFileURL
+        let wsPath = currentCompanionWorkspacePath()
+        let allowedRoots: [String] = [
+            baseDir.path,
+            wsPath.isEmpty || wsPath == "__general__" ? "" : URL(fileURLWithPath: wsPath).standardizedFileURL.path,
+            FileManager.default.temporaryDirectory.appendingPathComponent("MicroCodeUniversalPreview").standardizedFileURL.path
+        ].filter { !$0.isEmpty }
+
+        let targetFile: URL = cleanRelPath.isEmpty
+            ? entryFile.standardizedFileURL
+            : baseDir.appendingPathComponent(cleanRelPath).standardizedFileURL
+
+        let isAllowed = allowedRoots.contains { root in
+            targetFile.path == root || targetFile.path.hasPrefix(root + "/")
+        }
+        guard isAllowed, let data = try? Data(contentsOf: targetFile) else {
+            return makeHTTPResponse(status: "404 Not Found", contentType: "text/plain; charset=utf-8", body: Data("Asset not found".utf8))
+        }
+
+        let ext = targetFile.pathExtension
+        let mime = Self.mimeTypeForPreviewExtension(ext)
+        var outBody = data
+        if mime.hasPrefix("text/html"), var html = String(data: data, encoding: .utf8) {
+            let prefix = "/preview/local"
+            if !html.lowercased().contains("<base ") {
+                let baseTag = #"<base href="\#(prefix)/">"#
+                if let headRange = html.range(of: "<head>", options: .caseInsensitive) {
+                    html.insert(contentsOf: baseTag, at: headRange.upperBound)
+                } else {
+                    html = baseTag + html
+                }
+            }
+            if let attrRegex = try? NSRegularExpression(pattern: #"(\b(?:src|href|action)\s*=\s*["'])/(?!/|preview/)"#, options: .caseInsensitive) {
+                let ns = html as NSString
+                html = attrRegex.stringByReplacingMatches(in: html, options: [], range: NSRange(location: 0, length: ns.length), withTemplate: "$1\(prefix)/")
+            }
+            outBody = Data(html.utf8)
+        }
+        return makeHTTPResponse(status: "200 OK", contentType: mime, body: outBody)
+    }
+
     func handlePreviewReverseProxy(
         method: String,
         rawTarget: String,
         headers: [String: String],
         bodyData: Data
     ) async -> Data {
-        // Path format: /preview/<port> or /preview/<port>/subpath?query
         let stripped = rawTarget.dropFirst("/preview/".count)
         let slashIdx = stripped.firstIndex(of: "/")
         let qIdx = stripped.firstIndex(of: "?")
@@ -475,6 +610,21 @@ extension PhoneCompanionService {
             }
         }()
         let portString = String(stripped[..<portEnd])
+        var remainder = String(stripped[portEnd...])
+
+        if portString == "local" {
+            if remainder.isEmpty {
+                return makeHTTPResponse(
+                    status: "302 Found",
+                    contentType: "text/plain",
+                    extraHeaders: ["Location": "/preview/local/"],
+                    body: Data()
+                )
+            }
+            if remainder.hasPrefix("?") { remainder = "/" + remainder }
+            return serveLocalWorkspacePreview(subPathWithQuery: remainder)
+        }
+
         guard let port = Int(portString), (1...65535).contains(port), port != Int(listeningPort) else {
             return makeHTTPResponse(
                 status: "400 Bad Request",
@@ -483,9 +633,7 @@ extension PhoneCompanionService {
             )
         }
 
-        var remainder = String(stripped[portEnd...])
         if remainder.isEmpty {
-            // Redirect `/preview/3000` -> `/preview/3000/` so relative assets resolve under `/preview/3000/`
             return makeHTTPResponse(
                 status: "302 Found",
                 contentType: "text/plain",
@@ -497,91 +645,152 @@ extension PhoneCompanionService {
             remainder = "/" + remainder
         }
 
-        guard let targetURL = URL(string: "http://127.0.0.1:\(port)\(remainder)") else {
-            return makeHTTPResponse(
-                status: "400 Bad Request",
-                contentType: "text/plain; charset=utf-8",
-                body: Data("Malformed preview URL.".utf8)
-            )
-        }
+        let cleanRemainder: String = {
+            guard var comps = URLComponents(string: "http://localhost\(remainder)") else { return remainder }
+            if let items = comps.queryItems, items.contains(where: { $0.name == "token" }) {
+                let filtered = items.filter { $0.name != "token" }
+                comps.queryItems = filtered.isEmpty ? nil : filtered
+                let rebuiltPath = comps.percentEncodedPath.isEmpty ? "/" : comps.percentEncodedPath
+                if let pq = comps.percentEncodedQuery, !pq.isEmpty {
+                    return "\(rebuiltPath)?\(pq)"
+                }
+                return rebuiltPath
+            }
+            return remainder
+        }()
 
-        var req = URLRequest(url: targetURL, timeoutInterval: 15)
-        req.httpMethod = method
+        // Try `localhost` first (covers IPv6 `::1`-only Vite/Node servers on macOS) and fall back to `127.0.0.1`
+        let candidateHosts = ["localhost", "127.0.0.1"]
         let hopByHop: Set<String> = ["host", "connection", "accept-encoding", "content-length", "cookie", "x-companion-token"]
-        for (k, v) in headers where !hopByHop.contains(k.lowercased()) {
-            req.setValue(v, forHTTPHeaderField: k)
+
+        var fetchedResult: (Data, HTTPURLResponse)? = nil
+        for hostCandidate in candidateHosts {
+            guard let targetURL = URL(string: "http://\(hostCandidate):\(port)\(cleanRemainder)") else { continue }
+            var req = URLRequest(url: targetURL, timeoutInterval: 12)
+            req.httpMethod = method
+            for (k, v) in headers where !hopByHop.contains(k.lowercased()) {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
+            req.setValue("localhost:\(port)", forHTTPHeaderField: "Host")
+            req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            if !bodyData.isEmpty && method != "GET" && method != "HEAD" {
+                req.httpBody = bodyData
+            }
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse {
+                fetchedResult = (data, http)
+                break
+            }
         }
-        req.setValue("127.0.0.1:\(port)", forHTTPHeaderField: "Host")
-        req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        if !bodyData.isEmpty && method != "GET" && method != "HEAD" {
-            req.httpBody = bodyData
-        }
 
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse else {
-                return makeHTTPResponse(status: "502 Bad Gateway", contentType: "text/plain", body: Data("Invalid upstream response".utf8))
-            }
-            let statusLine = "\(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode).capitalized)"
-            let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream")
-            var extra: [String: String] = [:]
-            if let loc = http.value(forHTTPHeaderField: "Location"), loc.hasPrefix("/") {
-                extra["Location"] = "/preview/\(port)\(loc)"
-            }
-
-            var outBody = data
-            if contentType.lowercased().contains("text/html"), var html = String(data: data, encoding: .utf8) {
-                let prefix = "/preview/\(port)"
-                if !html.lowercased().contains("<base ") {
-                    let baseTag = #"<base href="\#(prefix)/">"#
-                    if let headRange = html.range(of: "<head>", options: .caseInsensitive) {
-                        html.insert(contentsOf: baseTag, at: headRange.upperBound)
-                    } else {
-                        html = baseTag + html
-                    }
-                }
-                // Rewrite root-anchored src="/..." and href="/..." (excluding // protocol-relative and already-prefixed /preview/)
-                if let attrRegex = try? NSRegularExpression(pattern: #"(\b(?:src|href|action)\s*=\s*["'])/(?!/|preview/)"#, options: .caseInsensitive) {
-                    let ns = html as NSString
-                    html = attrRegex.stringByReplacingMatches(
-                        in: html,
-                        options: [],
-                        range: NSRange(location: 0, length: ns.length),
-                        withTemplate: "$1\(prefix)/"
-                    )
-                }
-                outBody = Data(html.utf8)
-            }
-
-            return makeHTTPResponse(status: statusLine, contentType: contentType, extraHeaders: extra, body: outBody)
-        } catch {
+        guard let (data, http) = fetchedResult else {
             let errHTML = """
             <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
             <style>body{background:#0d0d0f;color:#e4e4e7;font-family:-apple-system,sans-serif;padding:28px;text-align:center}
             .box{max-width:380px;margin:12vh auto;background:#16161a;border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:22px}
-            code{background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px}</style></head>
-            <body><div class="box"><h3>Dev Server Offline on :\(port)</h3>
-            <p style="color:#a1a1aa;font-size:13px">Nothing is currently listening on <code>127.0.0.1:\(port)</code> on your Mac. Start your dev server from the <b>Term</b> tab or ask the AI Agent to run it.</p></div></body></html>
+            code{background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px}
+            button{margin-top:14px;background:#f3f4f6;color:#0d0d0f;border:none;border-radius:8px;padding:9px 16px;font-weight:600;font-size:13px;cursor:pointer}</style></head>
+            <body><div class="box"><h3>No Server Listening on :\(port)</h3>
+            <p style="color:#a1a1aa;font-size:13px">Port <code>:\(port)</code> is currently closed on your Mac. Tap <b>Run Preview</b> to launch your workspace server automatically.</p>
+            <button onclick="window.parent.postMessage({type:'mc_run_preview'},'*')">Run Preview</button></div></body></html>
             """
             return makeHTTPResponse(status: "502 Bad Gateway", contentType: "text/html; charset=utf-8", body: Data(errHTML.utf8))
         }
+
+        let statusLine = "\(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode).capitalized)"
+        let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream")
+        let lowerCT = contentType.lowercased()
+        let prefix = "/preview/\(port)"
+
+        var extra: [String: String] = [:]
+        if let loc = http.value(forHTTPHeaderField: "Location") {
+            if loc.hasPrefix("/") && !loc.hasPrefix("/preview/") {
+                extra["Location"] = "\(prefix)\(loc)"
+            } else {
+                extra["Location"] = loc
+            }
+        }
+
+        var outBody = data
+        if lowerCT.contains("text/html"), var html = String(data: data, encoding: .utf8) {
+            if !html.lowercased().contains("<base ") {
+                let baseTag = #"<base href="\#(prefix)/">"#
+                if let headRange = html.range(of: "<head>", options: .caseInsensitive) {
+                    html.insert(contentsOf: baseTag, at: headRange.upperBound)
+                } else {
+                    html = baseTag + html
+                }
+            }
+            if let attrRegex = try? NSRegularExpression(pattern: #"(\b(?:src|href|action)\s*=\s*["'])/(?!/|preview/)"#, options: .caseInsensitive) {
+                let ns = html as NSString
+                html = attrRegex.stringByReplacingMatches(
+                    in: html,
+                    options: [],
+                    range: NSRange(location: 0, length: ns.length),
+                    withTemplate: "$1\(prefix)/"
+                )
+            }
+            if let importRegex = try? NSRegularExpression(pattern: #"(\b(?:from|import)\s*(?:\(\s*)?["'])/(?!/|preview/)"#, options: []) {
+                let ns = html as NSString
+                html = importRegex.stringByReplacingMatches(
+                    in: html,
+                    options: [],
+                    range: NSRange(location: 0, length: ns.length),
+                    withTemplate: "$1\(prefix)/"
+                )
+            }
+            outBody = Data(html.utf8)
+        } else if (lowerCT.contains("javascript") || lowerCT.contains("ecmascript")),
+                  data.count < 2_500_000,
+                  var js = String(data: data, encoding: .utf8) {
+            if let esmRegex = try? NSRegularExpression(pattern: #"(\b(?:from|import)\s*(?:\(\s*)?["'])/(?=@vite/|@fs/|@id/|@react-refresh|node_modules/|src/|_next/|assets/)"#, options: []) {
+                let ns = js as NSString
+                js = esmRegex.stringByReplacingMatches(
+                    in: js,
+                    options: [],
+                    range: NSRange(location: 0, length: ns.length),
+                    withTemplate: "$1\(prefix)/"
+                )
+                outBody = Data(js.utf8)
+            }
+        }
+
+        return makeHTTPResponse(status: statusLine, contentType: contentType, extraHeaders: extra, body: outBody)
     }
 
     func buildPreviewPortsPayload() -> [String: Any] {
-        var portsSet = Set<Int>()
-        if let p = DeviceRuntimeService.shared.targetWebURL?.port { portsSet.insert(p) }
-        if let p = DeviceRuntimeService.shared.lastDetectedDevServerPort { portsSet.insert(p) }
-        for proc in IDEBrowserAutomationService.shared.activePortProcesses {
-            portsSet.insert(proc.port)
+        let browserAuto = IDEBrowserAutomationService.shared
+        let wsPath = currentCompanionWorkspacePath()
+        let canonicalWs = (wsPath.isEmpty || wsPath == "__general__") ? "" : URL(fileURLWithPath: wsPath).standardizedFileURL.path
+
+        var procByPort: [Int: ActiveLocalPortProcess] = [:]
+        for proc in browserAuto.activePortProcesses {
+            procByPort[proc.port] = proc
+        }
+
+        var portsSet = Set(procByPort.keys)
+        if UniversalAppPreviewBridge.shared.activeProcess?.isRunning == true,
+           let p = DeviceRuntimeService.shared.targetWebURL?.port ?? DeviceRuntimeService.shared.lastDetectedDevServerPort {
+            portsSet.insert(p)
         }
         for p in DevPortTunnelService.shared.tunnels.keys {
             portsSet.insert(p)
         }
         portsSet.remove(Int(listeningPort))
+        portsSet.remove(Int(LocalLLMGatewayService.shared.listeningPort))
         portsSet.remove(8470)
         portsSet.remove(8471)
+        portsSet.remove(8472)
 
-        let sortedPorts = portsSet.sorted()
+        let recommendedPort = browserAuto.bestActivePort(forWorkspace: canonicalWs.isEmpty ? nil : canonicalWs)
+            ?? (UniversalAppPreviewBridge.shared.activeProcess?.isRunning == true ? DeviceRuntimeService.shared.lastDetectedDevServerPort : nil)
+
+        let sortedPorts = portsSet.sorted { a, b in
+            if a == recommendedPort { return true }
+            if b == recommendedPort { return false }
+            return a < b
+        }
+
         let items: [[String: Any]] = sortedPorts.map { p in
             var tunnelURL = ""
             var tunnelStatus = "stopped"
@@ -598,15 +807,31 @@ extension PhoneCompanionService {
                     tunnelStatus = "stopped"
                 }
             }
+            let proc = procByPort[p]
+            let isWsMatch: Bool = {
+                guard let proc, !proc.cwd.isEmpty, !canonicalWs.isEmpty else { return false }
+                return proc.cwd == canonicalWs || proc.cwd.hasPrefix(canonicalWs + "/") || canonicalWs.hasPrefix(proc.cwd + "/")
+            }()
             return [
                 "port": p,
+                "name": proc?.processName ?? "server",
+                "isWorkspace": isWsMatch,
+                "recommended": p == recommendedPort,
                 "proxyPath": "/preview/\(p)/",
                 "lanURL": activeLANHost != "127.0.0.1" ? "http://\(activeLANHost):\(p)/" : "",
                 "publicTunnelURL": tunnelURL,
                 "tunnelStatus": tunnelStatus
             ]
         }
-        return ["ok": true, "ports": items]
+
+        let hasLocalStatic = (resolveLocalStaticPreviewEntryFile() != nil) || UniversalAppPreviewBridge.shared.isUsingNativeCanvas
+        return [
+            "ok": true,
+            "ports": items,
+            "recommendedPort": recommendedPort ?? 0,
+            "hasLocalStaticPreview": hasLocalStatic,
+            "localPreviewPath": hasLocalStatic ? "/preview/local/" : ""
+        ]
     }
 
     // MARK: - Camera, Screenshot & File Attachments Builder
@@ -1053,30 +1278,48 @@ extension PhoneCompanionService {
             ? wsPath
             : FileManager.default.homeDirectoryForCurrentUser.path
 
-        let res = await Self.runCommandAsync(
-            executable: "/bin/zsh",
-            arguments: ["-c", cmd],
-            cwd: cwd,
-            timeout: 35
-        )
-        let combined = [res.stdout, res.stderr]
-            .filter { !$0.isEmpty }
-            .joined(separator: res.stdout.isEmpty ? "" : "\n")
-        // Strip ANSI escape sequences so mobile output renders cleanly
-        let cleanOutput: String = {
-            if let ansi = try? NSRegularExpression(pattern: #"\x1B\[[0-9;]*[A-Za-z]"#, options: []) {
-                let ns = combined as NSString
-                return ansi.stringByReplacingMatches(in: combined, options: [], range: NSRange(location: 0, length: ns.length), withTemplate: "")
-            }
-            return combined
-        }()
-        return [
-            "ok": res.exitCode == 0,
-            "exitCode": res.exitCode,
-            "durationMs": res.durationMs,
-            "cwd": cwd,
-            "output": cleanOutput.isEmpty ? "(Command exited with code \(res.exitCode), no output)" : cleanOutput
-        ]
+        let start = DispatchTime.now()
+        do {
+            let output = try await ShellCommandTool().execute(params: [
+                "command": cmd,
+                "cwd": cwd,
+                "timeout": 45
+            ])
+            let elapsedMs = Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
+            let cleanOutput: String = {
+                if let ansi = try? NSRegularExpression(pattern: #"\x1B\[[0-9;]*[A-Za-z]"#, options: []) {
+                    let ns = output as NSString
+                    return ansi.stringByReplacingMatches(in: output, options: [], range: NSRange(location: 0, length: ns.length), withTemplate: "")
+                }
+                return output
+            }()
+            IDEBrowserAutomationService.shared.notifyHarnessServerOutput(cleanOutput, cwd: cwd)
+            broadcastSSEStateNow()
+            return [
+                "ok": true,
+                "exitCode": 0,
+                "durationMs": elapsedMs,
+                "cwd": cwd,
+                "output": cleanOutput.isEmpty ? "(Completed)" : cleanOutput
+            ]
+        } catch {
+            let elapsedMs = Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
+            let rawErr = error.localizedDescription
+            let cleanErr: String = {
+                if let ansi = try? NSRegularExpression(pattern: #"\x1B\[[0-9;]*[A-Za-z]"#, options: []) {
+                    let ns = rawErr as NSString
+                    return ansi.stringByReplacingMatches(in: rawErr, options: [], range: NSRange(location: 0, length: ns.length), withTemplate: "")
+                }
+                return rawErr
+            }()
+            return [
+                "ok": false,
+                "exitCode": 1,
+                "durationMs": elapsedMs,
+                "cwd": cwd,
+                "output": cleanErr
+            ]
+        }
     }
 
     // MARK: - Fullscreen Installable PWA Assets (/manifest.json, /sw.js, /apple-touch-icon.png)

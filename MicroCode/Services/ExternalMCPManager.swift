@@ -20,6 +20,8 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     let env: [String: String]
     let source: String
     let remoteURL: String?
+    var customHeaders: [String: String]
+    private var mcpSessionId: String? = nil
     
     @Published var isConnected = false
     @Published private(set) var isHandshakeReady = false
@@ -48,6 +50,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         self.env = server.env
         self.source = server.sourcePlatform
         self.remoteURL = server.url ?? ((server.command.hasPrefix("http://") || server.command.hasPrefix("https://")) ? server.command : nil)
+        self.customHeaders = server.headers
     }
     
     // MARK: - Lifecycle
@@ -344,8 +347,12 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             let lineData = stdoutBuffer.subdata(in: 0..<newlineIndex)
             stdoutBuffer.removeSubrange(0...newlineIndex)
             
-            let line = String(decoding: lineData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            var line = String(decoding: lineData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("data:") {
+                line = String(line.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             guard !line.isEmpty,
+                  line != "[DONE]",
                   let jsonData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
                 continue
@@ -416,16 +423,80 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         sendRaw(request)
     }
     
+    private func resolvedAuthHeaderValue() -> String? {
+        if let h = customHeaders.first(where: { $0.key.caseInsensitiveCompare("Authorization") == .orderedSame })?.value, !h.isEmpty {
+            return h
+        }
+        let savedToken = UserDefaults.standard.string(forKey: "microcode.mcp.bearer.\(serverName.lowercased())") ?? ""
+        if !savedToken.isEmpty {
+            return savedToken.lowercased().hasPrefix("bearer ") ? savedToken : "Bearer \(savedToken)"
+        }
+        let upperName = serverName.uppercased().replacingOccurrences(of: "-", with: "_")
+        let envKeys = [
+            "AUTHORIZATION", "MCP_BEARER_TOKEN", "BEARER_TOKEN", "MCP_TOKEN",
+            "\(upperName)_ACCESS_TOKEN", "\(upperName)_API_KEY", "\(upperName)_TOKEN"
+        ]
+        for k in envKeys {
+            if let v = env[k] ?? ProcessInfo.processInfo.environment[k], !v.isEmpty, !v.hasPrefix("YOUR_") {
+                return v.lowercased().hasPrefix("bearer ") ? v : "Bearer \(v)"
+            }
+        }
+        return nil
+    }
+
     private func sendRaw(_ obj: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         if let httpURL = remoteURL, let url = URL(string: httpURL) {
-            var req = URLRequest(url: url)
+            var req = URLRequest(url: url, timeoutInterval: 12)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+            if let sid = mcpSessionId, !sid.isEmpty {
+                req.setValue(sid, forHTTPHeaderField: "Mcp-Session-Id")
+            }
+            for (hk, hv) in customHeaders where hk.caseInsensitiveCompare("Authorization") != .orderedSame {
+                req.setValue(hv, forHTTPHeaderField: hk)
+            }
+            if let authVal = resolvedAuthHeaderValue() {
+                req.setValue(authVal, forHTTPHeaderField: "Authorization")
+            }
             req.httpBody = data
-            URLSession.shared.dataTask(with: req) { [weak self] respData, _, err in
+            URLSession.shared.dataTask(with: req) { [weak self] respData, urlResp, err in
                 guard let self else { return }
+                if let httpResp = urlResp as? HTTPURLResponse {
+                    if let newSid = httpResp.value(forHTTPHeaderField: "Mcp-Session-Id") ?? httpResp.value(forHTTPHeaderField: "mcp-session-id"), !newSid.isEmpty {
+                        DispatchQueue.main.async { self.mcpSessionId = newSid }
+                    }
+                    if httpResp.statusCode == 401 || httpResp.statusCode == 403 {
+                        let wwwAuth = httpResp.value(forHTTPHeaderField: "WWW-Authenticate") ?? "OAuth 2.1 / Bearer token"
+                        let authErr = NSError(
+                            domain: "ExternalMCP",
+                            code: httpResp.statusCode,
+                            userInfo: [NSLocalizedDescriptionKey: "AUTH_REQUIRED (HTTP \(httpResp.statusCode) at \(httpURL) — \(wwwAuth)). Provide a Bearer token via `mcp_orchestrator(action: \"connect\", server_name: \"\(self.serverName)\", bearer_token: \"...\")` or Settings → MCP Servers."]
+                        )
+                        DispatchQueue.main.async {
+                            self.error = authErr.localizedDescription
+                            if let reqId = obj["id"] as? Int, let cb = self.pendingRequests.removeValue(forKey: reqId) {
+                                cb(.failure(authErr))
+                            }
+                        }
+                        return
+                    }
+                    if httpResp.statusCode >= 400 {
+                        let preview = respData.flatMap { String(data: $0, encoding: .utf8) }?.prefix(200) ?? ""
+                        let httpErr = NSError(
+                            domain: "ExternalMCP",
+                            code: httpResp.statusCode,
+                            userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResp.statusCode) from \(httpURL): \(preview)"]
+                        )
+                        DispatchQueue.main.async {
+                            if let reqId = obj["id"] as? Int, let cb = self.pendingRequests.removeValue(forKey: reqId) {
+                                cb(.failure(httpErr))
+                            }
+                        }
+                        return
+                    }
+                }
                 if let respData = respData, !respData.isEmpty {
                     var newlineData = respData
                     if newlineData.last != 0x0A { newlineData.append(0x0A) }
@@ -436,6 +507,13 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
                     DispatchQueue.main.async {
                         if let cb = self.pendingRequests.removeValue(forKey: reqId) {
                             cb(.failure(err))
+                        }
+                    }
+                } else if let reqId = obj["id"] as? Int {
+                    // Empty 202/204 response
+                    DispatchQueue.main.async {
+                        if let cb = self.pendingRequests.removeValue(forKey: reqId) {
+                            cb(.success([:] as [String: Any]))
                         }
                     }
                 }
@@ -921,6 +999,158 @@ class ExternalMCPManager: ObservableObject {
         """
     }
     
+    /// Connects or registers a remote Streamable HTTP or local stdio MCP server, saves optional Bearer credentials,
+    /// persists to `~/.microcode/mcp.json`, probes tools immediately, and reports companion skills/CLIs.
+    func connectOrConfigureServer(
+        name rawName: String,
+        remoteURL: String? = nil,
+        command: String? = nil,
+        args: [String] = [],
+        bearerToken: String? = nil,
+        workspacePath: String? = nil
+    ) async -> String {
+        let cleanName = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !cleanName.isEmpty else {
+            return "Error: `server_name` is required (e.g. 'canva', 'github', 'figma')."
+        }
+
+        if let tok = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines), !tok.isEmpty {
+            UserDefaults.standard.set(tok, forKey: "microcode.mcp.bearer.\(cleanName)")
+        }
+
+        // Trigger fresh plugin/IDE config discovery if server isn't loaded yet
+        if connections[cleanName] == nil && (remoteURL ?? "").isEmpty && (command ?? "").isEmpty {
+            MultiPlatformRulesEngine.shared.refresh(workspaceRoot: workspacePath ?? AgentToolBox.shared.effectiveWorkspaceRoot ?? NSHomeDirectory())
+            try? await Task.sleep(nanoseconds: 350_000_000)
+        }
+
+        // Known official Streamable HTTP endpoints for zero-guess 1-click setup when user says "เชื่อม Canva MCP"
+        var effectiveURL = remoteURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if (effectiveURL == nil || effectiveURL!.isEmpty), connections[cleanName] == nil, (command ?? "").isEmpty {
+            let officialEndpoints: [String: String] = [
+                "canva": "https://mcp.canva.com/mcp",
+                "figma": "https://mcp.figma.com/mcp",
+                "linear": "https://mcp.linear.app/mcp"
+            ]
+            effectiveURL = officialEndpoints[cleanName]
+        }
+
+        if let urlStr = effectiveURL, !urlStr.isEmpty {
+            let globalMCP = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".microcode/mcp.json")
+            try? FileManager.default.createDirectory(at: globalMCP.deletingLastPathComponent(), withIntermediateDirectories: true)
+            var rootObj: [String: Any] = [:]
+            if let d = try? Data(contentsOf: globalMCP),
+               let parsed = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                rootObj = parsed
+            }
+            var servers = rootObj["mcpServers"] as? [String: Any] ?? [:]
+            var entry: [String: Any] = ["serverUrl": urlStr]
+            if let tok = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines), !tok.isEmpty {
+                let authHeader = tok.lowercased().hasPrefix("bearer ") ? tok : "Bearer \(tok)"
+                entry["headers"] = ["Authorization": authHeader]
+            }
+            servers[cleanName] = entry
+            rootObj["mcpServers"] = servers
+            if let out = try? JSONSerialization.data(withJSONObject: rootObj, options: [.prettyPrinted, .sortedKeys]) {
+                try? out.write(to: globalMCP)
+            }
+
+            connections[cleanName]?.stop()
+            let spec = DiscoveredMCPServer(
+                name: cleanName,
+                sourcePlatform: "MicroCode Global (~/.microcode/mcp.json)",
+                command: urlStr,
+                args: [],
+                env: [:],
+                url: urlStr,
+                headers: (entry["headers"] as? [String: String]) ?? [:]
+            )
+            let conn = ExternalMCPConnection(server: spec)
+            connections[cleanName] = conn
+        } else if let cmd = command?.trimmingCharacters(in: .whitespacesAndNewlines), !cmd.isEmpty {
+            connections[cleanName]?.stop()
+            let spec = DiscoveredMCPServer(
+                name: cleanName,
+                sourcePlatform: "MicroCode Connected",
+                command: cmd,
+                args: args,
+                env: [:]
+            )
+            connections[cleanName] = ExternalMCPConnection(server: spec)
+        }
+
+        guard let conn = connections[cleanName] else {
+            return "MCP server '\(cleanName)' was not found in local configs (`~/.gemini/config/plugins`, `~/.microcode/mcp.json`, `~/.cursor/mcp.json`). Pass `url` (for remote HTTP MCP) or `command` + `args` (for local stdio MCP) to register it."
+        }
+
+        failedProbeServers.remove(cleanName)
+        conn.stop()
+        conn.start()
+        let deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if !conn.availableTools.isEmpty { break }
+            if !conn.isConnected && conn.error != nil { break }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+        refreshToolCountNow()
+
+        let matchingSkills = AgentSkillsStore.shared.skills.filter {
+            $0.id.lowercased().contains(cleanName) || $0.filePath.lowercased().contains("/\(cleanName)/")
+        }
+        let skillsSummary = matchingSkills.isEmpty
+            ? "None"
+            : matchingSkills.map { "`\($0.id)` (\($0.description.prefix(80)))" }.joined(separator: ", ")
+
+        if !conn.availableTools.isEmpty {
+            for t in conn.availableTools {
+                explicitlyMountedTools.insert("mcp__\(cleanName)__\(t.name)")
+            }
+            let toolNames = conn.availableTools.map { "`mcp__\(cleanName)__\($0.name)`" }.joined(separator: ", ")
+            return """
+            ✅ Connected MCP Server '\(cleanName)' (\(conn.source))
+            Endpoint/Command: \(conn.remoteURL ?? conn.command)
+            Exposed Tools (\(conn.availableTools.count)): \(toolNames)
+            Companion Installed Skills (\(matchingSkills.count)): \(skillsSummary)
+            """
+        } else {
+            let errDetail = conn.error ?? "Waiting for server response"
+            // Check if local companion CLI exists (e.g., `canva` CLI)
+            let hasCLI = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/\(cleanName)")
+                || FileManager.default.isExecutableFile(atPath: "/usr/local/bin/\(cleanName)")
+                || FileManager.default.isExecutableFile(atPath: "\(NSHomeDirectory())/.local/bin/\(cleanName)")
+            return """
+            ⚠️ MCP Server '\(cleanName)' Registered (\(conn.remoteURL ?? conn.command)) — Handshake Status: \(errDetail)
+            Companion Installed Skills (\(matchingSkills.count)): \(skillsSummary)
+            Local '\(cleanName)' CLI Binary Found: \(hasCLI ? "Yes (can authenticate/use via CLI skill)" : "No")
+            Next Step: To complete live tool mounting for an OAuth-protected remote MCP endpoint, sign in via `\(cleanName) login` (if CLI is supported) or pass an access token via `mcp_orchestrator(action: "connect", server_name: "\(cleanName)", bearer_token: "<token>")` / Settings → MCP Servers. Meanwhile, companion skills above are active and ready to read via `skill_engine(action: "read", query: "...")`.
+            """
+        }
+    }
+
+    /// Compact 1-screen catalog for `buildSystemPrompt` so Turn 1 always knows real MCP status without guessing.
+    func compactPromptSummary() -> String {
+        guard !connections.isEmpty else { return "" }
+        let router = PNSGanglionRouter.shared
+        var lines: [String] = ["## Discovered External MCP Servers (Use `mcp_orchestrator` to inspect/search/connect)"]
+        for (name, conn) in connections.sorted(by: { $0.key < $1.key }).prefix(16) {
+            let tools = !conn.availableTools.isEmpty ? conn.availableTools : (router.cachedServerManifests[name] ?? [])
+            let state: String
+            if conn.isConnected {
+                state = "ONLINE (\(tools.count) tools)"
+            } else if !tools.isEmpty {
+                state = "READY (\(tools.count) cached tools)"
+            } else if let err = conn.error, err.contains("AUTH_REQUIRED") {
+                state = "AUTH_REQUIRED (\(conn.remoteURL ?? conn.source))"
+            } else if let err = conn.error, !err.isEmpty {
+                state = "OFFLINE (\(err.prefix(60)))"
+            } else {
+                state = "DISCOVERED (\(conn.source))"
+            }
+            lines.append("- `\(name)`: \(state)")
+        }
+        return "\n\n" + lines.joined(separator: "\n")
+    }
+
     /// Formatted mesh status report for Agent & UI
     func meshStatusSummary() -> String {
         if connections.isEmpty {

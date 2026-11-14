@@ -316,6 +316,7 @@ let package = Package(
                 "Services/AgentLSPBridge.swift",
                 "Services/BackgroundAgentService.swift",
                 "Services/VoiceCodingService.swift",
+                "Services/TextToSpeechService.swift",
                 // Phase 2: Killer Features
                 "Services/SuperTabEngine.swift",
                 "Services/DiffEngine.swift",

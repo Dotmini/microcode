@@ -365,7 +365,7 @@ public final class NativeComputerUseService {
                 var collected: [(role: String, label: String, value: String, enabled: Bool, frame: CGRect, elem: AXUIElement)] = []
 
                 func walkAX(_ elem: AXUIElement, depth: Int) {
-                    guard depth <= maxDepth, collected.count < 160 else { return }
+                    guard depth <= maxDepth, collected.count < 95 else { return }
                     let role = Self.axString(elem, kAXRoleAttribute) ?? ""
                     let title = Self.axString(elem, kAXTitleAttribute) ?? ""
                     let desc = Self.axString(elem, kAXDescriptionAttribute) ?? ""
@@ -443,7 +443,7 @@ public final class NativeComputerUseService {
                 var viewItems: [(role: String, label: String, frame: CGRect, view: NSView)] = []
 
                 func walkNSView(_ v: NSView, depth: Int) {
-                    guard depth <= 22, !v.isHidden, v.alphaValue > 0.05, viewItems.count < 140 else { return }
+                    guard depth <= 22, !v.isHidden, v.alphaValue > 0.05, viewItems.count < 95 else { return }
                     let winRect = v.convert(v.bounds, to: nil)
                     let screenRectAppKit = nsWin.convertToScreen(winRect)
                     let qFrame = CGRect(
@@ -514,11 +514,13 @@ public final class NativeComputerUseService {
             }
         }
 
-        // Layer C: Apple Neural Engine Vision OCR Augmentation (fills in SwiftUI/Metal/Web labels not exposed via AX)
-        if let cgImage = cgImageForOCR, rawMarks.count < 85 {
+        // Layer C: Apple Neural Engine Vision OCR Augmentation (fills in SwiftUI/Metal/Web/Canvas labels not exposed via AX).
+        // Never starve Layer C even on AX-dense IDE windows: always allow up to 45 deduplicated OCRText marks.
+        if let cgImage = cgImageForOCR {
             let ocrBoxes = await Self.recognizeOCRTextBoxes(in: cgImage)
+            var addedOCRCount = 0
             for box in ocrBoxes {
-                guard rawMarks.count < 110 else { break }
+                guard addedOCRCount < 45 && rawMarks.count < 140 else { break }
                 // Convert normalized Vision rect (bottom-left 0..1) to top-left logical window coordinates
                 let winX = box.normalizedRect.origin.x * target.bounds.width
                 let winY = (1.0 - box.normalizedRect.origin.y - box.normalizedRect.height) * target.bounds.height
@@ -545,6 +547,7 @@ public final class NativeComputerUseService {
                         axElement: nil,
                         inProcessView: nil
                     ))
+                    addedOCRCount += 1
                 }
             }
         }
@@ -576,7 +579,7 @@ public final class NativeComputerUseService {
         outputPath: String? = nil,
         cropRect: CGRect? = nil,
         highResolutionCrop: Bool = false
-    ) async throws -> (path: String, base64JPEG: String, imageSize: CGSize, marks: [ComputerUseMark], captureMethod: String) {
+    ) async throws -> (path: String, base64JPEG: String, imageSize: CGSize, marks: [ComputerUseMark], captureMethod: String, cgImage: CGImage) {
         let (rawCGImage, captureMethod) = try captureWindowCGImage(target: target, nominalResolution: !highResolutionCrop)
 
         var workingCGImage = rawCGImage
@@ -594,10 +597,15 @@ public final class NativeComputerUseService {
             }
         }
 
-        let marks = await inspectElements(
-            target: target,
-            cgImageForOCR: workingCGImage
-        )
+        let marks: [ComputerUseMark]
+        if cropRect == nil {
+            marks = await inspectElements(
+                target: target,
+                cgImageForOCR: workingCGImage
+            )
+        } else {
+            marks = []
+        }
 
         let logicalSize = cropRect?.size ?? target.bounds.size
         let finalImage: NSImage
@@ -629,7 +637,7 @@ public final class NativeComputerUseService {
             }
         }
 
-        return (absURL.path, jpegBase64, logicalSize, marks, captureMethod)
+        return (absURL.path, jpegBase64, logicalSize, marks, captureMethod, workingCGImage)
     }
 
     private func captureWindowCGImage(
@@ -751,14 +759,16 @@ public final class NativeComputerUseService {
         var resolvedMark: ComputerUseMark? = nil
         if let mid = markId {
             if cachedMarks[mid] == nil {
-                _ = await inspectElements(target: targetWindow)
+                let cg = (try? captureWindowCGImage(target: targetWindow, nominalResolution: true))?.0
+                _ = await inspectElements(target: targetWindow, cgImageForOCR: cg)
             }
             resolvedMark = cachedMarks[mid]
             if resolvedMark == nil {
-                throw NSError(domain: "NativeComputerUse", code: 404, userInfo: [NSLocalizedDescriptionKey: "Mark [\(mid)] not found. Call computer_use_observe first to refresh Set-of-Mark IDs."])
+                throw NSError(domain: "NativeComputerUse", code: 404, userInfo: [NSLocalizedDescriptionKey: "Mark [\(mid)] not found. Call computer_use observe first to refresh Set-of-Mark IDs."])
             }
         } else if let q = query, !q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let matches = await inspectElements(target: targetWindow, query: q, roleFilter: roleFilter)
+            let cg = (try? captureWindowCGImage(target: targetWindow, nominalResolution: true))?.0
+            let matches = await inspectElements(target: targetWindow, query: q, roleFilter: roleFilter, cgImageForOCR: cg)
             resolvedMark = matches.first
             if resolvedMark == nil {
                 throw NSError(domain: "NativeComputerUse", code: 404, userInfo: [NSLocalizedDescriptionKey: "No UI element or OCR text matching '\(q)' found in \(targetWindow.appName)."])
@@ -1176,12 +1186,16 @@ public final class NativeComputerUseService {
                     roleFilter: payload["role"] as? String,
                     cgImageForOCR: cg
                 )
+                let themeSummary = cg.map { AppleVisionEngine.sampleColorAndThemeProfile(cgImage: $0) } ?? ""
+                let spatialMap = Self.buildSpatialScreenMap(window: target, marks: marks, visualTheme: themeSummary)
                 return [
                     "success": true,
                     "window": Self.encodeWindow(target),
                     "permissions": permissionStatus(promptIfNeeded: false),
+                    "visual_theme": themeSummary,
+                    "spatial_map": spatialMap,
                     "element_count": marks.count,
-                    "elements": marks.map(Self.encodeMark)
+                    "elements": marks.prefix(100).map(Self.encodeMark)
                 ]
 
             case "observe", "capture":
@@ -1193,6 +1207,8 @@ public final class NativeComputerUseService {
                     drawSetOfMark: drawSoM,
                     outputPath: outPath
                 )
+                let themeSummary = AppleVisionEngine.sampleColorAndThemeProfile(cgImage: obs.cgImage)
+                let spatialMap = Self.buildSpatialScreenMap(window: target, marks: obs.marks, visualTheme: themeSummary)
                 var resp: [String: Any] = [
                     "success": true,
                     "path": obs.path,
@@ -1200,8 +1216,10 @@ public final class NativeComputerUseService {
                     "window": Self.encodeWindow(target),
                     "logical_size": ["width": obs.imageSize.width, "height": obs.imageSize.height],
                     "permissions": permissionStatus(promptIfNeeded: false),
+                    "visual_theme": themeSummary,
+                    "spatial_map": spatialMap,
                     "mark_count": obs.marks.count,
-                    "marks": obs.marks.prefix(80).map(Self.encodeMark)
+                    "marks": obs.marks.prefix(85).map(Self.encodeMark)
                 ]
                 if includeImage && !obs.base64JPEG.isEmpty {
                     resp["image_base64"] = obs.base64JPEG
@@ -1214,6 +1232,7 @@ public final class NativeComputerUseService {
                 let y = (payload["y"] as? Double) ?? (payload["y"] as? NSNumber)?.doubleValue ?? 0
                 let w = (payload["width"] as? Double) ?? (payload["width"] as? NSNumber)?.doubleValue ?? 320
                 let h = (payload["height"] as? Double) ?? (payload["height"] as? NSNumber)?.doubleValue ?? 240
+                let includeImage = (payload["include_image"] as? Bool) ?? true
                 let crop = CGRect(x: x, y: y, width: max(40, w), height: max(40, h))
                 let obs = try await captureAndAnnotate(
                     target: target,
@@ -1222,14 +1241,66 @@ public final class NativeComputerUseService {
                     cropRect: crop,
                     highResolutionCrop: true
                 )
-                return [
+                let cropData = (try? Data(contentsOf: URL(fileURLWithPath: obs.path))) ?? Data()
+                let visionSummary: VisionAnalysisResult? = cropData.isEmpty
+                    ? nil
+                    : await AppleVisionEngine.shared.analyzeImage(
+                        data: cropData,
+                        filename: "zoom_crop.png",
+                        fastPreview: false,
+                        includeSceneClassification: true
+                    )
+                var zoomTargets: [[String: Any]] = []
+                if let vision = visionSummary {
+                    var nextZoomMarkId = max(201, (self.cachedMarks.keys.max() ?? 200) + 1)
+                    for block in vision.spatialBlocks.prefix(40) {
+                        let winRect = CGRect(
+                            x: crop.origin.x + block.normalizedTopLeftRect.origin.x * crop.width,
+                            y: crop.origin.y + block.normalizedTopLeftRect.origin.y * crop.height,
+                            width: max(8, block.normalizedTopLeftRect.width * crop.width),
+                            height: max(8, block.normalizedTopLeftRect.height * crop.height)
+                        )
+                        let screenRect = CGRect(
+                            x: target.bounds.origin.x + winRect.origin.x,
+                            y: target.bounds.origin.y + winRect.origin.y,
+                            width: winRect.width,
+                            height: winRect.height
+                        )
+                        let zMark = ComputerUseMark(
+                            id: nextZoomMarkId,
+                            role: "ZoomOCRText",
+                            label: block.text,
+                            value: "",
+                            enabled: true,
+                            screenFrame: screenRect,
+                            windowFrame: winRect,
+                            axElement: nil,
+                            inProcessView: nil
+                        )
+                        self.cachedMarks[nextZoomMarkId] = zMark
+                        zoomTargets.append([
+                            "mark_id": nextZoomMarkId,
+                            "text": block.text,
+                            "center": ["x": Double(zMark.screenCenter.x), "y": Double(zMark.screenCenter.y)],
+                            "window_center": ["x": Double(zMark.windowCenter.x), "y": Double(zMark.windowCenter.y)]
+                        ])
+                        nextZoomMarkId += 1
+                    }
+                }
+                var zoomResp: [String: Any] = [
                     "success": true,
                     "action": "zoom",
                     "path": obs.path,
-                    "crop_rect": ["x": x, "y": y, "width": w, "height": h],
-                    "image_base64": obs.base64JPEG,
-                    "image_mime_type": "image/jpeg"
+                    "crop_rect": ["x": x, "y": y, "width": crop.width, "height": crop.height],
+                    "visual_summary": visionSummary?.formattedSummary ?? "",
+                    "zoom_target_count": zoomTargets.count,
+                    "zoom_targets": zoomTargets
                 ]
+                if includeImage && !obs.base64JPEG.isEmpty {
+                    zoomResp["image_base64"] = obs.base64JPEG
+                    zoomResp["image_mime_type"] = "image/jpeg"
+                }
+                return zoomResp
 
             case "click", "double_click", "right_click":
                 let markId = (payload["mark_id"] as? Int) ?? (payload["mark_id"] as? NSNumber)?.intValue
@@ -1326,19 +1397,27 @@ public final class NativeComputerUseService {
                         break
                     }
                 }
+                let includeImage = (payload["include_image"] as? Bool) ?? true
                 let finalObs = try? await captureAndAnnotate(target: target, drawSetOfMark: true)
-                return [
+                let afterTheme = finalObs.map { AppleVisionEngine.sampleColorAndThemeProfile(cgImage: $0.cgImage) } ?? ""
+                let afterSpatialMap = finalObs.map { Self.buildSpatialScreenMap(window: target, marks: $0.marks, visualTheme: afterTheme) } ?? ""
+                var batchResp: [String: Any] = [
                     "success": true,
                     "action": "batch",
                     "executed_steps": stepResults.count,
                     "step_results": stepResults,
                     "after_screenshot": finalObs?.path as Any,
                     "after_mark_count": finalObs?.marks.count ?? 0,
-                    "image_base64": (finalObs?.base64JPEG ?? ""),
-                    "image_mime_type": "image/jpeg"
+                    "after_spatial_map": afterSpatialMap
                 ]
+                if includeImage, let b64 = finalObs?.base64JPEG, !b64.isEmpty {
+                    batchResp["image_base64"] = b64
+                    batchResp["image_mime_type"] = "image/jpeg"
+                }
+                return batchResp
 
             case "qa_verify", "live_test":
+                let includeImage = (payload["include_image"] as? Bool) ?? true
                 let beforePath = "/tmp/microcode_qa_before.png"
                 let afterPath = "/tmp/microcode_qa_after.png"
                 let beforeImg = try captureWindowCGImage(target: target, nominalResolution: true).0
@@ -1359,6 +1438,8 @@ public final class NativeComputerUseService {
                 let afterImg = try captureWindowCGImage(target: target, nominalResolution: true).0
                 let afterObs = try await captureAndAnnotate(target: target, drawSetOfMark: true, outputPath: afterPath)
                 let diffRatio = Self.computePixelDiffRatio(beforeImg, afterImg)
+                let afterTheme = AppleVisionEngine.sampleColorAndThemeProfile(cgImage: afterObs.cgImage)
+                let afterSpatialMap = Self.buildSpatialScreenMap(window: target, marks: afterObs.marks, visualTheme: afterTheme)
 
                 var expectationMet = true
                 if let expectedText = payload["expect_text"] as? String, !expectedText.isEmpty {
@@ -1366,19 +1447,24 @@ public final class NativeComputerUseService {
                     expectationMet = afterObs.marks.contains { $0.label.lowercased().contains(needle) }
                 }
 
-                return [
+                var qaResp: [String: Any] = [
                     "status": expectationMet ? "success" : "expectation_failed",
                     "success": expectationMet,
                     "before_screenshot": beforePath,
                     "after_screenshot": afterObs.path,
                     "pixel_diff_ratio": Double((diffRatio * 10000).rounded() / 10000),
                     "visual_changed": diffRatio > 0.001,
+                    "visual_theme": afterTheme,
+                    "after_spatial_map": afterSpatialMap,
                     "mark_count": afterObs.marks.count,
                     "marks": afterObs.marks.prefix(50).map(Self.encodeMark),
-                    "step_results": stepResults,
-                    "image_base64": afterObs.base64JPEG,
-                    "image_mime_type": "image/jpeg"
+                    "step_results": stepResults
                 ]
+                if includeImage && !afterObs.base64JPEG.isEmpty {
+                    qaResp["image_base64"] = afterObs.base64JPEG
+                    qaResp["image_mime_type"] = "image/jpeg"
+                }
+                return qaResp
 
             default:
                 return ["success": false, "error": "Unknown Computer Use action '\(action)'."]
@@ -1430,14 +1516,20 @@ public final class NativeComputerUseService {
             DispatchQueue.global(qos: .userInitiated).async {
                 let req = VNRecognizeTextRequest()
                 req.recognitionLevel = .fast
-                req.recognitionLanguages = ["en-US", "th-TH"]
+                req.usesLanguageCorrection = true
+                req.recognitionLanguages = ["en-US", "th-TH", "zh-Hans", "ja-JP"]
                 let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-                try? handler.perform([req])
+                do {
+                    try handler.perform([req])
+                } catch {
+                    req.recognitionLanguages = ["en-US"]
+                    try? handler.perform([req])
+                }
                 var out: [(String, CGRect)] = []
-                for obs in (req.results ?? []).prefix(70) {
+                for obs in (req.results ?? []).prefix(85) {
                     if let top = obs.topCandidates(1).first {
                         let str = top.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if str.count >= 2 && str.count <= 60 {
+                        if str.count >= 2 && str.count <= 90 {
                             out.append((str, obs.boundingBox))
                         }
                     }
@@ -1445,6 +1537,98 @@ public final class NativeComputerUseService {
                 continuation.resume(returning: out)
             }
         }
+    }
+
+    private static func buildSpatialScreenMap(
+        window: TargetWindowInfo,
+        marks: [ComputerUseMark],
+        visualTheme: String
+    ) -> String {
+        let winW = max(1.0, window.bounds.width)
+        let winH = max(1.0, window.bounds.height)
+        var lines: [String] = []
+        lines.append("Window: \(window.appName) — \"\(window.windowTitle)\" (\(Int(winW.rounded()))×\(Int(winH.rounded())) pt, origin=(\(Int(window.bounds.origin.x.rounded())),\(Int(window.bounds.origin.y.rounded()))))")
+        if !visualTheme.isEmpty {
+            lines.append("Visual Theme: \(visualTheme)")
+        }
+        guard !marks.isEmpty else {
+            lines.append("(No interactive controls or OCR labels detected)")
+            return lines.joined(separator: "\n")
+        }
+
+        enum ScreenZone: Int, CaseIterable {
+            case topBar = 0
+            case leftSidebar = 1
+            case mainCanvas = 2
+            case rightInspector = 3
+            case bottomStatus = 4
+
+            var title: String {
+                switch self {
+                case .topBar: return "[Top Bar / Toolbar]"
+                case .leftSidebar: return "[Left Sidebar / Navigator]"
+                case .mainCanvas: return "[Main Canvas / Center]"
+                case .rightInspector: return "[Right Inspector / Panel]"
+                case .bottomStatus: return "[Bottom Status / Dock]"
+                }
+            }
+        }
+
+        var bucketed: [ScreenZone: [ComputerUseMark]] = [:]
+        for m in marks.prefix(110) {
+            let nx = m.windowCenter.x / winW
+            let ny = m.windowCenter.y / winH
+            let zone: ScreenZone
+            if ny <= 0.14 {
+                zone = .topBar
+            } else if ny >= 0.88 {
+                zone = .bottomStatus
+            } else if nx < 0.24 {
+                zone = .leftSidebar
+            } else if nx > 0.76 {
+                zone = .rightInspector
+            } else {
+                zone = .mainCanvas
+            }
+            bucketed[zone, default: []].append(m)
+        }
+
+        for zone in ScreenZone.allCases {
+            guard var zMarks = bucketed[zone], !zMarks.isEmpty else { continue }
+            zMarks.sort {
+                if abs($0.windowCenter.y - $1.windowCenter.y) > 12 {
+                    return $0.windowCenter.y < $1.windowCenter.y
+                }
+                return $0.windowCenter.x < $1.windowCenter.x
+            }
+            lines.append(zone.title)
+            var currentRow: [ComputerUseMark] = []
+            var rowY: CGFloat = -9999
+            func flushRow() {
+                guard !currentRow.isEmpty else { return }
+                currentRow.sort { $0.windowCenter.x < $1.windowCenter.x }
+                let rowStr = currentRow.map { m -> String in
+                    let shortRole = m.role.replacingOccurrences(of: "AX", with: "")
+                    let cleanVal = m.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let valPart = (!cleanVal.isEmpty && cleanVal != m.label) ? " val=\"\(cleanVal.prefix(24))\"" : ""
+                    return "[#\(m.id)] \(shortRole) \"\(m.label.prefix(44))\"\(valPart) @(\(Int(m.screenCenter.x)),\(Int(m.screenCenter.y)))"
+                }.joined(separator: "  │  ")
+                lines.append("  " + rowStr)
+                currentRow.removeAll(keepingCapacity: true)
+            }
+            for m in zMarks {
+                if currentRow.isEmpty || abs(m.windowCenter.y - rowY) <= 12 {
+                    if currentRow.isEmpty { rowY = m.windowCenter.y }
+                    currentRow.append(m)
+                } else {
+                    flushRow()
+                    rowY = m.windowCenter.y
+                    currentRow.append(m)
+                }
+            }
+            flushRow()
+        }
+        return lines.joined(separator: "\n")
     }
 
     private nonisolated static func computePixelDiffRatio(_ a: CGImage, _ b: CGImage) -> Double {

@@ -371,39 +371,65 @@ final class SupabaseAuthService: ObservableObject {
 
     func startOAuth(provider: String) async throws {
         guard await bootstrapConfiguration() else { throw AuthError.unconfigured }
-        guard let window = NSApp.keyWindow ?? NSApp.windows.first else {
-            throw AuthError.rejected("Open a MicroCode window before signing in.")
-        }
+        MCPServer.shared.startLocalHttpBridge(port: 18888)
         webAuthID = nil
         webAuthSession?.cancel()
         webAuthSession = nil
         webAuthContext = nil
-        let authURL = try makeOAuthURL(provider: provider)
+        _ = try? makeOAuthURL(provider: provider)
+
+        let cleanProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let portalURL = try URL(string: "https://microcode.dotmini.net/auth.html?source=macapp&provider=\(cleanProvider)")
+            ?? makeOAuthURL(provider: provider)
+
+        guard let rawWindow = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first else {
+            NSWorkspace.shared.open(portalURL)
+            return
+        }
+        let hostWindow = rawWindow.sheetParent ?? rawWindow
         let attemptID = UUID()
         webAuthID = attemptID
-        let context = OAuthPresentationContext(window: window)
-        let browserSession = ASWebAuthenticationSession(url: authURL, callbackURLScheme: "microcode") { [weak self] callbackURL, _ in
+        let context = OAuthPresentationContext(window: hostWindow)
+        let browserSession = ASWebAuthenticationSession(url: portalURL, callbackURLScheme: "microcode") { [weak self] callbackURL, error in
             Task { @MainActor in
                 guard let self, self.webAuthID == attemptID else { return }
                 self.webAuthID = nil
                 self.webAuthSession = nil
                 self.webAuthContext = nil
                 if let callbackURL {
+                    _ = await self.handleCallback(callbackURL)
                     NotificationCenter.default.post(name: Notification.Name("MicroCodeOAuthCallback"), object: callbackURL)
                 } else {
                     self.pendingOAuth = nil
+                    if let authErr = error as? ASWebAuthenticationSessionError, authErr.code == .canceledLogin {
+                        return
+                    }
+                    if error != nil {
+                        NSWorkspace.shared.open(portalURL)
+                    }
                 }
             }
         }
         browserSession.presentationContextProvider = context
+        browserSession.prefersEphemeralWebBrowserSession = false
         webAuthContext = context
         webAuthSession = browserSession
-        guard browserSession.start() else {
+        if !browserSession.start() {
             webAuthID = nil
             webAuthSession = nil
             webAuthContext = nil
             pendingOAuth = nil
-            throw AuthError.rejected("Could not open the sign-in browser. Please try again.")
+            NSWorkspace.shared.open(portalURL)
+        }
+    }
+
+    /// Opens the system default browser (Safari/Chrome) to sign in with Google or sync an existing Dotmini session
+    /// back to the Mac app via localhost `:18888/v1/auth/sync` and `microcode://auth`.
+    func startBrowserSignIn(provider: String = "google") {
+        MCPServer.shared.startLocalHttpBridge(port: 18888)
+        let cleanProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let url = URL(string: "https://microcode.dotmini.net/auth.html?source=macapp&provider=\(cleanProvider)") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -570,6 +596,11 @@ final class SupabaseAuthService: ObservableObject {
             sessionGeneration = UUID()
             refreshTask?.cancel()
             refreshTask = nil
+            webAuthID = nil
+            webAuthSession?.cancel()
+            webAuthSession = nil
+            webAuthContext = nil
+            pendingOAuth = nil
             try persist(newSession)
             await refreshEntitlement()
             AuthService.shared.syncWithWebSession(

@@ -39,7 +39,7 @@ public struct SubscriptionModelInfo: Identifiable, Hashable, Codable {
 }
 
 public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codable {
-    case aipass = "aipass"
+    case aipass = "omni_ai"
     case thai_gemini_enterprise = "thai_gemini_enterprise"
     case tokenme = "tokenme"
     case chatgpt = "chatgpt"
@@ -67,7 +67,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     
     public var displayName: String {
         switch self {
-        case .aipass: return "TH-AI Passport (de.aipass.net)"
+        case .aipass: return "Omni AI (Dotmini Cloud · omni.ai)"
         case .thai_gemini_enterprise: return "Thai AI Gemini Enterprise (AiPASS.TH · Vertex AI Search)"
         case .tokenme: return "TokenMe (9ARM — tokenme.limited)"
         case .chatgpt: return "ChatGPT Plus / Team / Pro"
@@ -424,7 +424,10 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             ]
         case .gemini:
             return [
+                SubscriptionModelInfo(modelID: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen (Flagship Reasoning)", provider: .gemini, badge: "FLAGSHIP", description: "Google Gemini 4 Hydrogen flagship reasoning model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-4-orchestra", name: "Gemini 4 Orchestra (Multi-Modal Orchestrator)", provider: .gemini, badge: "FLAGSHIP", description: "Google Gemini 4 Orchestra multi-modal orchestrator model", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-4-argon", name: "Gemini 4 Argon (Pro / Ultra)", provider: .gemini, badge: "FLAGSHIP", description: "Google Gemini 4 Argon frontier reasoning model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-4-argon-extra", name: "Gemini 4 Argon (Extra Thinking)", provider: .gemini, badge: "THINKING", description: "Google Gemini 4 Argon with extra thinking budget", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-4-argon-high", name: "Gemini 4 Argon (High Thinking)", provider: .gemini, badge: "THINKING", description: "Google Gemini 4 Argon with high thinking budget", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium Thinking)", provider: .gemini, badge: "THINKING", description: "Google Gemini 4 Argon with medium thinking budget", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-4-argon-low", name: "Gemini 4 Argon (Low Thinking)", provider: .gemini, badge: "FAST", description: "Google Gemini 4 Argon fast low-thinking tier", aiProviderID: "gemini"),

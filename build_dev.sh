@@ -52,6 +52,8 @@ rm -rf "$BUILD_ROOT/tmp/"* "$BUILD_ROOT/apps/MicroCode.app" 2>/dev/null || true
 export TMPDIR="$BUILD_ROOT/tmp"
 export CARGO_HOME="$BUILD_ROOT/cargo-home"
 export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
+export CLANG_MODULE_CACHE_PATH="$BUILD_ROOT/clang-module-cache"
+mkdir -p "$CLANG_MODULE_CACHE_PATH" "$BUILD_ROOT/swift-module-cache"
 SWIFT_SCRATCH_PATH="$BUILD_ROOT/swiftpm/$(basename "$PWD")"
 
 # Collect potential Rust library directories (prefer release first when --release is active)
@@ -111,6 +113,8 @@ if [ "$SWIFT_CONFIG" = "release" ]; then
 fi
 
 if ! swift build -c "$SWIFT_CONFIG" --scratch-path "$SWIFT_SCRATCH_PATH" \
+    -Xswiftc -module-cache-path -Xswiftc "$BUILD_ROOT/swift-module-cache" \
+    -Xcc "-fmodules-cache-path=$CLANG_MODULE_CACHE_PATH" \
     "${SWIFT_RELEASE_FLAGS[@]}" \
     "${RUST_LINK_FLAGS[@]}" \
     -Xlinker -lmicrocode_embedded \
@@ -195,9 +199,9 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.41</string>
+    <string>2.5.42</string>
     <key>CFBundleVersion</key>
-    <string>38</string>
+    <string>39</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

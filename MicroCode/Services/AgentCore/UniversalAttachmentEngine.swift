@@ -658,18 +658,34 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
                 resolved.previewThumbnail = thumb
             }
 
-            // Text-only LLM fallback: if image skipped Vision OCR during fast staging, run accurate ANE OCR now
-            if requireImageOCR && resolved.semanticCategory == .image && resolved.extractionStatus == "FAST_IMAGE_READY" {
-                let visionBytes = resolved.effectiveVisionData.isEmpty
-                    ? (resolved.loadRawBinaryData(maxBytes: 15 * 1024 * 1024) ?? Data())
-                    : resolved.effectiveVisionData
-                if !visionBytes.isEmpty {
-                    let vision = await AppleVisionEngine.shared.analyzeImage(data: visionBytes, filename: resolved.name)
-                    resolved.extractedFullText = vision.formattedSummary
-                    resolved.extractionStatus = vision.extractedText.isEmpty ? "READ_OK" : "OCR_EXTRACTED"
-                    if let staged = resolved.stagedPath {
+            // Text-only & Local LLM Perception Upgrade: if image or scanned PDF skipped full ANE Vision OCR during fast staging, run accurate Spatial OCR now
+            if requireImageOCR {
+                if resolved.semanticCategory == .image &&
+                    (resolved.extractionStatus == "FAST_IMAGE_READY" ||
+                     (resolved.extractedFullText ?? "").contains("Delivered directly as native multimodal image input")) {
+                    let visionBytes = resolved.effectiveVisionData.isEmpty
+                        ? (resolved.loadRawBinaryData(maxBytes: 15 * 1024 * 1024) ?? Data())
+                        : resolved.effectiveVisionData
+                    if !visionBytes.isEmpty {
+                        let vision = await AppleVisionEngine.shared.analyzeImage(data: visionBytes, filename: resolved.name)
+                        resolved.extractedFullText = vision.formattedSummary
+                        resolved.extractionStatus = vision.extractedText.isEmpty ? "READ_OK" : "OCR_EXTRACTED"
+                        if let staged = resolved.stagedPath {
+                            let cachePath = staged + ".extracted.txt"
+                            try? vision.formattedSummary.write(toFile: cachePath, atomically: true, encoding: .utf8)
+                            resolved.extractedTextCachePath = cachePath
+                        }
+                    }
+                } else if resolved.semanticCategory == .pdf,
+                          let staged = resolved.stagedPath,
+                          let existingTxt = resolved.extractedFullText,
+                          (existingTxt.contains("Scanned/low-text page") || existingTxt.contains("Fast Preview OCR")) {
+                    let upgradedSlice = await self.readAttachmentSlice(path: staged, pageStart: 1, pageEnd: 8, forceOCR: true)
+                    if !upgradedSlice.hasPrefix("Error:") {
+                        resolved.extractedFullText = upgradedSlice
+                        resolved.extractionStatus = "OCR_EXTRACTED"
                         let cachePath = staged + ".extracted.txt"
-                        try? vision.formattedSummary.write(toFile: cachePath, atomically: true, encoding: .utf8)
+                        try? upgradedSlice.write(toFile: cachePath, atomically: true, encoding: .utf8)
                         resolved.extractedTextCachePath = cachePath
                     }
                 }
@@ -678,6 +694,73 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
             output.append(resolved)
         }
         return output
+    }
+
+    /// Detects explicit image/PDF/document file paths referenced inside a prompt (e.g. `test_samples/mobile_ui_mockup.png` or `/tmp/shot.jpg`)
+    /// that were not attached via the picker, resolving safe workspace/local URLs so Local & Text-Only LLMs automatically perceive them.
+    func extractReferencedMediaAndDocURLs(
+        from prompt: String,
+        workspaceRoot: String?,
+        existingAttachments: [AIAttachment] = []
+    ) -> [URL] {
+        let lower = prompt.lowercased()
+        let supportedExts: [String] = [
+            ".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".gif", ".bmp", ".tiff", ".tif", ".svg",
+            ".pdf", ".docx", ".xlsx", ".pptx", ".csv", ".tsv", ".sqlite", ".db", ".parquet"
+        ]
+        guard supportedExts.contains(where: { lower.contains($0) }) else { return [] }
+
+        let pattern = #"(?:@|['"`]|(?<=^)|(?<=\s))([~./A-Za-z0-9_\-\u0E00-\u0E7F/\\ ]+?\.(?:png|jpg|jpeg|webp|heic|heif|gif|bmp|tiff|tif|svg|pdf|docx|xlsx|pptx|csv|tsv|sqlite|db|parquet))(?=$|['"`\s,;:!?)\]])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+
+        let nsPrompt = prompt as NSString
+        let matches = regex.matches(in: prompt, range: NSRange(location: 0, length: nsPrompt.length))
+        guard !matches.isEmpty else { return [] }
+
+        let fm = FileManager.default
+        let existingPaths = Set(existingAttachments.compactMap { $0.sourceURL.map { WorkspacePathPolicy.canonicalPath($0.path) } })
+        var seen = existingPaths
+        var found: [URL] = []
+
+        for m in matches.prefix(8) {
+            guard m.numberOfRanges > 1 else { continue }
+            var rawCandidate = nsPrompt.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawCandidate.hasPrefix("@") { rawCandidate.removeFirst() }
+            guard !rawCandidate.isEmpty, !rawCandidate.contains("://") else { continue }
+
+            let candidatePaths: [String] = {
+                if rawCandidate.hasPrefix("~") {
+                    return [NSString(string: rawCandidate).expandingTildeInPath]
+                }
+                if rawCandidate.hasPrefix("/") {
+                    return [rawCandidate]
+                }
+                if let ws = workspaceRoot, !ws.isEmpty {
+                    return [(ws as NSString).appendingPathComponent(rawCandidate)]
+                }
+                return []
+            }()
+
+            for cand in candidatePaths {
+                let canon = WorkspacePathPolicy.canonicalPath(cand)
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: canon, isDirectory: &isDir), !isDir.boolValue else { continue }
+                // Enforce safety: allow inside active workspace, /tmp, or user's non-sensitive document/desktop/downloads dirs
+                let inWorkspace = (workspaceRoot != nil && !workspaceRoot!.isEmpty)
+                    ? WorkspacePathPolicy.contains(canon, in: workspaceRoot!)
+                    : false
+                let inTemp = canon.hasPrefix("/tmp/") || canon.hasPrefix("/private/tmp/")
+                let home = fm.homeDirectoryForCurrentUser.path
+                let isDotfileSecret = canon.contains("/.") && !canon.contains("/.microcode/")
+                let inSafeUserDir = canon.hasPrefix(home + "/") && !isDotfileSecret
+                guard (inWorkspace || inTemp || inSafeUserDir), !seen.contains(canon) else { continue }
+
+                seen.insert(canon)
+                found.append(URL(fileURLWithPath: canon))
+                break
+            }
+        }
+        return found
     }
 
     // MARK: - Single URL Staging & Extraction
@@ -885,7 +968,7 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
 
         switch ext {
         case "pdf":
-            return await extractPDF(url: targetURL, name: originalName, stagedPath: stagedVaultURL.path, sizeStr: sizeStr)
+            return await extractPDF(url: targetURL, name: originalName, stagedPath: stagedVaultURL.path, sizeStr: sizeStr, eagerOCR: eagerImageOCR)
         case "docx":
             return extractDOCX(url: targetURL, name: originalName, sizeStr: sizeStr)
         case "xlsx":
@@ -1194,7 +1277,7 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
 
     // MARK: - 1. PDF Extractor (Digital Layer + Scanned/Chart ANE Vision OCR)
 
-    private func extractPDF(url: URL, name: String, stagedPath: String, sizeStr: String) async -> AttachmentExtractionPayload {
+    private func extractPDF(url: URL, name: String, stagedPath: String, sizeStr: String, eagerOCR: Bool = false) async -> AttachmentExtractionPayload {
         guard let doc = PDFDocument(url: url) else {
             let warn = "Corrupted or unreadable PDF header"
             return AttachmentExtractionPayload(
@@ -1252,9 +1335,12 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
         var ocrCount = 0
         var unocredLowTextPages: [Int] = []
         var firstRasterizedPagePNG: Data? = nil
-        // Fast background PDF ingestion: only run quick preview OCR on Page 1 of scanned PDFs during staging
-        // so 50-page scanned PDFs stage in <60ms instead of 15s; `attachment_read(..., ocr: true)` performs full `.accurate` OCR on demand.
-        let maxAutoOCRPages = 1
+        // When eagerOCR is active (Local LLMs & Text-Only models) or PDF is short (<= 5 pages),
+        // run full multi-language `.accurate` Spatial ANE OCR across up to 8 scanned pages immediately;
+        // otherwise keep staging fast (<80ms) on large PDFs and serve pages 3+ via `attachment_read(ocr: true)`.
+        let useAccurateAutoOCR = eagerOCR || totalPages <= 5
+        let maxAutoOCRPages = eagerOCR ? 8 : (totalPages <= 5 ? 4 : 2)
+        let autoOCRDPI: CGFloat = useAccurateAutoOCR ? 155.0 : 135.0
 
         for idx in 0..<totalPages {
             let pageNum = idx + 1
@@ -1265,7 +1351,7 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
             var pageBody = trimmed
             if trimmed.count < 48 {
                 if ocrCount < maxAutoOCRPages,
-                   let pngData = Self.rasterizePDFPageToPNG(page: page, dpi: 135.0) {
+                   let pngData = Self.rasterizePDFPageToPNG(page: page, dpi: autoOCRDPI) {
                     if firstRasterizedPagePNG == nil && pngData.count <= 4_500_000 {
                         firstRasterizedPagePNG = pngData
                     }
@@ -1273,12 +1359,17 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
                     let vision = await AppleVisionEngine.shared.analyzeImage(
                         data: pngData,
                         filename: "\(name)#page-\(pageNum).png",
-                        fastPreview: true
+                        fastPreview: !useAccurateAutoOCR
                     )
-                    let ocrText = vision.extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let ocrNote = ocrText.isEmpty
-                        ? "[Page \(pageNum) Fast Preview OCR]: (Graphical/scanned page — call `attachment_read(path: \"\(stagedPath)\", page_start: \(pageNum), page_end: \(min(totalPages, pageNum + 9)), ocr: true)` for high-precision multi-language OCR)"
-                        : "[Page \(pageNum) Fast Preview OCR]:\n\(ocrText)"
+                    let ocrLayout = vision.spatialLayoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let ocrLabel = useAccurateAutoOCR ? "ANE Spatial Vision OCR" : "Fast Preview OCR"
+                    let ocrNote: String
+                    if ocrLayout.isEmpty {
+                        let sceneHint = vision.detectedElements.isEmpty ? vision.colorPaletteSummary : vision.detectedElements.joined(separator: " | ")
+                        ocrNote = "[Page \(pageNum) \(ocrLabel)]: (Graphical page — \(sceneHint). Call `attachment_read(path: \"\(stagedPath)\", page_start: \(pageNum), page_end: \(min(totalPages, pageNum + 9)), ocr: true)` if deeper inspection is needed)"
+                    } else {
+                        ocrNote = "[Page \(pageNum) \(ocrLabel)]:\n\(ocrLayout)"
+                    }
                     pageBody = pageBody.isEmpty ? ocrNote : (pageBody + "\n\n" + ocrNote)
                 } else {
                     unocredLowTextPages.append(pageNum)
@@ -3153,7 +3244,8 @@ final class UniversalAttachmentEngine: @unchecked Sendable {
             originalName: displayName,
             stagedVaultURL: binaryURL,
             fileSize: size,
-            isDirectory: isDirectory
+            isDirectory: isDirectory,
+            eagerImageOCR: true
         )
 
         // Cache inside vault if path already resides inside vaultRootDirectory

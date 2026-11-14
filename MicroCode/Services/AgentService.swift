@@ -744,36 +744,11 @@ class AgentService: ObservableObject {
             9. Use find_symbol to locate function/class definitions.
             10. For multi-file changes, use `apply_patch` or `patch_file` for atomic efficiency.
             11. Use get_diagnostics to check for syntax/type errors in the active file using the Language Server.
-            12. CRITICAL SAFETY GUARD: NEVER delete user files or directories blindly. Destructive commands like `rm -rf`, `find . -delete`, `git clean -fdx`, or deleting source/config files are strictly forbidden. Always make safe, targeted modifications.
-            13. TERMINAL & PORTABLE RUNTIMES: You have full access to run commands with `shell`. It automatically includes MicroCode Portable Runtimes (`~/.microcode/runtimes` for Python, Node.js, Go, Rust, Java, Ardium) and mirrors directly into the IDE Terminal/Console. Always run build, test, and diagnostics commands to verify code.
-            14. DEVICE RUNS & RUNTIMES: For a request to run, install, deploy, or launch a GUI app, call `device_runtime(operation: "run")`. `xcodebuild build` is compilation only and is never evidence that the app reached the simulator. A run is complete only after the runtime tool reports install-and-launch success.
-            15. HARDWARE & DEVICE AUTOMATION: You have full-function authority to control real Android phones (via ADB), Android emulators, iOS Simulators, and physical iPhones/iPads (paired, unlocked, Developer Mode on; deployed with xcodebuild + devicectl). Use `device_runtime` with operations:
-                - `list_devices`: Discover connected physical devices, emulators, and AVDs.
-                - `run`: Build the open Xcode/Android/Flutter project and install+launch it on the target. ALWAYS pass `device_id` (UDID/serial or the device name from `list_devices`) when the user names a device such as 'my iPhone'; never assume the first device.
-                - `tap`: Send real touch events at pixel coordinates (x, y).
-                - `swipe`: Send natural swipe/scroll gestures (x, y, x2, y2, duration).
-                - `type_text`: Type strings directly into focused input fields.
-                - `key_event`: Dispatch hardware buttons (HOME, BACK, ENTER, POWER, RECENTS).
-                - `screenshot`: Capture high-resolution visual screenshots for verification with `inspect_image`.
-                - `launch_app` & `install_app`: Manage app lifecycle on device.
-                - `adb_shell`: Run raw ADB shell inspection commands (e.g. dumpsys, logcat, pm) on physical/emulator targets.
-            16. LIVE EMBEDDED PREVIEW & WEBAPP CONTROL:
-                - `open`: Opens preview dock (`preview_control(action: "open", mode: "web", url: "http://localhost:3000")`) when the user requests to open/view the live preview.
-                - `reload`: Triggers an immediate refresh of the rendered page.
-                - `set_url`: Navigates to a specific localhost or web address.
-                - `set_viewport`: Switches layout viewport (`responsive`, `desktop`, `tablet`, `mobile`) to verify UI responsiveness.
-                - `switch_mode`: Switches dock between `web`, `ios`, and `android`.
-                - Do NOT automatically take or inject WebApp screenshots unless the user explicitly asks you to take a screenshot.
-            17. MODEL CONTEXT PROTOCOL (MCP) TOOL HARNESS:
-                - MicroCode provides an active local MCP Server containing 35+ tools under the `mcp__local__*` namespace.
-                - Tools include `web_fetch`, `cell_create`, `cell_run`, `playground_run`, `ardium_*`, `computer_use_*`, `device_*`, `adb_execute`, and more.
-                - EVERY AI Agent and SubAgent in MicroCode has full access to all MCP tools. You and your SubAgents can invoke them directly at any time.
-            18. MULTIMODAL AI GENERATION (IMAGES, VIDEOS, MUSIC/AUDIO VIA TH-AI PASSPORT):
-                - You have built-in tools to generate real Images, Videos, and Music/Audio tracks directly inside the workspace and render them inline in the chat:
-                  * `generate_image(prompt: "...", model: "gemini-3.1-flash-image")` — Generates high-resolution images using Gemini Image, FLUX.2 Pro, GPT Image 2.5, or Seedream 5.0.
-                  * `generate_video(prompt: "...", model: "veo-3.1-fast-generate-001", aspect_ratio: "16:9")` — Generates MP4 videos using Google Veo 3.1, Seedance 2.0, OpenAI Sora 2, or Wan 2.2.
-                  * `generate_music(prompt: "...", model: "lyria-3-clip-preview")` — Generates music/audio tracks using Google Lyria 3.
-                - When the user asks to generate an image, picture, logo, UI mockup, video, animation, clip, song, or music track, call `generate_image`, `generate_video`, or `generate_music` directly and include the returned `![Generated ...](file://...)` markdown in your final response so the IDE renders the interactive media player inline.
+            12. CRITICAL SAFETY & GIT GUARD: NEVER delete user files or directories blindly (`rm -rf`, `find . -delete`, `git clean -fdx` are strictly forbidden). NEVER run `git init`, `git commit`, or `git push` unless the user explicitly asks to initialize Git or commit changes. NEVER invent unrelated boilerplate files (like random `index.html`) in an empty workspace unless the user explicitly asks to create a web page or app.
+            13. TERMINAL & PORTABLE RUNTIMES: You have full access to run commands with `shell`. It automatically includes MicroCode Portable Runtimes (`~/.microcode/runtimes` for Python, Node.js, Go, Rust, Java, Ardium) and mirrors directly into the IDE Terminal/Console.
+            14. LIVE PREVIEW & EXTERNAL MCP ORCHESTRATION:
+                - Live Web/Device Preview: Use `preview_control` (`open`, `reload`, `set_url`, `set_viewport`, `switch_mode`) when the user asks to preview a web app or UI.
+                - Local & External MCP Servers: Local IDE tools live under `mcp__local__*`. External MCP servers (from `~/.microcode/mcp.json`, `~/.gemini/config/plugins/*`, Cursor, Claude, Codex) are managed via `mcp_orchestrator` (`action: "status"`, `"discover"`, `"connect"`, `"search_tools"`, `"restart"`, `"synthesize"`). When the user asks to connect, inspect, or use an MCP server (e.g. Canva, GitHub, Figma, Gmail, Google Slides), ALWAYS call `mcp_orchestrator` and/or check `<available_skills>` via `skill_engine` FIRST rather than answering with generic capabilities prose!
             
             ## Implementation Plans & Pre-Planning Codebase Analysis Mandate ("วิเคราะห์อย่างละเอียดก่อนทำ ห้ามมั่วเด็ดขาด")
             When [PLAN MODE] or /plan is active, or whenever tackling non-trivial, multi-step, refactoring, or architectural tasks:
@@ -818,8 +793,7 @@ class AgentService: ObservableObject {
             1. file_read → 2. replace_in_file/patch_file → 3. shell (verify) → 4. Report
             
             ## Task Persistence, Rules & Strict Privacy
-            - You MUST read `.microcode/task.md` to understand your current objectives and active plan phases.
-            - Once you complete a task phase or item, YOU MUST edit `.microcode/task.md` to check it off (change `[ ]` to `[x]`) and record verification evidence.
+            - Only use `.microcode/task.md` when executing multi-step software implementations; do NOT read or update `task.md` for simple questions, MCP setup, or visual reviews.
             - Always follow instructions, prohibitions, and rules declared in `.microcode/agent.md`.
             - 🔒 ZERO-PRIVACY LEAKAGE MANDATE: NEVER write, log, or persist API keys, passwords, bearer tokens, or sensitive credentials in `.microcode/` files or workspace code. Always sanitize secrets with [REDACTED_SECRET_FOR_PRIVACY].
             
@@ -954,10 +928,11 @@ class AgentService: ObservableObject {
             prompt += "\n\n## agent.md\n\(compressed)"
         }
         
-        // Inject task.md (compressed & sanitized)
-        if domain == .software, !isChatMode, let taskMd = taskMdContent, !taskMd.isEmpty {
+        // Inject task.md ONLY when working on an active multi-step engineering mutation or explicit plan
+        if domain == .software, !isChatMode, let taskMd = taskMdContent, !taskMd.isEmpty,
+           (AgentExecutionEvidence.taskRequiresMutation(message, workspaceRoot: toolBox.workspaceRoot) || ImplementationPlanManager.shared.currentPlan != nil) {
             let sanitizedTaskMd = AgentPrivacyGuard.sanitize(taskMd)
-            let compressed = tokenOptimizer.compressText(sanitizedTaskMd, targetTokens: 1200)
+            let compressed = tokenOptimizer.compressText(sanitizedTaskMd, targetTokens: 900)
             prompt += "\n\n## task.md\n\(compressed)"
         }
         
@@ -974,7 +949,7 @@ class AgentService: ObservableObject {
             activeFiles.append(contentsOf: openFiles)
         }
 
-        // Inject Active Agent Skills (Semantic JIT Router + Zero-Round-Trip Distilled Pre-Warming)
+        // Inject Active Agent Skills (AAIF 3-Tier Progressive Disclosure)
         let skillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet(
             forPrompt: message,
             workspacePath: toolBox.workspaceRoot,
@@ -982,6 +957,12 @@ class AgentService: ObservableObject {
         )
         if !skillsSnippet.isEmpty {
             prompt += skillsSnippet
+        }
+
+        // Inject Live Discovered External MCP Servers Summary (Canva, GitHub, Google Workspace, etc.)
+        let mcpSnippet = ExternalMCPManager.shared.compactPromptSummary()
+        if !mcpSnippet.isEmpty {
+            prompt += mcpSnippet
         }
 
         // Inject Shared Swarm Blackboard (Cross-Agent Facts)
@@ -2039,24 +2020,45 @@ class AgentService: ObservableObject {
         }
         logActivity(.thinking, "Processing request...")
 
-        // Pre-resolve provider & model in <0.1ms so attachment staging knows whether native multimodal vision is active
+        // Pre-resolve provider & model in <0.1ms so attachment staging knows whether native multimodal vision is active.
+        // Always ground `.local` models (even small VLMs or GGUFs without mmproj) with Apple Neural Engine Spatial OCR + Layout.
         let preNormalizedAI = AIModelCatalog.shared.normalizedSelection(provider: provider, model: model)
         let preDetectedProvider = StreamableAIProvider(rawValue: preNormalizedAI.provider)
             ?? StreamableAIProvider.detect(from: preNormalizedAI.model)
-        let needsTextFallbackForImages = !preDetectedProvider.supportsNativeImageInput(model: preNormalizedAI.model)
+        let needsTextFallbackForImages = (preDetectedProvider == .local)
+            || !preDetectedProvider.supportsNativeImageInput(model: preNormalizedAI.model)
+
+        // Auto-discover any workspace/local media or document files (`.png`, `.jpg`, `.pdf`, `.docx`, `.xlsx`, `.csv`, etc.)
+        // explicitly mentioned in the user's prompt so Turn 1 perceives them immediately even without manual drag-and-drop.
+        let autoReferencedURLs = UniversalAttachmentEngine.shared.extractReferencedMediaAndDocURLs(
+            from: content,
+            workspaceRoot: pinnedWorkspace ?? toolBox.workspaceRoot,
+            existingAttachments: attachments
+        )
+        var turnSeedAttachments = attachments
+        if !autoReferencedURLs.isEmpty {
+            let autoIngested = await UniversalAttachmentEngine.shared.ingest(
+                urls: Array(autoReferencedURLs.prefix(4)),
+                chatId: runChatId ?? activeChatId,
+                eagerImageOCR: needsTextFallbackForImages
+            )
+            turnSeedAttachments.append(contentsOf: autoIngested)
+        }
 
         let userMessage = preparedUserMessage ?? prepareUserTurn(content, attachments: attachments, createStreamingPlaceholder: true)
         let enrichedAttachments: [AIAttachment]
-        if attachments.isEmpty {
+        if turnSeedAttachments.isEmpty {
             enrichedAttachments = []
         } else {
             enrichedAttachments = await UniversalAttachmentEngine.shared.ensureIngested(
-                attachments,
+                turnSeedAttachments,
                 chatId: runChatId ?? activeChatId,
                 requireImageOCR: needsTextFallbackForImages
             )
             let enrichedDigest = UniversalAttachmentEngine.shared.buildFollowUpHistoryDigest(attachments: enrichedAttachments)
-            let enrichedItems = enrichedAttachments.map { SentAttachmentItem.from($0) }
+            let enrichedItems = attachments.isEmpty
+                ? []
+                : enrichedAttachments.prefix(attachments.count).map { SentAttachmentItem.from($0) }
             if activeChatId == (runChatId ?? activeChatId), let msgIdx = messages.firstIndex(where: { $0.id == userMessage.id }) {
                 messages[msgIdx] = AgentMessageModel(
                     id: messages[msgIdx].id,
@@ -2067,7 +2069,7 @@ class AgentService: ObservableObject {
                     timestamp: messages[msgIdx].timestamp,
                     turnTelemetryLabel: messages[msgIdx].turnTelemetryLabel,
                     attachmentHistoryContext: enrichedDigest.isEmpty ? nil : enrichedDigest,
-                    attachments: enrichedItems
+                    attachments: enrichedItems.isEmpty ? messages[msgIdx].attachments : enrichedItems
                 )
                 saveCurrentChatMessages()
             } else if let cid = runChatId, var bgBuf = backgroundChatMessages[cid], let msgIdx = bgBuf.firstIndex(where: { $0.id == userMessage.id }) {
@@ -2080,7 +2082,7 @@ class AgentService: ObservableObject {
                     timestamp: bgBuf[msgIdx].timestamp,
                     turnTelemetryLabel: bgBuf[msgIdx].turnTelemetryLabel,
                     attachmentHistoryContext: enrichedDigest.isEmpty ? nil : enrichedDigest,
-                    attachments: enrichedItems
+                    attachments: enrichedItems.isEmpty ? bgBuf[msgIdx].attachments : enrichedItems
                 )
                 backgroundChatMessages[cid] = bgBuf
             }
@@ -2206,24 +2208,24 @@ class AgentService: ObservableObject {
         let isChatMode = false
         let isPlanModePrompt = content.contains("[PLAN MODE")
         let hasApprovedActivePlan = ImplementationPlanManager.shared.currentPlan?.approvalState == .approved
-        let priorUserRequestedMutation = isContinuation && messages.contains(where: { $0.role == .user && requestRequiresMutation($0.content) })
+        let hasTurnMedia = !attachments.isEmpty
+        let priorUserRequestedMutation = isContinuation && messages.contains(where: {
+            $0.role == .user && requestRequiresMutation($0.content, workspaceRoot: pinnedWorkspace, hasMediaAttachments: !$0.attachments.isEmpty)
+        })
         let requiresNativeExecution = domain == .software && !isChatMode && (requestRequiresNativeExecution(content) || (isContinuation && requestRequiresNativeExecution(effectiveObjective)))
         let requiresRuntimeLaunch = domain == .software && !isChatMode && (requestRequiresRuntimeLaunch(content) || (isContinuation && requestRequiresRuntimeLaunch(effectiveObjective)))
         var requiresMutation = domain == .software && !isChatMode && !isPlanModePrompt && (
-            requestRequiresMutation(content) ||
+            requestRequiresMutation(content, workspaceRoot: pinnedWorkspace, hasMediaAttachments: hasTurnMedia) ||
             hasApprovedActivePlan ||
             priorUserRequestedMutation
         )
-        let inspectionRequested = ["inspect", "scan", "audit", "debug", "diagnose", "error", "harness", "ตรวจ", "เช็ค", "สแกน"]
+        let inspectionRequested = ["inspect", "scan", "audit", "debug", "diagnose", "error", "ตรวจโค้ด", "เช็คไฟล์", "สแกน"]
             .contains(where: effectiveObjective.lowercased().contains) || isPlanModePrompt
         var requiresWorkspaceEvidence = requiresMutation || requiresNativeExecution || inspectionRequested
 
-        // The task documents are an agent-owned execution contract, not a
-        // form the user has to fill in before the agent is allowed to work.
-        // Preserve handwritten plans, but generate/refresh the managed task
-        // for each new request so every model begins from the same durable
-        // objective and verification phases.
-        if domain == .software, !isChatMode {
+        // Only generate/refresh `.microcode/task.md` when executing genuine engineering mutations, plans, or complex coding tasks —
+        // NEVER pollute empty workspaces, MCP connection questions, or design-critique chats with fake coding checklists!
+        if domain == .software, !isChatMode, (requiresMutation || isPlanModePrompt || (complexity == .complex && AgentExecutionEvidence.workspaceHasProjectFiles(pinnedWorkspace))) {
             prepareAutonomousTaskArtifacts(
                 objective: content,
                 isContinuation: isContinuation
@@ -2509,8 +2511,9 @@ class AgentService: ObservableObject {
                     var toolCalls: [AIToolCall] = []
                     var turnText = ""
                     turnText.reserveCapacity(8192)
-                    var text = finalText.isEmpty ? "" : finalText + "\n\n"
-                    text.reserveCapacity(max(16384, text.count + 4096))
+                    // Clean Turn Streaming: render each model turn cleanly rather than stacking aborted/preliminary turns into one Frankenstein bubble!
+                    var text = ""
+                    text.reserveCapacity(16384)
                     
                     let isDirectMediaModel = AIClient.isAiPassMediaModel(resolvedModel)
                     // Per-chunk idle watchdog: allows unlimited total turn duration while tokens stream,
@@ -2538,9 +2541,11 @@ class AgentService: ObservableObject {
                         }
                     }
 
+                    // Stateful Multimodal Persistence: pass `multimodalOnlyAttachments` on EVERY iteration so the model NEVER goes blind after Step 1!
+                    // (`AIClient` pins `inlineData` / `image_url` / `image` onto the originating user turn during tool-result iterations.)
                     aiClient.sendMessage(
                         prompt: nextPrompt,
-                        attachments: iteration == 1 ? multimodalOnlyAttachments : [],
+                        attachments: multimodalOnlyAttachments,
                         systemPrompt: isDirectMediaModel ? nil : optimizedSystemPrompt,
                         conversationHistory: isDirectMediaModel ? [] : priorHistory,
                         provider: detectedProvider,
@@ -2560,8 +2565,7 @@ class AgentService: ObservableObject {
                         onComplete: { fullText in
                             watchdogTask.cancel()
                             let resolvedTurn = fullText.isEmpty ? turnText : fullText
-                            let combined = finalText.isEmpty ? resolvedTurn : (resolvedTurn.isEmpty ? finalText : finalText + "\n\n" + resolvedTurn)
-                            self.flushStreamingToken(combined, toolResults: allToolResults, forChatId: runChatId, scope: runScope)
+                            self.flushStreamingToken(resolvedTurn.isEmpty ? finalText : resolvedTurn, toolResults: allToolResults, forChatId: runChatId, scope: runScope)
                             _ = gate.resumeOnce((resolvedTurn, toolCalls, nil))
                         },
                         onError: { error in
@@ -2576,6 +2580,15 @@ class AgentService: ObservableObject {
                 }
                 
                 streamedText = result.0
+                if Self.isGatewayCannedRefusal(streamedText) {
+                    // Never keep a gateway canned refusal ("Sorry, I could not respond...") in the chat bubble!
+                    flushStreamingToken(finalText, toolResults: allToolResults, forChatId: runChatId, scope: runScope)
+                    throw NSError(
+                        domain: "Agent",
+                        code: 422,
+                        userInfo: [NSLocalizedDescriptionKey: "Gateway returned canned refusal (422) — failing over to native multimodal model"]
+                    )
+                }
                 receivedToolCalls = result.1.map { tc in
                     AIToolCall(
                         id: tc.id,
@@ -2617,11 +2630,8 @@ class AgentService: ObservableObject {
                         lastPreToolText = preToolClean
                         flushStreamingToken(preToolClean, toolResults: allToolResults)
                     } else {
-                        if finalText.isEmpty {
-                            finalText = streamedText
-                        } else if !finalText.contains(streamedText) {
-                            finalText += "\n\n" + streamedText
-                        }
+                        // Replace `finalText` cleanly with the latest complete answer instead of gluing aborted earlier iterations together!
+                        finalText = streamedText
                         flushStreamingToken(finalText, toolResults: allToolResults)
                     }
                 } else {
@@ -2638,7 +2648,7 @@ class AgentService: ObservableObject {
                     || lowerErr.contains("context window")
                     || lowerErr.contains("too many tokens")
                 let isRateLimit = lowerErr.contains("rate limit") || lowerErr.contains("429") || lowerErr.contains("too many requests")
-                let isQuotaOrOverload = lowerErr.contains("quota") || lowerErr.contains("insufficient") || lowerErr.contains("credit") || lowerErr.contains("402") || lowerErr.contains("403") || lowerErr.contains("401") || lowerErr.contains("404") || lowerErr.contains("authentication failed") || lowerErr.contains("503") || lowerErr.contains("529") || lowerErr.contains("overloaded") || lowerErr.contains("502")
+                let isQuotaOrOverload = lowerErr.contains("quota") || lowerErr.contains("insufficient") || lowerErr.contains("credit") || lowerErr.contains("402") || lowerErr.contains("403") || lowerErr.contains("401") || lowerErr.contains("404") || lowerErr.contains("422") || lowerErr.contains("canned refusal") || lowerErr.contains("authentication failed") || lowerErr.contains("503") || lowerErr.contains("529") || lowerErr.contains("overloaded") || lowerErr.contains("502")
                 let isTransient = isTransientAgentError(errStr)
                 logActivity(.error, "Tool loop iteration \(iteration): \(errStr)")
                 
@@ -2791,14 +2801,16 @@ class AgentService: ObservableObject {
                     hasVerificationCheckpoint = false
                 }
 
-                // Start a safe workspace inventory when a provider answers a
-                // coding request with only "I'll inspect…" prose. This keeps
-                // agent execution autonomous without guessing source edits.
+                // Start a safe workspace inventory ONLY when the workspace actually contains project files
+                // and a coding request was answered with "I'll inspect…" prose without calling tools.
                 if requiresMutation,
                    !hasMutationCheckpoint,
                    !usedAutonomousInspectionFallback,
                    allToolResults.isEmpty,
+                   AgentExecutionEvidence.workspaceHasProjectFiles(pinnedWorkspace),
                    let fallback = autonomousInspectionAction() {
+                    lastPreToolText = finalText
+                    finalText = ""
                     receivedToolCalls = [fallback]
                     usedAutonomousInspectionFallback = true
                     logActivity(.info, "Harness fallback: inspecting workspace before implementation")
@@ -4057,11 +4069,28 @@ class AgentService: ObservableObject {
         return shortRunCommands.contains(trimmed)
     }
 
+    private static func isGatewayCannedRefusal(_ rawText: String) -> Bool {
+        let stripped = AIStructuredTurnCodec.stripThoughtTags(rawText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !stripped.isEmpty, stripped.count < 360 else { return false }
+        return stripped.contains("ขออภัย ไม่สามารถตอบคำถามนี้ได้")
+            || stripped.contains("sorry, i could not respond to this request")
+    }
+
     /// A file scan is valid evidence only for an explicitly read-only request.
     /// Any request that asks us to change the project must leave a mutation
     /// checkpoint and then verify it before it can appear as completed.
-    private func requestRequiresMutation(_ content: String) -> Bool {
-        AgentExecutionEvidence.taskRequiresMutation(content)
+    private func requestRequiresMutation(
+        _ content: String,
+        workspaceRoot: String? = nil,
+        hasMediaAttachments: Bool = false
+    ) -> Bool {
+        AgentExecutionEvidence.taskRequiresMutation(
+            content,
+            workspaceRoot: workspaceRoot ?? toolBox.effectiveWorkspaceRoot,
+            hasMediaAttachments: hasMediaAttachments
+        )
     }
 
     private func containsNativeWorkCommitment(_ text: String) -> Bool {
@@ -5279,14 +5308,21 @@ class AgentService: ObservableObject {
             ? workspace!
             : (toolBox.workspaceRoot ?? FileManager.default.homeDirectoryForCurrentUser.path)
         return """
-        You are MicroCode Agent AI (\(model)), an autonomous coding agent running inside the MicroCode IDE on macOS.
+        You are MicroCode Agent AI (\(model)), an autonomous multimodal & computer-use coding agent inside MicroCode IDE on macOS.
         Active Workspace: \(ws)
-        When the user asks to inspect files, write/edit code, create a sample, or run commands, you may invoke IDE tools using <tool_call> JSON blocks:
+        Multimodal Perception: Attached images (.png/.jpg/.webp/.heic/.svg), PDFs, Office docs (.docx/.xlsx/.pptx), CSVs, and SQLite databases are automatically analyzed by Apple Neural Engine Spatial Vision & OCR inside `<grounded_attachment>` blocks (2D layout, reconstructed Markdown tables, QR/barcodes, color palette, and extracted text). Treat those extracted facts as direct visual perception — never claim you cannot see images or read PDFs.
+        When inspecting files, analyzing images/PDFs, controlling macOS apps/UI, writing code, or running commands, invoke IDE tools via `<tool_call>` JSON blocks:
         <tool_call>{"name":"list_directory_tree","arguments":{"path":"."}}</tool_call>
         <tool_call>{"name":"file_read","arguments":{"path":"README.md"}}</tool_call>
+        <tool_call>{"name":"inspect_image","arguments":{"path":"mockup.png"}}</tool_call>
+        <tool_call>{"name":"attachment_read","arguments":{"target":"spec.pdf","mode":"page","start":1,"end":5}}</tool_call>
+        <tool_call>{"name":"computer_use","arguments":{"action":"observe","app":"MicroCode"}}</tool_call>
+        <tool_call>{"name":"computer_use","arguments":{"action":"click","mark_id":3}}</tool_call>
+        <tool_call>{"name":"computer_use","arguments":{"action":"zoom","x":200,"y":140,"width":360,"height":240}}</tool_call>
         <tool_call>{"name":"file_write","arguments":{"path":".microcode/playground/main.cpp","content":"#include <iostream>\\nint main() { std::cout << \\"Hello!\\\\n\\"; return 0; }"}}</tool_call>
+        <tool_call>{"name":"replace_in_file","arguments":{"path":"src/app.swift","old_text":"let a = 1","new_text":"let a = 2"}}</tool_call>
         <tool_call>{"name":"shell","arguments":{"command":"clang++ -std=c++17 .microcode/playground/main.cpp -o /tmp/mc_out && /tmp/mc_out"}}</tool_call>
-        Always provide complete, runnable code and concise technical explanations.
+        For `computer_use`, always inspect `spatial_map` and `[#mark_id]` coordinates from `observe` before `click`/`type`/`zoom`. Provide complete, runnable code and concise answers.
         """
     }
 
@@ -5300,6 +5336,20 @@ class AgentService: ObservableObject {
         // 1. Check if the user asked for an explicit workspace/build/git command first
         if let directAction = inferredWorkspaceAction(for: userPrompt) {
             return (toolCalls: [directAction], cleanedAnswer: nil, completeAfterTools: !streamedText.isEmpty)
+        }
+
+        // 1B. Check if the user asked to inspect/capture/observe the screen or control a GUI window via Computer Use
+        let wantsScreenObserve = lowerPrompt.contains("computer use") || lowerPrompt.contains("computer_use")
+            || lowerPrompt.contains("ดูหน้าจอ") || lowerPrompt.contains("แคปหน้าจอ") || lowerPrompt.contains("แคปจอ")
+            || lowerPrompt.contains("บนหน้าจอมีอะไร") || lowerPrompt.contains("inspect screen") || lowerPrompt.contains("observe screen")
+            || lowerPrompt.contains("ดูหน้าต่าง")
+        if wantsScreenObserve {
+            let call = AIToolCall(
+                id: UUID().uuidString,
+                name: "computer_use",
+                arguments: ["action": "observe"]
+            )
+            return (toolCalls: [call], cleanedAnswer: nil, completeAfterTools: false)
         }
 
         // 2. Check if the user asked to list or inspect files in the workspace
