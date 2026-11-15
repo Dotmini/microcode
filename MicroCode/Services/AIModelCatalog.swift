@@ -21,6 +21,14 @@ struct AIModelDefinition: Identifiable, Codable, Hashable {
     let badge: String
     let inputPricePerMillion: Double
     let outputPricePerMillion: Double
+    let inputTHBPerMillion: Double
+    let outputTHBPerMillion: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, provider, badge
+        case inputPricePerMillion, outputPricePerMillion
+        case inputTHBPerMillion, outputTHBPerMillion
+    }
 
     init(
         id: String,
@@ -28,7 +36,9 @@ struct AIModelDefinition: Identifiable, Codable, Hashable {
         provider: String,
         badge: String = "",
         inputPricePerMillion: Double = 0,
-        outputPricePerMillion: Double = 0
+        outputPricePerMillion: Double = 0,
+        inputTHBPerMillion: Double = 0,
+        outputTHBPerMillion: Double = 0
     ) {
         self.id = id
         self.name = name ?? id
@@ -36,20 +46,41 @@ struct AIModelDefinition: Identifiable, Codable, Hashable {
         self.badge = badge
         self.inputPricePerMillion = inputPricePerMillion
         self.outputPricePerMillion = outputPricePerMillion
+        self.inputTHBPerMillion = inputTHBPerMillion
+        self.outputTHBPerMillion = outputTHBPerMillion
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? self.id
+        self.provider = try c.decode(String.self, forKey: .provider)
+        self.badge = try c.decodeIfPresent(String.self, forKey: .badge) ?? ""
+        self.inputPricePerMillion = try c.decodeIfPresent(Double.self, forKey: .inputPricePerMillion) ?? 0
+        self.outputPricePerMillion = try c.decodeIfPresent(Double.self, forKey: .outputPricePerMillion) ?? 0
+        self.inputTHBPerMillion = try c.decodeIfPresent(Double.self, forKey: .inputTHBPerMillion) ?? 0
+        self.outputTHBPerMillion = try c.decodeIfPresent(Double.self, forKey: .outputTHBPerMillion) ?? 0
     }
 
     var fullDisplayName: String {
         AIModelCatalog.formatFullDisplayName(provider: provider, modelId: id, modelName: name)
     }
 
-    /// Per-1M token rate in THB on Dotmini Cloud (Upstream API USD × 36.5 THB/USD × 1.20 [+20% margin]).
+    /// Per-1M token rate in THB on Dotmini Cloud (exact server ledger rate when provided, else Upstream USD × 36.5 × 1.20).
     var cloudTHBRateSummary: String {
-        let base = (inputPricePerMillion > 0 || outputPricePerMillion > 0)
-            ? (input: inputPricePerMillion, output: outputPricePerMillion)
-            : AIModelCatalog.estimatedUpstreamUSDPer1M(for: id)
-        let multiplier = 36.5 * 1.20
-        let inTHB = base.input * multiplier
-        let outTHB = base.output * multiplier
+        let inTHB: Double
+        let outTHB: Double
+        if inputTHBPerMillion > 0 || outputTHBPerMillion > 0 {
+            inTHB = inputTHBPerMillion
+            outTHB = outputTHBPerMillion
+        } else {
+            let base = (inputPricePerMillion > 0 || outputPricePerMillion > 0)
+                ? (input: inputPricePerMillion, output: outputPricePerMillion)
+                : AIModelCatalog.estimatedUpstreamUSDPer1M(for: id)
+            let multiplier = 36.5 * 1.20
+            inTHB = base.input * multiplier
+            outTHB = base.output * multiplier
+        }
         func fmt(_ val: Double) -> String {
             if val >= 100 { return String(format: "฿%.0f", val) }
             if val >= 10 { return String(format: "฿%.1f", val) }
@@ -79,51 +110,46 @@ final class AIModelCatalog: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var isRefreshing = false
     @Published private(set) var source = "Built-in catalog"
+    @Published private(set) var cloudSource = "Fetching live models…"
 
-    /// Complete model list available to paid Dotmini Cloud subscribers:
-    /// Dotmini's Sovereign Omni O1X models plus live frontier models served by `microcode.dotmini.net/v1/models`
-    /// (keeping each model's true upstream provider & brand icon).
+    /// 100% pure live models served by `microcode.dotmini.net/v1/models` — zero hardcoded placeholders.
     var dotminiCloudModels: [AIModelDefinition] {
-        var result: [AIModelDefinition] = []
-        var seen = Set<String>()
-        let sovereignModels = provider("omni")?.models ?? [
-            AIModelDefinition(id: "omni-o1x-pro", name: "Omni O1X Pro (3B MoE)", provider: "omni", badge: "SOVEREIGN"),
-            AIModelDefinition(id: "omni-o1x-lite", name: "Omni O1X Lite (0.8B)", provider: "omni", badge: "FAST")
-        ]
-        for m in sovereignModels where seen.insert(m.id).inserted {
-            result.append(m)
+        cloudGatewayModels
+    }
+
+    /// Groups `dotminiCloudModels` by true upstream provider for crisp Settings & Menu navigation.
+    var dotminiCloudModelsByProvider: [(provider: String, providerName: String, models: [AIModelDefinition])] {
+        let preferredOrder = ["openai", "gemini", "anthropic", "deepseek", "glm", "qwen", "grok", "typhoon", "openrouter", "omni"]
+        var grouped: [String: [AIModelDefinition]] = [:]
+        for m in cloudGatewayModels {
+            grouped[m.provider, default: []].append(m)
         }
-        for m in cloudGatewayModels where seen.insert(m.id).inserted {
-            result.append(m)
+        let sortedKeys = grouped.keys.sorted { a, b in
+            let ia = preferredOrder.firstIndex(of: a) ?? 999
+            let ib = preferredOrder.firstIndex(of: b) ?? 999
+            if ia != ib { return ia < ib }
+            return a < b
         }
-        if cloudGatewayModels.isEmpty {
-            // Include live frontier models including Gemini 4 Hydrogen & Orchestra and DeepSeek V4 Pro
-            let defaultCloudFrontier: [AIModelDefinition] = [
-                AIModelDefinition(id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen (Flagship Reasoning)", provider: "gemini", badge: "FLAGSHIP"),
-                AIModelDefinition(id: "gemini-4-orchestra", name: "Gemini 4 Orchestra (Multi-Modal Orchestrator)", provider: "gemini", badge: "FLAGSHIP"),
-                AIModelDefinition(id: "gemini-4-argon", name: "Gemini 4 Argon (Pro / Ultra)", provider: "gemini", badge: "FLAGSHIP"),
-                AIModelDefinition(id: "deepseek-flash", name: "DeepSeek Flash", provider: "deepseek", badge: "FAST"),
-                AIModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", badge: "CLOUD")
-            ]
-            for m in defaultCloudFrontier where seen.insert(m.id).inserted {
-                result.append(m)
-            }
+        return sortedKeys.compactMap { key in
+            guard let list = grouped[key], !list.isEmpty else { return nil }
+            return (provider: key, providerName: Self.friendlyProviderName(key), models: list)
         }
-        return result
     }
 
     private let cacheKey = "microcode.aiModelCatalog.v18"
+    private let cloudGatewayCacheKey = "microcode.cloudGatewayModels.v2"
     private let refreshDateKey = "microcode.aiModelCatalogRefreshDate.v18"
     private let refreshInterval: TimeInterval = 15 * 60 // 15-minute live model refresh TTL
 
     private init() {
         providers = Self.fallbackProviders
         loadCachedCatalog()
-        // Auto-integrate cached local ecosystem models; only hit live provider APIs if cache is expired
+        // Fetch live Dotmini Cloud gateway models immediately on launch; refresh full provider catalog shortly after
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.integrateEcosystemEngines(LocalEcosystemDiscovery.shared.engines)
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            await self.refreshCloudProxyModels(forceRefresh: false)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
             await self.refreshIfNeeded(force: false)
         }
     }
@@ -247,13 +273,13 @@ final class AIModelCatalog: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
-        await refreshLiveProviderModels()
+        await refreshLiveProviderModels(force: force)
     }
 
     /// Dynamically fetches models directly from active provider APIs (OpenAI, Gemini, Anthropic, DeepSeek, Groq, Grok, GLM, Qwen, Copilot, TH-AI Passport)
     /// and local installed engines (Codex, AGY, Claude Code, OpenCode, Zed, Ollama, LM Studio) in parallel.
-    public func refreshLiveProviderModels() async {
-        async let cloudTask: Void = refreshCloudProxyModels()
+    public func refreshLiveProviderModels(force: Bool = false) async {
+        async let cloudTask: Void = refreshCloudProxyModels(forceRefresh: force)
         async let openAITask: Void = fetchLiveOpenAIModels()
         async let geminiTask: Void = fetchLiveGeminiModels()
         async let anthropicTask: Void = fetchLiveAnthropicModels()
@@ -317,17 +343,9 @@ final class AIModelCatalog: ObservableObject {
 
     private func rebuildOmniCloudCatalog() {
         guard let omniIdx = providers.firstIndex(where: { $0.id == "omni" }) else { return }
-        // Only keep native Dotmini Sovereign AI (Omni O1X) models inside "omni";
-        // never copy or claim third-party models (Gemini, OpenAI, Claude, DeepSeek, GLM) under Dotmini.
-        let omniOnly = providers[omniIdx].models.filter { $0.id.lowercased().hasPrefix("omni") }
-        if !omniOnly.isEmpty {
-            providers[omniIdx].models = omniOnly
-        } else {
-            providers[omniIdx].models = [
-                AIModelDefinition(id: "omni-o1x-pro", name: "Omni O1X Pro (3B MoE)", provider: "omni", badge: "SOVEREIGN"),
-                AIModelDefinition(id: "omni-o1x-lite", name: "Omni O1X Lite (0.8B)", provider: "omni", badge: "FAST")
-            ]
-        }
+        // Only keep real live Sovereign Omni models returned by the server (never hardcode fake models).
+        let omniOnly = cloudGatewayModels.filter { $0.provider == "omni" || $0.id.lowercased().hasPrefix("omni") }
+        providers[omniIdx].models = omniOnly
     }
 
     private func syncActiveAppStateSelection() {
@@ -353,10 +371,12 @@ final class AIModelCatalog: ObservableObject {
         }
     }
 
-    private func refreshCloudProxyModels() async {
+    public func refreshCloudProxyModels(forceRefresh: Bool = false) async {
         let base = StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let url = URL(string: "\(base)/models") else { return }
-        var request = URLRequest(url: url, timeoutInterval: 8)
+        let urlString = forceRefresh ? "\(base)/models?refresh=1" : "\(base)/models"
+        guard let url = URL(string: urlString) else { return }
+        var request = URLRequest(url: url, timeoutInterval: 12)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         
         let sessionToken = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded()
         let authorization = DotminiPlatformKeyService.shared.authorizationToken
@@ -375,18 +395,23 @@ final class AIModelCatalog: ObservableObject {
             providers = Self.mergeLive(remoteEntries: entries, fallback: providers)
             var gatewayList: [AIModelDefinition] = []
             var seenGateway = Set<String>()
+            var seenProviders = Set<String>()
             for item in entries {
                 let rawID = item.id.replacingOccurrences(of: "models/", with: "")
-                guard Self.isChatModel(rawID), !rawID.lowercased().hasPrefix("omni"), seenGateway.insert(rawID).inserted else { continue }
+                guard Self.isChatModel(rawID), seenGateway.insert(rawID).inserted else { continue }
                 let provID = Self.inferProvider(rawID, ownedBy: item.ownedBy)
+                seenProviders.insert(provID)
                 let fallbackUSD = Self.estimatedUpstreamUSDPer1M(for: rawID)
+                let cleanDisplayName = Self.preferredCloudDisplayName(rawID: rawID, serverName: item.name)
                 gatewayList.append(AIModelDefinition(
                     id: rawID,
-                    name: Self.formatModelName(rawID),
+                    name: cleanDisplayName,
                     provider: provID,
-                    badge: "CLOUD",
+                    badge: "",
                     inputPricePerMillion: item.inputUSDPer1M ?? fallbackUSD.input,
-                    outputPricePerMillion: item.outputUSDPer1M ?? fallbackUSD.output
+                    outputPricePerMillion: item.outputUSDPer1M ?? fallbackUSD.output,
+                    inputTHBPerMillion: item.inputTHBPer1M ?? 0,
+                    outputTHBPerMillion: item.outputTHBPer1M ?? 0
                 ))
             }
             gatewayList.sort { a, b in
@@ -396,7 +421,11 @@ final class AIModelCatalog: ObservableObject {
                 return a.id.localizedStandardCompare(b.id) == .orderedDescending
             }
             cloudGatewayModels = gatewayList
-            source = "Dotmini Cloud (\(entries.count) models live)"
+            cloudSource = "\(gatewayList.count) live models · \(seenProviders.count) providers"
+            if let encoded = try? JSONEncoder().encode(gatewayList) {
+                UserDefaults.standard.set(encoded, forKey: cloudGatewayCacheKey)
+            }
+            rebuildOmniCloudCatalog()
         } catch {}
     }
 
@@ -804,24 +833,42 @@ final class AIModelCatalog: ObservableObject {
 
     nonisolated public static func universalModelPriorityScore(_ id: String) -> Int {
         let lower = id.lowercased()
+        let isDatedPin = lower.range(of: #"-\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil
+        let datePenalty = isDatedPin ? 80 : 0
         if lower.contains("gemini") || lower.contains("gemma") {
-            return geminiModelSortScore(lower) + 100
+            return geminiModelSortScore(lower) + 100 - datePenalty
         }
         if lower.contains("claude") {
-            return claudeModelSortScore(lower)
+            return claudeModelSortScore(lower) - datePenalty
         }
-        if lower.contains("gpt-6.1") || lower.contains("gpt-6-1") { return 4450 }
-        if lower.contains("gpt-6") { return 4400 }
-        if lower.contains("gpt-5.6") { return 4200 }
-        if lower.contains("gpt-5.4") { return 4100 }
-        if lower.contains("gpt-5") { return 4000 }
-        if lower.contains("deepseek-v4") { return 4350 }
-        if lower.contains("deepseek-r") || lower.contains("deepseek-reasoner") { return 3900 }
-        if lower.contains("deepseek") { return 3700 }
-        if lower.contains("glm-5.3") { return 4150 }
-        if lower.contains("glm-5") { return 3950 }
-        if lower.contains("omni-o1x") { return 4300 }
-        return 2000
+        var score = 2000
+        if lower.contains("gpt-6.1") || lower.contains("gpt-6-1") { score = 4450 }
+        else if lower.contains("gpt-6") { score = 4400 }
+        else if lower.contains("gpt-5.6") { score = 4250 }
+        else if lower.contains("gpt-5.5") { score = 4200 }
+        else if lower.contains("gpt-5.4") { score = 4150 }
+        else if lower.contains("gpt-5.3") { score = 4120 }
+        else if lower.contains("gpt-5.2") { score = 4090 }
+        else if lower.contains("gpt-5.1") { score = 4060 }
+        else if lower.contains("gpt-5") { score = 4020 }
+        else if lower.hasPrefix("o3") || lower.hasPrefix("o4") { score = 3980 }
+        else if lower.contains("gpt-4.1") { score = 3850 }
+        else if lower.contains("gpt-4o") { score = 3800 }
+        else if lower.contains("deepseek-v4") { score = 4350 }
+        else if lower.contains("deepseek-r") || lower.contains("deepseek-reasoner") { score = 3900 }
+        else if lower.contains("deepseek") { score = 3700 }
+        else if lower.contains("glm-5.3") { score = 4150 }
+        else if lower.contains("glm-5.2") { score = 4100 }
+        else if lower.contains("glm-5.1") { score = 4050 }
+        else if lower.contains("glm-5") { score = 3950 }
+        else if lower.contains("glm-4.7") { score = 3820 }
+        else if lower.contains("glm-4.6") { score = 3780 }
+        else if lower.contains("glm-4.5") { score = 3740 }
+        else if lower.contains("omni-o1x") { score = 4300 }
+        if lower.contains("-pro") { score += 20 }
+        else if lower.contains("-mini") { score -= 15 }
+        else if lower.contains("-nano") { score -= 25 }
+        return score - datePenalty
     }
 
     /// Fetches live Anthropic Claude models using user's API key (or custom Anthropic / Cloudflare Tunnel Base URL)
@@ -1572,9 +1619,12 @@ final class AIModelCatalog: ObservableObject {
 
     private struct RemoteModelItem {
         let id: String
+        let name: String?
         let ownedBy: String?
         let inputUSDPer1M: Double?
         let outputUSDPer1M: Double?
+        let inputTHBPer1M: Double?
+        let outputTHBPer1M: Double?
     }
 
     nonisolated static func estimatedUpstreamUSDPer1M(for modelID: String) -> (input: Double, output: Double) {
@@ -1614,14 +1664,33 @@ final class AIModelCatalog: ObservableObject {
     private static func parseRemoteModelDict(_ dict: [String: Any], allowNameFallback: Bool = false) -> RemoteModelItem? {
         let id = (dict["id"] as? String) ?? (allowNameFallback ? (dict["name"] as? String) : nil)
         guard let id, !id.isEmpty else { return nil }
+        let rawName = (dict["displayName"] as? String) ?? (dict["display_name"] as? String) ?? (dict["name"] as? String)
         let inUSD = (dict["input_usd_per_1m"] as? Double) ?? (dict["input_usd_per_1m"] as? NSNumber)?.doubleValue
         let outUSD = (dict["output_usd_per_1m"] as? Double) ?? (dict["output_usd_per_1m"] as? NSNumber)?.doubleValue
+        let inTHB = (dict["input_thb_per_1m"] as? Double) ?? (dict["input_thb_per_1m"] as? NSNumber)?.doubleValue
+        let outTHB = (dict["output_thb_per_1m"] as? Double) ?? (dict["output_thb_per_1m"] as? NSNumber)?.doubleValue
         return RemoteModelItem(
             id: id,
+            name: (rawName != id) ? rawName : nil,
             ownedBy: dict["owned_by"] as? String,
             inputUSDPer1M: inUSD,
-            outputUSDPer1M: outUSD
+            outputUSDPer1M: outUSD,
+            inputTHBPer1M: inTHB,
+            outputTHBPer1M: outTHB
         )
+    }
+
+    nonisolated private static func preferredCloudDisplayName(rawID: String, serverName: String?) -> String {
+        if let sn = serverName?.trimmingCharacters(in: .whitespacesAndNewlines), !sn.isEmpty {
+            let lowerSN = sn.lowercased()
+            // Replace naive space-split names like "Gpt 5 4 2026 03 05" or "Glm 4 5" with clean canonical formatting
+            let looksAutoSplit = lowerSN.hasPrefix("gpt ") || lowerSN.hasPrefix("glm ") || lowerSN.hasPrefix("deepseek ") ||
+                sn.range(of: #"\b202[4-9]\s+\d{2}\s+\d{2}\b"#, options: .regularExpression) != nil
+            if !looksAutoSplit {
+                return sn
+            }
+        }
+        return formatModelName(rawID)
     }
 
     private static func decodeRemoteModels(_ data: Data) throws -> [RemoteModelItem] {
@@ -1756,6 +1825,14 @@ final class AIModelCatalog: ObservableObject {
             prefix = ""
         }
         
+        // Extract trailing -YYYY-MM-DD snapshot suffix cleanly before splitting
+        var dateSuffix = ""
+        if let range = clean.range(of: #"-(202[4-9]-\d{2}-\d{2})$"#, options: .regularExpression) {
+            let dateStr = String(clean[range].dropFirst())
+            dateSuffix = " (\(dateStr))"
+            clean = String(clean[..<range.lowerBound])
+        }
+
         // Split by hyphens or underscores
         let parts = clean.components(separatedBy: CharacterSet(charactersIn: "-_"))
         var formattedParts: [String] = []
@@ -1803,7 +1880,7 @@ final class AIModelCatalog: ObservableObject {
             }
         }
         
-        let result = prefix + formattedParts.joined(separator: " ")
+        let result = prefix + formattedParts.joined(separator: " ") + dateSuffix
         return result.isEmpty ? id : result
     }
 
@@ -1857,6 +1934,13 @@ final class AIModelCatalog: ObservableObject {
     }
 
     private func loadCachedCatalog() {
+        if let cloudData = UserDefaults.standard.data(forKey: cloudGatewayCacheKey),
+           let cachedCloud = try? JSONDecoder().decode([AIModelDefinition].self, from: cloudData),
+           !cachedCloud.isEmpty {
+            cloudGatewayModels = cachedCloud
+            let provCount = Set(cachedCloud.map(\.provider)).count
+            cloudSource = "\(cachedCloud.count) live models · \(provCount) providers"
+        }
         if let data = UserDefaults.standard.data(forKey: cacheKey),
            var cached = try? JSONDecoder().decode([AIProviderDefinition].self, from: data),
            !cached.isEmpty {

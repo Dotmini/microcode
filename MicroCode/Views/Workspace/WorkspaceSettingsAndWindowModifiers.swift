@@ -947,8 +947,9 @@ struct SettingsView: View {
                 }
                 .environmentObject(appState)
             } else if aiKeyMode == "cloud" {
-                // Dotmini Cloud Dedicated Panel
+                // Dotmini Cloud Dedicated Panel (100% Pure Live Upstream Models)
                 let cloudModels = modelCatalog.dotminiCloudModels
+                let groupedCloudModels = modelCatalog.dotminiCloudModelsByProvider
                 let hasCloudSession = supabaseAuth.session != nil
                 let rawPlan = supabaseAuth.entitlement.plan.trimmingCharacters(in: .whitespacesAndNewlines)
                 let planUpper = rawPlan.isEmpty ? "FREE" : rawPlan.uppercased()
@@ -964,11 +965,12 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Text(modelCatalog.source)
+                        Text(modelCatalog.cloudSource)
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                         Button(modelCatalog.isRefreshing ? "Refreshing…" : "Refresh Catalog") {
                             Task {
+                                await modelCatalog.refreshCloudProxyModels(forceRefresh: true)
                                 await modelCatalog.refreshIfNeeded(force: true)
                                 await supabaseAuth.refreshEntitlement()
                                 if let match = modelCatalog.dotminiCloudModels.first(where: { $0.id == selectedModel }) {
@@ -976,6 +978,7 @@ struct SettingsView: View {
                                 } else if let first = modelCatalog.dotminiCloudModels.first {
                                     selectedProvider = first.provider
                                     selectedModel = first.id
+                                    hasChanges = true
                                 }
                             }
                         }
@@ -992,14 +995,27 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                             .frame(width: 110, alignment: .leading)
                         
+                        if let activeMatch = cloudModels.first(where: { $0.id == selectedModel }) {
+                            AIProviderBrandIcon(provider: activeMatch.provider, size: 14)
+                        }
+                        
                         Picker("", selection: $selectedModel) {
-                            ForEach(cloudModels, id: \.id) { m in
-                                HStack {
-                                    Text("\(m.name) (\(m.cloudTHBRateSummary))")
-                                    if !m.badge.isEmpty {
-                                        Text("[\(m.badge)]")
+                            if cloudModels.isEmpty {
+                                Text("Fetching live models from microcode.dotmini.net/v1…")
+                                    .tag(selectedModel)
+                            } else {
+                                if !selectedModel.isEmpty && !cloudModels.contains(where: { $0.id == selectedModel }) {
+                                    Text("\(AIModelCatalog.formatModelName(selectedModel))")
+                                        .tag(selectedModel)
+                                }
+                                ForEach(groupedCloudModels, id: \.provider) { group in
+                                    Section("\(group.providerName) (\(group.models.count))") {
+                                        ForEach(group.models, id: \.id) { m in
+                                            Text("\(m.name) (\(m.cloudTHBRateSummary))")
+                                                .tag(m.id)
+                                        }
                                     }
-                                }.tag(m.id)
+                                }
                             }
                         }
                         .labelsHidden()
@@ -1011,6 +1027,17 @@ struct SettingsView: View {
                                 selectedProvider = StreamableAIProvider.detect(from: newID).rawValue
                             }
                             hasChanges = true
+                        }
+                    }
+                    .task {
+                        await modelCatalog.refreshCloudProxyModels(forceRefresh: false)
+                        let live = modelCatalog.dotminiCloudModels
+                        if !live.isEmpty, !live.contains(where: { $0.id == selectedModel }), let first = live.first {
+                            selectedProvider = first.provider
+                            selectedModel = first.id
+                            appState.aiProvider = first.provider
+                            appState.aiModel = first.id
+                            appState.saveSettings()
                         }
                     }
                     

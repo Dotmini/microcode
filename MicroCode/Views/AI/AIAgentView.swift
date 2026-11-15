@@ -6266,20 +6266,41 @@ struct AIAgentView: View {
         }
         cloudMenu.addItem(.separator())
         let cloudModels = AIModelCatalog.shared.dotminiCloudModels
-        for m in cloudModels {
-            let baseName = m.badge.isEmpty ? m.name : "\(m.name) [\(m.badge)]"
-            let label = "\(baseName) · \(m.cloudTHBRateSummary)"
-            let brand = m.provider == "omni" ? "microcode" : m.provider
-            let isChecked = (currentExecutionMode == .cloud && appState.aiModel == m.id)
-            cloudMenu.addItem(makeActionMenuItem(label, brandKey: brand, checked: isChecked) {
-                switchToNativeMode(mode: "cloud")
-                appState.aiProvider = m.provider
-                appState.aiModel = m.id
-                UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
-                appState.saveSettings()
-            })
+        let groupedCloud = AIModelCatalog.shared.dotminiCloudModelsByProvider
+        if cloudModels.isEmpty {
+            cloudMenu.addItem(makeActionMenuItem("Fetching live models from microcode.dotmini.net/v1…", systemImage: "arrow.triangle.2.circlepath", enabled: false))
+        } else {
+            cloudMenu.addItem(makeActionMenuItem(AIModelCatalog.shared.cloudSource, systemImage: "antenna.radiowaves.left.and.right", enabled: false))
+            if currentExecutionMode == .cloud, let activeCloud = cloudModels.first(where: { $0.id == appState.aiModel }) {
+                let brand = activeCloud.provider == "omni" ? "microcode" : activeCloud.provider
+                cloudMenu.addItem(makeActionMenuItem("Active: \(activeCloud.name) · \(activeCloud.cloudTHBRateSummary)", brandKey: brand, checked: true) {})
+                cloudMenu.addItem(.separator())
+            }
+            for group in groupedCloud {
+                let provMenu = NSMenu(title: group.providerName)
+                provMenu.autoenablesItems = false
+                let brand = group.provider == "omni" ? "microcode" : group.provider
+                for m in group.models {
+                    let label = "\(m.name) · \(m.cloudTHBRateSummary)"
+                    let isChecked = (currentExecutionMode == .cloud && appState.aiModel == m.id)
+                    provMenu.addItem(makeActionMenuItem(label, brandKey: brand, checked: isChecked) {
+                        switchToNativeMode(mode: "cloud")
+                        appState.aiProvider = m.provider
+                        appState.aiModel = m.id
+                        UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
+                        appState.saveSettings()
+                    })
+                }
+                let groupActive = (currentExecutionMode == .cloud && group.models.contains(where: { $0.id == appState.aiModel }))
+                cloudMenu.addItem(makeSubmenuItem("\(group.providerName) (\(group.models.count))", brandKey: brand, checked: groupActive, submenu: provMenu))
+            }
         }
         cloudMenu.addItem(.separator())
+        cloudMenu.addItem(makeActionMenuItem("Refresh Live Cloud Models", systemImage: "arrow.clockwise") {
+            Task { @MainActor in
+                await AIModelCatalog.shared.refreshCloudProxyModels(forceRefresh: true)
+            }
+        })
         cloudMenu.addItem(makeActionMenuItem("Top Up Cloud AI Credit / Upgrade Plan…", systemImage: "creditcard.fill") {
             appState.settingsSelectedTab = 6
             appState.showingSettingsDialog = true
@@ -6309,7 +6330,7 @@ struct AIAgentView: View {
         })
         rootMenu.addItem(makeActionMenuItem("Rescan Local Engines & Cloud APIs", systemImage: "arrow.triangle.2.circlepath") {
             Task {
-                await AIModelCatalog.shared.refreshLiveProviderModels()
+                await AIModelCatalog.shared.refreshLiveProviderModels(force: true)
                 await LocalEcosystemDiscovery.shared.refresh(force: true)
             }
         })
