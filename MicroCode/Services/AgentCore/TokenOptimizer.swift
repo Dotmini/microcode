@@ -303,7 +303,7 @@ class TokenOptimizer: ObservableObject {
         }
         
         let totalTokens = sanitizedMessages.reduce(0) { $0 + estimateTokens($1.content) }
-        let effectiveBudget = max(40_000, min(budget, 160_000))
+        let effectiveBudget = budget <= 20_000 ? max(4_000, budget) : max(40_000, min(budget, 160_000))
         if totalTokens <= effectiveBudget { return sanitizedMessages }
         
         var result: [(role: String, content: String)] = []
@@ -801,12 +801,38 @@ class TokenOptimizer: ObservableObject {
         _ history: [(role: String, content: String)],
         budget: Int = 120_000
     ) -> [(role: String, content: String)] {
-        guard history.count > 8 else { return history }
+        let isTightLocalBudget = budget <= 20_000
+        if !isTightLocalBudget && history.count <= 8 { return history }
+        if history.count <= 2 { return history }
         
-        let scaledBudget = Int(Double(budget) * mode.iterativeBudgetMultiplier)
-        let effectiveBudget = max(40_000, min(scaledBudget, 200_000))
+        let scaledBudget = isTightLocalBudget
+            ? max(4_500, budget)
+            : Int(Double(budget) * mode.iterativeBudgetMultiplier)
+        let effectiveBudget = isTightLocalBudget
+            ? scaledBudget
+            : max(40_000, min(scaledBudget, 200_000))
         let totalTokens = history.reduce(0) { $0 + estimateTokens($1.content) }
         if totalTokens <= effectiveBudget { return history }
+
+        // Fast compaction path for tight Local LLM KV windows (4K–12K ctx) when <= 8 turns already exceed budget
+        if isTightLocalBudget && history.count <= 6 {
+            var compactLocal: [(role: String, content: String)] = []
+            for (idx, item) in history.enumerated() {
+                if idx == 0 {
+                    compactLocal.append(item)
+                } else if item.content.contains(AIStructuredTurnCodec.markerKey), item.role == "user" {
+                    let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(item.content, maxCharsPerOutput: 2_600)
+                    compactLocal.append((role: "user", content: compacted))
+                } else if item.role == "user" && item.content.count > 9_000 {
+                    let head = String(item.content.prefix(5_500))
+                    let tail = String(item.content.suffix(1_800))
+                    compactLocal.append((role: "user", content: head + "\n... [Condensed for Local LLM context window] ...\n" + tail))
+                } else {
+                    compactLocal.append(item)
+                }
+            }
+            return compactLocal
+        }
         
         var optimized: [(role: String, content: String)] = []
         

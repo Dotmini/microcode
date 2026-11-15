@@ -29,7 +29,7 @@ struct EmbeddedDeviceDockView: View {
             return true
         case .file(let url):
             let ext = url.pathExtension.lowercased()
-            return ["swift", "html", "htm", "svg", "md", "markdown", "mdx"].contains(ext)
+            return ext == "swift"
         }
     }
 
@@ -152,14 +152,11 @@ struct EmbeddedDeviceDockView: View {
                             tabScrollProxy.scrollTo(dockService.activeTabId, anchor: .center)
                         }
                     }
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
                     .clipped()
                 }
-                .layoutPriority(-1)
-                
-                Spacer(minLength: 4)
 
-                // Universal Playground-style Hot Reload Control Group (shown only on runtime & live-renderable tabs)
+                // Universal Playground-style Hot Reload Control Group (shown only on runtime & live-compiled SwiftUI tabs)
                 if shouldShowHotReloadControls {
                     hotReloadControlsBar
                 }
@@ -384,15 +381,15 @@ struct EmbeddedDeviceDockView: View {
                         } label: {
                             Image(systemName: dockService.isExpandedWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(dockService.isExpandedWidth ? .accentColor : .primary.opacity(0.8))
+                                .foregroundColor(dockService.isExpandedWidth ? .primary : .primary.opacity(0.75))
                                 .frame(width: 24, height: 22)
                                 .background(
                                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .fill(dockService.isExpandedWidth ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.08))
+                                        .fill(dockService.isExpandedWidth ? Color.primary.opacity(0.14) : Color.primary.opacity(0.07))
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .stroke(dockService.isExpandedWidth ? Color.accentColor.opacity(0.32) : Color.primary.opacity(0.12), lineWidth: 0.8)
+                                        .stroke(dockService.isExpandedWidth ? Color.primary.opacity(0.24) : Color.primary.opacity(0.12), lineWidth: 0.8)
                                 )
                                 .contentShape(Rectangle())
                         }
@@ -493,9 +490,9 @@ struct EmbeddedDeviceDockView: View {
                 } else {
                     // Quick Preview Hub (shown only if all tabs were cleared)
                     VStack(spacing: 14) {
-                        Image(systemName: "sparkles.tv")
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundColor(.accentColor.opacity(0.85))
+                        Image(systemName: "rectangle.split.2x1")
+                            .font(.system(size: 26, weight: .medium))
+                            .foregroundColor(.secondary)
                         Text("Live Preview & Device Hub")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(.primary)
@@ -510,8 +507,8 @@ struct EmbeddedDeviceDockView: View {
                                     .font(.system(size: 11, weight: .semibold))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
-                                    .background(Color.accentColor.opacity(0.16))
-                                    .foregroundColor(.accentColor)
+                                    .background(Color.primary.opacity(0.12))
+                                    .foregroundColor(.primary)
                                     .cornerRadius(6)
                             }
                             .buttonStyle(.plain)
@@ -592,7 +589,7 @@ struct EmbeddedDeviceDockView: View {
                 HStack(spacing: 3) {
                     Image(systemName: hotReloadEngine.isAutoHotReloadEnabled ? "bolt.fill" : "bolt.slash")
                         .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(hotReloadEngine.isAutoHotReloadEnabled ? .green : .secondary)
+                        .foregroundColor(hotReloadEngine.isAutoHotReloadEnabled ? .primary : .secondary)
                     if deviceRuntime.isHotReloading {
                         ProgressView()
                             .controlSize(.mini)
@@ -611,7 +608,7 @@ struct EmbeddedDeviceDockView: View {
                 .padding(.vertical, 3)
                 .background(
                     Capsule()
-                        .fill(hotReloadEngine.isAutoHotReloadEnabled ? Color.green.opacity(0.12) : Color.primary.opacity(0.06))
+                        .fill(hotReloadEngine.isAutoHotReloadEnabled ? Color.primary.opacity(0.10) : Color.primary.opacity(0.05))
                 )
             }
             .menuStyle(.borderlessButton)
@@ -622,7 +619,7 @@ struct EmbeddedDeviceDockView: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundColor(deviceRuntime.isHotReloading ? .accentColor : .secondary)
+                    .foregroundColor(deviceRuntime.isHotReloading ? .primary : .secondary)
                     .frame(width: 22, height: 22)
                     .background(Color.primary.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))

@@ -3203,7 +3203,7 @@ struct AIAgentView: View {
                 text: $inputText,
                 isFocused: $isInputFocused,
                 measuredHeight: $composerDynamicHeight,
-                placeholder: "Ask anything, @ to mention, / for actions — paste (⌘V) or drop PDF, Code & Images",
+                placeholder: composerPlaceholderText,
                 minHeight: 24,
                 maxHeight: 240,
                 onSubmit: {
@@ -3273,15 +3273,27 @@ struct AIAgentView: View {
         .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.04))
+                .fill(isDropTargeted ? Color.primary.opacity(0.09) : Color.white.opacity(0.04))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isDropTargeted ? Color.accentColor : (isInputFocused ? Color.accentColor.opacity(0.42) : Color.primary.opacity(0.10)), lineWidth: isDropTargeted ? 1.5 : 1)
+                .stroke(isDropTargeted ? Color.primary.opacity(0.45) : (isInputFocused ? Color.primary.opacity(0.24) : Color.primary.opacity(0.10)), lineWidth: isDropTargeted ? 1.5 : 1)
         )
         .animation(.easeOut(duration: 0.12), value: composerDynamicHeight)
     }
     
+    private var composerPlaceholderText: String {
+        let isSplitOpen = previewDock.isDockVisible
+            || deviceRuntime.showingEmbeddedDeviceDock
+            || appState.agenticContextVisible
+            || isPlanMode
+            || planManager.isPlanVisible
+        if isSplitOpen || (measuredRootWidth > 0 && measuredRootWidth < 920) {
+            return "Ask anything, @ to mention, / for commands"
+        }
+        return "Ask anything, @ to mention, / for commands — paste (⌘V) or drop files"
+    }
+
     // MARK: - Compact Agent Activity & Queue Indicator
     
     @ViewBuilder

@@ -1631,11 +1631,15 @@ private struct UnifiedRightInspectorToggleButton: View {
         }) {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 12))
-                .foregroundColor(isRightPaneOpen ? .accentColor : .secondary)
+                .foregroundColor(isRightPaneOpen ? .primary : .secondary)
                 .frame(width: 28, height: 26)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(isRightPaneOpen ? Color.accentColor.opacity(0.12) : Color.clear)
+                        .fill(isRightPaneOpen ? Color.primary.opacity(0.11) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(isRightPaneOpen ? Color.primary.opacity(0.16) : Color.clear, lineWidth: 0.8)
                 )
                 .contentShape(Rectangle())
         }
@@ -1706,7 +1710,7 @@ private struct UnifiedAgentModePillsView: View {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) { barState.selectWalkthroughMode() }
                 } label: {
-                    Label("Walkthrough Summary", systemImage: "sparkles")
+                    Label("Walkthrough Summary", systemImage: "doc.text.magnifyingglass")
                 }
 
                 Button {
@@ -1822,8 +1826,8 @@ private struct UnifiedWorkspacePreviewMenu: View {
 
     var body: some View {
         Button(action: { isPopoverPresented.toggle() }) {
-            HStack(spacing: 3) {
-                Image(systemName: (isPreviewActive && deviceRuntime.showingEmbeddedAppleDock) ? "iphone" : "apps.iphone")
+            HStack(spacing: 3.5) {
+                Image(systemName: (isPreviewActive && deviceRuntime.showingEmbeddedAppleDock) ? "iphone" : "rectangle.split.2x1")
                     .font(.system(size: 9.5))
                 if !isIconOnly {
                     Text("Preview")
@@ -1832,14 +1836,15 @@ private struct UnifiedWorkspacePreviewMenu: View {
                 }
                 Image(systemName: "chevron.down")
                     .font(.system(size: 7, weight: .semibold))
+                    .foregroundColor(.secondary)
             }
-            .foregroundColor(isPreviewActive ? .white : .primary.opacity(0.85))
-            .padding(.horizontal, isIconOnly ? 6 : 7)
+            .foregroundColor(isPreviewActive ? .primary : .primary.opacity(0.82))
+            .padding(.horizontal, isIconOnly ? 6 : 8)
             .padding(.vertical, 4)
-            .background(isPreviewActive ? Color.accentColor.opacity(0.85) : Color.primary.opacity(0.06))
+            .background(isPreviewActive ? Color.primary.opacity(0.12) : Color.primary.opacity(0.05))
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(isPreviewActive ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                    .stroke(isPreviewActive ? Color.primary.opacity(0.20) : Color.primary.opacity(0.08), lineWidth: 0.8)
             )
             .cornerRadius(6)
             .contentShape(Rectangle())

@@ -11,6 +11,7 @@
 
 import Foundation
 import AppKit
+import CoreText
 import PDFKit
 import Darwin
 
@@ -125,6 +126,7 @@ class AgentToolBox: ObservableObject {
         register(CellRunTool())
         register(InspectImageTool())
         register(ExtractPDFTool())
+        register(ExportPDFTool())
         register(AgentPlanTool())
         register(CreatePlanTool())
         register(DefineSubagentTool())
@@ -212,6 +214,8 @@ class AgentToolBox: ObservableObject {
             return "create_directory"
         case "mv", "move_file":
             return "rename_file"
+        case "markdown_to_pdf", "create_pdf", "generate_pdf", "write_pdf", "render_pdf", "pdf_export":
+            return "export_pdf"
         default:
             return trimmed
         }
@@ -342,8 +346,8 @@ class AgentToolBox: ObservableObject {
         
         if !isRemoteTarget {
             // Auto-resolve relative paths against local effectiveWorkspaceRoot (or expand ~ when no workspace is open)
-            for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-                if let path = resolvedParams[key] as? String {
+            for key in ["path", "output_path", "source_path", "directory", "old_path", "new_path", "cwd"] {
+                if let path = resolvedParams[key] as? String, !path.isEmpty {
                     resolvedParams[key] = executionWorkspace != nil
                         ? resolveLocalToolPath(path)
                         : NSString(string: path).expandingTildeInPath
@@ -358,8 +362,11 @@ class AgentToolBox: ObservableObject {
             
             // Validate every declared local path, including list and rename arguments.
             let isReadOnlyFS = ["attachment_read", "file_read", "multi_file_read", "extract_pdf", "inspect_image", "list_directory_tree", "grep_search", "file_search", "find_symbol", "codebase_search", "repo_map"].contains(toolName)
-            for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-                if let path = resolvedParams[key] as? String { try validateSandbox(path, allowGlobalReadOnly: isReadOnlyFS) }
+            for key in ["path", "output_path", "source_path", "directory", "old_path", "new_path", "cwd"] {
+                if let path = resolvedParams[key] as? String, !path.isEmpty {
+                    let allowGlobalRead = isReadOnlyFS || (toolName == "export_pdf" && key == "source_path")
+                    try validateSandbox(path, allowGlobalReadOnly: allowGlobalRead)
+                }
             }
             if let paths = resolvedParams["paths"] as? String {
                 for path in paths.components(separatedBy: ",") {
@@ -2551,10 +2558,13 @@ struct FileReadTool: AgentTool {
         }
         
         // TokenMem Layer 4: AST Structural Skeleton Windowing for large files read without start_line/end_line
-        let maxUnwindowed = TokenOptimizer.shared.mode.maxUnwindowedFileLines
+        let isLocalLLMActive = (AppState.shared?.aiProvider.lowercased() == "local")
+        let maxUnwindowed = isLocalLLMActive
+            ? min(180, TokenOptimizer.shared.mode.maxUnwindowedFileLines)
+            : TokenOptimizer.shared.mode.maxUnwindowedFileLines
         if totalLines > maxUnwindowed {
-            let headCount = min(300, maxUnwindowed - 80)
-            let tailCount = 80
+            let headCount = min(isLocalLLMActive ? 110 : 300, maxUnwindowed - (isLocalLLMActive ? 50 : 80))
+            let tailCount = isLocalLLMActive ? 50 : 80
             let headSlice = lines.prefix(headCount).enumerated().map { "\($0.offset + 1): \($0.element)" }.joined(separator: "\n")
             let tailSlice = lines.suffix(tailCount).enumerated().map { "\(totalLines - tailCount + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
             
@@ -2674,6 +2684,499 @@ struct ExtractPDFTool: AgentTool {
         }
         
         return "[PDF: \(url.lastPathComponent) (\(totalPages) pages)]\n\n\(extracted)"
+    }
+}
+
+struct ExportPDFTool: AgentTool {
+    let name = "export_pdf"
+    let description = "Generate an official, publication-grade A4 vector PDF from Markdown content or an existing Markdown/text file, with native Thai & English typography, executive header, bordered tables, code blocks, and page numbers."
+    let parameters = [
+        ToolParameter(name: "path", type: "string", description: "Output PDF file path (e.g. 'Official_Documentation_TH.pdf')", required: true),
+        ToolParameter(name: "markdown", type: "string", description: "Markdown document content to render into PDF (optional if source_path is provided)", required: false),
+        ToolParameter(name: "source_path", type: "string", description: "Existing .md or .txt file path to convert into PDF (optional if markdown is provided)", required: false),
+        ToolParameter(name: "title", type: "string", description: "Official document title shown in the executive cover header", required: false),
+        ToolParameter(name: "subtitle", type: "string", description: "Optional subtitle, organization, or version label (e.g. 'Dotmini Software · Official Specification')", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        let rawOut = (params["path"] as? String) ?? (params["output_path"] as? String) ?? ""
+        guard !rawOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("path (output .pdf path) is required")
+        }
+        var outputURL = URL(fileURLWithPath: rawOut)
+        if outputURL.pathExtension.lowercased() != "pdf" {
+            outputURL = outputURL.appendingPathExtension("pdf")
+        }
+
+        var markdownBody = (params["markdown"] as? String) ?? (params["content"] as? String) ?? ""
+        if markdownBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let srcPath = params["source_path"] as? String, !srcPath.isEmpty {
+            let srcURL = URL(fileURLWithPath: srcPath)
+            markdownBody = try String(contentsOf: srcURL, encoding: .utf8)
+        }
+        guard !markdownBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("Provide either 'markdown' content or a non-empty 'source_path' file.")
+        }
+
+        let explicitTitle = (params["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let explicitSubtitle = (params["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let pageCount = try Self.renderOfficialMarkdownPDF(
+            markdown: markdownBody,
+            explicitTitle: explicitTitle,
+            explicitSubtitle: explicitSubtitle,
+            to: outputURL
+        )
+
+        let outPath = outputURL.path
+        let finalURL = outputURL
+        await MainActor.run {
+            PreviewHotReloadEngine.shared.notifyFileSaved(path: outPath, content: "", source: "Agent")
+            PreviewDockService.shared.openFile(url: finalURL, makeActive: true)
+            AppState.shared?.showPreviewInspector()
+        }
+
+        let attrs = try? FileManager.default.attributesOfItem(atPath: outputURL.path)
+        let bytes = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        let sizeStr = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return "✅ Exported official A4 PDF to \(outputURL.path) (\(pageCount) page\(pageCount == 1 ? "" : "s"), \(sizeStr)) and opened in Preview."
+    }
+
+    private static func resolvePreferredThaiSansFont(size: CGFloat, bold: Bool) -> NSFont {
+        let candidates = bold
+            ? ["Sarabun-Bold", "SukhumvitSet-Bold", "Thonburi-Bold"]
+            : ["Sarabun-Regular", "SukhumvitSet-Text", "SukhumvitSet-Medium", "Thonburi"]
+        for name in candidates {
+            if let f = NSFont(name: name, size: size) {
+                return f
+            }
+        }
+        return NSFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
+    }
+
+    private static func resolveMonoFont(size: CGFloat) -> NSFont {
+        NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    private static func appendInlineMarkdown(
+        _ raw: String,
+        to target: NSMutableAttributedString,
+        baseFont: NSFont,
+        boldFont: NSFont,
+        monoFont: NSFont,
+        textColor: NSColor,
+        paragraphStyle: NSParagraphStyle
+    ) {
+        var idx = raw.startIndex
+        while idx < raw.endIndex {
+            if raw[idx...].hasPrefix("**"),
+               let closeRange = raw.range(of: "**", range: raw.index(idx, offsetBy: 2)..<raw.endIndex) {
+                let inner = String(raw[raw.index(idx, offsetBy: 2)..<closeRange.lowerBound])
+                target.append(NSAttributedString(string: inner, attributes: [
+                    .font: boldFont,
+                    .foregroundColor: textColor,
+                    .paragraphStyle: paragraphStyle
+                ]))
+                idx = closeRange.upperBound
+                continue
+            }
+            if raw[idx] == "`",
+               let closeIdx = raw[raw.index(after: idx)...].firstIndex(of: "`") {
+                let inner = String(raw[raw.index(after: idx)..<closeIdx])
+                target.append(NSAttributedString(string: " \(inner) ", attributes: [
+                    .font: monoFont,
+                    .foregroundColor: NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.23, alpha: 1.0),
+                    .backgroundColor: NSColor(calibratedWhite: 0.94, alpha: 1.0),
+                    .paragraphStyle: paragraphStyle
+                ]))
+                idx = raw.index(after: closeIdx)
+                continue
+            }
+            // Advance to next special marker
+            var next = raw.index(after: idx)
+            while next < raw.endIndex && !raw[next...].hasPrefix("**") && raw[next] != "`" {
+                next = raw.index(after: next)
+            }
+            let plain = String(raw[idx..<next])
+            target.append(NSAttributedString(string: plain, attributes: [
+                .font: baseFont,
+                .foregroundColor: textColor,
+                .paragraphStyle: paragraphStyle
+            ]))
+            idx = next
+        }
+    }
+
+    private static func renderOfficialMarkdownPDF(
+        markdown: String,
+        explicitTitle: String?,
+        explicitSubtitle: String?,
+        to outputURL: URL
+    ) throws -> Int {
+        let bodyFont = resolvePreferredThaiSansFont(size: 10.5, bold: false)
+        let bodyBoldFont = resolvePreferredThaiSansFont(size: 10.5, bold: true)
+        let h1Font = resolvePreferredThaiSansFont(size: 18.5, bold: true)
+        let h2Font = resolvePreferredThaiSansFont(size: 14.0, bold: true)
+        let h3Font = resolvePreferredThaiSansFont(size: 12.0, bold: true)
+        let metaFont = resolvePreferredThaiSansFont(size: 9.0, bold: false)
+        let monoFont = resolveMonoFont(size: 9.0)
+
+        let inkPrimary = NSColor(calibratedRed: 0.07, green: 0.09, blue: 0.13, alpha: 1.0)
+        let inkSecondary = NSColor(calibratedRed: 0.32, green: 0.36, blue: 0.42, alpha: 1.0)
+        let ruleColor = NSColor(calibratedWhite: 0.84, alpha: 1.0)
+
+        let lines = markdown.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        var detectedTitle = explicitTitle ?? ""
+        var startLineIndex = 0
+        if detectedTitle.isEmpty {
+            for (idx, line) in lines.prefix(8).enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("# ") {
+                    detectedTitle = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                    startLineIndex = idx + 1
+                    break
+                }
+            }
+        }
+        if detectedTitle.isEmpty {
+            detectedTitle = outputURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_", with: " ")
+        }
+
+        let docAttr = NSMutableAttributedString()
+
+        // Official Cover Header Block
+        let titlePara = NSMutableParagraphStyle()
+        titlePara.lineSpacing = 4
+        titlePara.paragraphSpacing = 4
+        docAttr.append(NSAttributedString(string: detectedTitle + "\n", attributes: [
+            .font: h1Font,
+            .foregroundColor: inkPrimary,
+            .paragraphStyle: titlePara
+        ]))
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let subtitleLine = [
+            (explicitSubtitle?.isEmpty == false ? explicitSubtitle! : "Official Technical Documentation"),
+            "Issued \(dateFormatter.string(from: Date()))"
+        ].joined(separator: "  ·  ")
+
+        let subPara = NSMutableParagraphStyle()
+        subPara.paragraphSpacing = 10
+        docAttr.append(NSAttributedString(string: subtitleLine + "\n", attributes: [
+            .font: metaFont,
+            .foregroundColor: inkSecondary,
+            .paragraphStyle: subPara
+        ]))
+
+        let dividerPara = NSMutableParagraphStyle()
+        dividerPara.paragraphSpacing = 12
+        docAttr.append(NSAttributedString(string: String(repeating: "━", count: 56) + "\n", attributes: [
+            .font: resolveMonoFont(size: 8.5),
+            .foregroundColor: ruleColor,
+            .paragraphStyle: dividerPara
+        ]))
+
+        var i = startLineIndex
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Fenced Code Block
+            if trimmed.hasPrefix("```") {
+                i += 1
+                var codeLines: [String] = []
+                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                    codeLines.append(lines[i])
+                    i += 1
+                }
+                if i < lines.count { i += 1 }
+                let codeText = codeLines.joined(separator: "\n")
+                let codePara = NSMutableParagraphStyle()
+                codePara.lineSpacing = 2.5
+                codePara.headIndent = 10
+                codePara.firstLineHeadIndent = 10
+                codePara.tailIndent = -10
+                codePara.paragraphSpacingBefore = 4
+                codePara.paragraphSpacing = 8
+                docAttr.append(NSAttributedString(string: codeText + "\n", attributes: [
+                    .font: monoFont,
+                    .foregroundColor: NSColor(calibratedRed: 0.11, green: 0.14, blue: 0.20, alpha: 1.0),
+                    .backgroundColor: NSColor(calibratedWhite: 0.955, alpha: 1.0),
+                    .paragraphStyle: codePara
+                ]))
+                continue
+            }
+
+            // Markdown Pipe Table (`| Col A | Col B |`)
+            if trimmed.hasPrefix("|") && trimmed.contains("|") {
+                var rawRows: [[String]] = []
+                while i < lines.count {
+                    let rowTrim = lines[i].trimmingCharacters(in: .whitespaces)
+                    guard rowTrim.hasPrefix("|") else { break }
+                    let cells = rowTrim
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "|"))
+                        .components(separatedBy: "|")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                    let isSeparator = cells.allSatisfy { cell in
+                        let stripped = cell.replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "")
+                        return stripped.isEmpty && cell.contains("-")
+                    }
+                    if !isSeparator && !cells.isEmpty {
+                        rawRows.append(cells)
+                    }
+                    i += 1
+                }
+                if !rawRows.isEmpty {
+                    let colCount = max(1, rawRows.map(\.count).max() ?? 1)
+                    let table = NSTextTable()
+                    table.numberOfColumns = colCount
+                    table.collapsesBorders = true
+                    table.hidesEmptyCells = false
+                    for (rIdx, row) in rawRows.enumerated() {
+                        let isHeader = (rIdx == 0)
+                        for cIdx in 0..<colCount {
+                            let cellVal = cIdx < row.count ? row[cIdx] : ""
+                            let block = NSTextTableBlock(table: table, startingRow: rIdx, rowSpan: 1, startingColumn: cIdx, columnSpan: 1)
+                            block.setWidth(0.6, type: .absoluteValueType, for: .border)
+                            block.setBorderColor(ruleColor)
+                            block.setWidth(5.0, type: .absoluteValueType, for: .padding, edge: .minY)
+                            block.setWidth(5.0, type: .absoluteValueType, for: .padding, edge: .maxY)
+                            block.setWidth(7.0, type: .absoluteValueType, for: .padding, edge: .minX)
+                            block.setWidth(7.0, type: .absoluteValueType, for: .padding, edge: .maxX)
+                            block.setValue(CGFloat(100.0 / Double(colCount)), type: .percentageValueType, for: .width)
+                            if isHeader {
+                                block.backgroundColor = NSColor(calibratedRed: 0.94, green: 0.95, blue: 0.97, alpha: 1.0)
+                            } else if rIdx % 2 == 1 {
+                                block.backgroundColor = NSColor(calibratedWhite: 0.985, alpha: 1.0)
+                            }
+                            let cellPara = NSMutableParagraphStyle()
+                            cellPara.textBlocks = [block]
+                            cellPara.lineSpacing = 2.5
+                            cellPara.paragraphSpacing = 2
+                            appendInlineMarkdown(
+                                cellVal,
+                                to: docAttr,
+                                baseFont: isHeader ? resolvePreferredThaiSansFont(size: 9.8, bold: true) : resolvePreferredThaiSansFont(size: 9.8, bold: false),
+                                boldFont: resolvePreferredThaiSansFont(size: 9.8, bold: true),
+                                monoFont: resolveMonoFont(size: 8.8),
+                                textColor: inkPrimary,
+                                paragraphStyle: cellPara
+                            )
+                            docAttr.append(NSAttributedString(string: "\n", attributes: [
+                                .font: bodyFont,
+                                .paragraphStyle: cellPara
+                            ]))
+                        }
+                    }
+                    let afterTable = NSMutableParagraphStyle()
+                    afterTable.paragraphSpacing = 6
+                    docAttr.append(NSAttributedString(string: "\n", attributes: [.font: metaFont, .paragraphStyle: afterTable]))
+                }
+                continue
+            }
+
+            if trimmed.isEmpty {
+                let sp = NSMutableParagraphStyle()
+                sp.paragraphSpacing = 3
+                docAttr.append(NSAttributedString(string: "\n", attributes: [.font: metaFont, .paragraphStyle: sp]))
+                i += 1
+                continue
+            }
+
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                let hrPara = NSMutableParagraphStyle()
+                hrPara.paragraphSpacingBefore = 6
+                hrPara.paragraphSpacing = 8
+                docAttr.append(NSAttributedString(string: String(repeating: "─", count: 58) + "\n", attributes: [
+                    .font: resolveMonoFont(size: 8.0),
+                    .foregroundColor: ruleColor,
+                    .paragraphStyle: hrPara
+                ]))
+                i += 1
+                continue
+            }
+
+            // Headings
+            if trimmed.hasPrefix("# ") || trimmed.hasPrefix("## ") || trimmed.hasPrefix("### ") || trimmed.hasPrefix("#### ") {
+                let level: Int
+                let text: String
+                if trimmed.hasPrefix("#### ") {
+                    level = 4; text = String(trimmed.dropFirst(5))
+                } else if trimmed.hasPrefix("### ") {
+                    level = 3; text = String(trimmed.dropFirst(4))
+                } else if trimmed.hasPrefix("## ") {
+                    level = 2; text = String(trimmed.dropFirst(3))
+                } else {
+                    level = 1; text = String(trimmed.dropFirst(2))
+                }
+                let hFont = (level == 1) ? h1Font : (level == 2 ? h2Font : (level == 3 ? h3Font : bodyBoldFont))
+                let hPara = NSMutableParagraphStyle()
+                hPara.paragraphSpacingBefore = (level <= 2) ? 12 : 8
+                hPara.paragraphSpacing = 5
+                hPara.lineSpacing = 3
+                let cleanHeading = text.replacingOccurrences(of: "**", with: "").trimmingCharacters(in: .whitespaces)
+                docAttr.append(NSAttributedString(string: cleanHeading + "\n", attributes: [
+                    .font: hFont,
+                    .foregroundColor: inkPrimary,
+                    .paragraphStyle: hPara
+                ]))
+                i += 1
+                continue
+            }
+
+            // Bullet & Numbered Lists
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
+                let itemText = String(trimmed.dropFirst(2))
+                let listPara = NSMutableParagraphStyle()
+                listPara.firstLineHeadIndent = 8
+                listPara.headIndent = 20
+                listPara.lineSpacing = 3.5
+                listPara.paragraphSpacing = 3.5
+                docAttr.append(NSAttributedString(string: "•  ", attributes: [
+                    .font: bodyBoldFont,
+                    .foregroundColor: inkPrimary,
+                    .paragraphStyle: listPara
+                ]))
+                appendInlineMarkdown(itemText, to: docAttr, baseFont: bodyFont, boldFont: bodyBoldFont, monoFont: monoFont, textColor: inkPrimary, paragraphStyle: listPara)
+                docAttr.append(NSAttributedString(string: "\n", attributes: [.font: bodyFont, .paragraphStyle: listPara]))
+                i += 1
+                continue
+            }
+
+            // Blockquote
+            if trimmed.hasPrefix(">") {
+                let quoteText = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                let qPara = NSMutableParagraphStyle()
+                qPara.firstLineHeadIndent = 12
+                qPara.headIndent = 12
+                qPara.lineSpacing = 3.5
+                qPara.paragraphSpacing = 5
+                docAttr.append(NSAttributedString(string: "▎ ", attributes: [
+                    .font: bodyBoldFont,
+                    .foregroundColor: inkSecondary,
+                    .paragraphStyle: qPara
+                ]))
+                appendInlineMarkdown(quoteText, to: docAttr, baseFont: bodyFont, boldFont: bodyBoldFont, monoFont: monoFont, textColor: inkSecondary, paragraphStyle: qPara)
+                docAttr.append(NSAttributedString(string: "\n", attributes: [.font: bodyFont, .paragraphStyle: qPara]))
+                i += 1
+                continue
+            }
+
+            // Standard Paragraph
+            let pStyle = NSMutableParagraphStyle()
+            pStyle.lineSpacing = 4.0
+            pStyle.paragraphSpacing = 6.0
+            appendInlineMarkdown(trimmed, to: docAttr, baseFont: bodyFont, boldFont: bodyBoldFont, monoFont: monoFont, textColor: inkPrimary, paragraphStyle: pStyle)
+            docAttr.append(NSAttributedString(string: "\n", attributes: [.font: bodyFont, .paragraphStyle: pStyle]))
+            i += 1
+        }
+
+        // Paginate into ISO A4 PDF pages via TextKit 1 NSLayoutManager + CGContext (supports NSTextTable + Thai shaping, zero WebKit deadlock!)
+        let pageW: CGFloat = 595.28
+        let pageH: CGFloat = 841.89
+        let marginX: CGFloat = 48.0
+        let marginTop: CGFloat = 52.0
+        let marginBottom: CGFloat = 54.0
+        let contentW = pageW - marginX * 2
+        let contentH = pageH - marginTop - marginBottom
+
+        let storage = NSTextStorage(attributedString: docAttr)
+        let layoutManager = NSLayoutManager()
+        storage.addLayoutManager(layoutManager)
+
+        var containers: [NSTextContainer] = []
+        let maxPages = 200
+        while containers.count < maxPages {
+            let tc = NSTextContainer(size: NSSize(width: contentW, height: contentH))
+            tc.lineFragmentPadding = 0
+            layoutManager.addTextContainer(tc)
+            containers.append(tc)
+            let range = layoutManager.glyphRange(for: tc)
+            if range.length == 0 && containers.count > 1 {
+                containers.removeLast()
+                break
+            }
+            if NSMaxRange(range) >= layoutManager.numberOfGlyphs {
+                break
+            }
+        }
+
+        let totalPages = max(1, containers.count)
+        let pdfData = NSMutableData()
+        guard let consumer = CGDataConsumer(data: pdfData),
+              var mediaBox = Optional(CGRect(x: 0, y: 0, width: pageW, height: pageH)),
+              let pdfCtx = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw ToolBoxError.executionFailed("Failed to initialize CoreGraphics A4 PDF context")
+        }
+
+        for (pageIdx, tc) in containers.enumerated() {
+            pdfCtx.beginPDFPage(nil)
+            // White A4 paper fill
+            pdfCtx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            pdfCtx.fill(CGRect(x: 0, y: 0, width: pageW, height: pageH))
+
+            // Flip coordinate system to top-down AppKit drawing coordinates for NSLayoutManager
+            pdfCtx.saveGState()
+            pdfCtx.translateBy(x: 0, y: pageH)
+            pdfCtx.scaleBy(x: 1, y: -1)
+
+            let nsGraphics = NSGraphicsContext(cgContext: pdfCtx, flipped: true)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = nsGraphics
+
+            // Running header on pages 2+
+            if pageIdx > 0 {
+                let headerAttrs: [NSAttributedString.Key: Any] = [
+                    .font: metaFont,
+                    .foregroundColor: inkSecondary
+                ]
+                (detectedTitle as NSString).draw(at: NSPoint(x: marginX, y: 24), withAttributes: headerAttrs)
+                ruleColor.setStroke()
+                let path = NSBezierPath()
+                path.lineWidth = 0.5
+                path.move(to: NSPoint(x: marginX, y: 40))
+                path.line(to: NSPoint(x: pageW - marginX, y: 40))
+                path.stroke()
+            }
+
+            let glyphRange = layoutManager.glyphRange(for: tc)
+            if glyphRange.length > 0 {
+                let origin = NSPoint(x: marginX, y: marginTop)
+                layoutManager.drawBackground(forGlyphRange: glyphRange, at: origin)
+                layoutManager.drawGlyphs(forGlyphRange: glyphRange, at: origin)
+            }
+
+            // Running footer with page number
+            ruleColor.setStroke()
+            let footRule = NSBezierPath()
+            footRule.lineWidth = 0.5
+            footRule.move(to: NSPoint(x: marginX, y: pageH - 38))
+            footRule.line(to: NSPoint(x: pageW - marginX, y: pageH - 38))
+            footRule.stroke()
+
+            let pageLabel = "Page \(pageIdx + 1) of \(totalPages)" as NSString
+            let footAttrs: [NSAttributedString.Key: Any] = [
+                .font: metaFont,
+                .foregroundColor: inkSecondary
+            ]
+            let labelSize = pageLabel.size(withAttributes: footAttrs)
+            pageLabel.draw(
+                at: NSPoint(x: pageW - marginX - labelSize.width, y: pageH - 31),
+                withAttributes: footAttrs
+            )
+
+            NSGraphicsContext.restoreGraphicsState()
+            pdfCtx.restoreGState()
+            pdfCtx.endPDFPage()
+        }
+        pdfCtx.closePDF()
+
+        try (pdfData as Data).write(to: outputURL, options: .atomic)
+        let verifiedPages = PDFDocument(url: outputURL)?.pageCount ?? totalPages
+        return max(1, verifiedPages)
     }
 }
 

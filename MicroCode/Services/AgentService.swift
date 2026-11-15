@@ -2331,11 +2331,21 @@ class AgentService: ObservableObject {
         var lastKnownExternalToolCount = ExternalMCPManager.shared.totalToolCount
         var lastExplicitMountedCount = ExternalMCPManager.shared.explicitlyMountedTools.count
 
+        let localEssentialTools: Set<String> = [
+            "list_directory_tree", "file_read", "multi_file_read", "file_write",
+            "replace_in_file", "grep_search", "file_search", "shell",
+            "export_pdf", "extract_pdf", "attachment_read", "inspect_image",
+            "computer_use", "preview_control"
+        ]
+
         func rebuildActiveTools() -> [[String: Any]] {
             allToolSchemas.filter { (tool: [String: Any]) -> Bool in
                 guard let name = tool["name"] as? String else { return true }
                 if name.hasPrefix("mcp__") && !name.hasPrefix("mcp__local__") {
                     return stickyEagerExternalMCP.contains(name)
+                }
+                if detectedProvider == .local {
+                    return localEssentialTools.contains(name)
                 }
                 guard let tier = ToolScope.toolTierMap[name] else { return true }
                 return currentToolScope.contains(tier)
@@ -2399,12 +2409,13 @@ class AgentService: ObservableObject {
         }
         
         // Build and compress prior conversation history (excluding the just-appended userMessage to avoid duplication)
+        let effectiveHistoryBudget = (detectedProvider == .local) ? 9_500 : budget.maxHistoryTokens
         let rawHistory = buildConversationHistory(excludingMessageID: userMessage.id, forChatId: runChatId, scope: runScope)
-        var history = tokenOptimizer.compressHistory(rawHistory, budget: budget.maxHistoryTokens)
+        var history = tokenOptimizer.compressHistory(rawHistory, budget: effectiveHistoryBudget)
         let externallyModifiedFiles = detectExternalFileDrift()
         var turnPromptWithDrift = effectiveContent
         if !enrichedAttachments.isEmpty {
-            let maxInlineAttachmentBudget = detectedProvider == .aipass ? 28_000 : 90_000
+            let maxInlineAttachmentBudget = (detectedProvider == .local) ? 14_000 : (detectedProvider == .aipass ? 28_000 : 90_000)
             let groundedAttachmentPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
                 attachments: enrichedAttachments,
                 maxInlineChars: maxInlineAttachmentBudget
@@ -2497,7 +2508,7 @@ class AgentService: ObservableObject {
                     stickyActiveTools = rebuildActiveTools()
                 }
                 // Compress iterative history dynamically so context never blows up
-                history = tokenOptimizer.compressIterativeToolHistory(history, budget: budget.maxHistoryTokens)
+                history = tokenOptimizer.compressIterativeToolHistory(history, budget: effectiveHistoryBudget)
             }
             
             // Keep the latest user/tool-result turn in history until the model call succeeds,
@@ -5321,8 +5332,9 @@ class AgentService: ObservableObject {
         <tool_call>{"name":"computer_use","arguments":{"action":"zoom","x":200,"y":140,"width":360,"height":240}}</tool_call>
         <tool_call>{"name":"file_write","arguments":{"path":".microcode/playground/main.cpp","content":"#include <iostream>\\nint main() { std::cout << \\"Hello!\\\\n\\"; return 0; }"}}</tool_call>
         <tool_call>{"name":"replace_in_file","arguments":{"path":"src/app.swift","old_text":"let a = 1","new_text":"let a = 2"}}</tool_call>
+        <tool_call>{"name":"export_pdf","arguments":{"path":"Official_Documentation.pdf","markdown":"# เอกสารทางการ\\n\\n## 1. ภาพรวมระบบ\\n...","title":"เอกสารคู่มือทางการ","subtitle":"Dotmini Software · Official Documentation"}}</tool_call>
         <tool_call>{"name":"shell","arguments":{"command":"clang++ -std=c++17 .microcode/playground/main.cpp -o /tmp/mc_out && /tmp/mc_out"}}</tool_call>
-        For `computer_use`, always inspect `spatial_map` and `[#mark_id]` coordinates from `observe` before `click`/`type`/`zoom`. Provide complete, runnable code and concise answers.
+        When asked to generate or export a PDF document (Thai or English), ALWAYS use the native `export_pdf` tool (either passing `"markdown"` directly or `"source_path"` after writing a `.md` file) instead of installing external Python/LaTeX packages. Read only necessary files (using `start_line`/`end_line` for large files) so you stay fast and concise. For `computer_use`, always inspect `spatial_map` and `[#mark_id]` coordinates from `observe` before `click`/`type`/`zoom`. Provide complete, runnable code and concise answers.
         """
     }
 

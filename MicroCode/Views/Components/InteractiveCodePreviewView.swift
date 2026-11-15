@@ -27,10 +27,12 @@ struct InteractiveCodePreviewView: View {
     @State private var errorMessage: String? = nil
     @State private var isCopied: Bool = false
     @State private var showLineNumbers: Bool = true
+    @State private var wrapRawLines: Bool = false
     @State private var showGitDiff: Bool = false
     @State private var gitDiffContent: (old: String, new: String)? = nil
     @State private var hasGitDiff: Bool = false
     @State private var activeHighlightRange: ClosedRange<Int>? = nil
+    @ObservedObject private var dockService = PreviewDockService.shared
 
     // Playground-Style Live Render state (.swift SwiftUI, .html/.svg Web, .md Markdown)
     @State private var showLiveRender: Bool = false
@@ -113,10 +115,20 @@ struct InteractiveCodePreviewView: View {
     private var effectiveHighlightRange: ClosedRange<Int>? {
         guard let range = activeHighlightRange else { return nil }
         let total = lineUTF16Offsets.count
-        if total > 0 && range.lowerBound <= 1 && range.upperBound >= total {
+        if total > 0 && range.lowerBound <= 1 && range.upperBound >= max(1, total - 1) {
             return nil
         }
         return range
+    }
+
+    /// Returns true when `range` is nil or starts at line 1 (e.g. `#L1-172` from `Analyzed MODEL_CARD.md #L1-172`),
+    /// so Markdown documents open in crisp Rendered Preview instead of raw source unless a specific sub-section is targeted.
+    private static func shouldDefaultMarkdownToPreview(range: ClosedRange<Int>?, totalLines: Int = 0) -> Bool {
+        guard let range else { return true }
+        if totalLines > 0 {
+            return range.lowerBound <= 1 && range.upperBound >= max(1, totalLines - 2)
+        }
+        return range.lowerBound <= 1
     }
 
     /// Breadcrumb segments relative to workspace root (matching AGY breadcrumb bar)
@@ -190,8 +202,9 @@ struct InteractiveCodePreviewView: View {
         .background(editorCanvas)
         .onAppear {
             activeHighlightRange = highlightRange
-            if isMarkdownDocument && highlightRange == nil {
-                showLiveRender = true
+            if isMarkdownDocument {
+                wrapRawLines = true
+                showLiveRender = Self.shouldDefaultMarkdownToPreview(range: highlightRange)
             }
             loadFileContent(for: url)
             checkGitDiff(for: url)
@@ -205,14 +218,15 @@ struct InteractiveCodePreviewView: View {
             swiftUICompileError = nil
             let ext = newURL.pathExtension.lowercased()
             let isMD = (ext == "md" || ext == "markdown" || ext == "mdx")
-            showLiveRender = isMD && (highlightRange == nil)
+            wrapRawLines = isMD
+            showLiveRender = isMD && Self.shouldDefaultMarkdownToPreview(range: highlightRange)
             loadFileContent(for: newURL)
             checkGitDiff(for: newURL)
         }
         .onChange(of: highlightRange) { newRange in
             activeHighlightRange = newRange
-            if newRange != nil && isMarkdownDocument {
-                showLiveRender = false
+            if isMarkdownDocument {
+                showLiveRender = Self.shouldDefaultMarkdownToPreview(range: newRange, totalLines: lineUTF16Offsets.count)
             }
         }
         .onChange(of: appState.appTheme) { newTheme in
@@ -298,8 +312,8 @@ struct InteractiveCodePreviewView: View {
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.14))
-                            .foregroundColor(.accentColor)
+                            .background(Color.primary.opacity(0.10))
+                            .foregroundColor(.primary)
                             .cornerRadius(4)
                         }
                         .buttonStyle(.plain)
@@ -327,8 +341,8 @@ struct InteractiveCodePreviewView: View {
                         }
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2.5)
-                        .background(showLiveRender ? Color.accentColor.opacity(0.18) : Color.clear)
-                        .foregroundColor(showLiveRender ? .accentColor : .secondary)
+                        .background(showLiveRender ? Color.primary.opacity(0.12) : Color.clear)
+                        .foregroundColor(showLiveRender ? .primary : .secondary)
                         .cornerRadius(3.5)
                     }
                     .buttonStyle(.plain)
@@ -346,7 +360,7 @@ struct InteractiveCodePreviewView: View {
                         }
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2.5)
-                        .background(!showLiveRender ? Color.primary.opacity(0.10) : Color.clear)
+                        .background(!showLiveRender ? Color.primary.opacity(0.12) : Color.clear)
                         .foregroundColor(!showLiveRender ? .primary : .secondary)
                         .cornerRadius(3.5)
                     }
@@ -376,8 +390,8 @@ struct InteractiveCodePreviewView: View {
                     }
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2.5)
-                    .background(showLiveRender ? Color.green.opacity(0.16) : Color.primary.opacity(0.06))
-                    .foregroundColor(showLiveRender ? .green : .secondary)
+                    .background(showLiveRender ? Color.primary.opacity(0.12) : Color.primary.opacity(0.06))
+                    .foregroundColor(showLiveRender ? .primary : .secondary)
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
@@ -399,12 +413,28 @@ struct InteractiveCodePreviewView: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2.5)
-                    .background(showGitDiff ? Color.orange.opacity(0.15) : Color.primary.opacity(0.06))
-                    .foregroundColor(showGitDiff ? .orange : .secondary)
+                    .background(showGitDiff ? Color.primary.opacity(0.14) : Color.primary.opacity(0.06))
+                    .foregroundColor(showGitDiff ? .primary : .secondary)
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
                 .help("Toggle Git Diff with HEAD")
+            }
+
+            if !showLiveRender || !supportsLiveRender {
+                Button {
+                    wrapRawLines.toggle()
+                } label: {
+                    Image(systemName: "text.word.spacing")
+                        .font(.system(size: 10.5, weight: wrapRawLines ? .semibold : .regular))
+                        .foregroundColor(wrapRawLines ? .primary : .secondary)
+                        .frame(width: 22, height: 22)
+                        .background(wrapRawLines ? Color.primary.opacity(0.10) : Color.clear)
+                        .cornerRadius(4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(wrapRawLines ? "Disable Soft Line Wrap" : "Enable Soft Line Wrap")
             }
             
             // Copy Code Button
@@ -418,7 +448,7 @@ struct InteractiveCodePreviewView: View {
             } label: {
                 Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 11))
-                    .foregroundColor(isCopied ? .green : .secondary)
+                    .foregroundColor(isCopied ? .primary : .secondary)
                     .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
@@ -442,14 +472,16 @@ struct InteractiveCodePreviewView: View {
             .buttonStyle(.plain)
             .help("Open in full Code Editor")
 
-            Divider()
-                .frame(height: 14)
-                .padding(.horizontal, 1)
+            if !dockService.isDockVisible {
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 1)
 
-            PreviewCloseTabButton()
+                PreviewCloseTabButton()
+            }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
         .background(headerBg)
     }
     
@@ -463,6 +495,7 @@ struct InteractiveCodePreviewView: View {
             lineUTF16Offsets: lineUTF16Offsets,
             revision: codeRevision,
             showLineNumbers: showLineNumbers,
+            wrapLines: wrapRawLines,
             highlightRange: effectiveHighlightRange,
             editorBackground: theme.editorBackground,
             gutterTextColor: theme.commentColor.withAlphaComponent(0.78),
@@ -892,6 +925,12 @@ struct InteractiveCodePreviewView: View {
                     self.highlightedNSCode = built.attributed
                     self.lineUTF16Offsets = built.lineOffsets
                     self.codeRevision &+= 1
+                    if isMD && !silent {
+                        self.showLiveRender = Self.shouldDefaultMarkdownToPreview(
+                            range: self.activeHighlightRange,
+                            totalLines: built.lineOffsets.count
+                        )
+                    }
                     self.isLoading = false
                 }
             } catch {
@@ -1292,29 +1331,32 @@ struct InteractiveCodePreviewView: View {
 // MARK: - Shared Header Close Tab Button [✕]
 
 struct PreviewCloseTabButton: View {
+    @ObservedObject private var dock = PreviewDockService.shared
     @State private var isHovered: Bool = false
 
     var body: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                PreviewDockService.shared.closeActiveTabOrHideDock()
+        if !dock.isDockVisible {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    PreviewDockService.shared.closeActiveTabOrHideDock()
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(isHovered ? .white : .secondary)
+                    .frame(width: 22, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(isHovered ? Color.red.opacity(0.85) : Color.primary.opacity(0.06))
+                    )
+                    .contentShape(Rectangle())
             }
-        } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(isHovered ? .white : .secondary)
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isHovered ? Color.red.opacity(0.85) : Color.primary.opacity(0.06))
-                )
-                .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                isHovered = hovering
+            }
+            .help("Close Preview Tab")
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            isHovered = hovering
-        }
-        .help("Close Preview Tab")
     }
 }
 
@@ -1817,6 +1859,7 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
     let lineUTF16Offsets: [Int]
     let revision: UInt64
     let showLineNumbers: Bool
+    let wrapLines: Bool
     let highlightRange: ClosedRange<Int>?
     let editorBackground: NSColor
     let gutterTextColor: NSColor
@@ -1825,15 +1868,69 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
 
     final class Coordinator: NSObject {
         var lastRevision: UInt64 = 0
+        var lastWrapLines: Bool?
         var lastHighlightRange: ClosedRange<Int>?
         var appliedTempRange: NSRange?
         weak var gutterView: PreviewCodeGutterRulerView?
+        weak var scrollView: NSScrollView?
+        weak var textView: NSTextView?
         nonisolated(unsafe) var boundsObserver: NSObjectProtocol?
+        nonisolated(unsafe) var frameObserver: NSObjectProtocol?
 
         deinit {
             if let obs = boundsObserver {
                 NotificationCenter.default.removeObserver(obs)
             }
+            if let obs = frameObserver {
+                NotificationCenter.default.removeObserver(obs)
+            }
+        }
+
+        @MainActor
+        func recalculateDocumentSize(wrapLines: Bool) {
+            guard let scrollView,
+                  let textView,
+                  let lm = textView.layoutManager,
+                  let tc = textView.textContainer else { return }
+
+            let contentSize = scrollView.contentSize
+            let viewportW = max(260, contentSize.width)
+            let viewportH = max(120, contentSize.height)
+            let insetW = textView.textContainerInset.width * 2
+            let insetH = textView.textContainerInset.height * 2
+
+            if wrapLines {
+                let containerW = max(180, viewportW - insetW)
+                if tc.widthTracksTextView != true || abs(tc.containerSize.width - containerW) > 0.5 {
+                    tc.widthTracksTextView = true
+                    tc.containerSize = NSSize(width: containerW, height: CGFloat.greatestFiniteMagnitude)
+                }
+                textView.isHorizontallyResizable = false
+                textView.autoresizingMask = [.width]
+                lm.ensureLayout(for: tc)
+                let used = lm.usedRect(for: tc)
+                let targetH = max(viewportH, ceil(used.height + insetH + 28))
+                textView.minSize = NSSize(width: viewportW, height: viewportH)
+                if abs(textView.frame.size.width - viewportW) > 0.5 || abs(textView.frame.size.height - targetH) > 0.5 {
+                    textView.setFrameSize(NSSize(width: viewportW, height: targetH))
+                }
+            } else {
+                if tc.widthTracksTextView != false || tc.containerSize.width < 1_000_000 {
+                    tc.widthTracksTextView = false
+                    tc.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+                }
+                textView.isHorizontallyResizable = true
+                textView.autoresizingMask = []
+                lm.ensureLayout(for: tc)
+                let used = lm.usedRect(for: tc)
+                let targetW = max(viewportW, ceil(used.width + insetW + 32))
+                let targetH = max(viewportH, ceil(used.height + insetH + 28))
+                textView.minSize = NSSize(width: viewportW, height: viewportH)
+                if abs(textView.frame.size.width - targetW) > 0.5 || abs(textView.frame.size.height - targetH) > 0.5 {
+                    textView.setFrameSize(NSSize(width: targetW, height: targetH))
+                }
+            }
+            gutterView?.needsDisplay = true
         }
     }
 
@@ -1842,21 +1939,31 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let initialFrame = NSRect(x: 0, y: 0, width: 680, height: 520)
+        let scrollView = NSScrollView(frame: initialFrame)
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        scrollView.hasHorizontalScroller = !wrapLines
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = !isGlass
         scrollView.backgroundColor = editorBackground
 
-        // Force TextKit 1 (`NSTextView(usingTextLayoutManager: false)`) so NSRulerView glyph layout & temporary attributes run at 120Hz
-        let textView: NSTextView
-        if #available(macOS 13.0, *) {
-            textView = NSTextView(usingTextLayoutManager: false)
-        } else {
-            textView = NSTextView()
-        }
+        // Explicit TextKit 1 stack with non-zero initial frame so lines NEVER collapse to 1 character wide
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(
+            size: NSSize(
+                width: wrapLines ? 660 : CGFloat.greatestFiniteMagnitude,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+        )
+        textContainer.widthTracksTextView = wrapLines
+        textContainer.heightTracksTextView = false
+        textContainer.lineFragmentPadding = 4
+        layoutManager.addTextContainer(textContainer)
+
+        let textView = NSTextView(frame: initialFrame, textContainer: textContainer)
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true
@@ -1865,14 +1972,12 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
         textView.usesFindBar = true
         textView.drawsBackground = !isGlass
         textView.backgroundColor = editorBackground
-        textView.textContainerInset = NSSize(width: 8, height: 8)
-        textView.minSize = NSSize(width: 0, height: 0)
+        textView.textContainerInset = NSSize(width: 10, height: 8)
+        textView.minSize = NSSize(width: 320, height: 120)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = true
-        textView.autoresizingMask = []
-        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.textContainer?.widthTracksTextView = false
+        textView.isHorizontallyResizable = !wrapLines
+        textView.autoresizingMask = wrapLines ? [.width] : []
 
         scrollView.documentView = textView
 
@@ -1880,18 +1985,36 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
         scrollView.verticalRulerView = gutter
         scrollView.hasVerticalRuler = showLineNumbers
         scrollView.rulersVisible = showLineNumbers
-        context.coordinator.gutterView = gutter
+
+        let coordinator = context.coordinator
+        coordinator.gutterView = gutter
+        coordinator.scrollView = scrollView
+        coordinator.textView = textView
 
         scrollView.contentView.postsBoundsChangedNotifications = true
-        context.coordinator.boundsObserver = NotificationCenter.default.addObserver(
+        scrollView.contentView.postsFrameChangedNotifications = true
+        coordinator.boundsObserver = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification,
             object: scrollView.contentView,
             queue: .main
         ) { [weak gutter] _ in
             gutter?.needsDisplay = true
         }
+        coordinator.frameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak coordinator] _ in
+            MainActor.assumeIsolated {
+                guard let coordinator else { return }
+                coordinator.recalculateDocumentSize(wrapLines: coordinator.lastWrapLines ?? false)
+            }
+        }
 
-        applyUpdates(to: scrollView, textView: textView, coordinator: context.coordinator, isInitial: true)
+        applyUpdates(to: scrollView, textView: textView, coordinator: coordinator, isInitial: true)
+        DispatchQueue.main.async { [weak coordinator] in
+            coordinator?.recalculateDocumentSize(wrapLines: coordinator?.lastWrapLines ?? false)
+        }
         return scrollView
     }
 
@@ -1908,6 +2031,7 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
     ) {
         scrollView.drawsBackground = !isGlass
         scrollView.backgroundColor = editorBackground
+        scrollView.hasHorizontalScroller = !wrapLines
         textView.drawsBackground = !isGlass
         textView.backgroundColor = editorBackground
 
@@ -1917,6 +2041,9 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
         }
 
         let didChangeContent = isInitial || coordinator.lastRevision != revision
+        let didChangeWrap = coordinator.lastWrapLines != wrapLines
+        coordinator.lastWrapLines = wrapLines
+
         if didChangeContent {
             coordinator.lastRevision = revision
             coordinator.appliedTempRange = nil
@@ -1930,7 +2057,10 @@ private struct PreviewReadOnlyCodeNSView: NSViewRepresentable {
             gutter.bgColor = editorBackground
             gutter.isGlass = isGlass
             gutter.updateRuleThickness()
-            gutter.needsDisplay = true
+        }
+
+        if didChangeContent || didChangeWrap {
+            coordinator.recalculateDocumentSize(wrapLines: wrapLines)
         }
 
         let didChangeHighlight = didChangeContent || coordinator.lastHighlightRange != highlightRange
