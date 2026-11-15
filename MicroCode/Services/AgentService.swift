@@ -746,8 +746,10 @@ class AgentService: ObservableObject {
             11. Use get_diagnostics to check for syntax/type errors in the active file using the Language Server.
             12. CRITICAL SAFETY & GIT GUARD: NEVER delete user files or directories blindly (`rm -rf`, `find . -delete`, `git clean -fdx` are strictly forbidden). NEVER run `git init`, `git commit`, or `git push` unless the user explicitly asks to initialize Git or commit changes. NEVER invent unrelated boilerplate files (like random `index.html`) in an empty workspace unless the user explicitly asks to create a web page or app.
             13. TERMINAL & PORTABLE RUNTIMES: You have full access to run commands with `shell`. It automatically includes MicroCode Portable Runtimes (`~/.microcode/runtimes` for Python, Node.js, Go, Rust, Java, Ardium) and mirrors directly into the IDE Terminal/Console.
-            14. LIVE PREVIEW & EXTERNAL MCP ORCHESTRATION:
+            14. LIVE PREVIEW, OFFICIAL PDF EXPORT, SKILLS & EXTERNAL MCP ORCHESTRATION:
                 - Live Web/Device Preview: Use `preview_control` (`open`, `reload`, `set_url`, `set_viewport`, `switch_mode`) when the user asks to preview a web app or UI.
+                - Official Document & PDF Generation: When the user asks to write/export an official PDF document (Thai or English), ALWAYS call `export_pdf` (`output_path`, `markdown` or `source_path`, `title`, `subtitle`, `organization`, `document_id`) directly — it renders native CoreText ISO A4 PDFs with full Thai vowel/tone shaping (`Thonburi`/`Sarabun`), formal cover headers, tables, code blocks, and page numbers without requiring Pandoc or LaTeX!
+                - Agent Skills (`<available_skills>`): Whenever an active skill matches the task, call `skill_engine` (`action: "read"`, `"match"`, `"run_script"`, or `"crystallize"`) and follow its exact instructions.
                 - Local & External MCP Servers: Local IDE tools live under `mcp__local__*`. External MCP servers (from `~/.microcode/mcp.json`, `~/.gemini/config/plugins/*`, Cursor, Claude, Codex) are managed via `mcp_orchestrator` (`action: "status"`, `"discover"`, `"connect"`, `"search_tools"`, `"restart"`, `"synthesize"`). When the user asks to connect, inspect, or use an MCP server (e.g. Canva, GitHub, Figma, Gmail, Google Slides), ALWAYS call `mcp_orchestrator` and/or check `<available_skills>` via `skill_engine` FIRST rather than answering with generic capabilities prose!
             
             ## Implementation Plans & Pre-Planning Codebase Analysis Mandate ("วิเคราะห์อย่างละเอียดก่อนทำ ห้ามมั่วเด็ดขาด")
@@ -998,23 +1000,32 @@ class AgentService: ObservableObject {
 
         prompt += "\n\n## Provider Harness Contract\n\(providerHarnessProfile(for: provider, model: model))"
         
-        // Apply final compression to system prompt
-        return tokenOptimizer.compressSystemPrompt(prompt, budget: budget.maxSystemTokens)
+        // Apply final compression to system prompt (keep Local LLM system prompt crisp for 16K–32K KV windows while preserving 100% of Harness, Skills & MCP)
+        let sysBudget = (provider == .local) ? min(budget.maxSystemTokens, 14_000) : budget.maxSystemTokens
+        return tokenOptimizer.compressSystemPrompt(prompt, budget: sysBudget)
     }
 
     private func providerHarnessProfile(for provider: StreamableAIProvider, model: String) -> String {
         let common = """
-        - Built-in MicroCode tools (`attachment_read`, `file_read`, `file_write`, `replace_in_file`, `patch_file`, `list_directory_tree`, `grep_search`, `file_search`, `find_symbol`, `shell`, `git_status`, `ardium_run`, `create_plan`, `agent_plan`), `skill_engine`, `mcp_orchestrator`, `swarm_orchestrator`, `invoke_subagent`, and active MicroCode skills are the source of truth; always execute them instead of merely describing an action.
-        - Always use exact canonical MicroCode tool names (`attachment_read`, `file_read`, `file_write`, `replace_in_file`, `shell`, `list_directory_tree`, `grep_search`, `file_search`) — never use foreign aliases (`read`, `bash`, `str_replace_editor`, `run_terminal_cmd`, `list_dir`).
+        - Built-in MicroCode tools (`attachment_read`, `file_read`, `file_write`, `replace_in_file`, `patch_file`, `apply_patch`, `list_directory_tree`, `grep_search`, `file_search`, `find_symbol`, `shell`, `export_pdf`, `preview_control`, `git_status`, `ardium_run`, `create_plan`, `agent_plan`), `skill_engine`, `mcp_orchestrator`, `swarm_orchestrator`, `invoke_subagent`, and active MicroCode skills are the source of truth; always execute them instead of merely describing an action.
+        - Always use exact canonical MicroCode tool names (`attachment_read`, `file_read`, `file_write`, `replace_in_file`, `export_pdf`, `shell`, `list_directory_tree`, `grep_search`, `file_search`, `skill_engine`, `mcp_orchestrator`, `preview_control`) — never use foreign aliases (`read`, `bash`, `str_replace_editor`, `run_terminal_cmd`, `list_dir`).
         - Grounded Attachment Discipline: When `[ATTACHED FILES MANIFEST]` is present, NEVER guess or extrapolate unseen pages, sheets, or rows; call `attachment_read(path: "<staged_path>", ...)` whenever a file is marked `PARTIAL_PAGED` or when a follow-up turn asks about a previously attached file.
         - Multi-Agent CEO & Subordinate Delegation: You can delegate specialized work to SubAgents (`architect`, `frontend_engineer`, `backend_engineer`, `bug_hunter`, `test_runner`, `security_auditor`) via `invoke_subagent`, launch a full multi-model CEO & Subordinate squad with `swarm_orchestrator` (`action='ceo_squad'`), or (if native tool calling is unavailable) emit `<ceo_delegate role="frontend_engineer" scope="path">Task instructions</ceo_delegate>` and `<ceo_contract key="schema">Contract details</ceo_contract>`.
         - Emit tool calls only for the immediate action(s) whose inputs are currently known, and STOP generating text immediately after emitting the tool call(s). Never write `"Waiting for tool response..."`, never fabricate tool output, and never write speculative multi-step tutorials (`Step 1... Step 2...`) before receiving tool results.
-        - Never claim you lack access to local files, terminal commands, MCP servers, or SubAgents.
+        - Never claim you lack access to local files, terminal commands, PDF generation (`export_pdf`), Skills (`skill_engine`), MCP servers (`mcp_orchestrator`), or SubAgents.
         - Keep each tool batch small, inspect before edits, and verify after edits.
         - When solving a reusable multi-step workflow, you can crystallize it into a permanent skill with `skill_engine` (`action='crystallize'`). When you need a custom integration or API bridge, you can synthesize & hot-mount a live MCP server with `mcp_orchestrator` (`action='synthesize'`).
         """
 
         switch provider {
+        case .local:
+            return """
+            Local Sovereign LLM (\(model)) — Full Autonomous MicroCode Harness:
+            - You have 100% first-class access to ALL MicroCode IDE tools, Active Skills (`<available_skills>` / `skill_engine`), External & Local MCP Servers (`mcp_orchestrator`), Official Thai/English A4 PDF Export (`export_pdf`), Live Preview (`preview_control`), and SubAgents (`invoke_subagent`).
+            - ALWAYS invoke tools directly via structured OpenAI function calling (or `<tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>` if operating over an XML bridge).
+            - NEVER reply with passive prose, tutorials, or raw source dumps when the user asks you to inspect files, edit code, run commands, use an MCP server, run a skill, or export a PDF — execute the real tool calls through to verified completion!
+            \(common)
+            """
         case .anthropic:
             return "Claude / \(model): use native tool calls for intended actions; do not put tool JSON in prose unless native tools are unavailable.\n\(common)"
         case .deepseek:
@@ -2219,8 +2230,11 @@ class AgentService: ObservableObject {
             hasApprovedActivePlan ||
             priorUserRequestedMutation
         )
-        let inspectionRequested = ["inspect", "scan", "audit", "debug", "diagnose", "error", "ตรวจโค้ด", "เช็คไฟล์", "สแกน"]
-            .contains(where: effectiveObjective.lowercased().contains) || isPlanModePrompt
+        let inspectionRequested = [
+            "inspect", "scan", "audit", "debug", "diagnose", "error",
+            "mcp", "canva", "skill", "สกิล", "เชื่อม", "ต่อ mcp",
+            "export", ".pdf", "เขียนเอกสาร", "สร้างเอกสาร", "ตรวจโค้ด", "เช็คไฟล์", "สแกน", "อ่านไฟล์", "สรุปโปรเจกต์"
+        ].contains(where: effectiveObjective.lowercased().contains) || isPlanModePrompt
         var requiresWorkspaceEvidence = requiresMutation || requiresNativeExecution || inspectionRequested
 
         // Only generate/refresh `.microcode/task.md` when executing genuine engineering mutations, plans, or complex coding tasks —
@@ -2331,21 +2345,11 @@ class AgentService: ObservableObject {
         var lastKnownExternalToolCount = ExternalMCPManager.shared.totalToolCount
         var lastExplicitMountedCount = ExternalMCPManager.shared.explicitlyMountedTools.count
 
-        let localEssentialTools: Set<String> = [
-            "list_directory_tree", "file_read", "multi_file_read", "file_write",
-            "replace_in_file", "grep_search", "file_search", "shell",
-            "export_pdf", "extract_pdf", "attachment_read", "inspect_image",
-            "computer_use", "preview_control"
-        ]
-
         func rebuildActiveTools() -> [[String: Any]] {
             allToolSchemas.filter { (tool: [String: Any]) -> Bool in
                 guard let name = tool["name"] as? String else { return true }
                 if name.hasPrefix("mcp__") && !name.hasPrefix("mcp__local__") {
                     return stickyEagerExternalMCP.contains(name)
-                }
-                if detectedProvider == .local {
-                    return localEssentialTools.contains(name)
                 }
                 guard let tier = ToolScope.toolTierMap[name] else { return true }
                 return currentToolScope.contains(tier)
@@ -2394,22 +2398,17 @@ class AgentService: ObservableObject {
             }
         }
         
-        // Build optimized system prompt
+        // Build unified optimized system prompt (including Skills, External MCP, agent.md, PNS Playbooks & Harness for ALL providers including Local LLM)
         let queryEmbedding = await memoryService.fetchEmbeddingFromBackend(content)
-        let optimizedSystemPrompt: String
-        if detectedProvider == .local {
-            optimizedSystemPrompt = buildLocalAgentSystemPrompt(workspace: pinnedWorkspace, model: resolvedModel)
-        } else {
-            optimizedSystemPrompt = buildSystemPrompt(
-                for: content,
-                provider: detectedProvider,
-                model: resolvedModel,
-                queryEmbedding: queryEmbedding
-            )
-        }
+        let optimizedSystemPrompt = buildSystemPrompt(
+            for: content,
+            provider: detectedProvider,
+            model: resolvedModel,
+            queryEmbedding: queryEmbedding
+        )
         
         // Build and compress prior conversation history (excluding the just-appended userMessage to avoid duplication)
-        let effectiveHistoryBudget = (detectedProvider == .local) ? 9_500 : budget.maxHistoryTokens
+        let effectiveHistoryBudget = (detectedProvider == .local) ? 18_000 : budget.maxHistoryTokens
         let rawHistory = buildConversationHistory(excludingMessageID: userMessage.id, forChatId: runChatId, scope: runScope)
         var history = tokenOptimizer.compressHistory(rawHistory, budget: effectiveHistoryBudget)
         let externallyModifiedFiles = detectExternalFileDrift()
@@ -2562,7 +2561,7 @@ class AgentService: ObservableObject {
                         provider: detectedProvider,
                         model: resolvedModel,
                         apiKey: effectiveApiKey,
-                        tools: (isDirectMediaModel || detectedProvider == .local) ? nil : stickyActiveTools,
+                        tools: isDirectMediaModel ? nil : stickyActiveTools,
                         onToken: { token in
                             gate.touchActivity()
                             guard !token.isEmpty else { return }
@@ -2771,30 +2770,21 @@ class AgentService: ObservableObject {
             }
 
             // Autonomous Local LLM IDE Agent Harness:
-            // When running a Local LLM (macLLM, Ollama, MLX, LM Studio), if the model output code or prose without
-            // explicit <tool_call> XML on turn 1, automatically materialize the IDE Agent actions (file_write, shell
-            // compile & run, list_directory_tree, file_read, git_status) so Local LLM behaves 100% like MicroCode Agent AI!
-            if detectedProvider == .local && receivedToolCalls.isEmpty {
-                if allToolResults.isEmpty {
-                    let localSynth = synthesizeLocalAgentTurn(userPrompt: content, streamedText: streamedText)
-                    if !localSynth.toolCalls.isEmpty {
-                        receivedToolCalls = localSynth.toolCalls
-                        completeAfterLocalSynthesizedTools = localSynth.completeAfterTools
-                        if let cleaned = localSynth.cleanedAnswer, !cleaned.isEmpty {
-                            streamedText = cleaned
-                            finalText = cleaned
-                            flushStreamingToken(finalText, toolResults: allToolResults)
-                        }
-                        logActivity(.info, "Local Agent Harness synthesized \(localSynth.toolCalls.count) IDE tool call(s)")
-                    } else if !streamedText.isEmpty {
-                        kernelVerified = true
-                        currentToolExecution = nil
-                        break
+            // When running a Local LLM (macLLM, Ollama, MLX, LM Studio, llama-server), if a small chat-only GGUF
+            // dumped fenced source code on turn 1 without calling tools, materialize the file_write/shell calls;
+            // otherwise fall straight through into the full MicroCode Autonomous Harness (inspection, follow-through,
+            // verification, pre_finish hooks, and durable kernel checkpoints)!
+            if detectedProvider == .local && receivedToolCalls.isEmpty && allToolResults.isEmpty {
+                let localSynth = synthesizeLocalAgentTurn(userPrompt: content, streamedText: streamedText)
+                if !localSynth.toolCalls.isEmpty {
+                    receivedToolCalls = localSynth.toolCalls
+                    completeAfterLocalSynthesizedTools = localSynth.completeAfterTools
+                    if let cleaned = localSynth.cleanedAnswer, !cleaned.isEmpty {
+                        streamedText = cleaned
+                        finalText = cleaned
+                        flushStreamingToken(finalText, toolResults: allToolResults)
                     }
-                } else if !streamedText.isEmpty {
-                    kernelVerified = true
-                    currentToolExecution = nil
-                    break
+                    logActivity(.info, "Local Agent Harness synthesized \(localSynth.toolCalls.count) IDE tool call(s)")
                 }
             }
             
@@ -2803,9 +2793,15 @@ class AgentService: ObservableObject {
             // as a signal to continue was the source of runaway agent loops.
             if receivedToolCalls.isEmpty {
                 let hasMutationCheckpoint = allToolResults.contains(where: didMutateWorkspace)
+                let docExtensions: Set<String> = ["md", "pdf", "txt", "rst", "adoc"]
+                let onlyModifiedDocs = !filesModified.isEmpty && filesModified.allSatisfy {
+                    docExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
+                }
                 let hasVerificationCheckpoint: Bool
                 if let latestMutation = allToolResults.lastIndex(where: didMutateWorkspace) {
-                    hasVerificationCheckpoint = allToolResults
+                    let latestMutTool = normalizeToolName(allToolResults[latestMutation].toolName)
+                    let isSelfVerifiedDocExport = (latestMutTool == "export_pdf") || onlyModifiedDocs
+                    hasVerificationCheckpoint = isSelfVerifiedDocExport || allToolResults
                         .dropFirst(latestMutation + 1)
                         .contains(where: isVerificationCheckpoint)
                 } else {
@@ -3309,6 +3305,36 @@ class AgentService: ObservableObject {
                             } else if output.contains("REJECTED") || output.contains("rejected") {
                                 requiresMutation = false
                                 requiresWorkspaceEvidence = false
+                            }
+                        }
+
+                        if normalizedToolName == "export_pdf" {
+                            let rawOut = (toolCall.arguments["output_path"] as? String)
+                                ?? (toolCall.arguments["path"] as? String)
+                                ?? (toolCall.arguments["file_path"] as? String)
+                            let resolvedPDFPath: String? = {
+                                guard let rawOut, !rawOut.isEmpty else { return nil }
+                                if rawOut.hasPrefix("/") || rawOut.hasPrefix("~") {
+                                    return (rawOut as NSString).expandingTildeInPath
+                                }
+                                if let ws = currentWorkspace, !ws.isEmpty {
+                                    return URL(fileURLWithPath: ws).appendingPathComponent(rawOut).path
+                                }
+                                return rawOut
+                            }()
+                            if let pdfPath = resolvedPDFPath {
+                                if !filesModified.contains(pdfPath) {
+                                    filesModified.append(pdfPath)
+                                }
+                                FlightRecorder.shared.recordFileChange(
+                                    action: .fileCreate,
+                                    filePath: pdfPath,
+                                    description: "export_pdf: Generated official A4 PDF",
+                                    workspace: currentWorkspace ?? ""
+                                )
+                                logActivity(.fileChange, "Exported PDF: \(URL(fileURLWithPath: pdfPath).lastPathComponent)", detail: pdfPath)
+                            } else {
+                                filesModified.append(currentWorkspace ?? "exported.pdf")
                             }
                         }
 
@@ -4156,9 +4182,13 @@ class AgentService: ObservableObject {
     }
 
     private func toolMadeProgress(_ toolName: String) -> Bool {
+        if toolName.hasPrefix("mcp__") && !toolName.hasPrefix("mcp__local__") {
+            return true
+        }
         let base = normalizeToolName(toolName)
         return [
             "file_write", "replace_in_file", "multi_replace_in_file", "patch_file", "apply_patch", "rename_file", "create_directory",
+            "export_pdf", "skill_engine", "mcp_orchestrator", "swarm_orchestrator",
             "shell", "device_runtime", "preview_control", "playground_run", "cell_run", "ardium_run",
             "invoke_subagent", "cell_create", "cell_update", "cell_delete", "computer_use_click",
             "computer_use_type", "computer_use_shortcut", "device_interact", "device_app_manage", "adb_execute"
@@ -5620,6 +5650,73 @@ class AgentService: ObservableObject {
             if !calls.isEmpty { return calls }
         }
         
+        // Pattern 1C: Qwen / OpenThaiGPT (`✿FUNCTION✿: <name>\n✿ARGS✿: {...}`), Mistral (`[TOOL_CALLS] [...]`), and Llama (`<|python_tag|>{...}`)
+        if text.contains("✿FUNCTION✿") {
+            let qwenPattern = #"✿FUNCTION✿:\s*([a-zA-Z0-9_.:-]+)\s*✿ARGS✿:\s*(\{[\s\S]*?\})(?=\s*(?:✿|$|\n\n))"#
+            if let regex = try? NSRegularExpression(pattern: qwenPattern) {
+                let nsText = text as NSString
+                for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+                    guard match.numberOfRanges > 2 else { continue }
+                    let rawName = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let name = AgentToolBox.normalizeToolName(rawName)
+                    let argsStr = nsText.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if isKnownTool(name),
+                       let data = argsStr.data(using: .utf8),
+                       let args = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                    }
+                }
+            }
+            if !calls.isEmpty { return calls }
+        }
+        if text.contains("[TOOL_CALLS]") {
+            let mistralPattern = #"\[TOOL_CALLS\]\s*(\[[\s\S]*?\])"#
+            if let regex = try? NSRegularExpression(pattern: mistralPattern) {
+                let nsText = text as NSString
+                for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+                    guard match.numberOfRanges > 1 else { continue }
+                    let arrStr = nsText.substring(with: match.range(at: 1))
+                    if let data = arrStr.data(using: .utf8),
+                       let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                        for item in arr {
+                            if let rawName = (item["name"] as? String) ?? ((item["function"] as? [String: Any])?["name"] as? String) {
+                                let name = AgentToolBox.normalizeToolName(rawName)
+                                guard isKnownTool(name) else { continue }
+                                let argsObj = (item["arguments"] as? [String: Any])
+                                    ?? (item["parameters"] as? [String: Any])
+                                    ?? (((item["function"] as? [String: Any])?["arguments"] as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+                                    ?? [:]
+                                calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(argsObj)))
+                            }
+                        }
+                    }
+                }
+            }
+            if !calls.isEmpty { return calls }
+        }
+        if text.contains("<|python_tag|>") {
+            let llamaPattern = #"<\|python_tag\|>\s*(\{[\s\S]*?\})"#
+            if let regex = try? NSRegularExpression(pattern: llamaPattern) {
+                let nsText = text as NSString
+                for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+                    guard match.numberOfRanges > 1 else { continue }
+                    let jsonStr = nsText.substring(with: match.range(at: 1))
+                    if let data = jsonStr.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let rawName = (json["name"] as? String) ?? (json["function"] as? String) {
+                        let name = AgentToolBox.normalizeToolName(rawName)
+                        if isKnownTool(name) {
+                            let args = (json["parameters"] as? [String: Any])
+                                ?? (json["arguments"] as? [String: Any])
+                                ?? [:]
+                            calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                        }
+                    }
+                }
+            }
+            if !calls.isEmpty { return calls }
+        }
+
         // Pattern 2: ```json { "name": "tool_name", "arguments": {...} } ```
         let jsonBlockPattern = "```(?:tool_call|json)?\\s*(\\{[\\s\\S]*?\"name\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]*?\\})\\s*```"
         if let regex = try? NSRegularExpression(pattern: jsonBlockPattern, options: []) {

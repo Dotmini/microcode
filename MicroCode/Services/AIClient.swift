@@ -781,6 +781,30 @@ enum AIStructuredTurnCodec {
                 options: .regularExpression
             )
         }
+        if result.contains("✿FUNCTION✿") || result.contains("✿RESULT✿") {
+            result = result.replacingOccurrences(
+                of: #"✿FUNCTION✿:\s*[a-zA-Z0-9_.:-]+\s*✿ARGS✿:\s*\{[\s\S]*?\}(?=\s*(?:✿|$|\n\n))"#,
+                with: "",
+                options: .regularExpression
+            )
+            result = result.replacingOccurrences(
+                of: #"✿(?:FUNCTION|ARGS|RESULT|RETURN)✿[\s\S]*$"#,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        if result.contains("[TOOL_CALLS]") || result.contains("<|python_tag|>") {
+            result = result.replacingOccurrences(
+                of: #"\[TOOL_CALLS\]\s*\[[\s\S]*?\]"#,
+                with: "",
+                options: .regularExpression
+            )
+            result = result.replacingOccurrences(
+                of: #"<\|python_tag\|>\s*\{[\s\S]*?\}"#,
+                with: "",
+                options: .regularExpression
+            )
+        }
         if result.range(of: "waiting for tool response", options: .caseInsensitive) != nil {
             result = result.replacingOccurrences(
                 of: #"(?mi)^[ \t]*[*_]*waiting for tool response\.{0,3}[*_]*[ \t]*\r?\n?"#,
@@ -793,9 +817,14 @@ enum AIStructuredTurnCodec {
 
     static func stripThoughtTags(_ text: String) -> String {
         var cleaned = stripToolCallArtifacts(text)
-        if cleaned.contains("<thought>") {
+        if cleaned.contains("<thought>") || cleaned.contains("<think>") {
             cleaned = cleaned.replacingOccurrences(
-                of: "<thought>[\\s\\S]*?</thought>",
+                of: "<(?:thought|think)>[\\s\\S]*?</(?:thought|think)>",
+                with: "",
+                options: .regularExpression
+            )
+            cleaned = cleaned.replacingOccurrences(
+                of: "<(?:thought|think)>[\\s\\S]*$",
                 with: "",
                 options: .regularExpression
             )
@@ -4641,6 +4670,25 @@ final class AIClient: ObservableObject {
     }
     
     // MARK: - OpenAI/DeepSeek Streaming
+
+    /// Remembers endpoints/models whose Jinja template rejects native OpenAI `tools` so subsequent turns
+    /// automatically use the `<tool_call>` XML bridge without incurring an extra HTTP 400 round-trip.
+    private enum XMLToolBridgeRegistry {
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var keys: Set<String> = []
+
+        static func contains(_ key: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return keys.contains(key)
+        }
+
+        static func insert(_ key: String) {
+            lock.lock()
+            keys.insert(key)
+            lock.unlock()
+        }
+    }
     
     func streamOpenAI(
         prompt: String,
@@ -4654,6 +4702,7 @@ final class AIClient: ObservableObject {
         maxTokensOverride: Int? = nil,
         omitToolChoice: Bool = false,
         forceDisableVision: Bool = false,
+        forceXMLToolBridge: Bool = false,
         customEndpointURL: URL? = nil,
         customSession: URLSession? = nil,
         customHeadersHook: ((inout URLRequest) -> Void)? = nil,
@@ -4702,14 +4751,52 @@ final class AIClient: ObservableObject {
         }
         EnterpriseAIAuthService.shared.applyEnterpriseHeaders(to: &request)
         
+        let modelBridgeKey = "\(baseURL.lowercased())::\(model.lowercased())"
+        let useXMLToolBridge = forceXMLToolBridge || XMLToolBridgeRegistry.contains(modelBridgeKey)
+        var effectiveSystemPrompt = systemPrompt ?? ""
+        if useXMLToolBridge, let tools = tools, !tools.isEmpty {
+            let xmlToolBlock = Self.buildAiPassToolSystemInstruction(tools)
+            effectiveSystemPrompt = effectiveSystemPrompt.isEmpty
+                ? xmlToolBlock
+                : (effectiveSystemPrompt + "\n\n" + xmlToolBlock)
+        }
+
         var messages: [[String: Any]] = []
-        if let sys = systemPrompt, !sys.isEmpty { messages.append(["role": "system", "content": sys]) }
+        if !effectiveSystemPrompt.isEmpty { messages.append(["role": "system", "content": effectiveSystemPrompt]) }
         
         var activeAssistantToolCallIds: Set<String> = []
         func appendOpenAITurn(role: String, content: String) {
             let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             if let structured = AIStructuredTurnCodec.decode(trimmed) {
+                if useXMLToolBridge {
+                    switch structured {
+                    case .assistantToolCalls(let text, let toolCalls):
+                        let cleanText = AIStructuredTurnCodec.stripThoughtTags(text)
+                        let xmlCalls = toolCalls.map { tc -> String in
+                            let payload: [String: Any] = [
+                                "name": AgentToolBox.normalizeToolName(tc.name),
+                                "arguments": tc.arguments
+                            ]
+                            let jsonData = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data("{}".utf8)
+                            let jsonStr = String(data: jsonData, encoding: .utf8) ?? "{}"
+                            return "<tool_call>\(jsonStr)</tool_call>"
+                        }.joined(separator: "\n")
+                        let combined = [cleanText, xmlCalls].filter { !$0.isEmpty }.joined(separator: "\n")
+                        if !combined.isEmpty {
+                            messages.append(["role": "assistant", "content": combined])
+                        }
+                    case .toolResults(let results, let directive):
+                        let xmlResults = results.map { res in
+                            "<tool_response name=\"\(res.name)\">\n\(res.output)\n</tool_response>"
+                        }.joined(separator: "\n\n")
+                        let combined = [xmlResults, directive].filter { !$0.isEmpty }.joined(separator: "\n\n")
+                        if !combined.isEmpty {
+                            messages.append(["role": "user", "content": combined])
+                        }
+                    }
+                    return
+                }
                 switch structured {
                 case .assistantToolCalls(let text, let toolCalls):
                     let cleanText = AIStructuredTurnCodec.stripThoughtTags(text)
@@ -4848,17 +4935,17 @@ final class AIClient: ObservableObject {
         let isLocalTarget = StreamableAIProvider.isLocalEndpoint(baseURL)
         // TokenMe enforces a tiny ~512-token default cap (shared with `reasoning`) when `max_tokens` is omitted,
         // and supports up to 32,768 output tokens across all chat models. Always send an explicit budget.
-        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : (isLocalTarget ? (attachments.isEmpty ? 2048 : 4096) : maxOutputTokens(for: effectiveModel)))
+        let requestedMaxTokens = maxTokensOverride ?? (isTokenMe ? 32768 : (isLocalTarget ? 4096 : maxOutputTokens(for: effectiveModel)))
         if isOpenAIReasoning {
             body["max_completion_tokens"] = requestedMaxTokens
         } else if isReasoningNoTemp {
             body["max_tokens"] = requestedMaxTokens
         } else {
-            body["temperature"] = 0.7
+            body["temperature"] = isLocalTarget ? 0.35 : 0.7
             body["max_tokens"] = requestedMaxTokens
         }
         
-        if let tools = tools, !tools.isEmpty, !baseURL.contains("perplexity.ai") {
+        if !useXMLToolBridge, let tools = tools, !tools.isEmpty, !baseURL.contains("perplexity.ai") {
             let sanitizedTools = tools.map { sanitizeToolSchemaForStandardJSONSchema($0) }
             body["tools"] = sanitizedTools.map { ["type": "function", "function": $0] as [String: Any] }
             if !isReasoningNoTemp && !omitToolChoice {
@@ -5146,9 +5233,15 @@ final class AIClient: ObservableObject {
                 lowerErrText.contains("tool calling is not supported") ||
                 lowerErrText.contains("tool use is not supported") ||
                 lowerErrText.contains("function calling is not supported") ||
-                lowerErrText.contains("functions are not supported")
-            if (code == 400 || code == 422), let tools = tools, !tools.isEmpty, modelExplicitlyLacksToolSupport {
-                NSLog("⚠️ [streamOpenAI] HTTP %d model explicitly lacks native tool calling on %@ (%@) — retrying without server-side tools", code, effectiveModel, baseURL)
+                lowerErrText.contains("functions are not supported") ||
+                (isLocalTarget && (lowerErrText.contains("jinja") || lowerErrText.contains("template") || lowerErrText.contains("tool")))
+            if (code == 400 || code == 422 || (isLocalTarget && code == 500)),
+               !useXMLToolBridge,
+               let tools = tools,
+               !tools.isEmpty,
+               modelExplicitlyLacksToolSupport {
+                XMLToolBridgeRegistry.insert(modelBridgeKey)
+                NSLog("⚠️ [streamOpenAI] HTTP %d native tool template unsupported on %@ (%@) — switching to <tool_call> XML Harness bridge with full tools preserved", code, effectiveModel, baseURL)
                 try await streamOpenAI(
                     prompt: prompt,
                     attachments: attachments,
@@ -5157,9 +5250,14 @@ final class AIClient: ObservableObject {
                     model: model,
                     apiKey: apiKey,
                     baseURL: baseURL,
-                    tools: nil,
+                    tools: tools,
                     maxTokensOverride: maxTokensOverride,
                     omitToolChoice: true,
+                    forceDisableVision: forceDisableVision,
+                    forceXMLToolBridge: true,
+                    customEndpointURL: customEndpointURL,
+                    customSession: customSession,
+                    customHeadersHook: customHeadersHook,
                     onToken: onToken,
                     onToolCall: onToolCall
                 )

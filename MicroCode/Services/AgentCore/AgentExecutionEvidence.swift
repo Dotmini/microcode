@@ -70,6 +70,7 @@ struct AgentExecutionEvidence {
         let scaffoldPhrases = [
             "สร้างโปรเจกต์", "สร้างเว็บ", "สร้างหน้าเว็บ", "สร้างแอป", "สร้างไฟล์", "เขียนโค้ด", "เขียนโปรแกรม",
             "ทำเว็บ", "ทำหน้าเว็บ", "ทำแอป", "ทำระบบ", "ขึ้นโปรเจกต์",
+            "เขียนเอกสาร", "สร้างเอกสาร", "สร้าง pdf", "ทำ pdf", "export เป็น pdf", "export pdf",
             "create a ", "create new ", "build a ", "scaffold", "initialize project", "init project",
             "generate index.html", "write index.html", "new file", "implement a "
         ]
@@ -166,12 +167,13 @@ struct AgentExecutionEvidence {
             }
             return true
         }
-        return ["rename_file", "create_directory", "delete_file",
+        return ["export_pdf", "rename_file", "create_directory", "delete_file",
                 "cell_create", "cell_update", "cell_delete"].contains(base)
     }
 
     static func verifies(name: String, arguments: [String: Any]) -> Bool {
         let base = normalize(name)
+        if base == "export_pdf" { return true }
         if base == "shell" { return (shellVerifies(arguments["command"] as? String ?? "") || launches(name: name, arguments: arguments)) && !mutates(name: name, arguments: arguments) }
         if base == "device_runtime" {
             return ["build", "test", "run", "diagnostics"].contains((arguments["operation"] as? String ?? "").lowercased())
