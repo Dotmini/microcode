@@ -51,6 +51,12 @@ struct AIProviderBrandIcon: View {
             return "codex"
         case "gemini", "google", "google_gemini":
             return "gemini"
+        case "google_cloud", "gcp", "vertex", "vertex_ai", "vertex_gemini":
+            return "google_cloud"
+        case "aws", "bedrock", "aws_bedrock", "amazon_bedrock", "amazon":
+            return "aws"
+        case "azure", "azure_openai", "microsoft_azure", "ai_foundry", "foundry":
+            return "azure"
         case "gemini_cli", "geminicli":
             return "gemini_cli"
         case "opencode", "open_code":
@@ -127,6 +133,9 @@ struct AIProviderBrandIcon: View {
             }
             if rawKey.contains("9router") { return "9router" }
             if rawKey.contains("openrouter") { return "openrouter" }
+            if rawKey.contains("vertex") || rawKey.contains("google_cloud") || rawKey == "gcp" { return "google_cloud" }
+            if rawKey.contains("bedrock") || rawKey == "aws" || rawKey.hasPrefix("aws_") { return "aws" }
+            if rawKey.contains("azure") || rawKey.contains("foundry") { return "azure" }
             if rawKey.contains("claude") { return "claude" }
             if rawKey.contains("anthropic") { return "anthropic" }
             if rawKey.contains("gemini_cli") { return "gemini_cli" }
@@ -168,6 +177,21 @@ struct AIProviderBrandIcon: View {
             iconCache[resolvedKey] = img
             return img
         }
+        if resolvedKey == "google_cloud" {
+            let img = makeGoogleCloudBrandImage()
+            iconCache[resolvedKey] = img
+            return img
+        }
+        if resolvedKey == "aws" {
+            let img = makeAWSBrandImage()
+            iconCache[resolvedKey] = img
+            return img
+        }
+        if resolvedKey == "azure" {
+            let img = makeAzureBrandImage()
+            iconCache[resolvedKey] = img
+            return img
+        }
         guard let base64 = base64Data[resolvedKey],
               let data = Data(base64Encoded: base64),
               let img = NSImage(data: data) else {
@@ -179,7 +203,7 @@ struct AIProviderBrandIcon: View {
     
     static func pngData(for provider: String) -> Data? {
         let resolvedKey = resolveKey(for: provider)
-        if resolvedKey == "tokenme" || resolvedKey == "perch",
+        if ["tokenme", "perch", "google_cloud", "aws", "azure"].contains(resolvedKey),
            let img = image(for: resolvedKey),
            let tiff = img.tiffRepresentation,
            let rep = NSBitmapImageRep(data: tiff),
@@ -191,6 +215,76 @@ struct AIProviderBrandIcon: View {
             return data
         }
         return nil
+    }
+
+    /// Resolves the authentic model-family brand logo key for any live model ID.
+    static func modelBrandKey(for modelId: String, fallback: String = "microcode") -> String {
+        let l = modelId.lowercased()
+        if l.contains("gemini") || l.contains("gemma") { return "gemini" }
+        if l.contains("claude") || l.contains("anthropic") { return "claude" }
+        if l.contains("gpt") || l.hasPrefix("o1") || l.hasPrefix("o3") || l.hasPrefix("o4") || l.contains("codex") { return "openai" }
+        if l.contains("deepseek") { return "deepseek" }
+        if l.contains("qwen") { return "qwen" }
+        if l.contains("glm") || l.contains("zhipu") { return "glm" }
+        if l.contains("grok") { return "grok" }
+        if l.contains("mistral") || l.contains("codestral") || l.contains("devstral") { return "mistral" }
+        if l.contains("kimi") || l.contains("moonshot") { return "kimi" }
+        if l.contains("nova") || l.contains("amazon.") { return "aws" }
+        if l.contains("omni") || l.contains("dotmini") { return "microcode" }
+        return resolveKey(for: fallback)
+    }
+
+    /// Official Google Cloud 4-color cloud logomark on a dark graphite badge.
+    private static func makeGoogleCloudBrandImage() -> NSImage {
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+          <rect x="2" y="2" width="60" height="60" rx="14" fill="#15161A" stroke="#2F3138" stroke-width="2"/>
+          <path fill="#EA4335" d="M38.9 23.6l4.6-4.6.3-1.9C39.6 13.3 33.6 11.7 28 13.3c-5.6 1.6-9.8 6.1-11 11.8l1.6-.2 6.5-1.1.5-.6c2.9-3.2 7.8-3.6 11.3-.9l2 .3z"/>
+          <path fill="#4285F4" d="M49.1 25.1c-1-3.7-3.1-7-6.1-9.3l-5.7 5.7c2.4 1.9 3.7 4.9 3.6 8v1c3 0 5.5 2.5 5.5 5.5S43.9 41.5 40.9 41.5H30l-1.1 1.2v5.6l1.1 1h10.9c6.8 0 12.6-5.2 13.2-12 .4-5.1-2-10-5-12.2z"/>
+          <path fill="#34A853" d="M19.1 49.3H30v-7.8H19.1c-.8 0-1.6-.2-2.3-.5l-1.6.5-4.6 4.6-.4 1.6c2.5 1.9 5.6 1.6 8.9 1.6z"/>
+          <path fill="#FBBC05" d="M19.1 23.2c-6.8 0-12.5 5.1-13.2 11.9-.5 5 1.9 9.9 6.2 12.6l6.7-6.7c-2.8-1.3-4.1-4.6-2.8-7.4 1.3-2.8 4.6-4.1 7.4-2.8l2.9-2.9-4.3-4.3c-.9-.3-1.9-.4-2.9-.4z"/>
+        </svg>
+        """
+        if let img = NSImage(data: Data(svg.utf8)) {
+            img.size = NSSize(width: 64, height: 64)
+            return img
+        }
+        return NSImage(size: NSSize(width: 64, height: 64))
+    }
+
+    /// Official AWS logomark + orange smile curve on a dark graphite badge.
+    private static func makeAWSBrandImage() -> NSImage {
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+          <rect x="2" y="2" width="60" height="60" rx="14" fill="#15161A" stroke="#2F3138" stroke-width="2"/>
+          <path fill="#FFFFFF" d="M19.8 31.1c0 .8.1 1.5.3 2 .2.5.5 1 .9 1.6.1.2.2.4.2.6 0 .3-.2.5-.5.8l-1.6 1.1c-.2.2-.5.2-.7.2-.3 0-.6-.1-.8-.4-.4-.4-.7-.9-.9-1.4-.2-.5-.5-1.1-.8-1.8-1.9 2.2-4.3 3.3-7.2 3.3-2.1 0-3.7-.6-4.9-1.8-1.2-1.2-1.8-2.8-1.8-4.7 0-2.1.7-3.8 2.2-5 1.5-1.2 3.5-1.9 6-1.9.8 0 1.7.1 2.6.2.9.1 1.8.4 2.8.6v-1.9c0-2-.4-3.4-1.2-4.2-.8-.8-2.3-1.2-4.3-1.2-.9 0-1.9.1-2.9.4-1 .3-2 .6-2.9 1-.4.2-.7.3-.9.3-.4 0-.6-.3-.6-.9v-1.4c0-.5.1-.8.2-1 .2-.2.5-.4.9-.6 1-.5 2.1-.9 3.4-1.2 1.3-.3 2.7-.5 4.2-.5 3.2 0 5.5.7 7 2.2 1.5 1.5 2.2 3.7 2.2 6.7v8.9zm-10.1 2.9c.8 0 1.7-.2 2.6-.5.9-.3 1.7-.9 2.3-1.8.4-.5.7-1.1.8-1.7.1-.6.2-1.4.2-2.4v-1.2c-.7-.2-1.5-.3-2.3-.4-.8-.1-1.6-.2-2.3-.2-1.7 0-2.9.3-3.7 1-.8.7-1.2 1.6-1.2 2.9 0 1.2.3 2.1.9 2.7.6.6 1.5.9 2.7.9zm18.7 2.8c-.4 0-.7-.1-.9-.3-.2-.2-.4-.6-.6-1.1l-5-16.5c-.2-.5-.2-.9-.2-1.1 0-.4.2-.7.7-.7h2.2c.4 0 .7.1.9.3.2.2.4.6.5 1.1l3.6 14.1 3.3-14.1c.1-.5.3-.9.5-1.1.2-.2.5-.3 1-.3h1.8c.4 0 .8.1 1 .3.2.2.4.6.5 1.1l3.4 14.3 3.7-14.3c.2-.5.3-.9.5-1.1.2-.2.5-.3.9-.3h2.1c.4 0 .7.2.7.7 0 .1 0 .3-.1.5 0 .2-.1.4-.2.7l-5.1 16.5c-.2.5-.4.9-.6 1.1-.2.2-.5.3-.9.3h-1.9c-.4 0-.8-.1-1-.3-.2-.2-.4-.6-.5-1.2l-3.3-13.8-3.3 13.7c-.1.6-.3 1-.5 1.2-.2.2-.6.3-1 .3h-1.9zm27.4.6c-1.3 0-2.6-.2-3.8-.5-1.2-.3-2.1-.6-2.7-1-.4-.2-.6-.5-.7-.7-.1-.2-.2-.5-.2-.9v-1.3c0-.6.2-.9.6-.9.2 0 .3 0 .5.1.2.1.4.2.7.3.9.4 1.9.7 2.9.9 1 .2 2 .3 2.9.3 1.6 0 2.8-.3 3.6-.8.8-.6 1.2-1.3 1.2-2.3 0-.7-.2-1.2-.7-1.7-.5-.5-1.3-.9-2.6-1.3l-3.7-1.2c-1.9-.6-3.2-1.4-4.1-2.5-.9-1.1-1.3-2.3-1.3-3.7 0-1.1.2-2 .7-2.9.5-.8 1.1-1.6 1.9-2.1.8-.6 1.7-1 2.8-1.3 1.1-.3 2.2-.4 3.4-.4.6 0 1.2 0 1.8.1.6.1 1.2.2 1.8.3.5.1 1 .3 1.5.5.5.2.8.3 1.1.5.3.2.6.4.7.6.1.2.2.5.2.9v1.2c0 .6-.2.9-.6.9-.2 0-.6-.1-1-.3-1.5-.7-3.2-1-5-1-1.5 0-2.6.2-3.4.7-.8.5-1.2 1.2-1.2 2.2 0 .7.2 1.3.7 1.7.5.5 1.5.9 2.8 1.3l3.6 1.1c1.8.6 3.2 1.4 4 2.4.8 1 1.2 2.2 1.2 3.6 0 1.1-.2 2.1-.7 3-.5.9-1.1 1.7-2 2.3-.8.6-1.9 1.1-3 1.4-1.2.4-2.5.5-3.9.5z"/>
+          <path fill="#FF9900" d="M51.8 46.2c-5.9 4.3-14.4 6.6-21.8 6.6-10.3 0-19.6-3.8-26.6-10.1-.6-.5-.1-1.2.6-.8 7.6 4.4 16.9 7.1 26.6 7.1 6.5 0 13.7-1.4 20.3-4.2 1-.4 1.8.6.9 1.4z"/>
+          <path fill="#FF9900" d="M54.3 43.3c-.8-1-5-.5-6.9-.2-.6.1-.7-.4-.1-.8 3.4-2.4 8.9-1.7 9.6-.9.7.8-.2 6.5-3.4 9.2-.5.4-1 .2-.8-.3.7-1.9 2.3-6 1.6-7z"/>
+        </svg>
+        """
+        if let img = NSImage(data: Data(svg.utf8)) {
+            img.size = NSSize(width: 64, height: 64)
+            return img
+        }
+        return NSImage(size: NSSize(width: 64, height: 64))
+    }
+
+    /// Official Microsoft Azure geometric 'A' ribbon logomark on a dark graphite badge.
+    private static func makeAzureBrandImage() -> NSImage {
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+          <rect x="2" y="2" width="60" height="60" rx="14" fill="#15161A" stroke="#2F3138" stroke-width="2"/>
+          <path fill="#3CCBF4" d="M25.6 13.5h12.1L24.9 50.1c-.4 1.2-1.5 2-2.8 2h-9.3c-1.6 0-2.8-1.6-2.2-3.1l12.3-33.5c.4-1.2 1.5-2 2.7-2z"/>
+          <path fill="#0078D4" d="M45.8 37.6H26.4c-.9 0-1.4 1.1-.7 1.7l12.4 11.6c.6.5 1.3.8 2.1.8h10.9l-5.3-14.1z"/>
+          <path fill="#114A8B" d="M25.6 13.5c-1.3 0-2.4.8-2.8 2L10.6 48.9c-.6 1.6.6 3.2 2.2 3.2h9.6c1.1-.2 2-.9 2.5-1.9l2.4-7.1 8.7 8.1c.6.5 1.3.8 2 .8h10.8l-4.7-13.5-13.9.1 8.5-25.1H25.6z" opacity="0.35"/>
+          <path fill="#50E6FF" d="M39.9 15.5c-.4-1.2-1.5-2-2.8-2h-11c1.3 0 2.4.8 2.8 2l12.3 33.5c.6 1.5-.6 3.1-2.2 3.1h11c1.6 0 2.8-1.6 2.2-3.1L39.9 15.5z"/>
+        </svg>
+        """
+        if let img = NSImage(data: Data(svg.utf8)) {
+            img.size = NSSize(width: 64, height: 64)
+            return img
+        }
+        return NSImage(size: NSSize(width: 64, height: 64))
     }
 
     /// Official TokenMe (tokenme.limited / 9ARM) vector logomark rendered on an obsidian badge.

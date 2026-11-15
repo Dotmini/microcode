@@ -2,12 +2,10 @@
 //  EnterpriseConnectHubView.swift
 //  MicroCode
 //
-//  1-Click Enterprise API Hub UI:
-//  - Smart Paste (URL / cURL / .env / Service Account JSON / microcode://enterprise)
-//  - Zero-Key CLI SSO Auto-Connect (gcloud / az / aws sso)
-//  - Multi-Profile Management (Vertex AI, Gemini Enterprise Agentspace, Azure OpenAI,
-//    AWS Bedrock, LiteLLM / Kong / Corporate VPC Gateways, Anthropic Enterprise, Dotmini ZDR)
-//  - Live /models Discovery, Custom Keychain Headers, Corporate Proxy, & 1-Click Team Share.
+//  Zero-Config Enterprise & Cloud AI Connect Hub:
+//  - Pure Monochrome / Graphite executive aesthetic (zero garish colors or generic AI icons)
+//  - Authentic Official Brand Logos (Google Cloud, Gemini, Claude, OpenAI, AWS, Microsoft Azure, Dotmini)
+//  - Automatic SSO detection, smart active GCP project resolution, and 100% live upstream model catalog
 //
 
 import SwiftUI
@@ -15,903 +13,1190 @@ import AppKit
 import UniformTypeIdentifiers
 
 struct EnterpriseConnectHubView: View {
+    @EnvironmentObject var appState: AppState
     @ObservedObject private var enterprise = EnterpriseAIAuthService.shared
 
-    var onModelOrProfileChanged: ((String, String) -> Void)? = nil
+    var onSelectModel: ((String, String) -> Void)?
 
-    @State private var smartPasteInput: String = ""
-    @State private var primarySecretInput: String = ""
-    @State private var secondarySecretInput: String = ""
+    @State private var connectingDialect: EnterpriseProviderDialect? = nil
+    @State private var expandedSetupDialect: EnterpriseProviderDialect? = nil
+    @State private var inlineCredentialInput: String = ""
+    @State private var modelSearchQuery: String = ""
+    @State private var modelFamilyFilter: String = "all"
+    @State private var showAdvancedSection: Bool = false
     @State private var customModelDraft: String = ""
-    @State private var newHeaderKey: String = ""
-    @State private var newHeaderValue: String = ""
-    @State private var newHeaderIsSecret: Bool = true
-    @State private var showAdvancedHeadersAndProxy: Bool = false
-    @State private var showGovernanceSection: Bool = false
-    @State private var toastBanner: String = ""
+    @State private var showHeadersSheet: Bool = false
+    @State private var showPoliciesSheet: Bool = false
+    @State private var copiedTeamLinkFeedback: Bool = false
 
-    private var activeProfileBinding: Binding<EnterpriseAPIProfile>? {
-        guard let idx = enterprise.profiles.firstIndex(where: { $0.id == enterprise.activeProfileID })
-                ?? enterprise.profiles.indices.first else {
-            return nil
-        }
-        let targetId = enterprise.profiles[idx].id
-        return Binding<EnterpriseAPIProfile>(
-            get: {
-                enterprise.profiles.first(where: { $0.id == targetId }) ?? enterprise.profiles[0]
-            },
-            set: { updated in
-                enterprise.upsertProfile(updated, makeActive: true)
-            }
-        )
+    init(onSelectModel: ((String, String) -> Void)? = nil) {
+        self.onSelectModel = onSelectModel
+    }
+
+    private static let primaryProviders: [EnterpriseProviderDialect] = [
+        .vertexGemini,
+        .awsBedrock,
+        .azureOpenAI,
+        .dotminiEnterprise,
+        .openaiGateway
+    ]
+
+    private var activeProfile: EnterpriseAPIProfile? {
+        enterprise.activeProfile
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            smartPasteCard
-            cliSSODetectorStrip
-            profileBarCard
-            if let profileBinding = activeProfileBinding {
-                activeProfileEditorCard(profileBinding)
-                modelsAndVerifyCard(profileBinding)
-                teamShareAndNetworkCard(profileBinding)
+            providersConnectCard
+            liveModelSelectorCard
+            advancedConfigurationCard
+        }
+        .task {
+            await enterprise.autoBootstrapZeroConfigIfNeeded()
+            if let prof = enterprise.activeProfile, !prof.defaultModel.isEmpty {
+                onSelectModel?(prof.dialect.brandIconKey, prof.defaultModel)
             }
-            governanceCard
         }
-        .onAppear {
-            syncSecretInputsForActiveProfile()
-            Task { await enterprise.detectLocalCLIs() }
+        .sheet(isPresented: $showHeadersSheet) {
+            if let prof = activeProfile {
+                EnterpriseHeadersAndProxySheet(profileId: prof.id)
+            }
         }
-        .onChange(of: enterprise.activeProfileID) { _ in
-            syncSecretInputsForActiveProfile()
-        }
-    }
-
-    private func syncSecretInputsForActiveProfile() {
-        guard let prof = enterprise.activeProfile else { return }
-        primarySecretInput = enterprise.readPrimarySecret(for: prof.id)
-        if prof.dialect == .awsBedrock && prof.authScheme == .awsSigV4AccessKey {
-            secondarySecretInput = enterprise.readSecondarySecret(for: prof.id)
-        } else {
-            secondarySecretInput = ""
+        .sheet(isPresented: $showPoliciesSheet) {
+            EnterpriseComplianceSheet()
+                .environmentObject(appState)
         }
     }
 
-    // MARK: - 1. Smart Paste Card
+    // MARK: - 1. Zero-Config Cloud & Enterprise Providers
 
-    private var smartPasteCard: some View {
+    private var providersConnectCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.indigo)
-                Text("1-Click Smart Connect (Paste URL, cURL, .env, or Team Link)")
-                    .font(.system(size: 13, weight: .semibold))
+                Text("Cloud & Enterprise Providers")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundColor(.primary)
+
                 Spacer()
-                Button {
-                    if let clip = NSPasteboard.general.string(forType: .string), !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        smartPasteInput = clip
-                        runSmartPaste(clip)
+
+                if enterprise.isVerifying || enterprise.cliStatus.isScanning {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("Syncing live catalog…")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(.secondary)
                     }
-                } label: {
-                    Label("Paste Clipboard & Connect", systemImage: "doc.on.clipboard.fill")
+                } else {
+                    Button {
+                        Task {
+                            await enterprise.detectLocalCLIs()
+                            if let prof = activeProfile {
+                                _ = await enterprise.discoverModelsAndVerify(profileId: prof.id)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 10, weight: .medium))
+                            Text("Sync")
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.primary.opacity(0.04))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Re-scan local SSO sessions and refresh live models")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.indigo)
-                .controlSize(.small)
             }
 
-            Text("Paste any Azure OpenAI URL, Vertex AI / Gemini Enterprise URL, AWS Bedrock key (`ABSK…`), `curl` command, `.env` block, Service Account `.json`, or `microcode://enterprise` link — fields, headers, and dialect configure automatically.")
+            Text("Click Connect — credentials, active cloud project, optimal endpoint, and live models are configured automatically.")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
 
-            HStack(spacing: 8) {
-                TextField("Paste endpoint URL, curl -H \"...\", AZURE_OPENAI_ENDPOINT=..., or ABSK...", text: $smartPasteInput)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .onSubmit {
-                        runSmartPaste(smartPasteInput)
-                    }
-
-                Button("Auto-Configure") {
-                    runSmartPaste(smartPasteInput)
+            VStack(spacing: 6) {
+                ForEach(Self.primaryProviders) { dialect in
+                    providerRow(for: dialect)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(smartPasteInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                Button {
-                    importTeamConfigFile()
-                } label: {
-                    Label("Import .json", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-            }
-
-            if !toastBanner.isEmpty {
-                Text(toastBanner)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(toastBanner.hasPrefix("✓") ? .green : .orange)
             }
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.indigo.opacity(0.06))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.indigo.opacity(0.22), lineWidth: 1))
-        )
+        .background(cardSurface)
     }
 
-    private func runSmartPaste(_ raw: String) {
-        guard let result = enterprise.applySmartPaste(raw) else {
-            toastBanner = "Could not recognize format. Paste a full https:// URL, cURL command, .env variables, or Service Account JSON."
-            return
-        }
-        syncSecretInputsForActiveProfile()
-        smartPasteInput = ""
-        toastBanner = "✓ \(result.summary)"
-        onModelOrProfileChanged?(result.profile.dialect.brandIconKey, result.profile.defaultModel)
-        Task {
-            _ = await enterprise.discoverModelsAndVerify(profileId: result.profile.id)
-            if let refreshed = enterprise.activeProfile {
-                onModelOrProfileChanged?(refreshed.dialect.brandIconKey, refreshed.defaultModel)
+    @ViewBuilder
+    private func providerRow(for dialect: EnterpriseProviderDialect) -> some View {
+        let matchedProfile = enterprise.profiles.first(where: { $0.dialect == dialect })
+        let isSelected = activeProfile?.dialect == dialect
+        let isVerified = (matchedProfile?.isVerified == true) && !(matchedProfile?.discoveredModels.isEmpty ?? true)
+        let isBusy = (connectingDialect == dialect) || (isSelected && enterprise.isVerifying)
+        let isSetupExpanded = expandedSetupDialect == dialect
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 11) {
+                AIProviderBrandIcon(provider: dialect.brandIconKey, size: 22)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(providerDisplayTitle(for: dialect))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.primary)
+
+                        if dialect == .vertexGemini {
+                            HStack(spacing: 3) {
+                                AIProviderBrandIcon(provider: "gemini", size: 11)
+                                AIProviderBrandIcon(provider: "claude", size: 11)
+                            }
+                            .opacity(0.85)
+                        }
+                    }
+
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(providerDotColor(for: dialect, isVerified: isVerified))
+                            .frame(width: 5.5, height: 5.5)
+                        Text(providerStatusSubtitle(for: dialect, profile: matchedProfile))
+                            .font(.system(size: 10.5))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+
+                if dialect == .openaiGateway || !canZeroClickSSO(for: dialect, profile: matchedProfile) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            if expandedSetupDialect == dialect {
+                                expandedSetupDialect = nil
+                            } else {
+                                expandedSetupDialect = dialect
+                                inlineCredentialInput = ""
+                            }
+                        }
+                    } label: {
+                        Text(isSetupExpanded ? "Close" : "Configure")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color.primary.opacity(0.04))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    handleOneClickConnect(dialect: dialect, existingProfile: matchedProfile)
+                } label: {
+                    HStack(spacing: 5) {
+                        if isBusy {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else if isSelected && isVerified {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9.5, weight: .bold))
+                        }
+                        Text(isBusy ? "Connecting…" : (isSelected && isVerified ? "Connected" : "Connect"))
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundColor(isSelected && isVerified ? .primary : Color(nsColor: .windowBackgroundColor))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5.5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isSelected && isVerified ? Color.primary.opacity(0.09) : Color.primary.opacity(0.88))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.primary.opacity(isSelected && isVerified ? 0.18 : 0.0), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isBusy)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if let prof = matchedProfile {
+                    enterprise.activateEnterpriseSelection(profileId: prof.id, modelId: prof.defaultModel)
+                    if !prof.defaultModel.isEmpty {
+                        onSelectModel?(prof.dialect.brandIconKey, prof.defaultModel)
+                    }
+                    if prof.discoveredModels.isEmpty && !enterprise.isVerifying {
+                        Task { _ = await enterprise.discoverModelsAndVerify(profileId: prof.id) }
+                    }
+                }
+            }
+
+            if isSetupExpanded {
+                inlineCredentialBox(for: dialect)
             }
         }
-    }
-
-    // MARK: - 2. Zero-Key CLI SSO Strip
-
-    private var cliSSODetectorStrip: some View {
-        let cli = enterprise.cliStatus
-        return HStack(spacing: 10) {
-            Label("Local SSO:", systemImage: "person.badge.shield.checkmark.fill")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundColor(.secondary)
-
-            // Google Cloud CLI
-            Button {
-                if cli.isGcloudReady {
-                    var p = enterprise.createPresetProfile(dialect: .vertexGemini)
-                    p.authScheme = .gcloudADC
-                    if !cli.gcloudProject.isEmpty { p.gcpProjectId = cli.gcloudProject }
-                    enterprise.upsertProfile(p, makeActive: true)
-                    enterprise.activateEnterpriseSelection(profileId: p.id, modelId: p.defaultModel)
-                    onModelOrProfileChanged?(p.dialect.brandIconKey, p.defaultModel)
-                    toastBanner = "✓ Connected to Google Cloud SSO (\(p.gcpProjectId.isEmpty ? "ADC" : p.gcpProjectId))"
-                } else {
-                    enterprise.triggerInteractiveCLILogin(command: "gcloud auth application-default login")
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Circle().fill(cli.isGcloudReady ? Color.green : Color.secondary.opacity(0.45)).frame(width: 6, height: 6)
-                    Text(cli.isGcloudReady ? "gcloud (\(cli.gcloudProject.isEmpty ? "Ready" : cli.gcloudProject))" : "gcloud SSO Login")
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-
-            // Azure CLI
-            Button {
-                if cli.isAzureReady {
-                    var p = enterprise.createPresetProfile(dialect: .azureOpenAI)
-                    p.authScheme = .azureEntraCLI
-                    enterprise.upsertProfile(p, makeActive: true)
-                    enterprise.activateEnterpriseSelection(profileId: p.id, modelId: p.defaultModel)
-                    onModelOrProfileChanged?(p.dialect.brandIconKey, p.defaultModel)
-                    toastBanner = "✓ Created Azure Entra ID SSO profile (\(cli.azAccount)) — enter Resource & Deployment below"
-                } else {
-                    enterprise.triggerInteractiveCLILogin(command: "az login")
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Circle().fill(cli.isAzureReady ? Color.green : Color.secondary.opacity(0.45)).frame(width: 6, height: 6)
-                    Text(cli.isAzureReady ? "Azure Entra (\(cli.azAccount))" : "az login SSO")
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-
-            // AWS SSO / CLI
-            Button {
-                if cli.isAWSReady {
-                    let p = enterprise.createPresetProfile(dialect: .awsBedrock)
-                    enterprise.activateEnterpriseSelection(profileId: p.id, modelId: p.defaultModel)
-                    onModelOrProfileChanged?(p.dialect.brandIconKey, p.defaultModel)
-                    toastBanner = "✓ Created AWS Bedrock SSO profile ('\(p.awsProfileName)' • \(p.awsRegion))"
-                } else {
-                    enterprise.triggerInteractiveCLILogin(command: "aws configure sso")
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Circle().fill(cli.isAWSReady ? Color.green : Color.secondary.opacity(0.45)).frame(width: 6, height: 6)
-                    Text(cli.isAWSReady ? "AWS (\(cli.awsProfiles.count) profile\(cli.awsProfiles.count == 1 ? "" : "s"))" : "AWS SSO Login")
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-
-            Spacer()
-
-            Button {
-                Task { await enterprise.detectLocalCLIs() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-            .help("Rescan local gcloud, az, and aws CLI sessions")
-        }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 11)
         .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                .fill(isSelected ? Color.primary.opacity(0.065) : Color.primary.opacity(0.025))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isSelected ? Color.primary.opacity(0.20) : Color.primary.opacity(0.07), lineWidth: 1)
         )
     }
 
-    // MARK: - 3. Multi-Profile Selector & Presets
+    @ViewBuilder
+    private func inlineCredentialBox(for dialect: EnterpriseProviderDialect) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider().opacity(0.5)
 
-    private var profileBarCard: some View {
-        HStack(spacing: 10) {
-            Text("Enterprise Profile:")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.secondary)
-
-            Picker("", selection: Binding(
-                get: { enterprise.activeProfileID },
-                set: { newId in
-                    enterprise.activateEnterpriseSelection(profileId: newId)
-                    if let p = enterprise.activeProfile {
-                        onModelOrProfileChanged?(p.dialect.brandIconKey, p.defaultModel)
+            HStack(spacing: 8) {
+                TextField(inlinePlaceholder(for: dialect), text: $inlineCredentialInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .onSubmit {
+                        submitInlineConnect(for: dialect)
                     }
-                }
-            )) {
-                ForEach(enterprise.profiles) { p in
-                    Text("\(p.isVerified ? "✓ " : "")\(p.name) — \(p.dialect.shortTitle)").tag(p.id)
-                }
-            }
-            .labelsHidden()
-            .frame(maxWidth: 340)
 
-            Menu {
-                ForEach(EnterpriseProviderDialect.allCases) { dialect in
-                    Button {
-                        let p = enterprise.createPresetProfile(dialect: dialect)
-                        enterprise.activateEnterpriseSelection(profileId: p.id, modelId: p.defaultModel)
-                        onModelOrProfileChanged?(p.dialect.brandIconKey, p.defaultModel)
-                    } label: {
-                        Label(dialect.title, systemImage: dialect.systemIcon)
+                if dialect == .vertexGemini || dialect == .openaiGateway {
+                    Button("Import .json") {
+                        importFileForProvider(dialect: dialect)
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-            } label: {
-                Label("Add Provider", systemImage: "plus.circle.fill")
-            }
-            .controlSize(.small)
 
-            Spacer()
+                if let cliCmd = cliLoginCommand(for: dialect) {
+                    Button("CLI Sign-In") {
+                        enterprise.triggerInteractiveCLILogin(command: cliCmd)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Run `\(cliCmd)` in Terminal")
+                }
 
-            if enterprise.profiles.count > 1, let active = enterprise.activeProfile {
-                Button(role: .destructive) {
-                    enterprise.deleteProfile(id: active.id)
-                } label: {
-                    Image(systemName: "trash")
+                Button("Connect") {
+                    submitInlineConnect(for: dialect)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Delete this Enterprise Profile")
+                .disabled(inlineCredentialInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        )
+        .padding(.top, 2)
     }
 
-    // MARK: - 4. Active Profile Dialect Editor
+    // MARK: - 2. Real Live Model Selector (Zero Mock)
 
-    private func activeProfileEditorCard(_ profile: Binding<EnterpriseAPIProfile>) -> some View {
-        let p = profile.wrappedValue
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: p.dialect.systemIcon)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(p.dialect.title)
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(p.dialect.subtitle)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                if p.isVerified {
-                    Text("VERIFIED")
-                        .font(.system(size: 9.5, weight: .bold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.green.opacity(0.18)))
-                        .foregroundStyle(.green)
-                }
-            }
+    private var liveModelSelectorCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let prof = activeProfile {
+                let liveModels = prof.availableModels
+                let filteredModels = filteredLiveModels(from: liveModels)
 
-            Divider().opacity(0.6)
+                HStack(spacing: 8) {
+                    AIProviderBrandIcon(provider: prof.dialect.brandIconKey, size: 16)
 
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Profile Name").font(.caption).foregroundColor(.secondary)
-                    TextField("Company Production AI", text: profile.name)
-                        .textFieldStyle(.roundedBorder)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Provider Dialect").font(.caption).foregroundColor(.secondary)
-                    Picker("", selection: Binding(
-                        get: { p.dialect },
-                        set: { newDialect in
-                            var copy = p
-                            copy.dialect = newDialect
-                            if !newDialect.supportedAuthSchemes.contains(copy.authScheme),
-                               let firstScheme = newDialect.supportedAuthSchemes.first {
-                                copy.authScheme = firstScheme
-                            }
-                            if copy.defaultModel.isEmpty || EnterpriseProviderDialect.allCases.flatMap(\.fallbackModels).contains(copy.defaultModel) {
-                                copy.defaultModel = newDialect.fallbackModels.first ?? "gpt-4o"
-                            }
-                            enterprise.upsertProfile(copy, makeActive: true)
-                        }
-                    )) {
-                        ForEach(EnterpriseProviderDialect.allCases) { d in
-                            Text(d.title).tag(d)
-                        }
-                    }
-                    .labelsHidden()
-                }
-            }
+                    Text("Live Models")
+                        .font(.system(size: 12.5, weight: .semibold))
 
-            // Dialect-specific minimal fields
-            switch p.dialect {
-            case .openaiGateway, .anthropicGateway, .dotminiEnterprise:
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Gateway Base URL").font(.caption).foregroundColor(.secondary)
-                    TextField(
-                        p.dialect == .anthropicGateway
-                            ? "https://anthropic-gateway.corp.internal/v1"
-                            : "https://litellm.corp.internal/v1",
-                        text: profile.baseURL
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                }
-
-            case .azureOpenAI:
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Azure Resource Name").font(.caption).foregroundColor(.secondary)
-                        TextField("my-bank-openai", text: profile.azureResourceName)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Deployment Name").font(.caption).foregroundColor(.secondary)
-                        TextField("gpt-4o-prod", text: Binding(
-                            get: { p.azureDeploymentName },
-                            set: { dep in
-                                var copy = p
-                                copy.azureDeploymentName = dep
-                                if !dep.isEmpty { copy.defaultModel = dep }
-                                enterprise.upsertProfile(copy, makeActive: true)
-                            }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("API Version").font(.caption).foregroundColor(.secondary)
-                        TextField("2024-10-21", text: profile.azureAPIVersion)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 115)
-                    }
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Optional Full Foundry / APIM Base URL Override (leave blank for standard `*.openai.azure.com`)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("https://my-foundry.services.ai.azure.com/models", text: profile.baseURL)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11.5, design: .monospaced))
-                }
-
-            case .vertexGemini:
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Google Cloud Project ID").font(.caption).foregroundColor(.secondary)
-                        TextField("my-enterprise-gcp-project", text: profile.gcpProjectId)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Vertex AI Region").font(.caption).foregroundColor(.secondary)
-                        Picker("", selection: profile.gcpLocation) {
-                            ForEach(EnterpriseAIAuthService.supportedVertexLocations, id: \.id) { loc in
-                                Text(loc.label).tag(loc.id)
-                            }
-                        }
-                        .labelsHidden()
-                    }
-                }
-
-            case .geminiEnterpriseAgentspace:
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Google Cloud Project ID").font(.caption).foregroundColor(.secondary)
-                        TextField("my-enterprise-gcp-project", text: profile.gcpProjectId)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Data Store Location").font(.caption).foregroundColor(.secondary)
-                        Picker("", selection: profile.gcpLocation) {
-                            Text("global").tag("global")
-                            Text("us (Multi-Region US)").tag("us")
-                            Text("eu (Multi-Region EU)").tag("eu")
-                        }
-                        .labelsHidden()
-                        .frame(width: 180)
-                    }
-                }
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Agentspace Engine / App ID (`cid/...`)").font(.caption).foregroundColor(.secondary)
-                        TextField("1b5ab175-0783-4463-8a33-b61845396a2b", text: profile.discoveryEngineId)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11.5, design: .monospaced))
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Assistant ID").font(.caption).foregroundColor(.secondary)
-                        TextField("default_assistant", text: profile.discoveryAssistantId)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 170)
-                    }
-                }
-
-            case .awsBedrock:
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("AWS Region").font(.caption).foregroundColor(.secondary)
-                        Picker("", selection: profile.awsRegion) {
-                            Text("ap-southeast-1 (Singapore)").tag("ap-southeast-1")
-                            Text("ap-northeast-1 (Tokyo)").tag("ap-northeast-1")
-                            Text("us-east-1 (N. Virginia)").tag("us-east-1")
-                            Text("us-west-2 (Oregon)").tag("us-west-2")
-                            Text("eu-central-1 (Frankfurt)").tag("eu-central-1")
-                        }
-                        .labelsHidden()
-                    }
-                    if p.authScheme == .awsSigV4Profile {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("AWS CLI / SSO Profile (`~/.aws/config`)").font(.caption).foregroundColor(.secondary)
-                            if enterprise.cliStatus.awsProfiles.isEmpty {
-                                TextField("default", text: profile.awsProfileName)
-                                    .textFieldStyle(.roundedBorder)
-                            } else {
-                                Picker("", selection: profile.awsProfileName) {
-                                    ForEach(enterprise.cliStatus.awsProfiles, id: \.self) { profName in
-                                        Text(profName).tag(profName)
-                                    }
-                                }
-                                .labelsHidden()
-                            }
-                        }
-                    } else if p.authScheme == .awsSigV4AccessKey {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("AWS Access Key ID").font(.caption).foregroundColor(.secondary)
-                            TextField("AKIA...", text: profile.awsAccessKeyId)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 11.5, design: .monospaced))
-                        }
-                    }
-                }
-            }
-
-            // Authentication Scheme & Secret Input
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Authentication Method").font(.caption).foregroundColor(.secondary)
-                    Picker("", selection: profile.authScheme) {
-                        ForEach(p.dialect.supportedAuthSchemes) { scheme in
-                            Text(scheme.title).tag(scheme)
-                        }
-                    }
-                    .labelsHidden()
-                }
-
-                if p.authScheme.requiresPrimarySecretField {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(p.authScheme == .awsSigV4AccessKey ? "AWS Secret Access Key (Keychain)" : "API Key / Bearer Token (Keychain)")
-                            .font(.caption)
+                    if !liveModels.isEmpty {
+                        Text("\(liveModels.count)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .foregroundColor(.secondary)
-                        SecureField(
-                            p.authScheme == .awsBedrockAPIKey ? "ABSK..." : "Enter secret key (stored in macOS Keychain)",
-                            text: Binding(
-                                get: { primarySecretInput },
-                                set: { val in
-                                    primarySecretInput = val
-                                    enterprise.savePrimarySecret(val, for: p.id)
-                                }
-                            )
-                        )
-                        .textFieldStyle(.roundedBorder)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(4)
                     }
-                } else if p.authScheme == .serviceAccountJSON {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Google Cloud Service Account Key").font(.caption).foregroundColor(.secondary)
-                        HStack(spacing: 8) {
-                            Button {
-                                importVertexServiceAccountFile(for: p)
-                            } label: {
-                                Label(
-                                    enterprise.readSecondarySecret(for: p.id).isEmpty && !enterprise.hasVertexServiceAccount
-                                        ? "Import Service Account .json…"
-                                        : "Replace Service Account .json…",
-                                    systemImage: "doc.badge.key"
-                                )
-                            }
-                            .buttonStyle(.bordered)
-                            if !enterprise.readSecondarySecret(for: p.id).isEmpty || enterprise.hasVertexServiceAccount {
-                                Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                            }
-                        }
-                    }
-                }
-            }
 
-            if p.authScheme == .awsSigV4AccessKey {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Optional AWS Session Token (for temporary STS credentials)").font(.caption).foregroundColor(.secondary)
-                    SecureField("IQoJb3JpZ2luX2Vj...", text: Binding(
-                        get: { secondarySecretInput },
-                        set: { val in
-                            secondarySecretInput = val
-                            enterprise.saveSecondarySecret(val, for: p.id)
+                    Spacer()
+
+                    if !prof.defaultModel.isEmpty {
+                        HStack(spacing: 5) {
+                            AIProviderBrandIcon(
+                                provider: AIProviderBrandIcon.modelBrandKey(for: prof.defaultModel, fallback: prof.dialect.brandIconKey),
+                                size: 12
+                            )
+                            Text(prof.defaultModel)
+                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
                         }
-                    ))
-                    .textFieldStyle(.roundedBorder)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.primary.opacity(0.06))
+                        )
+                    }
+
+                    Button {
+                        Task {
+                            _ = await enterprise.discoverModelsAndVerify(profileId: prof.id)
+                            if let updated = enterprise.profiles.first(where: { $0.id == prof.id }), !updated.defaultModel.isEmpty {
+                                onSelectModel?(updated.dialect.brandIconKey, updated.defaultModel)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .frame(width: 24, height: 24)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(Color.primary.opacity(0.04))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(enterprise.isVerifying)
+                    .help("Fetch latest live models from upstream API")
+                }
+
+                // Inline Smart GCP Project Helper (shown automatically when Vertex AI project needs attention or has multiple active projects)
+                if prof.dialect == .vertexGemini {
+                    gcpSmartProjectBar(for: prof)
+                } else if !prof.lastStatusMessage.isEmpty && !prof.isVerified {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.circle")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text(prof.lastStatusMessage)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                        Spacer()
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.035)))
+                }
+
+                if liveModels.isEmpty {
+                    HStack(spacing: 8) {
+                        if enterprise.isVerifying {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Fetching live models directly from \(providerDisplayTitle(for: prof.dialect))…")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                        } else {
+                            Image(systemName: "tray")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                            Text("No live models fetched yet. Click Connect on a provider above to fetch the real-time catalog.")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 10)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.025)))
+                } else {
+                    // Search + Family Filter Bar
+                    HStack(spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                            TextField("Search \(liveModels.count) live models…", text: $modelSearchQuery)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11.5))
+                            if !modelSearchQuery.isEmpty {
+                                Button {
+                                    modelSearchQuery = ""
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 10.5))
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+
+                        let hasGemini = liveModels.contains { $0.lowercased().contains("gemini") }
+                        let hasClaude = liveModels.contains { $0.lowercased().contains("claude") }
+                        if hasGemini && hasClaude {
+                            familyFilterChip(id: "all", label: "All", brand: nil)
+                            familyFilterChip(id: "gemini", label: "Gemini", brand: "gemini")
+                            familyFilterChip(id: "claude", label: "Claude", brand: "claude")
+                        }
+                    }
+
+                    // Clean Scrollable Live Model List
+                    ScrollView {
+                        LazyVStack(spacing: 3) {
+                            ForEach(filteredModels, id: \.self) { modelId in
+                                let isActiveModel = (prof.defaultModel == modelId)
+                                Button {
+                                    enterprise.activateEnterpriseSelection(profileId: prof.id, modelId: modelId)
+                                    onSelectModel?(prof.dialect.brandIconKey, modelId)
+                                } label: {
+                                    HStack(spacing: 9) {
+                                        AIProviderBrandIcon(
+                                            provider: AIProviderBrandIcon.modelBrandKey(for: modelId, fallback: prof.dialect.brandIconKey),
+                                            size: 15
+                                        )
+                                        Text(modelId)
+                                            .font(.system(size: 11.5, weight: isActiveModel ? .semibold : .regular, design: .monospaced))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+
+                                        Spacer()
+
+                                        if let tier = subtleModelTierLabel(for: modelId) {
+                                            Text(tier)
+                                                .font(.system(size: 9.5, weight: .medium))
+                                                .foregroundColor(.secondary)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 1.5)
+                                                .background(Color.primary.opacity(0.045))
+                                                .cornerRadius(4)
+                                        }
+
+                                        Image(systemName: isActiveModel ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundColor(isActiveModel ? .primary : .secondary.opacity(0.35))
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6.5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .fill(isActiveModel ? Color.primary.opacity(0.08) : Color.clear)
+                                    )
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(4)
+                    }
+                    .frame(minHeight: 150, maxHeight: 220)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.primary.opacity(0.02))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                    )
                 }
             }
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        )
+        .background(cardSurface)
     }
 
-    // MARK: - 5. Models Discovery & Connection Verification Card
+    @ViewBuilder
+    private func gcpSmartProjectBar(for prof: EnterpriseAPIProfile) -> some View {
+        let state = enterprise.gcpDiagnosticState
+        let projects = enterprise.availableGCPProjects
+        let orderedProjects: [String] = {
+            var seen = Set<String>()
+            var out: [String] = []
+            for p in enterprise.readyGCPProjects where seen.insert(p).inserted { out.append(p) }
+            if !prof.gcpProjectId.isEmpty && seen.insert(prof.gcpProjectId).inserted { out.append(prof.gcpProjectId) }
+            for p in projects where seen.insert(p).inserted { out.append(p) }
+            return out
+        }()
 
-    private func modelsAndVerifyCard(_ profile: Binding<EnterpriseAPIProfile>) -> some View {
-        let p = profile.wrappedValue
-        let models = p.availableModels
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Label("Active Enterprise Model / Deployment", systemImage: "cpu.fill")
-                    .font(.system(size: 12.5, weight: .semibold))
+        HStack(spacing: 8) {
+            Text("GCP Project:")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
 
+            if !orderedProjects.isEmpty {
                 Picker("", selection: Binding(
-                    get: { p.defaultModel.isEmpty ? (models.first ?? "") : p.defaultModel },
-                    set: { newModel in
-                        var copy = p
-                        copy.defaultModel = newModel
+                    get: { prof.gcpProjectId },
+                    set: { newProj in
+                        var copy = prof
+                        copy.gcpProjectId = newProj
                         enterprise.upsertProfile(copy, makeActive: true)
-                        enterprise.activateEnterpriseSelection(profileId: copy.id, modelId: newModel)
-                        onModelOrProfileChanged?(copy.dialect.brandIconKey, newModel)
+                        Task { _ = await enterprise.discoverModelsAndVerify(profileId: prof.id) }
                     }
                 )) {
-                    ForEach(models, id: \.self) { m in
-                        Text(m).tag(m)
+                    ForEach(orderedProjects, id: \.self) { pid in
+                        let suffix = enterprise.readyGCPProjects.contains(pid) ? " (Vertex API Enabled)" : ""
+                        Text("\(pid)\(suffix)").tag(pid)
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 320)
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .frame(maxWidth: 260)
+            } else {
+                Text(prof.gcpProjectId.isEmpty ? "Auto-detecting…" : prof.gcpProjectId)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.primary)
+            }
 
-                Spacer()
+            Spacer()
 
-                Button {
-                    Task {
-                        let ok = await enterprise.discoverModelsAndVerify(profileId: p.id)
-                        if ok, let updated = enterprise.activeProfile {
-                            enterprise.activateEnterpriseSelection(profileId: updated.id, modelId: updated.defaultModel)
-                            onModelOrProfileChanged?(updated.dialect.brandIconKey, updated.defaultModel)
-                        }
+            if state == "billing_disabled" && !prof.gcpProjectId.isEmpty {
+                Text("Billing inactive on project")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                Button("Enable Billing") {
+                    if let u = URL(string: "https://console.cloud.google.com/billing/linkedaccount?project=\(prof.gcpProjectId)") {
+                        NSWorkspace.shared.open(u)
                     }
-                } label: {
-                    Label(
-                        enterprise.isVerifying ? "Testing & Fetching…" : "Verify & Fetch Models",
-                        systemImage: "checkmark.shield.fill"
-                    )
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            } else if state == "service_disabled" && !prof.gcpProjectId.isEmpty {
+                Button("Enable Vertex AI API") {
+                    Task { _ = await enterprise.enableVertexAIAPI(for: prof.id) }
+                }
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(enterprise.isVerifying)
-            }
-
-            HStack(spacing: 8) {
-                TextField("Add custom deployment / internal model ID (e.g. corp-gpt4o, claude-sonnet-4@20250514)", text: $customModelDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .onSubmit { addCustomModel(to: p) }
-
-                Button("Add & Select") {
-                    addCustomModel(to: p)
+            } else if state == "ready" {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.primary.opacity(0.75))
+                        .frame(width: 5, height: 5)
+                    Text("Ready (\(prof.gcpLocation))")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(customModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-
-            if !p.lastStatusMessage.isEmpty {
-                Text(p.lastStatusMessage)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(p.isVerified ? .green : .orange)
             }
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        )
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.03)))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.primary.opacity(0.07), lineWidth: 1))
     }
 
-    private func addCustomModel(to p: EnterpriseAPIProfile) {
-        let m = customModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !m.isEmpty else { return }
-        var copy = p
-        if !copy.customModels.contains(m) {
-            copy.customModels.insert(m, at: 0)
+    @ViewBuilder
+    private func familyFilterChip(id: String, label: String, brand: String?) -> some View {
+        let selected = modelFamilyFilter == id
+        Button {
+            modelFamilyFilter = id
+        } label: {
+            HStack(spacing: 4) {
+                if let brand {
+                    AIProviderBrandIcon(provider: brand, size: 11)
+                }
+                Text(label)
+                    .font(.system(size: 10.5, weight: selected ? .semibold : .regular))
+                    .foregroundColor(selected ? .primary : .secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4.5)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(selected ? Color.primary.opacity(0.11) : Color.primary.opacity(0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(Color.primary.opacity(selected ? 0.20 : 0.07), lineWidth: 1)
+            )
         }
-        copy.defaultModel = m
-        if copy.dialect == .azureOpenAI && copy.azureDeploymentName.isEmpty {
-            copy.azureDeploymentName = m
-        }
-        enterprise.upsertProfile(copy, makeActive: true)
-        enterprise.activateEnterpriseSelection(profileId: copy.id, modelId: m)
-        onModelOrProfileChanged?(copy.dialect.brandIconKey, m)
-        customModelDraft = ""
+        .buttonStyle(.plain)
     }
 
-    // MARK: - 6. 1-Click Team Onboarding + Custom Headers + Proxy
+    // MARK: - 3. Collapsed Advanced Settings, Team Rollout & Security
 
-    private func teamShareAndNetworkCard(_ profile: Binding<EnterpriseAPIProfile>) -> some View {
-        let p = profile.wrappedValue
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Label("Team Rollout, Custom Headers & Corporate Proxy", systemImage: "person.3.sequence.fill")
-                    .font(.system(size: 12.5, weight: .semibold))
-                Spacer()
-                Button {
-                    if let link = enterprise.exportTeamShareLink(for: p.id) {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(link, forType: .string)
-                        toastBanner = "✓ Copied 1-Click Team Link (`microcode://enterprise?...`) — safe to share in Slack/Teams (secrets stripped)"
-                    }
-                } label: {
-                    Label("Copy 1-Click Team Link", systemImage: "link.badge.plus")
+    private var advancedConfigurationCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    showAdvancedSection.toggle()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: showAdvancedSection ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 12)
 
-                Button {
-                    _ = enterprise.exportTeamShareFileWithSavePanel(for: p.id)
-                } label: {
-                    Label("Export Team .json", systemImage: "square.and.arrow.up")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                    Text("Advanced Settings, Team Rollout & Security Policies")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary)
 
-                Button(showAdvancedHeadersAndProxy ? "Hide Headers & Proxy" : "Headers & Proxy (\(p.customHeaders.count))") {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        showAdvancedHeadersAndProxy.toggle()
-                    }
+                    Spacer()
+
+                    Text("ZDR · DLP · Proxy")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
-            if showAdvancedHeadersAndProxy {
-                Divider().opacity(0.6)
+            if showAdvancedSection, let prof = activeProfile {
+                Divider().opacity(0.5)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Corporate HTTP/HTTPS Proxy (Optional — e.g. Zscaler / Squid)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("http://proxy.corp.internal:8080", text: profile.proxyURL)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11.5, design: .monospaced))
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Custom HTTP Headers (e.g. `CF-Access-Client-Id`, `CF-Access-Client-Secret`, `X-Cost-Center`)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    ForEach(p.customHeaders) { hdr in
-                        HStack(spacing: 8) {
-                            Image(systemName: hdr.isSecret ? "lock.fill" : "tag")
-                                .font(.system(size: 10))
-                                .foregroundColor(hdr.isSecret ? .orange : .secondary)
-                            Text(hdr.key)
-                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                            if hdr.isSecret {
-                                SecureField(
-                                    hdr.requiresUserSecret ? "Enter your secret value…" : "Stored in Keychain",
-                                    text: Binding(
-                                        get: { enterprise.readHeaderSecret(profileId: p.id, headerId: hdr.id) },
-                                        set: { v in enterprise.saveHeaderSecret(v, profileId: p.id, headerId: hdr.id) }
-                                    )
-                                )
-                                .textFieldStyle(.roundedBorder)
-                            } else {
-                                Text(hdr.value)
-                                    .font(.system(size: 11.5, design: .monospaced))
+                VStack(alignment: .leading, spacing: 12) {
+                    // Region / Endpoint / Auth Overrides
+                    HStack(spacing: 12) {
+                        if prof.dialect == .vertexGemini || prof.dialect == .geminiEnterpriseAgentspace {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Google Cloud Project ID")
+                                    .font(.system(size: 10.5, weight: .medium))
                                     .foregroundColor(.secondary)
-                                Spacer()
+                                TextField("my-gcp-project-id", text: binding(for: prof.id, keyPath: \.gcpProjectId))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11.5, design: .monospaced))
                             }
-                            Button(role: .destructive) {
-                                var copy = p
-                                enterprise.saveHeaderSecret("", profileId: p.id, headerId: hdr.id)
-                                copy.customHeaders.removeAll { $0.id == hdr.id }
-                                enterprise.upsertProfile(copy, makeActive: true)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Endpoint Region")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                Picker("", selection: binding(for: prof.id, keyPath: \.gcpLocation)) {
+                                    ForEach(EnterpriseAIAuthService.supportedVertexLocations, id: \.id) { loc in
+                                        Text(loc.label).tag(loc.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
                             }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.secondary)
+                        } else if prof.dialect == .awsBedrock {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("AWS Region")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                TextField("ap-southeast-1", text: binding(for: prof.id, keyPath: \.awsRegion))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("AWS Profile")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                TextField("default", text: binding(for: prof.id, keyPath: \.awsProfileName))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                            }
+                        } else if prof.dialect == .azureOpenAI {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Azure Resource / Endpoint")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                TextField("resource-name or https://…", text: binding(for: prof.id, keyPath: \.azureResourceName))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Deployment Name")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                TextField("gpt-4.1", text: binding(for: prof.id, keyPath: \.azureDeploymentName))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Gateway Base URL")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                TextField("https://llm-gateway.company.com/v1", text: binding(for: prof.id, keyPath: \.baseURL))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                            }
                         }
                     }
 
+                    // Custom Deployment ID
                     HStack(spacing: 8) {
-                        TextField("Header Name (e.g. CF-Access-Client-Secret)", text: $newHeaderKey)
+                        TextField("Add custom deployment or fine-tuned model ID…", text: $customModelDraft)
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11.5, design: .monospaced))
-                        if newHeaderIsSecret {
-                            SecureField("Secret Value (Keychain)", text: $newHeaderValue)
-                                .textFieldStyle(.roundedBorder)
-                        } else {
-                            TextField("Header Value", text: $newHeaderValue)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        Toggle("Keychain", isOn: $newHeaderIsSecret)
-                            .font(.system(size: 11))
-                            .toggleStyle(.checkbox)
-                        Button("Add") {
-                            let k = newHeaderKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let v = newHeaderValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !k.isEmpty, !v.isEmpty else { return }
-                            var copy = p
-                            let item = EnterpriseHeaderItem(key: k, value: newHeaderIsSecret ? "" : v, isSecret: newHeaderIsSecret)
-                            copy.customHeaders.append(item)
-                            if newHeaderIsSecret {
-                                enterprise.saveHeaderSecret(v, profileId: p.id, headerId: item.id)
+                            .font(.system(size: 11, design: .monospaced))
+                        Button("Add Model") {
+                            let clean = customModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !clean.isEmpty else { return }
+                            var copy = prof
+                            if !copy.customModels.contains(clean) {
+                                copy.customModels.insert(clean, at: 0)
                             }
+                            copy.defaultModel = clean
                             enterprise.upsertProfile(copy, makeActive: true)
-                            newHeaderKey = ""
-                            newHeaderValue = ""
+                            enterprise.activateEnterpriseSelection(profileId: copy.id, modelId: clean)
+                            onSelectModel?(copy.dialect.brandIconKey, clean)
+                            customModelDraft = ""
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(customModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    Divider().opacity(0.4)
+
+                    // Action Buttons: Team Share, Proxy/Headers, Security & DLP
+                    HStack(spacing: 8) {
+                        Button {
+                            if let link = enterprise.exportTeamShareLink(for: prof.id) {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(link, forType: .string)
+                                copiedTeamLinkFeedback = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    copiedTeamLinkFeedback = false
+                                }
+                            }
+                        } label: {
+                            Label(copiedTeamLinkFeedback ? "Copied Link" : "Copy Team Link", systemImage: copiedTeamLinkFeedback ? "checkmark" : "link")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button {
+                            _ = enterprise.exportTeamShareFileWithSavePanel(for: prof.id)
+                        } label: {
+                            Label("Export .json", systemImage: "square.and.arrow.up")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button {
+                            showHeadersSheet = true
+                        } label: {
+                            Label("Headers & Proxy (\(prof.customHeaders.count))", systemImage: "slider.horizontal.3")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Spacer()
+
+                        Button {
+                            showPoliciesSheet = true
+                        } label: {
+                            Label("Security & DLP Policies", systemImage: "lock.shield")
+                                .font(.system(size: 11))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                 }
+                .padding(.top, 4)
             }
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        )
+        .background(cardSurface)
     }
 
-    // MARK: - 7. Sovereign DLP & Governance Card
+    // MARK: - Helpers & Actions
 
-    private var governanceCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private var cardSurface: some View {
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .fill(Color(nsColor: .controlBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+    }
+
+    private func providerDisplayTitle(for dialect: EnterpriseProviderDialect) -> String {
+        switch dialect {
+        case .vertexGemini: return "Google Cloud Vertex AI"
+        case .awsBedrock: return "Amazon Bedrock (AWS)"
+        case .azureOpenAI: return "Microsoft Azure AI"
+        case .dotminiEnterprise: return "Dotmini Sovereign Cloud"
+        case .openaiGateway: return "Custom Enterprise Gateway"
+        case .anthropicGateway: return "Anthropic Enterprise Proxy"
+        case .geminiEnterpriseAgentspace: return "Google Agentspace"
+        }
+    }
+
+    private func canZeroClickSSO(for dialect: EnterpriseProviderDialect, profile: EnterpriseAPIProfile?) -> Bool {
+        switch dialect {
+        case .vertexGemini, .geminiEnterpriseAgentspace:
+            return enterprise.cliStatus.isGcloudReady || enterprise.hasVertexServiceAccount || !(profile.map { enterprise.readPrimarySecret(for: $0.id) } ?? "").isEmpty
+        case .awsBedrock:
+            return enterprise.cliStatus.isAWSReady || !(profile.map { enterprise.readPrimarySecret(for: $0.id) } ?? "").isEmpty
+        case .azureOpenAI:
+            return (enterprise.cliStatus.isAzureReady && !(profile?.azureResourceName.isEmpty ?? true))
+                || !(profile.map { enterprise.readPrimarySecret(for: $0.id) } ?? "").isEmpty
+        case .dotminiEnterprise:
+            return DotminiPlatformKeyService.shared.authorizationToken != nil
+                || SupabaseAuthService.shared.accessToken != nil
+                || !(profile.map { enterprise.readPrimarySecret(for: $0.id) } ?? "").isEmpty
+        case .openaiGateway, .anthropicGateway:
+            return !(profile?.baseURL.isEmpty ?? true) && !(profile.map { enterprise.readPrimarySecret(for: $0.id) } ?? "").isEmpty
+        }
+    }
+
+    private func providerDotColor(for dialect: EnterpriseProviderDialect, isVerified: Bool) -> Color {
+        if isVerified {
+            return Color.primary.opacity(0.85)
+        }
+        if canZeroClickSSO(for: dialect, profile: enterprise.profiles.first(where: { $0.dialect == dialect })) {
+            return Color.primary.opacity(0.45)
+        }
+        return Color.secondary.opacity(0.28)
+    }
+
+    private func providerStatusSubtitle(for dialect: EnterpriseProviderDialect, profile: EnterpriseAPIProfile?) -> String {
+        if let profile, profile.isVerified, !profile.discoveredModels.isEmpty {
+            switch dialect {
+            case .vertexGemini:
+                let projLabel = profile.gcpProjectId.isEmpty ? "global" : profile.gcpProjectId
+                return "\(projLabel) · \(profile.discoveredModels.count) live models"
+            case .awsBedrock:
+                return "\(profile.awsRegion) · \(profile.discoveredModels.count) live models"
+            default:
+                return "\(profile.discoveredModels.count) live models ready"
+            }
+        }
+
+        switch dialect {
+        case .vertexGemini:
+            if enterprise.cliStatus.isGcloudReady {
+                let acct = enterprise.cliStatus.gcloudAccount.isEmpty ? "ADC Ready" : enterprise.cliStatus.gcloudAccount
+                return "Google Cloud SSO detected (\(acct)) — 1-click ready"
+            }
+            return "Gemini & Claude on Vertex via Google Cloud SSO or Service Account"
+        case .awsBedrock:
+            if let first = enterprise.cliStatus.awsProfiles.first {
+                return "AWS profile '\(first)' (\(enterprise.cliStatus.awsDefaultRegion)) detected"
+            }
+            return "Claude, Nova & DeepSeek via AWS SSO or Bedrock API Key"
+        case .azureOpenAI:
+            if enterprise.cliStatus.isAzureReady {
+                return "Entra ID (\(enterprise.cliStatus.azAccount)) detected"
+            }
+            return "Azure OpenAI & Microsoft AI Foundry deployments"
+        case .dotminiEnterprise:
+            if let email = SupabaseAuthService.shared.session?.email {
+                return "Signed in as \(email) · Zero Data Retention"
+            }
+            return "Sovereign multi-model gateway with centralized billing"
+        case .openaiGateway, .anthropicGateway, .geminiEnterpriseAgentspace:
+            if let base = profile?.baseURL, !base.isEmpty, base != "https://llm-gateway.corp.internal/v1" {
+                return base
+            }
+            return "LiteLLM, Kong, Apigee, Cloudflare AI Gateway, or VPC endpoint"
+        }
+    }
+
+    private func inlinePlaceholder(for dialect: EnterpriseProviderDialect) -> String {
+        switch dialect {
+        case .vertexGemini:
+            return "Paste Vertex API Key or Service Account JSON (or click CLI Sign-In)…"
+        case .awsBedrock:
+            return "Paste Bedrock API Key (ABSK…) or click CLI Sign-In…"
+        case .azureOpenAI:
+            return "Paste Azure Endpoint URL (https://….openai.azure.com/…) or API Key…"
+        case .dotminiEnterprise:
+            return "Paste Organization Key (sk-dotmini-ent-…)…"
+        case .openaiGateway, .anthropicGateway, .geminiEnterpriseAgentspace:
+            return "Paste Gateway URL, cURL command, or .env block…"
+        }
+    }
+
+    private func cliLoginCommand(for dialect: EnterpriseProviderDialect) -> String? {
+        switch dialect {
+        case .vertexGemini:
+            return "gcloud auth application-default login"
+        case .awsBedrock:
+            return "aws sso login"
+        case .azureOpenAI:
+            return "az login"
+        default:
+            return nil
+        }
+    }
+
+    private func handleOneClickConnect(dialect: EnterpriseProviderDialect, existingProfile: EnterpriseAPIProfile?) {
+        if !canZeroClickSSO(for: dialect, profile: existingProfile) && inlineCredentialInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                expandedSetupDialect = dialect
+            }
+            return
+        }
+        connectingDialect = dialect
+        Task {
+            _ = await enterprise.connectProviderZeroConfig(dialect: dialect, credentialOrURL: inlineCredentialInput)
+            connectingDialect = nil
+            inlineCredentialInput = ""
+            expandedSetupDialect = nil
+            if let active = enterprise.activeProfile, !active.defaultModel.isEmpty {
+                onSelectModel?(active.dialect.brandIconKey, active.defaultModel)
+            }
+        }
+    }
+
+    private func submitInlineConnect(for dialect: EnterpriseProviderDialect) {
+        let raw = inlineCredentialInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        connectingDialect = dialect
+        Task {
+            _ = await enterprise.connectProviderZeroConfig(dialect: dialect, credentialOrURL: raw)
+            connectingDialect = nil
+            inlineCredentialInput = ""
+            expandedSetupDialect = nil
+            if let active = enterprise.activeProfile, !active.defaultModel.isEmpty {
+                onSelectModel?(active.dialect.brandIconKey, active.defaultModel)
+            }
+        }
+    }
+
+    private func importFileForProvider(dialect: EnterpriseProviderDialect) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json, .plainText]
+        panel.title = "Import Enterprise Key or Configuration (.json / .env)"
+        guard panel.runModal() == .OK, let url = panel.url,
+              let content = try? String(contentsOf: url, encoding: .utf8) else { return }
+        connectingDialect = dialect
+        Task {
+            _ = await enterprise.connectProviderZeroConfig(dialect: dialect, credentialOrURL: content)
+            connectingDialect = nil
+            expandedSetupDialect = nil
+            if let active = enterprise.activeProfile, !active.defaultModel.isEmpty {
+                onSelectModel?(active.dialect.brandIconKey, active.defaultModel)
+            }
+        }
+    }
+
+    private func filteredLiveModels(from models: [String]) -> [String] {
+        let q = modelSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return models.filter { id in
+            let l = id.lowercased()
+            if modelFamilyFilter == "gemini" && !l.contains("gemini") && !l.contains("gemma") {
+                return false
+            }
+            if modelFamilyFilter == "claude" && !l.contains("claude") {
+                return false
+            }
+            if !q.isEmpty && !l.contains(q) {
+                return false
+            }
+            return true
+        }
+    }
+
+    private func subtleModelTierLabel(for modelId: String) -> String? {
+        let l = modelId.lowercased()
+        if l.contains("gemini-4") || l.contains("opus-5") || l.contains("sonnet-5") || l.contains("gpt-5") || l.contains("gpt-6") {
+            return "Frontier"
+        }
+        if l.contains("pro") || l.contains("opus") || l.hasPrefix("o3") || l.hasPrefix("o4") {
+            return "Reasoning"
+        }
+        if l.contains("flash") || l.contains("haiku") || l.contains("mini") || l.contains("lite") {
+            return "Fast"
+        }
+        return nil
+    }
+
+    private func binding<Value>(for profileId: String, keyPath: WritableKeyPath<EnterpriseAPIProfile, Value>) -> Binding<Value> {
+        Binding(
+            get: {
+                enterprise.profiles.first(where: { $0.id == profileId })![keyPath: keyPath]
+            },
+            set: { newValue in
+                guard var prof = enterprise.profiles.first(where: { $0.id == profileId }) else { return }
+                prof[keyPath: keyPath] = newValue
+                enterprise.upsertProfile(prof, makeActive: false)
+            }
+        )
+    }
+}
+
+// MARK: - Custom Headers & Corporate Proxy Sheet (Monochrome)
+
+private struct EnterpriseHeadersAndProxySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var enterprise = EnterpriseAIAuthService.shared
+    let profileId: String
+
+    @State private var headerKey: String = ""
+    @State private var headerValue: String = ""
+    @State private var headerIsSecret: Bool = true
+    @State private var proxyDraft: String = ""
+
+    private var profile: EnterpriseAPIProfile? {
+        enterprise.profiles.first(where: { $0.id == profileId })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Label("Enterprise DLP, Command Firewall & Compliance", systemImage: "lock.shield.fill")
-                    .font(.system(size: 12.5, weight: .semibold))
+                Text("Custom Headers & Corporate Proxy")
+                    .font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Text("Vaulted: \(AgentPrivacyGuard.vaultedSecretCount)")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.green.opacity(0.15)))
-                    .foregroundStyle(.green)
-                Button(showGovernanceSection ? "Collapse" : "Configure Policies") {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        showGovernanceSection.toggle()
-                    }
+                Button("Done") {
+                    saveProxy()
+                    dismiss()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
 
-            if showGovernanceSection {
-                Divider().opacity(0.6)
-                Toggle("Zero Data Retention (ZDR) — Send no-training / no-logging headers on every request", isOn: $enterprise.zeroDataRetention)
-                    .font(.system(size: 12))
-                Toggle("Bidirectional DLP Secret Vault — Tokenize API keys/PEMs before prompts leave Mac", isOn: $enterprise.localDLPRedaction)
-                    .font(.system(size: 12))
-                Toggle("Confidential Split-Routing — Route turns reading .env / *.pem to Local LLM or Enterprise VPC", isOn: $enterprise.enforceConfidentialSplitRouting)
-                    .font(.system(size: 12))
-                Toggle("Enterprise Shell Command Firewall — Block destructive shell / DB / Terraform commands", isOn: $enterprise.commandFirewallEnabled)
-                    .font(.system(size: 12))
-                Toggle("Air-Gapped Sovereign Lockdown — Block public consumer AI endpoints", isOn: $enterprise.isAirGappedLockdownEnabled)
-                    .font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 6) {
+                Text("HTTPS / Forward Proxy URL (Optional)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                TextField("http://proxy.corp.internal:8080", text: $proxyDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Custom HTTP Headers (CF-Access, Apigee, Kong, Custom Auth)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+
+                if let prof = profile, !prof.customHeaders.isEmpty {
+                    ForEach(prof.customHeaders) { hdr in
+                        HStack(spacing: 8) {
+                            Text(hdr.key)
+                                .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                            Spacer()
+                            Text(hdr.isSecret ? "Stored in Keychain" : hdr.value)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Button {
+                                removeHeader(hdr.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
+                    }
+                }
 
                 HStack(spacing: 8) {
-                    Button {
-                        let wsPath = AppState.shared?.workspaceFolder?.path ?? UserDefaults.standard.string(forKey: "lastOpenedWorkspacePath")
-                        _ = enterprise.exportWorkspacePolicyTemplate(workspacePath: wsPath)
-                    } label: {
-                        Label("Generate enterprise-policy.json", systemImage: "doc.badge.gearshape")
+                    TextField("Header-Name", text: $headerKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11.5, design: .monospaced))
+                    SecureField("Value", text: $headerValue)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11.5, design: .monospaced))
+                    Toggle("Keychain", isOn: $headerIsSecret)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 11))
+                    Button("Add") {
+                        addHeader()
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-
-                    Button {
-                        _ = FlightRecorder.shared.saveComplianceReportWithPanel()
-                    } label: {
-                        Label("Export SOC2 / PDPA Report", systemImage: "checkmark.shield")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .disabled(headerKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
+
+            Spacer(minLength: 0)
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        )
-    }
-
-    // MARK: - File Import Helpers
-
-    private func importTeamConfigFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "Select a .microcode-enterprise.json Team Setup file or Google Cloud Service Account JSON"
-        if panel.runModal() == .OK, let url = panel.url,
-           let text = try? String(contentsOf: url, encoding: .utf8) {
-            runSmartPaste(text)
+        .padding(20)
+        .frame(width: 520, height: 340)
+        .onAppear {
+            proxyDraft = profile?.proxyURL ?? ""
         }
     }
 
-    private func importVertexServiceAccountFile(for profile: EnterpriseAPIProfile) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "Select Google Cloud Service Account JSON key file"
-        if panel.runModal() == .OK, let url = panel.url,
-           let content = try? String(contentsOf: url, encoding: .utf8) {
-            enterprise.saveSecondarySecret(content, for: profile.id)
-            _ = enterprise.saveVertexServiceAccountJSON(content)
-            var copy = profile
-            if copy.gcpProjectId.isEmpty && !enterprise.vertexProjectId.isEmpty {
-                copy.gcpProjectId = enterprise.vertexProjectId
+    private func saveProxy() {
+        guard var prof = profile else { return }
+        prof.proxyURL = proxyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        enterprise.upsertProfile(prof, makeActive: false)
+    }
+
+    private func addHeader() {
+        guard var prof = profile else { return }
+        let k = headerKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let v = headerValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !k.isEmpty else { return }
+        let item = EnterpriseHeaderItem(key: k, value: headerIsSecret ? "" : v, isSecret: headerIsSecret)
+        if headerIsSecret && !v.isEmpty {
+            enterprise.saveHeaderSecret(v, profileId: prof.id, headerId: item.id)
+        }
+        prof.customHeaders.append(item)
+        enterprise.upsertProfile(prof, makeActive: false)
+        headerKey = ""
+        headerValue = ""
+    }
+
+    private func removeHeader(_ id: String) {
+        guard var prof = profile else { return }
+        enterprise.saveHeaderSecret("", profileId: prof.id, headerId: id)
+        prof.customHeaders.removeAll { $0.id == id }
+        enterprise.upsertProfile(prof, makeActive: false)
+    }
+}
+
+// MARK: - Enterprise DLP, ZDR & Command Firewall Sheet (Monochrome)
+
+private struct EnterpriseComplianceSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var appState: AppState
+    @ObservedObject private var enterprise = EnterpriseAIAuthService.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Enterprise Security, ZDR & DLP Policies")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
             }
-            enterprise.upsertProfile(copy, makeActive: true)
-            toastBanner = "✓ Loaded Service Account JSON (\(url.lastPathComponent))"
+
+            Toggle("Zero Data Retention (X-Dotmini-ZDR / no-store headers)", isOn: $enterprise.zeroDataRetention)
+                .font(.system(size: 12))
+
+            Toggle("Reversible Secret Vault DLP (tokenize API keys & PEM keys before outbound requests)", isOn: $enterprise.localDLPRedaction)
+                .font(.system(size: 12))
+
+            Toggle("Enterprise Shell Command Firewall (block destructive / exfiltration patterns)", isOn: $enterprise.commandFirewallEnabled)
+                .font(.system(size: 12))
+
+            Toggle("Confidential File Split-Routing (.env, *.pem, secrets/*)", isOn: $enterprise.enforceConfidentialSplitRouting)
+                .font(.system(size: 12))
+
+            Toggle("Air-Gapped Lockdown (restrict external egress)", isOn: $enterprise.isAirGappedLockdownEnabled)
+                .font(.system(size: 12))
+
+            Divider()
+
+            HStack {
+                Text("Vaulted Secrets: \(AgentPrivacyGuard.vaultedSecretCount) · Blocked Commands: \(enterprise.blockedCommandsCount)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Export Policy (.microcode/enterprise-policy.json)") {
+                    _ = enterprise.exportWorkspacePolicyTemplate(workspacePath: appState.workspaceFolder?.path)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            Spacer(minLength: 0)
         }
+        .padding(20)
+        .frame(width: 520, height: 300)
     }
 }

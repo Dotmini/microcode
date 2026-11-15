@@ -132,9 +132,8 @@ extension AIClient {
             let bearer = try await ent.resolveGCPBearerToken(for: profile)
             var prebuiltReq = URLRequest(url: endpoint)
             if let bearer { prebuiltReq.setValue(bearer, forHTTPHeaderField: "Authorization") }
-            if !profile.gcpProjectId.isEmpty {
-                prebuiltReq.setValue(profile.gcpProjectId, forHTTPHeaderField: "x-goog-user-project")
-            }
+            // Note: Do NOT inject `x-goog-user-project` automatically; Vertex URL already scopes billing/quota to
+            // `/v1/projects/{project}/...`, whereas `x-goog-user-project` triggers 403 USER_PROJECT_DENIED on gcloud CLI tokens.
             ent.applyProfileHeaders(profile: profile, to: &prebuiltReq)
             let headerSnapshot = prebuiltReq.allHTTPHeaderFields ?? [:]
 

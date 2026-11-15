@@ -78,11 +78,11 @@ struct SettingsView: View {
     static let sidebarItems: [(tab: Int, title: String, icon: String)] = [
         (0, "General", "gearshape"),
         (1, "Editor", "text.cursor"),
-        (2, "AI & Agent", "sparkles"),
+        (2, "AI & Agent", "cpu"),
         (11, "Connect with Phone", "iphone.radiowaves.left.and.right"),
         (12, "Team Collaboration", "person.2"),
-        (9, "Cloud GPU", "cpu"),
-        (10, "Skills", "sparkles.rectangle.stack"),
+        (9, "Cloud GPU", "memorychip"),
+        (10, "Skills", "square.stack.3d.up"),
         (8, "MCP Servers", "server.rack"),
         (3, "Tools", "wrench.and.screwdriver"),
         (5, "Extensions", "puzzlepiece.extension"),
@@ -821,9 +821,9 @@ struct SettingsView: View {
                         hasChanges = true
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "sparkles.rectangle.stack")
+                            Image(systemName: "person.crop.rectangle")
                                 .font(.system(size: 12))
-                                .foregroundColor(.orange)
+                                .foregroundColor(.secondary)
                             Text("Web Subscription")
                                 .font(.system(size: 11.5, weight: aiKeyMode == "subscription" ? .semibold : .regular))
                                 .lineLimit(1)
@@ -878,14 +878,15 @@ struct SettingsView: View {
                         aiKeyMode = "enterprise"
                         if let prof = EnterpriseAIAuthService.shared.activeProfile {
                             selectedProvider = prof.dialect.brandIconKey
-                            selectedModel = prof.defaultModel.isEmpty ? (prof.availableModels.first ?? "gpt-4o") : prof.defaultModel
+                            let m = prof.defaultModel.isEmpty ? (prof.availableModels.first ?? "") : prof.defaultModel
+                            if !m.isEmpty { selectedModel = m }
                         }
                         hasChanges = true
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "building.2.crop.circle.fill")
+                            Image(systemName: "building.2")
                                 .font(.system(size: 12))
-                                .foregroundColor(.indigo)
+                                .foregroundColor(.secondary)
                             Text("Enterprise")
                                 .font(.system(size: 11.5, weight: aiKeyMode == "enterprise" ? .semibold : .regular))
                                 .lineLimit(1)
@@ -1015,8 +1016,8 @@ struct SettingsView: View {
                     
                     HStack(spacing: 10) {
                         Circle()
-                            .fill(hasCloudSession ? ((isPaidPlan || supabaseAuth.entitlement.totalAvailableTHB > 0) ? Color.green : Color.orange) : Color.secondary)
-                            .frame(width: 7, height: 7)
+                            .fill(hasCloudSession ? Color.primary.opacity((isPaidPlan || supabaseAuth.entitlement.totalAvailableTHB > 0) ? 0.85 : 0.45) : Color.secondary.opacity(0.35))
+                            .frame(width: 6, height: 6)
                         if let activeSession = supabaseAuth.session {
                             Text("\(activeSession.email) · Plan: \(planUpper)")
                                 .font(.system(size: 11.5, weight: .semibold))
@@ -1030,7 +1031,7 @@ struct SettingsView: View {
                             Button("Top Up / Plans") {
                                 appState.settingsSelectedTab = 6
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.bordered)
                             .controlSize(.small)
                             Button("Web Console") {
                                 NSWorkspace.shared.open(supabaseAuth.authenticatedPortalURL(path: "/dashboard"))
@@ -1050,7 +1051,7 @@ struct SettingsView: View {
                             Button("Sign In") {
                                 appState.settingsSelectedTab = 6
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.bordered)
                             .controlSize(.small)
                         }
                     }
@@ -1073,11 +1074,11 @@ struct SettingsView: View {
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
                         Text("Isolated from Local/LAN LLM")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundColor(.teal)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundColor(.secondary)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2.5)
-                            .background(Color.teal.opacity(0.12))
+                            .background(Color.primary.opacity(0.05))
                             .cornerRadius(4)
                     }
                     
@@ -1344,9 +1345,9 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             // Header
             HStack(spacing: 10) {
-                Image(systemName: "sparkles.rectangle.stack")
-                    .font(.system(size: 16))
-                    .foregroundColor(.orange)
+                Image(systemName: "person.crop.rectangle")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.primary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Web Subscription Mode (No API Billing)")
                         .font(.system(size: 13, weight: .semibold))
@@ -1373,7 +1374,7 @@ struct SettingsView: View {
                             if healthProbe.isRunning {
                                 ProgressView().controlSize(.mini)
                             } else {
-                                Image(systemName: "stethoscope")
+                                Image(systemName: "checkmark.circle")
                                     .font(.system(size: 10))
                             }
                             Text(healthProbe.isRunning ? "Testing…" : "Test connections")
@@ -1390,13 +1391,13 @@ struct SettingsView: View {
                         }
                     } label: {
                         HStack(spacing: 5) {
-                            Image(systemName: "wand.and.stars")
+                            Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 10))
-                            Text("Auto-detect & Verify CLI Auth")
+                            Text("Sync CLI Auth")
                                 .font(.system(size: 11, weight: .medium))
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
             }
@@ -1406,7 +1407,7 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     Image(systemName: subscriptionAuth.detectedSessionCount > 0 ? "checkmark.circle.fill" : "info.circle")
                         .font(.system(size: 12))
-                        .foregroundColor(subscriptionAuth.detectedSessionCount > 0 ? .green : .secondary)
+                        .foregroundColor(.secondary)
                     Text(subscriptionAuth.lastDetectionMessage)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -1423,7 +1424,7 @@ struct SettingsView: View {
                 HStack {
                     Image(systemName: "cpu")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.blue)
+                        .foregroundColor(.secondary)
                     Text("Active Subscription Model")
                         .font(.system(size: 12, weight: .semibold))
                     Spacer()
@@ -1483,16 +1484,14 @@ struct SettingsView: View {
                         if let activeInfo = subscriptionAuth.findModel(id: selectedModel) {
                             let account = subscriptionAuth.getAccount(activeInfo.provider)
                             HStack(spacing: 8) {
-                                Image(systemName: "checkmark.seal.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.green)
+                                AIProviderBrandIcon(provider: activeInfo.aiProviderID, size: 14)
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 6) {
                                         Text(activeInfo.name)
                                             .font(.system(size: 11, weight: .semibold))
                                         Text("[\(activeInfo.badge)]")
-                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                            .foregroundColor(.blue)
+                                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                            .foregroundColor(.secondary)
                                         Text("via \(activeInfo.provider.displayName)")
                                             .font(.system(size: 10))
                                             .foregroundColor(.secondary)
@@ -1513,23 +1512,23 @@ struct SettingsView: View {
                                 }
                             }
                             .padding(10)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.06)))
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.green.opacity(0.2), lineWidth: 1))
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.035)))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 1))
                         }
                     }
                 } else {
                     HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
+                        Image(systemName: "info.circle")
                             .font(.system(size: 12))
-                            .foregroundColor(.orange)
+                            .foregroundColor(.secondary)
                         Text("No active web subscriptions connected. Sign in or connect at least one account below to enable subscription models.")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                         Spacer()
                     }
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.06)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.2), lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.035)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 1))
                 }
             }
             .padding(12)

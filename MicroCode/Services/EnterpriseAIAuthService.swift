@@ -264,14 +264,17 @@ public final class EnterpriseAIAuthService: ObservableObject {
     @Published public var profiles: [EnterpriseAPIProfile] = []
     @Published public var activeProfileID: String = ""
     @Published public var cliStatus: EnterpriseCLIDetectionStatus = EnterpriseCLIDetectionStatus()
+    @Published public var availableGCPProjects: [String] = []
+    @Published public var readyGCPProjects: [String] = []
+    @Published public var gcpDiagnosticState: String = "" // "", "ready", "billing_disabled", "service_disabled"
 
     // Cached OAuth2 Access Token for Vertex AI
     private var cachedVertexToken: (token: String, expiresAt: Date)? = nil
 
     public static let supportedVertexLocations: [(id: String, label: String)] = [
-        ("asia-southeast1", "asia-southeast1 (Singapore — ASEAN / PDPA)"),
+        ("global", "global (Global Endpoint — Gemini 2.5 / 3.x / 4.x & Claude)"),
         ("us-central1", "us-central1 (Iowa — US Central)"),
-        ("global", "global (Global Endpoint — Gemini 2.5 / 3.x)"),
+        ("asia-southeast1", "asia-southeast1 (Singapore — ASEAN / PDPA)"),
         ("europe-west1", "europe-west1 (Belgium — EU GDPR)"),
         ("asia-northeast1", "asia-northeast1 (Tokyo — Japan)"),
         ("us-east4", "us-east4 (Northern Virginia — US East)")
@@ -298,7 +301,7 @@ public final class EnterpriseAIAuthService: ObservableObject {
             ?? ""
         self.vertexLocation = mdm?.string(forKey: "enterprise_vertex_location")
             ?? std.string(forKey: "enterprise_vertex_location")
-            ?? "asia-southeast1"
+            ?? "global"
         let rawVertexAuth = mdm?.string(forKey: "enterprise_vertex_auth_method")
             ?? std.string(forKey: "enterprise_vertex_auth_method")
             ?? VertexAuthMethod.serviceAccountJSON.rawValue
@@ -684,9 +687,6 @@ public final class EnterpriseAIAuthService: ObservableObject {
         let org = organizationId.trimmingCharacters(in: .whitespacesAndNewlines)
         if !org.isEmpty {
             request.setValue(org, forHTTPHeaderField: "X-Dotmini-Org-ID")
-        }
-        if mode == .geminiVertex && !vertexProjectId.isEmpty {
-            request.setValue(vertexProjectId, forHTTPHeaderField: "x-goog-user-project")
         }
         if UserDefaults.standard.string(forKey: "aiKeyMode") == "enterprise", let prof = activeProfile {
             applyProfileHeaders(profile: prof, to: &request)

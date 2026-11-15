@@ -650,14 +650,6 @@ final class AIModelCatalog: ObservableObject {
                 }
             }
         }
-        // Always include built-in Gemini flagship/pro/flash fallback models
-        if let fallbackModels = Self.fallbackProviders.first(where: { $0.id == "gemini" })?.models {
-            for fm in fallbackModels {
-                if seenIds.insert(fm.id).inserted {
-                    liveModels.append(fm)
-                }
-            }
-        }
         
         if !key.isEmpty {
             let endpoints = [
@@ -772,12 +764,12 @@ final class AIModelCatalog: ObservableObject {
         else if lower.contains("gemini-2.0") || lower.contains("gemini-2-0") { score += 2000 }
         else if lower.contains("gemini-1.5") { score += 1500 }
         
-        if lower.contains("argon") && !lower.contains("low") && !lower.contains("medium") && !lower.contains("high") { score += 400 }
+        if (lower.contains("argon") || lower.contains("hydrogen") || lower.contains("carbon")) && !lower.contains("low") && !lower.contains("medium") && !lower.contains("high") { score += 400 }
         else if lower.contains("pro") { score += 350 }
         else if lower.contains("tiered") || lower.contains("high") { score += 320 }
         else if lower.contains("flash") && !lower.contains("lite") { score += 280 }
         else if lower.contains("lite") { score += 220 }
-        else if lower.contains("argon") { score += 200 }
+        else if lower.contains("argon") || lower.contains("hydrogen") || lower.contains("carbon") { score += 200 }
         return score
     }
 
@@ -785,8 +777,10 @@ final class AIModelCatalog: ObservableObject {
         let lower = id.lowercased()
         var score = 0
         if lower.contains("5-5") || lower.contains("5.5") { score += 5500 }
+        else if lower.contains("5-2") || lower.contains("5.2") { score += 5200 }
         else if lower.contains("5-1") || lower.contains("5.1") { score += 5100 }
-        else if lower.contains("5-0") || lower.contains("5.0") || lower.contains("claude-5") { score += 5000 }
+        else if lower.contains("5-0") || lower.contains("5.0") || lower.contains("claude-5") || lower.hasSuffix("-5") { score += 5000 }
+        else if lower.contains("4-8") || lower.contains("4.8") { score += 4800 }
         else if lower.contains("4-7") || lower.contains("4.7") { score += 4700 }
         else if lower.contains("4-6") || lower.contains("4.6") { score += 4600 }
         else if lower.contains("4-5") || lower.contains("4.5") { score += 4500 }

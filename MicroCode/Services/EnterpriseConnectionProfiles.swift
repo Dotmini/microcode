@@ -70,22 +70,24 @@ public enum EnterpriseProviderDialect: String, CaseIterable, Codable, Identifiab
 
     public var systemIcon: String {
         switch self {
-        case .openaiGateway: return "network.badge.shield.half.filled"
-        case .azureOpenAI: return "cloud.bolt.fill"
-        case .vertexGemini: return "sparkles.tv.fill"
-        case .geminiEnterpriseAgentspace: return "magnifyingglass.circle.fill"
-        case .awsBedrock: return "cube.transparent.fill"
-        case .anthropicGateway: return "brain.head.profile"
-        case .dotminiEnterprise: return "building.2.crop.circle.fill"
+        case .openaiGateway: return "network"
+        case .azureOpenAI: return "cloud"
+        case .vertexGemini: return "cloud"
+        case .geminiEnterpriseAgentspace: return "magnifyingglass"
+        case .awsBedrock: return "server.rack"
+        case .anthropicGateway: return "network"
+        case .dotminiEnterprise: return "building.2"
         }
     }
 
     public var brandIconKey: String {
         switch self {
         case .openaiGateway: return "openai"
-        case .azureOpenAI: return "openai"
-        case .vertexGemini, .geminiEnterpriseAgentspace: return "gemini"
-        case .awsBedrock, .anthropicGateway: return "anthropic"
+        case .azureOpenAI: return "azure"
+        case .vertexGemini: return "google_cloud"
+        case .geminiEnterpriseAgentspace: return "gemini"
+        case .awsBedrock: return "aws"
+        case .anthropicGateway: return "claude"
         case .dotminiEnterprise: return "microcode"
         }
     }
@@ -95,13 +97,13 @@ public enum EnterpriseProviderDialect: String, CaseIterable, Codable, Identifiab
         case .openaiGateway:
             return [.bearerToken, .apiKeyHeader, .xApiKeyHeader, .ocpApimKey, .customHeadersOnly]
         case .azureOpenAI:
-            return [.apiKeyHeader, .azureEntraCLI, .bearerToken]
+            return [.azureEntraCLI, .apiKeyHeader, .bearerToken]
         case .vertexGemini:
             return [.gcloudADC, .serviceAccountJSON, .apiKeyQueryOrBearer]
         case .geminiEnterpriseAgentspace:
             return [.gcloudADC, .serviceAccountJSON]
         case .awsBedrock:
-            return [.awsBedrockAPIKey, .awsSigV4Profile, .awsSigV4AccessKey]
+            return [.awsSigV4Profile, .awsBedrockAPIKey, .awsSigV4AccessKey]
         case .anthropicGateway:
             return [.xApiKeyHeader, .bearerToken, .customHeadersOnly]
         case .dotminiEnterprise:
@@ -109,35 +111,13 @@ public enum EnterpriseProviderDialect: String, CaseIterable, Codable, Identifiab
         }
     }
 
+    /// Strict zero-mock policy: never synthesize or inject fake/hardcoded model catalogs.
     public var fallbackModels: [String] {
         switch self {
-        case .openaiGateway:
-            return ["gpt-4.1", "gpt-4o", "claude-sonnet-4-20250514", "gemini-2.5-pro", "deepseek-chat"]
-        case .azureOpenAI:
-            return ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3-mini"]
-        case .vertexGemini:
-            return [
-                "gemini-2.5-pro",
-                "gemini-2.5-flash",
-                "gemini-2.0-flash",
-                "claude-sonnet-4@20250514",
-                "claude-3-7-sonnet@20250219"
-            ]
         case .geminiEnterpriseAgentspace:
             return ["default_assistant"]
-        case .awsBedrock:
-            return [
-                "apac.anthropic.claude-sonnet-4-20250514-v1:0",
-                "apac.anthropic.claude-3-7-sonnet-20250219-v1:0",
-                "us.anthropic.claude-sonnet-4-20250514-v1:0",
-                "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-                "apac.amazon.nova-pro-v1:0",
-                "us.amazon.nova-pro-v1:0"
-            ]
-        case .anthropicGateway:
-            return ["claude-sonnet-4-20250514", "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"]
-        case .dotminiEnterprise:
-            return ["omni-o1x-pro", "gemini-2.5-pro", "gemini-2.5-flash", "claude-3-7-sonnet-20250219", "gpt-4o"]
+        default:
+            return []
         }
     }
 }
@@ -267,7 +247,7 @@ public struct EnterpriseAPIProfile: Codable, Equatable, Identifiable {
         azureDeploymentName: String = "",
         azureAPIVersion: String = "2024-10-21",
         gcpProjectId: String = "",
-        gcpLocation: String = "asia-southeast1",
+        gcpLocation: String = "global",
         discoveryEngineId: String = "",
         discoveryCollectionId: String = "default_collection",
         discoveryAssistantId: String = "default_assistant",
@@ -309,7 +289,7 @@ public struct EnterpriseAPIProfile: Codable, Equatable, Identifiable {
         self.customModels = customModels
         let initialDefault = !defaultModel.isEmpty
             ? defaultModel
-            : (!azureDeploymentName.isEmpty ? azureDeploymentName : (dialect.fallbackModels.first ?? "gpt-4o"))
+            : (!azureDeploymentName.isEmpty ? azureDeploymentName : (discoveredModels.first ?? customModels.first ?? ""))
         self.defaultModel = initialDefault
         self.enforceZDR = enforceZDR
         self.enforceDLP = enforceDLP
@@ -319,7 +299,7 @@ public struct EnterpriseAPIProfile: Codable, Equatable, Identifiable {
         self.lastStatusMessage = lastStatusMessage
     }
 
-    /// Combined deduplicated list of models available for selection in the AI Agent picker
+    /// Combined deduplicated list of real live-discovered + custom models (strictly zero mocked fallbacks).
     public var availableModels: [String] {
         var seen = Set<String>()
         var result: [String] = []
@@ -328,14 +308,13 @@ public struct EnterpriseAPIProfile: Codable, Equatable, Identifiable {
             guard !clean.isEmpty, seen.insert(clean).inserted else { return }
             result.append(clean)
         }
+        for m in discoveredModels { appendUnique(m) }
+        for m in customModels { appendUnique(m) }
         if dialect == .azureOpenAI, !azureDeploymentName.isEmpty {
             appendUnique(azureDeploymentName)
         }
-        for m in customModels { appendUnique(m) }
-        for m in discoveredModels { appendUnique(m) }
-        if !defaultModel.isEmpty { appendUnique(defaultModel) }
-        if result.isEmpty {
-            for m in dialect.fallbackModels { appendUnique(m) }
+        if dialect == .geminiEnterpriseAgentspace {
+            appendUnique(discoveryAssistantId.isEmpty ? "default_assistant" : discoveryAssistantId)
         }
         return result
     }
@@ -1271,9 +1250,38 @@ extension EnterpriseAIAuthService {
 
     public func loadProfilesFromDiskOrMigrate() {
         let std = UserDefaults.standard
+        let legacyVertexMockSet: Set<String> = [
+            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
+            "claude-sonnet-4@20250514", "claude-3-7-sonnet@20250219"
+        ]
+        let legacyBedrockMockSet: Set<String> = [
+            "apac.anthropic.claude-sonnet-4-20250514-v1:0",
+            "apac.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            "us.anthropic.claude-sonnet-4-20250514-v1:0",
+            "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            "apac.amazon.nova-pro-v1:0",
+            "us.amazon.nova-pro-v1:0"
+        ]
         if let data = std.data(forKey: Self.profilesDefaultsKey),
-           let decoded = try? JSONDecoder().decode([EnterpriseAPIProfile].self, from: data),
+           var decoded = try? JSONDecoder().decode([EnterpriseAPIProfile].self, from: data),
            !decoded.isEmpty {
+            for i in decoded.indices {
+                // Scrub previously persisted mock fallback arrays so only real live API models remain
+                if decoded[i].dialect == .vertexGemini && Set(decoded[i].discoveredModels) == legacyVertexMockSet {
+                    decoded[i].discoveredModels = []
+                    decoded[i].isVerified = false
+                }
+                if decoded[i].dialect == .awsBedrock && Set(decoded[i].discoveredModels) == legacyBedrockMockSet {
+                    decoded[i].discoveredModels = []
+                    decoded[i].isVerified = false
+                }
+                if decoded[i].gcpProjectId == "project-f7553022-d42b-46bd-a07" {
+                    decoded[i].gcpProjectId = ""
+                    decoded[i].name = "Google Cloud Vertex AI"
+                    decoded[i].gcpLocation = "global"
+                    decoded[i].isVerified = false
+                }
+            }
             self.profiles = decoded
             let savedActive = std.string(forKey: Self.activeProfileDefaultsKey) ?? ""
             if decoded.contains(where: { $0.id == savedActive }) {
@@ -1335,8 +1343,8 @@ extension EnterpriseAIAuthService {
                 name: "Google Cloud Vertex AI",
                 dialect: .vertexGemini,
                 authScheme: .gcloudADC,
-                gcpLocation: "asia-southeast1",
-                defaultModel: "gemini-2.5-pro"
+                gcpLocation: "global",
+                defaultModel: ""
             ))
         }
         self.profiles = initial
@@ -1680,15 +1688,6 @@ extension EnterpriseAIAuthService {
         var finished = detected
         finished.isScanning = false
         self.cliStatus = finished
-
-        // Auto-fill GCP Project ID on active Vertex/Agentspace profile if blank
-        if let idx = profiles.firstIndex(where: { $0.id == activeProfileID }),
-           (profiles[idx].dialect == .vertexGemini || profiles[idx].dialect == .geminiEnterpriseAgentspace),
-           profiles[idx].gcpProjectId.isEmpty,
-           !finished.gcloudProject.isEmpty {
-            profiles[idx].gcpProjectId = finished.gcloudProject
-            persistProfilesToDisk()
-        }
     }
 
     public func triggerInteractiveCLILogin(command: String) {
@@ -1937,20 +1936,35 @@ extension EnterpriseAIAuthService {
 
     public func buildVertexEndpointURL(profile: EnterpriseAPIProfile, model: String, streaming: Bool) -> URL? {
         let proj = profile.gcpProjectId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let loc = profile.gcpLocation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "asia-southeast1"
+        let rawLoc = profile.gcpLocation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "global"
             : profile.gcpLocation.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !proj.isEmpty else { return nil }
-        let host = (loc == "global")
-            ? "https://aiplatform.googleapis.com"
-            : "https://\(loc)-aiplatform.googleapis.com"
 
         var cleanModel = model
         for prefix in ["models/", "publishers/google/models/", "publishers/anthropic/models/"] {
             if cleanModel.hasPrefix(prefix) { cleanModel = String(cleanModel.dropFirst(prefix.count)) }
         }
+        let lowerModel = cleanModel.lowercased()
+        // Frontier Gemini 3.x / 4.x and Claude 5.x / 4.6+ models on Vertex AI are served from `global`
+        let requiresGlobal = lowerModel.hasPrefix("gemini-3")
+            || lowerModel.hasPrefix("gemini-4")
+            || lowerModel.hasPrefix("gemini-5")
+            || lowerModel.contains("claude-opus-5")
+            || lowerModel.contains("claude-sonnet-5")
+            || lowerModel.contains("claude-haiku-5")
+            || lowerModel.contains("claude-fable")
+            || lowerModel.contains("claude-opus-4-8")
+            || lowerModel.contains("claude-opus-4-7")
+            || lowerModel.contains("claude-opus-4-6")
+            || lowerModel.contains("claude-sonnet-4-6")
+        let loc = requiresGlobal ? "global" : rawLoc
 
-        if cleanModel.lowercased().hasPrefix("claude-") {
+        let host = (loc == "global")
+            ? "https://aiplatform.googleapis.com"
+            : "https://\(loc)-aiplatform.googleapis.com"
+
+        if lowerModel.hasPrefix("claude-") {
             let action = streaming ? "streamRawPredict" : "rawPredict"
             return URL(string: "\(host)/v1/projects/\(proj)/locations/\(loc)/publishers/anthropic/models/\(cleanModel):\(action)")
         }
@@ -1995,7 +2009,161 @@ extension EnterpriseAIAuthService {
         return URL(string: "https://bedrock-runtime.\(region).amazonaws.com/model/\(encodedModel)/converse")
     }
 
-    // MARK: - Live Model Discovery & Connection Verification
+    // MARK: - Zero-Config Bootstrap & 1-Click Provider Connect
+
+    private static var didAutoBootstrapSession = false
+
+    /// Automatically detects local SSO / saved credentials and fetches live models without user friction.
+    public func autoBootstrapZeroConfigIfNeeded() async {
+        await detectLocalCLIs()
+        guard let active = activeProfile else { return }
+
+        let shouldAutoFetch: Bool = {
+            if Self.didAutoBootstrapSession && !active.discoveredModels.isEmpty {
+                return false
+            }
+            switch active.dialect {
+            case .vertexGemini, .geminiEnterpriseAgentspace:
+                return cliStatus.isGcloudReady || hasVertexServiceAccount || !readPrimarySecret(for: active.id).isEmpty
+            case .awsBedrock:
+                return cliStatus.isAWSReady || !readPrimarySecret(for: active.id).isEmpty
+            case .azureOpenAI:
+                return cliStatus.isAzureReady || !readPrimarySecret(for: active.id).isEmpty
+            case .dotminiEnterprise:
+                return DotminiPlatformKeyService.shared.authorizationToken != nil
+                    || SupabaseAuthService.shared.accessToken != nil
+                    || !readPrimarySecret(for: active.id).isEmpty
+            case .openaiGateway, .anthropicGateway:
+                return !active.baseURL.isEmpty && !readPrimarySecret(for: active.id).isEmpty
+            }
+        }()
+
+        guard shouldAutoFetch else { return }
+        Self.didAutoBootstrapSession = true
+        _ = await discoverModelsAndVerify(profileId: active.id)
+    }
+
+    /// 1-Click Zero-Config Connect for any Enterprise provider dialect.
+    @discardableResult
+    public func connectProviderZeroConfig(
+        dialect: EnterpriseProviderDialect,
+        credentialOrURL: String = ""
+    ) async -> Bool {
+        let trimmedInput = credentialOrURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedInput.isEmpty, let parsed = applySmartPaste(trimmedInput) {
+            let ok = await discoverModelsAndVerify(profileId: parsed.profile.id)
+            if let updated = profiles.first(where: { $0.id == parsed.profile.id }) {
+                activateEnterpriseSelection(profileId: updated.id, modelId: updated.defaultModel)
+            }
+            return ok
+        }
+
+        await detectLocalCLIs()
+        var prof: EnterpriseAPIProfile
+        if let existing = profiles.first(where: { $0.dialect == dialect }) {
+            prof = existing
+        } else {
+            prof = createPresetProfile(dialect: dialect)
+        }
+
+        switch dialect {
+        case .vertexGemini:
+            if !trimmedInput.isEmpty {
+                if trimmedInput.hasPrefix("{") {
+                    prof.authScheme = .serviceAccountJSON
+                    saveSecondarySecret(trimmedInput, for: prof.id)
+                    _ = saveVertexServiceAccountJSON(trimmedInput)
+                } else {
+                    prof.authScheme = .apiKeyQueryOrBearer
+                    savePrimarySecret(trimmedInput, for: prof.id)
+                }
+            } else {
+                prof.authScheme = hasVertexServiceAccount ? .serviceAccountJSON : .gcloudADC
+            }
+            if prof.gcpLocation.isEmpty { prof.gcpLocation = "global" }
+            prof.name = "Google Cloud Vertex AI"
+
+        case .awsBedrock:
+            if !trimmedInput.isEmpty {
+                if trimmedInput.hasPrefix("ABSK") {
+                    prof.authScheme = .awsBedrockAPIKey
+                    savePrimarySecret(trimmedInput, for: prof.id)
+                } else {
+                    savePrimarySecret(trimmedInput, for: prof.id)
+                }
+            } else if let firstAWS = cliStatus.awsProfiles.first {
+                prof.authScheme = .awsSigV4Profile
+                prof.awsProfileName = firstAWS
+                prof.awsRegion = cliStatus.awsDefaultRegion
+            }
+
+        case .azureOpenAI:
+            if !trimmedInput.isEmpty {
+                if trimmedInput.lowercased().hasPrefix("http") {
+                    prof.baseURL = trimmedInput
+                } else {
+                    prof.authScheme = .apiKeyHeader
+                    savePrimarySecret(trimmedInput, for: prof.id)
+                }
+            } else if cliStatus.isAzureReady {
+                prof.authScheme = .azureEntraCLI
+            }
+
+        case .dotminiEnterprise:
+            if prof.baseURL.isEmpty { prof.baseURL = "https://api.dotmini.net/v1" }
+            if !trimmedInput.isEmpty {
+                savePrimarySecret(trimmedInput, for: prof.id)
+            }
+
+        case .openaiGateway, .anthropicGateway:
+            if !trimmedInput.isEmpty {
+                if trimmedInput.lowercased().hasPrefix("http") {
+                    prof.baseURL = trimmedInput
+                } else {
+                    savePrimarySecret(trimmedInput, for: prof.id)
+                }
+            }
+
+        case .geminiEnterpriseAgentspace:
+            prof.authScheme = .gcloudADC
+            prof.gcpLocation = "global"
+        }
+
+        upsertProfile(prof, makeActive: true)
+        let ok = await discoverModelsAndVerify(profileId: prof.id)
+        if let updated = profiles.first(where: { $0.id == prof.id }), !updated.defaultModel.isEmpty {
+            activateEnterpriseSelection(profileId: updated.id, modelId: updated.defaultModel)
+        }
+        return ok
+    }
+
+    /// Enables `aiplatform.googleapis.com` on the selected Google Cloud project via Service Usage API in 1 click.
+    @discardableResult
+    public func enableVertexAIAPI(for profileId: String) async -> Bool {
+        guard let prof = profiles.first(where: { $0.id == profileId }),
+              !prof.gcpProjectId.isEmpty else { return false }
+        isVerifying = true
+        defer { isVerifying = false }
+        do {
+            guard let bearer = try await resolveGCPBearerToken(for: prof),
+                  let url = URL(string: "https://serviceusage.googleapis.com/v1/projects/\(prof.gcpProjectId)/services/aiplatform.googleapis.com:enable") else {
+                return false
+            }
+            var req = URLRequest(url: url, timeoutInterval: 20)
+            req.httpMethod = "POST"
+            req.setValue(bearer, forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = Data("{}".utf8)
+            let (_, resp) = try await urlSession(for: prof).data(for: req)
+            if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                return await discoverModelsAndVerify(profileId: profileId)
+            }
+        } catch {}
+        return false
+    }
+
+    // MARK: - Live Model Discovery & Connection Verification (100% Real API, Zero Mock)
 
     @discardableResult
     public func discoverModelsAndVerify(profileId: String) async -> Bool {
@@ -2011,7 +2179,7 @@ extension EnterpriseAIAuthService {
                 let rawBase = prof.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !rawBase.isEmpty else {
                     prof.isVerified = false
-                    prof.lastStatusMessage = "Enter a valid Gateway Base URL."
+                    prof.lastStatusMessage = "Enter a Gateway Base URL."
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return false
@@ -2021,32 +2189,77 @@ extension EnterpriseAIAuthService {
                     : EnterpriseSmartPasteParser.normalizeOpenAIBaseURL(rawBase)
                 prof.baseURL = cleanBase
 
-                if let modelsURL = URL(string: "\(cleanBase)/models") {
-                    var req = URLRequest(url: modelsURL, timeoutInterval: 14)
-                    if prof.dialect == .anthropicGateway {
-                        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                guard let modelsURL = URL(string: "\(cleanBase)/models") else {
+                    prof.isVerified = false
+                    prof.lastStatusMessage = "Invalid Gateway URL."
+                    upsertProfile(prof, makeActive: false)
+                    statusMessage = prof.lastStatusMessage
+                    return false
+                }
+                var req = URLRequest(url: modelsURL, timeoutInterval: 14)
+                if prof.dialect == .anthropicGateway {
+                    req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                }
+                try await applyStandardGatewayAuth(profile: prof, to: &req)
+                let (data, resp) = try await session.data(for: req)
+                if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                    let ids = Self.sortEnterpriseModelIDs(Self.parseModelIDs(from: data))
+                    prof.discoveredModels = ids
+                    if !ids.isEmpty && (prof.defaultModel.isEmpty || !ids.contains(prof.defaultModel)) {
+                        prof.defaultModel = ids[0]
                     }
+                    prof.isVerified = true
+                    prof.lastVerifiedAt = Date()
+                    prof.lastStatusMessage = ids.isEmpty
+                        ? "Connected (0 models returned by /models)"
+                        : "Connected · \(ids.count) live models"
+                    upsertProfile(prof, makeActive: false)
+                    statusMessage = prof.lastStatusMessage
+                    return true
+                } else {
+                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                    let raw = String(data: data, encoding: .utf8) ?? ""
+                    prof.isVerified = false
+                    prof.lastStatusMessage = "Gateway HTTP \(code): \(Self.compactErrorSummary(raw))"
+                    upsertProfile(prof, makeActive: false)
+                    statusMessage = prof.lastStatusMessage
+                    return false
+                }
+
+            case .azureOpenAI:
+                let liveAzureModels = try await fetchLiveAzureModels(profile: prof, session: session)
+                if !liveAzureModels.isEmpty {
+                    prof.discoveredModels = liveAzureModels
+                    if prof.defaultModel.isEmpty || !liveAzureModels.contains(prof.defaultModel) {
+                        prof.defaultModel = !prof.azureDeploymentName.isEmpty ? prof.azureDeploymentName : liveAzureModels[0]
+                    }
+                }
+                let testModel = !prof.azureDeploymentName.isEmpty ? prof.azureDeploymentName : prof.defaultModel
+                if let chatURL = buildAzureChatCompletionsURL(profile: prof, modelOrDeployment: testModel), !testModel.isEmpty {
+                    var req = URLRequest(url: chatURL, timeoutInterval: 14)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     try await applyStandardGatewayAuth(profile: prof, to: &req)
+                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "model": testModel,
+                        "messages": [["role": "user", "content": "ping"]],
+                        "max_tokens": 2
+                    ])
                     let (data, resp) = try await session.data(for: req)
                     if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                        let ids = Self.parseModelIDs(from: data)
-                        if !ids.isEmpty {
-                            prof.discoveredModels = ids
-                            if !ids.contains(prof.defaultModel), let first = ids.first {
-                                prof.defaultModel = first
-                            }
+                        if !prof.discoveredModels.contains(testModel) {
+                            prof.discoveredModels.insert(testModel, at: 0)
                         }
                         prof.isVerified = true
                         prof.lastVerifiedAt = Date()
-                        prof.lastStatusMessage = "✓ Connected (\(ids.isEmpty ? "Auth OK" : "\(ids.count) models discovered"))"
+                        prof.lastStatusMessage = "Connected · \(prof.discoveredModels.count) live models"
                         upsertProfile(prof, makeActive: false)
                         statusMessage = prof.lastStatusMessage
                         return true
-                    } else if let http = resp as? HTTPURLResponse, http.statusCode == 404 {
-                        // Some corporate proxies disable GET /models and only expose POST /chat/completions or /messages
+                    } else if !liveAzureModels.isEmpty {
                         prof.isVerified = true
                         prof.lastVerifiedAt = Date()
-                        prof.lastStatusMessage = "✓ Gateway reachable (/models disabled by proxy — enter deployment/model ID manually)"
+                        prof.lastStatusMessage = "Connected · \(liveAzureModels.count) live models"
                         upsertProfile(prof, makeActive: false)
                         statusMessage = prof.lastStatusMessage
                         return true
@@ -2054,108 +2267,113 @@ extension EnterpriseAIAuthService {
                         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                         let raw = String(data: data, encoding: .utf8) ?? ""
                         prof.isVerified = false
-                        prof.lastStatusMessage = "HTTP \(code): \(String(raw.prefix(160)))"
+                        prof.lastStatusMessage = "Azure HTTP \(code): \(Self.compactErrorSummary(raw))"
                         upsertProfile(prof, makeActive: false)
                         statusMessage = prof.lastStatusMessage
                         return false
                     }
-                }
-
-            case .azureOpenAI:
-                let testModel = !prof.azureDeploymentName.isEmpty ? prof.azureDeploymentName : prof.defaultModel
-                guard let chatURL = buildAzureChatCompletionsURL(profile: prof, modelOrDeployment: testModel) else {
-                    prof.isVerified = false
-                    prof.lastStatusMessage = "Enter Azure Resource Name & Deployment Name (or paste full endpoint URL)."
-                    upsertProfile(prof, makeActive: false)
-                    statusMessage = prof.lastStatusMessage
-                    return false
-                }
-                var req = URLRequest(url: chatURL, timeoutInterval: 15)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                try await applyStandardGatewayAuth(profile: prof, to: &req)
-                let body: [String: Any] = [
-                    "model": testModel,
-                    "messages": [["role": "user", "content": "ping"]],
-                    "max_tokens": 4
-                ]
-                req.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let (data, resp) = try await session.data(for: req)
-                if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                    if !testModel.isEmpty && !prof.discoveredModels.contains(testModel) {
-                        prof.discoveredModels = [testModel]
-                    }
+                } else if !liveAzureModels.isEmpty {
                     prof.isVerified = true
                     prof.lastVerifiedAt = Date()
-                    prof.lastStatusMessage = "✓ Verified Azure OpenAI deployment '\(testModel)'"
+                    prof.lastStatusMessage = "Connected · \(liveAzureModels.count) live models"
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return true
                 } else {
-                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                    let raw = String(data: data, encoding: .utf8) ?? ""
                     prof.isVerified = false
-                    prof.lastStatusMessage = "Azure HTTP \(code): \(String(raw.prefix(180)))"
+                    prof.lastStatusMessage = "Enter Azure endpoint URL or Resource Name."
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return false
                 }
 
             case .vertexGemini:
-                let testModel = prof.defaultModel.isEmpty ? "gemini-2.5-flash" : prof.defaultModel
-                guard let url = buildVertexEndpointURL(profile: prof, model: testModel, streaming: false) else {
-                    prof.isVerified = false
-                    prof.lastStatusMessage = "Google Cloud Project ID is required."
-                    upsertProfile(prof, makeActive: false)
-                    statusMessage = prof.lastStatusMessage
-                    return false
-                }
-                var req = URLRequest(url: url, timeoutInterval: 16)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                if let bearer = try await resolveGCPBearerToken(for: prof) {
-                    req.setValue(bearer, forHTTPHeaderField: "Authorization")
-                }
-                req.setValue(prof.gcpProjectId, forHTTPHeaderField: "x-goog-user-project")
-                applyProfileHeaders(profile: prof, to: &req)
+                let bearer = try await resolveGCPBearerToken(for: prof)
+                let apiKey = prof.authScheme == .apiKeyQueryOrBearer ? readPrimarySecret(for: prof.id) : ""
+                let preferredGCPProject = prof.gcpProjectId
 
-                if testModel.lowercased().hasPrefix("claude-") {
-                    req.httpBody = try JSONSerialization.data(withJSONObject: [
-                        "anthropic_version": "vertex-2023-10-16",
-                        "max_tokens": 8,
-                        "messages": [["role": "user", "content": "ping"]]
-                    ])
-                } else {
-                    req.httpBody = try JSONSerialization.data(withJSONObject: [
-                        "contents": [["role": "user", "parts": [["text": "ping"]]]],
-                        "generationConfig": ["maxOutputTokens": 4]
-                    ])
+                // 1. Fetch 100% REAL live models from Google & Anthropic Publisher Catalogs on Vertex AI
+                async let catalogTask = fetchLiveVertexPublisherModels(bearer: bearer, apiKey: apiKey, session: session)
+                // 2. Auto-resolve an ACTIVE, non-suspended, Vertex-ready Google Cloud project in parallel
+                async let projectTask = resolveSmartGCPProject(
+                    bearer: bearer,
+                    preferredProject: preferredGCPProject,
+                    session: session
+                )
+
+                let (liveModels, projectResolution) = await (catalogTask, projectTask)
+
+                if !projectResolution.activeProjects.isEmpty {
+                    self.availableGCPProjects = projectResolution.activeProjects
                 }
-                let (data, resp) = try await session.data(for: req)
-                if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                    if prof.discoveredModels.isEmpty {
-                        prof.discoveredModels = EnterpriseProviderDialect.vertexGemini.fallbackModels
+                self.readyGCPProjects = projectResolution.readyProjects
+                self.gcpDiagnosticState = projectResolution.state
+
+                if !projectResolution.selectedProject.isEmpty {
+                    prof.gcpProjectId = projectResolution.selectedProject
+                }
+                if prof.gcpLocation.isEmpty {
+                    prof.gcpLocation = "global"
+                }
+                prof.name = "Google Cloud Vertex AI"
+
+                if !liveModels.isEmpty {
+                    prof.discoveredModels = liveModels
+                    if prof.defaultModel.isEmpty || !liveModels.contains(prof.defaultModel) {
+                        // Default to fast, widely-supported live frontier model
+                        prof.defaultModel = liveModels.first(where: { $0 == "gemini-3.5-flash" })
+                            ?? liveModels.first(where: { $0 == "gemini-2.5-pro" })
+                            ?? liveModels[0]
                     }
+                }
+
+                if projectResolution.state == "ready" {
                     prof.isVerified = true
                     prof.lastVerifiedAt = Date()
-                    prof.lastStatusMessage = "✓ Verified Vertex AI (\(prof.gcpProjectId) • \(prof.gcpLocation))"
+                    prof.lastStatusMessage = "Connected · \(prof.gcpProjectId) · \(liveModels.count) live models"
                     upsertProfile(prof, makeActive: false)
+                    if activeProfileID == prof.id && UserDefaults.standard.string(forKey: "aiKeyMode") == "enterprise" {
+                        activateEnterpriseSelection(profileId: prof.id, modelId: prof.defaultModel)
+                    }
+                    statusMessage = prof.lastStatusMessage
+                    return true
+                } else if !liveModels.isEmpty {
+                    // SSO & Live Model Garden catalog succeeded; surface exact project readiness state cleanly
+                    prof.isVerified = true
+                    prof.lastVerifiedAt = Date()
+                    if projectResolution.state == "billing_disabled" {
+                        prof.lastStatusMessage = "SSO Connected · \(liveModels.count) live models · Enable Billing on '\(prof.gcpProjectId)' to run inference"
+                    } else if projectResolution.state == "service_disabled" {
+                        prof.lastStatusMessage = "SSO Connected · \(liveModels.count) live models · Enable Vertex AI API on '\(prof.gcpProjectId)'"
+                    } else {
+                        prof.lastStatusMessage = "SSO Connected · \(liveModels.count) live models"
+                    }
+                    upsertProfile(prof, makeActive: false)
+                    if activeProfileID == prof.id && UserDefaults.standard.string(forKey: "aiKeyMode") == "enterprise" {
+                        activateEnterpriseSelection(profileId: prof.id, modelId: prof.defaultModel)
+                    }
                     statusMessage = prof.lastStatusMessage
                     return true
                 } else {
-                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                    let raw = String(data: data, encoding: .utf8) ?? ""
                     prof.isVerified = false
-                    prof.lastStatusMessage = "Vertex HTTP \(code): \(String(raw.prefix(180)))"
+                    prof.lastStatusMessage = projectResolution.errorDetail.isEmpty
+                        ? "Unable to fetch live Vertex AI models. Check Google Cloud sign-in."
+                        : projectResolution.errorDetail
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return false
                 }
 
             case .geminiEnterpriseAgentspace:
+                let bearer = try await resolveGCPBearerToken(for: prof)
+                if prof.gcpProjectId.isEmpty {
+                    let res = await resolveSmartGCPProject(bearer: bearer, preferredProject: "", session: session)
+                    if !res.selectedProject.isEmpty { prof.gcpProjectId = res.selectedProject }
+                    if !res.activeProjects.isEmpty { self.availableGCPProjects = res.activeProjects }
+                }
                 guard let url = buildDiscoveryEngineStreamAssistURL(profile: prof) else {
                     prof.isVerified = false
-                    prof.lastStatusMessage = "GCP Project ID and Discovery Engine / App ID are required."
+                    prof.lastStatusMessage = "Select a Google Cloud Project and enter your Agentspace App ID."
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return false
@@ -2163,10 +2381,7 @@ extension EnterpriseAIAuthService {
                 var req = URLRequest(url: url, timeoutInterval: 18)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                if let bearer = try await resolveGCPBearerToken(for: prof) {
-                    req.setValue(bearer, forHTTPHeaderField: "Authorization")
-                }
-                req.setValue(prof.gcpProjectId, forHTTPHeaderField: "X-Goog-User-Project")
+                if let bearer { req.setValue(bearer, forHTTPHeaderField: "Authorization") }
                 applyProfileHeaders(profile: prof, to: &req)
                 req.httpBody = try JSONSerialization.data(withJSONObject: [
                     "query": ["text": "ping"],
@@ -2177,7 +2392,7 @@ extension EnterpriseAIAuthService {
                     prof.discoveredModels = [prof.discoveryAssistantId.isEmpty ? "default_assistant" : prof.discoveryAssistantId]
                     prof.isVerified = true
                     prof.lastVerifiedAt = Date()
-                    prof.lastStatusMessage = "✓ Verified Gemini Enterprise Agentspace (\(prof.discoveryEngineId))"
+                    prof.lastStatusMessage = "Connected · Agentspace (\(prof.discoveryEngineId))"
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return true
@@ -2185,71 +2400,31 @@ extension EnterpriseAIAuthService {
                     let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
                     let raw = String(data: data, encoding: .utf8) ?? ""
                     prof.isVerified = false
-                    prof.lastStatusMessage = "Agentspace HTTP \(code): \(String(raw.prefix(180)))"
+                    prof.lastStatusMessage = "Agentspace HTTP \(code): \(Self.compactErrorSummary(raw))"
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return false
                 }
 
             case .awsBedrock:
-                let testModel = prof.defaultModel.isEmpty
-                    ? "apac.anthropic.claude-3-7-sonnet-20250219-v1:0"
-                    : prof.defaultModel
-                guard let url = buildBedrockConverseURL(profile: prof, modelId: testModel) else {
-                    prof.isVerified = false
-                    prof.lastStatusMessage = "Invalid AWS Region or Bedrock Model ID."
-                    upsertProfile(prof, makeActive: false)
-                    statusMessage = prof.lastStatusMessage
-                    return false
-                }
-                var req = URLRequest(url: url, timeoutInterval: 16)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                let bodyObj: [String: Any] = [
-                    "messages": [["role": "user", "content": [["text": "ping"]]]],
-                    "inferenceConfig": ["maxTokens": 8]
-                ]
-                let bodyData = try JSONSerialization.data(withJSONObject: bodyObj)
-                req.httpBody = bodyData
-                applyProfileHeaders(profile: prof, to: &req)
-
-                if prof.authScheme == .awsBedrockAPIKey {
-                    let key = readPrimarySecret(for: prof.id)
-                    guard !key.isEmpty else {
-                        prof.isVerified = false
-                        prof.lastStatusMessage = "Paste your Bedrock API Key (ABSK…)."
-                        upsertProfile(prof, makeActive: false)
-                        statusMessage = prof.lastStatusMessage
-                        return false
-                    }
-                    req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                } else {
-                    let creds = try await resolveAWSSigV4Credentials(for: prof)
-                    EnterpriseAWSSigV4Signer.sign(
-                        request: &req,
-                        bodyData: bodyData,
-                        credentials: creds,
-                        region: prof.awsRegion,
-                        service: "bedrock"
-                    )
-                }
-
-                let (data, resp) = try await session.data(for: req)
-                if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                    if prof.discoveredModels.isEmpty {
-                        prof.discoveredModels = EnterpriseProviderDialect.awsBedrock.fallbackModels
+                let liveBedrockModels = try await fetchLiveBedrockModels(profile: prof, session: session)
+                if !liveBedrockModels.isEmpty {
+                    prof.discoveredModels = liveBedrockModels
+                    if prof.defaultModel.isEmpty || !liveBedrockModels.contains(prof.defaultModel) {
+                        prof.defaultModel = liveBedrockModels[0]
                     }
                     prof.isVerified = true
                     prof.lastVerifiedAt = Date()
-                    prof.lastStatusMessage = "✓ Verified AWS Bedrock (\(prof.awsRegion) • \(testModel))"
+                    prof.lastStatusMessage = "Connected · \(prof.awsRegion) · \(liveBedrockModels.count) live models"
                     upsertProfile(prof, makeActive: false)
+                    if activeProfileID == prof.id && UserDefaults.standard.string(forKey: "aiKeyMode") == "enterprise" {
+                        activateEnterpriseSelection(profileId: prof.id, modelId: prof.defaultModel)
+                    }
                     statusMessage = prof.lastStatusMessage
                     return true
                 } else {
-                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                    let raw = String(data: data, encoding: .utf8) ?? ""
                     prof.isVerified = false
-                    prof.lastStatusMessage = "Bedrock HTTP \(code): \(String(raw.prefix(180)))"
+                    prof.lastStatusMessage = "No active Bedrock models returned in \(prof.awsRegion). Check AWS credentials or region."
                     upsertProfile(prof, makeActive: false)
                     statusMessage = prof.lastStatusMessage
                     return false
@@ -2257,12 +2432,326 @@ extension EnterpriseAIAuthService {
             }
         } catch {
             prof.isVerified = false
-            prof.lastStatusMessage = "Connection failed: \(error.localizedDescription)"
+            prof.lastStatusMessage = error.localizedDescription
             upsertProfile(prof, makeActive: false)
             statusMessage = prof.lastStatusMessage
             return false
         }
-        return false
+    }
+
+    // MARK: - Live Upstream Catalog Fetchers (Vertex AI, AWS Bedrock, Azure OpenAI)
+
+    private struct GCPProjectResolutionResult {
+        var selectedProject: String = ""
+        var activeProjects: [String] = []
+        var readyProjects: [String] = []
+        var state: String = "" // "ready", "billing_disabled", "service_disabled", ""
+        var errorDetail: String = ""
+    }
+
+    private func fetchLiveVertexPublisherModels(
+        bearer: String?,
+        apiKey: String,
+        session: URLSession
+    ) async -> [String] {
+        let keySuffix = (bearer == nil && !apiKey.isEmpty) ? "&key=\(apiKey)" : ""
+        let googleURLStr = "https://us-central1-aiplatform.googleapis.com/v1beta1/publishers/google/models?pageSize=200\(keySuffix)"
+        let anthropicURLStr = "https://us-central1-aiplatform.googleapis.com/v1beta1/publishers/anthropic/models?pageSize=100\(keySuffix)"
+
+        @Sendable func fetchPublisherList(_ urlStr: String, publisher: String) async -> [String] {
+            guard let url = URL(string: urlStr) else { return [] }
+            var req = URLRequest(url: url, timeoutInterval: 12)
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            // Explicitly omit `x-goog-user-project` so suspended or non-quota default projects never cause 403
+            if let bearer, !bearer.isEmpty {
+                req.setValue(bearer, forHTTPHeaderField: "Authorization")
+            }
+            guard let (data, resp) = try? await session.data(for: req),
+                  let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let models = json["publisherModels"] as? [[String: Any]] else {
+                return []
+            }
+
+            var extracted: [String] = []
+            for item in models {
+                guard let rawName = item["name"] as? String else { continue }
+                let bareId = rawName
+                    .replacingOccurrences(of: "publishers/\(publisher)/models/", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !bareId.isEmpty else { continue }
+                let lower = bareId.lowercased()
+
+                if publisher == "google" {
+                    guard lower.hasPrefix("gemini-") || lower.hasPrefix("gemma-") else { continue }
+                    if lower.hasPrefix("gemini-1.") || lower.hasPrefix("gemini-1-") { continue }
+                    let excludedTokens = [
+                        "embedding", "imagen", "veo", "tts", "transcribe", "audio",
+                        "live", "chirp", "medlm", "aqa", "-image", "image-",
+                        "robotics", "computer-use", "deep-research"
+                    ]
+                    if excludedTokens.contains(where: { lower.contains($0) }) { continue }
+                    extracted.append(bareId)
+                } else if publisher == "anthropic" {
+                    guard lower.hasPrefix("claude-") else { continue }
+                    // Exclude deprecated Claude 3.0 / 3.5 Haiku legacy snapshots if newer 4.x/5.x exist, or keep clean active IDs
+                    let versionId = (item["versionId"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !versionId.isEmpty && versionId != "default" && !bareId.contains("@") {
+                        extracted.append("\(bareId)@\(versionId)")
+                    } else {
+                        extracted.append(bareId)
+                    }
+                }
+            }
+            return extracted
+        }
+
+        async let googleModels = fetchPublisherList(googleURLStr, publisher: "google")
+        async let anthropicModels = fetchPublisherList(anthropicURLStr, publisher: "anthropic")
+        let combined = await googleModels + anthropicModels
+        return Self.sortEnterpriseModelIDs(combined)
+    }
+
+    private func resolveSmartGCPProject(
+        bearer: String?,
+        preferredProject: String,
+        session: URLSession
+    ) async -> GCPProjectResolutionResult {
+        var result = GCPProjectResolutionResult()
+        let cleanPreferred = preferredProject.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let bearer, !bearer.isEmpty else {
+            result.selectedProject = cleanPreferred
+            return result
+        }
+
+        // 1. Query Cloud Resource Manager for ACTIVE (non-suspended, non-deleted) projects
+        if let crmURL = URL(string: "https://cloudresourcemanager.googleapis.com/v1/projects?filter=lifecycleState%3AACTIVE&pageSize=150") {
+            var crmReq = URLRequest(url: crmURL, timeoutInterval: 10)
+            crmReq.setValue(bearer, forHTTPHeaderField: "Authorization")
+            crmReq.setValue("application/json", forHTTPHeaderField: "Accept")
+            if let (data, resp) = try? await session.data(for: crmReq),
+               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let list = json["projects"] as? [[String: Any]] {
+                let ids = list.compactMap { $0["projectId"] as? String }.filter { !$0.isEmpty }
+                result.activeProjects = ids
+            }
+        }
+
+        // Build candidate list: if preferredProject is active, test it first; then test active projects concurrently
+        var candidates: [String] = []
+        if !cleanPreferred.isEmpty && (result.activeProjects.isEmpty || result.activeProjects.contains(cleanPreferred)) {
+            candidates.append(cleanPreferred)
+        }
+        for pid in result.activeProjects where !candidates.contains(pid) {
+            candidates.append(pid)
+            if candidates.count >= 30 { break }
+        }
+
+        guard !candidates.isEmpty else {
+            result.selectedProject = cleanPreferred
+            return result
+        }
+
+        // 2. Probe Vertex AI endpoint readiness concurrently (fast 1-token check on global endpoint, NO x-goog-user-project)
+        enum ProbeOutcome: Sendable {
+            case ready(String)
+            case billingDisabled(String)
+            case serviceDisabled(String)
+            case other(String, String)
+        }
+
+        let probeOutcomes: [ProbeOutcome] = await withTaskGroup(of: (Int, ProbeOutcome).self) { group in
+            for (idx, pid) in candidates.enumerated() {
+                group.addTask {
+                    guard let u = URL(string: "https://aiplatform.googleapis.com/v1/projects/\(pid)/locations/global/publishers/google/models/gemini-2.5-flash:generateContent") else {
+                        return (idx, .other(pid, ""))
+                    }
+                    var rq = URLRequest(url: u, timeoutInterval: 6)
+                    rq.httpMethod = "POST"
+                    rq.setValue(bearer, forHTTPHeaderField: "Authorization")
+                    rq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    rq.httpBody = Data(#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":1}}"#.utf8)
+                    do {
+                        let (d, r) = try await session.data(for: rq)
+                        let code = (r as? HTTPURLResponse)?.statusCode ?? -1
+                        if (200..<300).contains(code) {
+                            return (idx, .ready(pid))
+                        }
+                        let msg = String(data: d, encoding: .utf8) ?? ""
+                        if msg.contains("BILLING_DISABLED") {
+                            return (idx, .billingDisabled(pid))
+                        }
+                        if msg.contains("SERVICE_DISABLED") || msg.contains("has not been used in project") {
+                            return (idx, .serviceDisabled(pid))
+                        }
+                        return (idx, .other(pid, msg))
+                    } catch {
+                        return (idx, .other(pid, error.localizedDescription))
+                    }
+                }
+            }
+            var ordered: [(Int, ProbeOutcome)] = []
+            for await pair in group { ordered.append(pair) }
+            ordered.sort { $0.0 < $1.0 }
+            return ordered.map(\.1)
+        }
+
+        var readyList: [String] = []
+        var billingDisabledList: [String] = []
+        var serviceDisabledList: [String] = []
+
+        for outcome in probeOutcomes {
+            switch outcome {
+            case .ready(let pid):
+                readyList.append(pid)
+            case .billingDisabled(let pid):
+                billingDisabledList.append(pid)
+            case .serviceDisabled(let pid):
+                serviceDisabledList.append(pid)
+            case .other:
+                break
+            }
+        }
+
+        result.readyProjects = readyList + billingDisabledList
+
+        if let firstWorking = readyList.first {
+            result.selectedProject = firstWorking
+            result.state = "ready"
+        } else if let firstAPIEnabled = billingDisabledList.first {
+            // If user explicitly chose another billing-disabled project, honor it; otherwise pick first Vertex-enabled project
+            if billingDisabledList.contains(cleanPreferred) {
+                result.selectedProject = cleanPreferred
+            } else {
+                result.selectedProject = firstAPIEnabled
+            }
+            result.state = "billing_disabled"
+        } else if let firstActive = serviceDisabledList.first ?? candidates.first {
+            result.selectedProject = candidates.contains(cleanPreferred) ? cleanPreferred : firstActive
+            result.state = "service_disabled"
+        }
+        return result
+    }
+
+    private func fetchLiveBedrockModels(profile: EnterpriseAPIProfile, session: URLSession) async throws -> [String] {
+        let region = profile.awsRegion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "ap-southeast-1"
+            : profile.awsRegion.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func sendBedrockControlGET(_ path: String) async throws -> Data {
+            guard let url = URL(string: "https://bedrock.\(region).amazonaws.com\(path)") else {
+                return Data()
+            }
+            var req = URLRequest(url: url, timeoutInterval: 14)
+            req.httpMethod = "GET"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            applyProfileHeaders(profile: profile, to: &req)
+
+            if profile.authScheme == .awsBedrockAPIKey {
+                let key = readPrimarySecret(for: profile.id)
+                guard !key.isEmpty else {
+                    throw NSError(domain: "EnterpriseAI", code: 401, userInfo: [
+                        NSLocalizedDescriptionKey: "Paste your AWS Bedrock API Key (ABSK…) or sign in via AWS CLI."
+                    ])
+                }
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            } else {
+                let creds = try await resolveAWSSigV4Credentials(for: profile)
+                EnterpriseAWSSigV4Signer.sign(
+                    request: &req,
+                    bodyData: Data(),
+                    credentials: creds,
+                    region: region,
+                    service: "bedrock"
+                )
+            }
+            let (data, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                throw NSError(domain: "EnterpriseAI", code: code, userInfo: [
+                    NSLocalizedDescriptionKey: "AWS Bedrock HTTP \(code): \(Self.compactErrorSummary(raw))"
+                ])
+            }
+            return data
+        }
+
+        var collected: [String] = []
+        // 1. Cross-region Inference Profiles (preferred by Converse API for Claude 4.x/5.x & Nova)
+        if let ipData = try? await sendBedrockControlGET("/inference-profiles"),
+           let json = try? JSONSerialization.jsonObject(with: ipData) as? [String: Any],
+           let summaries = json["inferenceProfileSummaries"] as? [[String: Any]] {
+            for item in summaries {
+                let status = (item["status"] as? String ?? "ACTIVE").uppercased()
+                guard status == "ACTIVE",
+                      let ipId = item["inferenceProfileId"] as? String,
+                      !ipId.isEmpty else { continue }
+                collected.append(ipId)
+            }
+        }
+        // 2. Regional On-Demand Text Foundation Models
+        let fmData = try await sendBedrockControlGET("/foundation-models?byOutputModality=TEXT")
+        if let json = try? JSONSerialization.jsonObject(with: fmData) as? [String: Any],
+           let summaries = json["modelSummaries"] as? [[String: Any]] {
+            for item in summaries {
+                if let lifecycle = item["modelLifecycle"] as? [String: Any],
+                   let status = lifecycle["status"] as? String,
+                   status.uppercased() != "ACTIVE" {
+                    continue
+                }
+                if let types = item["inferenceTypesSupported"] as? [String],
+                   !types.isEmpty,
+                   !types.contains("ON_DEMAND") {
+                    continue
+                }
+                if let mid = item["modelId"] as? String, !mid.isEmpty {
+                    let lower = mid.lowercased()
+                    if lower.contains("embed") || lower.contains("rerank") { continue }
+                    collected.append(mid)
+                }
+            }
+        }
+
+        return Self.sortEnterpriseModelIDs(collected)
+    }
+
+    private func fetchLiveAzureModels(profile: EnterpriseAPIProfile, session: URLSession) async throws -> [String] {
+        let apiVer = profile.azureAPIVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "2024-10-21"
+            : profile.azureAPIVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidateURLs: [URL] = []
+        if !profile.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let clean = EnterpriseSmartPasteParser.normalizeOpenAIBaseURL(profile.baseURL)
+            if clean.contains("/openai/v1"), let u = URL(string: "\(clean)/models") {
+                candidateURLs.append(u)
+            } else if let host = URL(string: clean)?.host,
+                      let u = URL(string: "https://\(host)/openai/models?api-version=\(apiVer)") {
+                candidateURLs.append(u)
+            }
+        } else if !profile.azureResourceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let res = profile.azureResourceName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let u = URL(string: "https://\(res).openai.azure.com/openai/models?api-version=\(apiVer)") {
+                candidateURLs.append(u)
+            }
+        }
+
+        for url in candidateURLs {
+            var req = URLRequest(url: url, timeoutInterval: 12)
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            try await applyStandardGatewayAuth(profile: profile, to: &req)
+            if let (data, resp) = try? await session.data(for: req),
+               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                let rawIds = Self.parseModelIDs(from: data).filter { id in
+                    let l = id.lowercased()
+                    return !l.contains("embedding") && !l.contains("whisper") && !l.contains("dall-e") && !l.contains("tts")
+                }
+                if !rawIds.isEmpty {
+                    return Self.sortEnterpriseModelIDs(rawIds)
+                }
+            }
+        }
+        return []
     }
 
     private static func parseModelIDs(from data: Data) -> [String] {
@@ -2277,6 +2766,72 @@ extension EnterpriseAIAuthService {
         } else if let arr = obj as? [[String: Any]] {
             ids = arr.compactMap { ($0["id"] as? String) ?? ($0["name"] as? String) }
         }
-        return ids.filter { !$0.isEmpty }
+        return ids
+            .map { $0.replacingOccurrences(of: "models/", with: "").trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { id in
+                guard !id.isEmpty else { return false }
+                let l = id.lowercased()
+                return !l.contains("embedding") && !l.contains("whisper") && !l.contains("dall-e") && !l.contains("tts") && !l.contains("moderation")
+            }
+    }
+
+    public static func sortEnterpriseModelIDs(_ raw: [String]) -> [String] {
+        var seen = Set<String>()
+        let unique = raw.filter { seen.insert($0).inserted }
+        return unique.sorted { a, b in
+            let sa = modelFrontierScore(a)
+            let sb = modelFrontierScore(b)
+            if sa != sb { return sa > sb }
+            return a.localizedStandardCompare(b) == .orderedDescending
+        }
+    }
+
+    private static func modelFrontierScore(_ id: String) -> Int {
+        let l = id.lowercased()
+        var s = 0
+        // Gemini 4.x / 3.x / 2.5
+        if l.contains("gemini-5") { s += 9500 }
+        else if l.contains("gemini-4") { s += 9000 }
+        else if l.contains("gemini-3.8") || l.contains("gemini-3-8") { s += 8800 }
+        else if l.contains("gemini-3.7") || l.contains("gemini-3-7") { s += 8700 }
+        else if l.contains("gemini-3.6") || l.contains("gemini-3-6") { s += 8600 }
+        else if l.contains("gemini-3.5") || l.contains("gemini-3-5") { s += 8500 }
+        else if l.contains("gemini-3.1") || l.contains("gemini-3-1") { s += 8100 }
+        else if l.contains("gemini-3") { s += 8000 }
+        else if l.contains("gemini-2.5") { s += 7200 }
+        // Claude 5.x / 4.x
+        else if l.contains("claude") && (l.contains("5-5") || l.contains("5.5")) { s += 9100 }
+        else if l.contains("claude") && (l.contains("5-2") || l.contains("5-1") || l.contains("-5")) { s += 8900 }
+        else if l.contains("claude") && (l.contains("4-8") || l.contains("4.8")) { s += 8400 }
+        else if l.contains("claude") && (l.contains("4-7") || l.contains("4.7")) { s += 8300 }
+        else if l.contains("claude") && (l.contains("4-6") || l.contains("4.6")) { s += 8200 }
+        else if l.contains("claude") && (l.contains("4-5") || l.contains("4.5")) { s += 7800 }
+        else if l.contains("claude") && l.contains("4") { s += 7500 }
+        // OpenAI GPT-5 / o3 / o4 / GPT-4.1
+        else if l.contains("gpt-6") { s += 9200 }
+        else if l.contains("gpt-5") { s += 8850 }
+        else if l.hasPrefix("o4") || l.hasPrefix("o3") { s += 8250 }
+        else if l.contains("gpt-4.1") { s += 7400 }
+        else if l.contains("gpt-4o") { s += 7100 }
+        // Sovereign / DeepSeek / Qwen / Nova
+        else if l.contains("omni-o1x") { s += 8950 }
+        else if l.contains("deepseek") { s += 7600 }
+        else if l.contains("nova-premier") || l.contains("nova-pro") { s += 7300 }
+        else { s += 5000 }
+
+        if l.contains("opus") || l.contains("argon") || l.contains("hydrogen") || l.contains("pro") { s += 60 }
+        else if l.contains("sonnet") || l.contains("carbon") || (l.contains("flash") && !l.contains("lite")) { s += 40 }
+        else if l.contains("haiku") || l.contains("lite") || l.contains("mini") { s += 20 }
+        return s
+    }
+
+    private static func compactErrorSummary(_ raw: String) -> String {
+        if let data = raw.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let err = json["error"] as? [String: Any],
+           let msg = err["message"] as? String, !msg.isEmpty {
+            return String(msg.prefix(160))
+        }
+        return String(raw.replacingOccurrences(of: "\n", with: " ").prefix(160))
     }
 }
