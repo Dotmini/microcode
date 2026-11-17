@@ -77,7 +77,26 @@
 | ACP host | ตรวจจับ adapter (`claude-code-acp`, `codex-acp`, `npx @x/y-acp@1.2`), แยก stream ทีละ turn และปิดเมื่อได้ response ของ `session/prompt` (แก้ AIAgentView/SubAgentHarness ค้าง), ตอบ -32601 ให้ request ที่ไม่รู้จัก, เก็บ `agentCapabilities`/`authMethods` และเมื่อต้อง auth จะเรียก `authenticate` ครั้งเดียวแล้วลอง `session/new` ใหม่ | `ACPHostService.swift`, `ACPProtocol.swift` |
 | ACP server | stdout มีแต่ข้อความ ACP (protocol ใช้ fd ส่วนตัว และ `print()` ไปที่ stderr), ประกาศ capability ตามจริง (`loadSession`/`image`/MCP http-sse = false), sessionId ที่ไม่รู้จักได้ error, prompt ซ้อนกันได้ error, ชน limit แล้วได้ `max_turn_requests` | `ACPServerService.swift`, `MicroCodeApp.swift` |
 
-**Phase 2b (ยังไม่ทำ):** MCP OAuth 2.1 (PRM, PKCE, Client ID Metadata Documents, `iss`), เก็บ token ใน Keychain และผูกกับ origin, `subscriptions/listen`, Streamable HTTP แบบ GET/SSE เต็มรูปแบบ, ACP: Codable types จาก SDK 1.0, ACP Registry, `usage_update`/`session/list`/`resume`/`close`, `session/load` แบบ replay, ใช้ fs/terminal/permission ของ client ฝั่ง server
+## สถานะ Phase 2b-1: MCP Authorization (อัปเดต 2026-11-18)
+
+ยังไม่ commit และ `Scripts/tests/run-phase2b-mcp-auth.sh` ผ่าน (ทดสอบ end-to-end กับ mock authorization server + resource server ที่รันในเครื่อง)
+
+| เรื่อง | สิ่งที่ทำ | ไฟล์ |
+|---|---|---|
+| OAuth 2.1 สำหรับ remote MCP | discovery ตาม RFC 9728 (`resource_metadata` จาก `WWW-Authenticate` แล้วค่อย well-known), RFC 8414/OIDC (path insertion), ตรวจว่า issuer ตรงกัน, บังคับ PKCE S256, ใส่ `resource` (RFC 8707) ทั้งตอน authorize/token/refresh, ตรวจ `iss` (RFC 9207, ถ้า AS ประกาศว่ารองรับต้องมี), ตรวจ `state`, redirect กลับมาที่ loopback `127.0.0.1` (RFC 8252), ลงทะเบียน client ผ่าน CIMD (ถ้าตั้งค่า `MicroCode.MCP.ClientIDMetadataURL`) หรือ DCR แบบ `application_type: native` และ reuse ตาม issuer, refresh token อัตโนมัติ | `MCPAuth.swift` |
+| เก็บ credential | OAuth token ผูกกับ canonical resource, client registration ผูกกับ issuer, static bearer ผูกกับ **origin** (ไม่ใช่ชื่อ server อีกต่อไป) และเก็บแบบ sealed ผ่าน KeychainManager โดย token เดิมที่เก็บตามชื่อจะถูกย้ายมาผูกกับ origin ครั้งเดียว (เฉพาะ server ระดับผู้ใช้) แล้วลบสำเนา plaintext ทิ้ง ส่วน `connect` ไม่เขียน token ลง `mcp.json` แล้ว และไฟล์ `mcp.json` ที่ MicroCode เขียนเป็น 0600 | `MCPAuthCenter.swift`, `ExternalMCPManager.swift` |
+| การใช้งาน | ปุ่ม Sign in/Sign out ในหน้า Settings → Agent Ecosystem → MCP, `mcp_orchestrator(action: "authenticate")`, เมื่อได้ 401 จะเก็บ challenge ไว้และไม่เปิด browser เอง, token ที่หมดอายุหรือ `invalid_token` จะ refresh เงียบๆ 1 ครั้ง และ request ทาง HTTP ถูกส่งตามลำดับ | `ExternalMCPManager.swift`, `AgentEcosystemConfigView.swift`, `AgentToolBox.swift` |
+
+## สถานะ Phase 2b-2: ACP session lifecycle (อัปเดต 2026-11-18)
+
+ยังไม่ commit และ `Scripts/tests/run-phase2b-acp.sh` ผ่าน
+
+| ฝั่ง | สิ่งที่ทำ | ไฟล์ |
+|---|---|---|
+| ACP server (MicroCode เป็น agent) | session เก็บถาวรบนดิสก์ (`~/Library/Application Support/MicroCode/acp-sessions`, 0600, transcript ผ่าน `AgentPrivacyGuard.sanitize`), ประกาศ `loadSession: true` + `sessionCapabilities {list, resume, close, delete}`, `session/load` replay ประวัติเป็น `user_message_chunk`/`agent_message_chunk` (มี `messageId`) ก่อนตอบ, `session/resume` restore โดยไม่ replay, `session/list` (กรอง cwd + cursor), `session/close`/`session/delete` แบบ idempotent, ส่ง `session_info_update` (ตั้ง title จาก prompt แรก + `updatedAt`), mode/model ถูกเก็บถาวร และ sessionId จาก client ถูกตรวจรูปแบบ (กัน path traversal) | `ACPSessionStore.swift`, `ACPServerService.swift` |
+| ACP host (MicroCode เป็น client) | parse `usage_update` (context used/size/cost) และ `session_info_update` (title) แล้วเก็บไว้ใน session, เมื่อ agent process เริ่มใหม่และ agent รองรับ `resume` จะส่ง `session/resume` ด้วย sessionId เดิม (ถ้าล้มเหลวจะ fallback เป็น `session/new`), ส่ง `session/close` เมื่อผู้ใช้เริ่มบทสนทนาใหม่ (แต่ Stop ไม่ close เพื่อให้ resume ต่อได้) | `ACPProtocol.swift`, `ACPHostService.swift` |
+
+**ยังเหลือ (Phase 2c / backlog):** แสดง `contextUsage`/`sessionTitle` ใน UI, MCP `subscriptions/listen` / GET-SSE stream, ย้าย header `Authorization` ที่ค้างอยู่ใน `~/.microcode/mcp.json` เก่า, ACP: Codable types จาก SDK 1.0, ACP Registry, ให้ฝั่ง server ใช้ fs/terminal/permission ของ client, `usage_update` ฝั่ง server (ต้องรู้ context window ของโมเดลก่อน), ทดสอบ `--acp-server` end-to-end กับ Zed/JetBrains จริง
 
 ---
 
