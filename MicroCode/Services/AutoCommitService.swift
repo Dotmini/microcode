@@ -90,7 +90,7 @@ class AutoCommitService: ObservableObject {
             let refResult = await runGitExec(["update-ref", "-m", commitMessage, refName, stashSha], in: root)
             
             if refResult.exitCode == 0 {
-                let checkpoint = AgentCheckpoint(
+                var checkpoint = AgentCheckpoint(
                     id: String(checkpointId),
                     timestamp: now,
                     toolName: toolName,
@@ -100,6 +100,7 @@ class AutoCommitService: ObservableObject {
                     isTagBased: false,
                     tagName: refName
                 )
+                checkpoint.untrackedRef = await captureUntracked(root: root, checkpointId: String(checkpointId))
                 
                 checkpoints.append(checkpoint)
                 lastCheckpointTime = now
@@ -115,6 +116,9 @@ class AutoCommitService: ObservableObject {
                     for old in removed {
                         if let oldRef = old.tagName, oldRef.hasPrefix("refs/microcode-checkpoints/") {
                             _ = await runGitExec(["update-ref", "-d", oldRef], in: root)
+                        }
+                        if let untracked = old.untrackedRef {
+                            _ = await runGitExec(["update-ref", "-d", untracked], in: root)
                         }
                     }
                     checkpoints.removeFirst(checkpoints.count - maxCheckpoints)
@@ -135,7 +139,7 @@ class AutoCommitService: ObservableObject {
             )
             
             if tagResult.exitCode == 0 {
-                let checkpoint = AgentCheckpoint(
+                var checkpoint = AgentCheckpoint(
                     id: String(checkpointId),
                     timestamp: now,
                     toolName: toolName,
@@ -145,6 +149,7 @@ class AutoCommitService: ObservableObject {
                     isTagBased: true,
                     tagName: tagName
                 )
+                checkpoint.untrackedRef = await captureUntracked(root: root, checkpointId: String(checkpointId))
                 
                 checkpoints.append(checkpoint)
                 lastCheckpointTime = now
@@ -170,6 +175,7 @@ class AutoCommitService: ObservableObject {
             // Tag-based: restore tracked files to the tagged commit
             let result = await runGitExec(["checkout", tagName, "--", "."], in: root)
             if result.exitCode == 0 {
+                await restoreUntracked(of: checkpoint, root: root)
                 if let index = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
                     checkpoints.removeSubrange((index + 1)...)
                 }
@@ -187,6 +193,7 @@ class AutoCommitService: ObservableObject {
                         ? applyResult
                         : await runGitExec(["stash", "apply", ref], in: root)
                     if fallbackApply.exitCode == 0 {
+                        await restoreUntracked(of: checkpoint, root: root)
                         if let index = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
                             checkpoints.removeSubrange((index + 1)...)
                         }
@@ -202,6 +209,7 @@ class AutoCommitService: ObservableObject {
                 if let stashRef = line.components(separatedBy: ":").first {
                     let result = await runGitExec(["stash", "apply", stashRef.trimmingCharacters(in: .whitespaces)], in: root)
                     if result.exitCode == 0 {
+                        await restoreUntracked(of: checkpoint, root: root)
                         if let index = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
                             checkpoints.removeSubrange((index + 1)...)
                         }
@@ -286,6 +294,19 @@ class AutoCommitService: ObservableObject {
     }
     
     // MARK: - Private Helpers
+
+    private func captureUntracked(root: String, checkpointId: String) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            GitUntrackedSnapshot.capture(root: root, checkpointId: checkpointId)
+        }.value
+    }
+
+    private func restoreUntracked(of checkpoint: AgentCheckpoint, root: String) async {
+        guard let ref = checkpoint.untrackedRef else { return }
+        _ = await Task.detached(priority: .userInitiated) {
+            GitUntrackedSnapshot.restore(root: root, ref: ref)
+        }.value
+    }
     
     private func runGit(_ args: [String], in directory: String) async -> String {
         await Task.detached(priority: .userInitiated) {
@@ -361,6 +382,8 @@ struct AgentCheckpoint: Identifiable, Codable {
     let filesSummary: String
     var isTagBased: Bool = false
     var tagName: String? = nil
+    /// Ref holding untracked (never-committed) files at checkpoint time; restored on rollback.
+    var untrackedRef: String? = nil
     
     var displayName: String {
         let file = targetPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "multiple files"

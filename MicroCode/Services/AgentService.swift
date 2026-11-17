@@ -1981,9 +1981,12 @@ class AgentService: ObservableObject {
             runningExecutionIDsByChatId[cid] = runExecutionID
         }
 
+        // `/plan` runs are read-only until the user approves the plan (enforced in AgentToolBox.execute).
+        let planGate: PlanModeGate? = PlanModePolicy.isPlanModePrompt(content) ? PlanModeGate() : nil
         await AgentExecutionContext.$workspaceRoot.withValue(pinnedWorkspace) {
             await AgentExecutionContext.$chatId.withValue(pinnedChatId) {
                 await AgentExecutionContext.$scopeRawValue.withValue(String(describing: pinnedScope)) {
+                    await AgentExecutionContext.$planModeGate.withValue(planGate) {
                     await self.executeIsolatedRunMessage(
                         content,
                         preparedUserMessage: preparedUserMessage,
@@ -1996,6 +1999,7 @@ class AgentService: ObservableObject {
                         apiKey: apiKey,
                         attachments: attachments
                     )
+                    }
                 }
             }
         }

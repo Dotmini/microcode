@@ -183,17 +183,39 @@ public final class SubAgentHarness: ObservableObject {
         ownedPaths: [String] = [],
         revisionRound: Int = 0
     ) -> SubAgentInstance {
+        // Unregistered (model-invented) types get read/search + MCP only, never every tool.
         let def = registeredDefinitions[typeName] ?? SubAgentDefinition(
             name: typeName,
             role: role,
             description: "Custom SubAgent",
             systemPrompt: "You are a specialized subagent executing a targeted subtask: \(role)",
-            allowedTools: ["*"]
+            allowedTools: SubAgentSpawnPolicy.unknownTypeTools
         )
         
         let resolvedEndpoint = endpointOverride ?? resolveRoleEndpoint(forTypeName: typeName, preferredModel: preferredModel, definition: def)
         let routePreview = resolveExecutionRoute(for: resolvedEndpoint, explicitApiKey: apiKey)
         
+        // Fan-out bounds: delegation depth (task-local) and app-wide concurrency.
+        let spawnerDepth = SubAgentContext.depth
+        let runningCount = activeSubagents.filter { $0.state == .running }.count
+        let spawnDecision = SubAgentSpawnPolicy.decide(spawnerDepth: spawnerDepth, runningCount: runningCount)
+        if let reason = spawnDecision.rejectionReason {
+            var rejected = SubAgentInstance(
+                typeName: typeName,
+                role: role,
+                taskPrompt: prompt,
+                state: .errored,
+                stateDetail: reason,
+                endpointBadge: routePreview.badgeLabel,
+                ownedPaths: ownedPaths,
+                revisionRound: revisionRound
+            )
+            rejected.finalReport = reason
+            activeSubagents.append(rejected)
+            log("[REJECTED] SubAgent [\(role)]: \(reason)")
+            return rejected
+        }
+
         let instance = SubAgentInstance(
             typeName: typeName,
             role: role,
@@ -212,8 +234,10 @@ public final class SubAgentHarness: ObservableObject {
         
         // Launch autonomous background task
         let instanceId = instance.id
+        let childDepth = spawnerDepth + 1
         let task = Task { [weak self] () -> Void in
             guard let self = self else { return }
+            await SubAgentContext.$depth.withValue(childDepth) {
             await self.executeSubagentLoop(
                 instanceId: instanceId,
                 definition: def,
@@ -224,6 +248,7 @@ public final class SubAgentHarness: ObservableObject {
                 endpointOverride: resolvedEndpoint,
                 ownedPaths: ownedPaths
             )
+            }
         }
         runningTasks[instanceId] = task
         

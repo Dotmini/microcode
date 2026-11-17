@@ -98,6 +98,20 @@
 
 **ยังเหลือ (Phase 2c / backlog):** แสดง `contextUsage`/`sessionTitle` ใน UI, MCP `subscriptions/listen` / GET-SSE stream, ย้าย header `Authorization` ที่ค้างอยู่ใน `~/.microcode/mcp.json` เก่า, ACP: Codable types จาก SDK 1.0, ACP Registry, ให้ฝั่ง server ใช้ fs/terminal/permission ของ client, `usage_update` ฝั่ง server (ต้องรู้ context window ของโมเดลก่อน), ทดสอบ `--acp-server` end-to-end กับ Zed/JetBrains จริง
 
+## สถานะ Phase 3a: Harness hardening (อัปเดต 2026-11-18)
+
+commit แล้ว (2026-11-18), `Scripts/tests/run-phase3a-harness.sh` ผ่าน และ build ทดสอบ launch แล้วติดตั้งลง `/Applications`
+
+| เรื่อง | สิ่งที่ทำ | ไฟล์ |
+|---|---|---|
+| Sub-agent fan-out | จำกัดความลึกที่ 2 ชั้น (นับผ่าน `@TaskLocal`), sub-agent รันพร้อมกันทั้งแอปได้ไม่เกิน 8 ตัว, type ที่โมเดลตั้งชื่อเองได้แค่เครื่องมืออ่าน/ค้นหา + MCP (เดิมได้ `["*"]`) และ spawn ที่ถูกปฏิเสธจะคืน instance `errored` พร้อมเหตุผล | `SubAgentSpawnPolicy.swift`, `SubAgentHarness.swift` |
+| Plan mode บังคับจริง | `/plan` ผูก `PlanModeGate` ต่อ run แล้ว `AgentToolBox.execute` ปฏิเสธเครื่องมือที่ไม่ใช่ read-only (`shell` ใช้ได้เฉพาะคำสั่ง read-only, MCP ภายนอกใช้ได้เฉพาะ get/list/search…) จนกว่า `create_plan`/`agent_plan` จะได้รับการ Approve และครอบคลุม sub-agent ที่ spawn ระหว่างวางแผนด้วย | `PlanModePolicy.swift`, `AgentExecutionContext.swift`, `AgentService.swift`, `AgentToolBox.swift` |
+| Stale-edit guard | จำ mtime/size ของไฟล์ทุกครั้งที่ agent อ่านหรือเขียน และปฏิเสธ `replace_in_file`/`multi_replace_in_file`/`patch_file`/`file_write` ถ้าไฟล์เปลี่ยนบนดิสก์หลังจากอ่าน (flush buffer ที่ยังไม่ save ของ editor ก่อนเทียบ) จนกว่าจะอ่านใหม่ ส่วนไฟล์ที่ agent ไม่เคยอ่านไม่ถูกบังคับ | `FileFreshnessGuard.swift`, `AgentToolBox.swift` |
+| Checkpoint รวมไฟล์ untracked | snapshot ไฟล์ untracked (ไม่นับไฟล์ที่ ignore, จำกัด ≤200 ไฟล์, ≤2 MB ต่อไฟล์, รวม ≤20 MB) เข้า `refs/microcode-checkpoints/<id>-untracked` ผ่าน index ชั่วคราว (ไม่แตะ index จริง) และ rollback คืนเฉพาะไฟล์ที่ snapshot ไว้ | `GitUntrackedSnapshot.swift`, `AutoCommitService.swift` |
+| Tool trace ถาวร | `~/Library/Logs/MicroCode/agent-tool-trace.jsonl` (0600, ผ่านตัวกรอง secret, หมุนไฟล์ที่ 10 MB) บันทึก tool, args, ผล, เวลา, workspace, chat และความลึกของ sub-agent | `AgentToolTrace.swift`, `AgentToolBox.swift` |
+
+**Phase 3b (รอผู้ใช้ตัดสินใจ เพราะเปลี่ยนพฤติกรรม):** `sandbox-exec` สำหรับ shell (จำกัดการเขียนไว้ที่ workspace/tmp และปิด network เป็นค่าเริ่มต้น), ลดจำนวน tool + tool search, hardening `agent.rs` (timeout, cancel, panic, ส่ง Gemini key ใน header), แยก evaluator ออกจาก generator, eval suite เป็น CI gate
+
 ---
 
 ## 1. P0: ความปลอดภัย (ควรแก้ทันที)

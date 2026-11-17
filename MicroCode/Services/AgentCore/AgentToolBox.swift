@@ -312,6 +312,12 @@ class AgentToolBox: ObservableObject {
     }
 
     func execute(_ rawToolName: String, params: [String: Any]) async throws -> String {
+        if let gate = AgentExecutionContext.planModeGate, gate.isLocked {
+            let canonical = Self.normalizeToolName(rawToolName)
+            if !PlanModePolicy.isAllowedWhileLocked(toolName: canonical, arguments: params, isReadOnlyShell: Self.isReadOnlyShellCommand) {
+                throw ToolBoxError.executionFailed(PlanModePolicy.lockedMessage(toolName: canonical))
+            }
+        }
         if let raw = params[AIToolCall.invalidArgumentsKey] as? String {
             throw ToolBoxError.invalidParams("""
             the arguments for `\(rawToolName)` were not valid JSON (most likely cut off by the output token limit), \
@@ -436,6 +442,16 @@ class AgentToolBox: ObservableObject {
             }
             return true
         }()
+        // Stale-edit guard: refuse to edit from an outdated read (the user's unsaved editor changes are flushed
+        // first, so they count as a change too).
+        let freshnessGuardedTools: Set<String> = ["replace_in_file", "multi_replace_in_file", "patch_file", "file_write"]
+        if !isRemoteTarget, freshnessGuardedTools.contains(toolName), let editPath = resolvedParams["path"] as? String {
+            AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: editPath)
+            if let staleReason = FileFreshnessRegistry.shared.staleReason(forEditing: editPath) {
+                readCache.removeAll(keepingCapacity: true) // the re-read must hit disk, not the 3 s read cache
+                throw ToolBoxError.executionFailed(staleReason)
+            }
+        }
         if !isRemoteTarget && (toolName == "file_read" || toolName == "multi_file_read") {
             if let readPath = resolvedParams["path"] as? String {
                 AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: readPath)
@@ -530,7 +546,20 @@ class AgentToolBox: ObservableObject {
                 )
             }
             var result = rawResult
+            if !isRemoteTarget {
+                // Remember what the agent has now seen (reads) or produced (its own edits) for the stale-edit guard.
+                if toolName == "file_read" || freshnessGuardedTools.contains(toolName),
+                   let observedPath = resolvedParams["path"] as? String {
+                    FileFreshnessRegistry.shared.noteObserved(observedPath)
+                }
+                if toolName == "multi_file_read", let paths = resolvedParams["paths"] as? String {
+                    for observedPath in paths.components(separatedBy: ",") {
+                        FileFreshnessRegistry.shared.noteObserved(observedPath.trimmingCharacters(in: .whitespaces))
+                    }
+                }
+            }
             let execution = ToolExecution(toolName: toolName, params: resolvedParams, result: result, success: true, duration: Date().timeIntervalSince(startTime))
+            AgentToolTrace.shared.record(tool: toolName, arguments: resolvedParams, success: true, duration: execution.duration, error: nil)
             executionHistory.append(execution)
             if executionHistory.count > 300 { executionHistory.removeFirst(executionHistory.count - 300) }
             if cacheable { readCache[cacheKey] = (result, Date()) }
@@ -574,6 +603,7 @@ class AgentToolBox: ObservableObject {
         } catch {
             let execution = ToolExecution(toolName: toolName, params: params, result: error.localizedDescription, success: false, duration: Date().timeIntervalSince(startTime))
             executionHistory.append(execution)
+            AgentToolTrace.shared.record(tool: toolName, arguments: resolvedParams, success: false, duration: execution.duration, error: error.localizedDescription)
             throw error
         }
     }
@@ -1197,6 +1227,7 @@ struct AgentPlanTool: AgentTool {
                 guard approved else {
                     return "Plan was rejected by the user. Please revise the plan based on user feedback and resubmit."
                 }
+                AgentExecutionContext.planModeGate?.unlock()
                 return "Implementation plan APPROVED by the user. You may now proceed with code edits and execution."
             }
 
@@ -1249,6 +1280,7 @@ struct AgentPlanTool: AgentTool {
             guard approved else {
                 return "Plan was rejected by the user. Please revise the plan based on user feedback and resubmit."
             }
+            AgentExecutionContext.planModeGate?.unlock()
 
             if let response = await AgentKernelClient.shared.setPlan(runID: runID, nodes: nodes) {
                 try await mirrorTaskMarkdown(response.run.plan)
@@ -1379,6 +1411,7 @@ struct CreatePlanTool: AgentTool {
         let approved = await ImplementationPlanManager.shared.presentMarkdownPlan(rawMarkdown, title: title)
         
         if approved {
+            AgentExecutionContext.planModeGate?.unlock() // the user approved: edits are allowed from here on
             return "Implementation plan APPROVED by user. You may now proceed with code edits and executing the proposed changes."
         } else {
             return "Implementation plan REJECTED by user. Do NOT modify any files. Ask the user for feedback or propose a revised approach."

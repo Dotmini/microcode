@@ -15,4 +15,6 @@ enum AgentExecutionContext {
     @TaskLocal static var workspaceRoot: String?
     @TaskLocal static var chatId: String?
     @TaskLocal static var scopeRawValue: String?
+    /// Present (and locked) while a `/plan` run awaits plan approval: AgentToolBox refuses mutating tools.
+    @TaskLocal static var planModeGate: PlanModeGate?
 }
