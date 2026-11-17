@@ -230,6 +230,13 @@ struct ACPToolResult {
 }
 
 /// Permission request from agent needing user approval
+/// One choice offered by an ACP agent in `session/request_permission` (`optionId` is agent-defined).
+struct ACPPermissionOption: Hashable {
+    let optionId: String
+    let name: String
+    let kind: String               // allow_once | allow_always | reject_once | reject_always
+}
+
 struct ACPPermissionRequest: Identifiable {
     let id: String
     let tool: String               // "Edit", "Bash", "Write"
@@ -239,6 +246,25 @@ struct ACPPermissionRequest: Identifiable {
     let command: String?           // For bash commands
     let description: String
     var isApproved: Bool? = nil    // nil = pending, true = approved, false = rejected
+    /// ACP tool kind (read, edit, delete, move, search, execute, think, fetch, other) when provided.
+    var kind: String? = nil
+    /// Options exactly as the agent offered them; the reply must echo one of these `optionId`s.
+    var options: [ACPPermissionOption] = []
+
+    var isReadOnly: Bool {
+        guard let kind = kind?.lowercased() else { return false }
+        return ["read", "search", "think", "fetch"].contains(kind)
+    }
+
+    /// Picks the agent-defined optionId for the user's decision (never a hard-coded guess when options exist).
+    func optionId(approved: Bool) -> String? {
+        let preferredKinds = approved ? ["allow_once", "allow_always"] : ["reject_once", "reject_always"]
+        for kind in preferredKinds {
+            if let match = options.first(where: { $0.kind == kind }) { return match.optionId }
+        }
+        let prefix = approved ? "allow" : "reject"
+        return options.first(where: { $0.kind.hasPrefix(prefix) })?.optionId
+    }
 }
 
 /// System info event (metadata, retry, status)
@@ -341,11 +367,18 @@ enum ACPPermissionMode: String, Codable, CaseIterable {
         }
     }
     
-    var claudeFlag: String {
+    /// Headless CLI agents (`claude -p`, `gemini -p`, `agy --print`, …) have no channel to ask the user,
+    /// so permission-bypass flags are passed ONLY in Full Auto. In the other modes the CLI denies anything
+    /// that would need approval (it can still read and answer).
+    var allowsCLIBypass: Bool { self == .fullAuto }
+
+    /// What this mode means for a headless CLI agent (shown in the autonomy menu tooltip).
+    var cliBehaviorSummary: String {
         switch self {
-        case .reviewEach: return "auto"
-        case .autoApproveReads: return "auto"
-        case .fullAuto: return "auto"
+        case .reviewEach, .autoApproveReads:
+            return "CLI agents run read-only (edits and commands are denied; ACP agents ask you). Switch to Full Auto to let them edit and run commands."
+        case .fullAuto:
+            return "CLI agents run with their permission checks bypassed (edits and commands without asking)."
         }
     }
     
@@ -355,6 +388,73 @@ enum ACPPermissionMode: String, Codable, CaseIterable {
         case .autoApproveReads: return ["Read", "Grep", "Glob", "LS", "Edit", "Write", "Bash"]
         case .fullAuto: return ["Read", "Grep", "Glob", "LS", "Edit", "Write", "Bash"]
         }
+    }
+}
+
+extension ACPStreamEvent {
+    /// For persistent ACP agents a turn ends with the `session/prompt` response (stopReason) or an error.
+    var endsACPTurn: Bool {
+        switch self {
+        case .complete, .error: return true
+        default: return false
+        }
+    }
+}
+
+/// Decides whether an agent command line speaks the Agent Client Protocol (JSON-RPC over stdio)
+/// rather than a vendor headless CLI stream.
+enum ACPAgentDetection {
+    private static let acpFlags: Set<String> = ["acp", "--acp", "--acp-server", "--experimental-acp"]
+
+    static func isACP(command: String, arguments: [String]) -> Bool {
+        let tokens = ([command] + arguments).map { $0.lowercased() }
+        return tokens.contains { token in
+            if acpFlags.contains(token) { return true }
+            // Package / binary names: claude-code-acp, @zed-industries/codex-acp@0.3.1, /usr/local/bin/claude-agent-acp
+            let base = token.split(separator: "/").last.map(String.init) ?? token
+            let unversioned = base.split(separator: "@").first.map(String.init) ?? base
+            return unversioned.hasSuffix("-acp") || unversioned == "acp"
+        }
+    }
+}
+
+/// Feature detection for headless agent CLIs (flags differ between installed versions).
+enum ACPCLICapabilities {
+    private final class HelpCache: @unchecked Sendable {
+        let lock = NSLock()
+        var helpText: [String: String] = [:]
+    }
+    private static let cache = HelpCache()
+
+    /// True when `<executable> --help` documents `flag`. Cached per binary path, so older CLI versions
+    /// never receive a flag they would reject. Bounded to 3 s; a failed probe counts as "unsupported".
+    static func helpMentions(_ executable: String, flag: String) -> Bool {
+        cache.lock.lock()
+        let cached = cache.helpText[executable]
+        cache.lock.unlock()
+        if let cached { return cached.contains(flag) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["--help"]
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        var output = ""
+        do {
+            try process.run()
+            let deadline = Date().addingTimeInterval(3)
+            while process.isRunning && Date() < deadline { usleep(20_000) }
+            if process.isRunning { process.terminate(); process.waitUntilExit() }
+            output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        } catch {
+            output = ""
+        }
+        cache.lock.lock()
+        cache.helpText[executable] = output
+        cache.lock.unlock()
+        return output.contains(flag)
     }
 }
 
@@ -483,6 +583,11 @@ struct ACPStandardJsonRpcParser {
         ]
     }
     
+    /// `session/request_permission` reply when no option can be selected (or the turn was cancelled).
+    static func buildPermissionCancelledResponse(requestId: Any) -> [String: Any] {
+        ["jsonrpc": "2.0", "id": requestId, "result": ["outcome": ["outcome": "cancelled"]]]
+    }
+
     static func buildPermissionResponse(requestId: Any, optionId: String) -> [String: Any] {
         [
             "jsonrpc": "2.0",
@@ -576,6 +681,14 @@ struct ACPStandardJsonRpcParser {
                     ?? rawInput["path"] as? String
                     ?? rawInput["file_path"] as? String
                 let cmd = rawInput["command"] as? String
+                let offered = (params["options"] as? [[String: Any]] ?? []).compactMap { opt -> ACPPermissionOption? in
+                    guard let optionId = opt["optionId"] as? String else { return nil }
+                    return ACPPermissionOption(
+                        optionId: optionId,
+                        name: opt["name"] as? String ?? optionId,
+                        kind: (opt["kind"] as? String ?? "").lowercased()
+                    )
+                }
                 return [.permissionRequest(ACPPermissionRequest(
                     id: reqIdStr,
                     tool: title,
@@ -583,7 +696,9 @@ struct ACPStandardJsonRpcParser {
                     oldContent: rawInput["old_string"] as? String,
                     newContent: rawInput["new_string"] as? String ?? rawInput["content"] as? String,
                     command: cmd,
-                    description: title
+                    description: title,
+                    kind: toolCall["kind"] as? String,
+                    options: offered
                 ))]
             default:
                 break

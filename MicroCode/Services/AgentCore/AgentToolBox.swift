@@ -312,6 +312,13 @@ class AgentToolBox: ObservableObject {
     }
 
     func execute(_ rawToolName: String, params: [String: Any]) async throws -> String {
+        if let raw = params[AIToolCall.invalidArgumentsKey] as? String {
+            throw ToolBoxError.invalidParams("""
+            the arguments for `\(rawToolName)` were not valid JSON (most likely cut off by the output token limit), \
+            so nothing was executed. Re-issue the call with complete arguments; for large content split it into \
+            several smaller calls (e.g. write the file in parts). Received: \(raw.prefix(120))…
+            """)
+        }
         let toolName = Self.normalizeToolName(rawToolName)
         var targetTool = tools[toolName] ?? tools[rawToolName]
         if targetTool == nil {
@@ -395,10 +402,12 @@ class AgentToolBox: ObservableObject {
             }
         }
 
-        // Check tool approval
+        // Check tool approval. Multi-action tools whose actions differ in risk get a per-action approval
+        // identity, so "Always allow skill_engine" for `read` never silently covers `run_script`.
         let stringArgs = resolvedParams.compactMapValues { "\($0)" }
+        let approvalToolName = ToolApprovalManager.approvalIdentity(toolName: toolName, arguments: stringArgs)
         let approved = await ToolApprovalManager.shared.requestApproval(
-            toolName: toolName,
+            toolName: approvalToolName,
             arguments: stringArgs,
             description: tool.description
         )
@@ -443,8 +452,10 @@ class AgentToolBox: ObservableObject {
                 }
             }
         }
-        if isMutatingCall {
-            // Enterprise Reversible Secret Vault: restore any <VAULT_..._N> tokens back to real secrets before writing to disk
+        if isMutatingCall && toolName != "shell" {
+            // Enterprise Reversible Secret Vault: restore any <VAULT_..._N> tokens back to real secrets before writing to disk.
+            // Never for `shell`: a detokenized command line (e.g. `curl -d "<VAULT_…>" https://…`) would exfiltrate the
+            // real secret. Shell commands keep the placeholder; scripts should read secrets from env/.env files instead.
             resolvedParams = AgentPrivacyGuard.detokenizeParams(resolvedParams)
         }
         if !isRemoteTarget && isMutatingCall {
@@ -465,15 +476,14 @@ class AgentToolBox: ObservableObject {
                 for line in patchText.components(separatedBy: "\n") {
                     let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                     var relPath: String? = nil
-                    if trimmed.hasPrefix("*** Update File:") {
-                        relPath = String(trimmed.dropFirst("*** Update File:".count)).trimmingCharacters(in: .whitespaces)
-                    } else if trimmed.hasPrefix("*** Delete File:") {
-                        relPath = String(trimmed.dropFirst("*** Delete File:".count)).trimmingCharacters(in: .whitespaces)
-                    } else if trimmed.hasPrefix("--- a/") {
-                        relPath = String(trimmed.dropFirst("--- a/".count)).trimmingCharacters(in: .whitespaces)
+                    for marker in ["*** Update File:", "*** Delete File:", "*** Add File:", "*** Move to:", "--- a/", "+++ b/"] where trimmed.hasPrefix(marker) {
+                        relPath = String(trimmed.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+                        break
                     }
                     if let rel = relPath, !rel.isEmpty {
-                        let absPath = rel.hasPrefix("/") ? rel : (root as NSString).appendingPathComponent(rel)
+                        let expanded = (rel as NSString).expandingTildeInPath
+                        let absPath = expanded.hasPrefix("/") ? expanded : (root as NSString).appendingPathComponent(rel)
+                        try validateSandbox(absPath)
                         AppState.flushAllUnsavedBuffersBeforeAgentAccess(path: absPath)
                         if let blockReason = WorkspaceScopeGuard.shared.validateMutationAllowed(path: absPath, workspaceRoot: executionWorkspace) {
                             throw ToolBoxError.executionFailed(blockReason)
@@ -971,6 +981,30 @@ class AgentToolBox: ObservableObject {
     
     // MARK: - Sandbox Validation
     
+    private static let globalAgentDocDirectoryNames: Set<String> = [
+        "skills", "plugins", "commands", "agents", "rules", "memory", "prompts", "workflows", "templates"
+    ]
+
+    /// True for skill/rule/doc content under a global agent folder, false for anything credential-like.
+    static func isGlobalAgentDocPath(_ path: String, under root: String) -> Bool {
+        let fileName = (path as NSString).lastPathComponent.lowercased()
+        let credentialNames: Set<String> = [
+            "auth.json", "credentials.json", ".credentials.json", "oauth_creds.json", "google_accounts.json",
+            "mcp.json", ".mcp.json", "mcp_config.json", "settings.json", "settings.local.json",
+            "config.toml", "config.json", ".env"
+        ]
+        if credentialNames.contains(fileName) || fileName.hasPrefix(".env") { return false }
+        for marker in ["token", "secret", "credential", "oauth", "apikey", "api_key", "keychain", "cookie"] where fileName.contains(marker) {
+            return false
+        }
+        let rootPath = URL(fileURLWithPath: root).standardizedFileURL.path
+        let relative = URL(fileURLWithPath: path).standardizedFileURL.path.dropFirst(rootPath.count)
+        let components = relative.split(separator: "/").map { $0.lowercased() }
+        if components.dropLast().contains(where: { globalAgentDocDirectoryNames.contains($0) }) { return true }
+        let ext = (fileName as NSString).pathExtension
+        return ext == "md" || ext == "mdc"
+    }
+
     private func validateSandbox(_ path: String, allowGlobalReadOnly: Bool = false) throws {
         let expandedPath = NSString(string: path).expandingTildeInPath
         if allowGlobalReadOnly {
@@ -984,8 +1018,14 @@ class AgentToolBox: ObservableObject {
                 "\(home)/.claude",
                 "\(home)/.cursor"
             ]
-            for allowedDir in globalAgentDirs {
-                if WorkspacePathPolicy.contains(expandedPath, in: allowedDir) {
+            if WorkspacePathPolicy.contains(expandedPath, in: UniversalAttachmentEngine.vaultRootDirectory.path) {
+                return
+            }
+            for allowedDir in globalAgentDirs where WorkspacePathPolicy.contains(expandedPath, in: allowedDir) {
+                // These folders also hold other tools' OAuth tokens and API keys (e.g. ~/.codex/auth.json,
+                // ~/.claude/.credentials.json, ~/.gemini/oauth_creds.json). Only skills / rules / docs are
+                // readable without a workspace boundary; credential-bearing files never are.
+                if Self.isGlobalAgentDocPath(expandedPath, under: allowedDir) {
                     return
                 }
             }
@@ -5110,13 +5150,46 @@ struct WebFetchTool: AgentTool {
         ToolParameter(name: "url", type: "string", description: "URL to fetch", required: true)
     ]
     
+    /// Blocks non-HTTP schemes (file://, ftp://, data:…), cloud metadata endpoints and MicroCode's own
+    /// local control bridge, so a prompt-injected agent cannot read local files or pivot via SSRF.
+    static func rejectionReason(for url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return "only http(s) URLs are allowed"
+        }
+        guard let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]")), !host.isEmpty else {
+            return "URL has no host"
+        }
+        let blockedHosts: Set<String> = ["metadata.google.internal", "metadata", "instance-data", "0.0.0.0", "fd00:ec2::254"]
+        if blockedHosts.contains(host) || host.hasPrefix("169.254.") || host.hasPrefix("fe80:") {
+            return "link-local / cloud metadata addresses are blocked"
+        }
+        let isLoopback = host == "localhost" || host == "::1" || host.hasPrefix("127.") || host.hasSuffix(".localhost")
+        if isLoopback, let port = url.port, MCPServer.reservedLocalControlPorts.contains(port) {
+            return "MicroCode's local control bridge is not reachable from agent tools"
+        }
+        return nil
+    }
+
+    private final class RedirectGuard: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            if let target = request.url, WebFetchTool.rejectionReason(for: target) == nil {
+                completionHandler(request)
+            } else {
+                completionHandler(nil) // stop at the redirect instead of following it into a blocked target
+            }
+        }
+    }
+
     func execute(params: [String: Any]) async throws -> String {
         guard let urlStr = params["url"] as? String,
-              let url = URL(string: urlStr) else {
+              let url = URL(string: urlStr.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             throw ToolBoxError.invalidParams("valid url is required")
         }
-        
-        let (data, _) = try await URLSession.shared.data(from: url)
+        if let reason = Self.rejectionReason(for: url) {
+            throw ToolBoxError.executionFailed("web_fetch refused '\(urlStr.prefix(200))': \(reason)")
+        }
+
+        let (data, _) = try await URLSession.shared.data(from: url, delegate: RedirectGuard())
         let content = String(data: data, encoding: .utf8) ?? ""
         
         if content.count > 500_000 {
@@ -5374,7 +5447,9 @@ struct ApplyPatchTool: AgentTool {
             throw ToolBoxError.invalidParams("patch is required")
         }
 
-        let defaultRoot = await MainActor.run { AgentToolBox.shared.effectiveWorkspaceRoot } ?? FileManager.default.currentDirectoryPath
+        guard let defaultRoot = await MainActor.run(body: { AgentToolBox.shared.effectiveWorkspaceRoot }), !defaultRoot.isEmpty else {
+            throw ToolBoxError.executionFailed("Open a workspace before applying patches")
+        }
         if patchText.contains("*** Begin Patch") || patchText.contains("*** Update File:") || patchText.contains("*** Add File:") {
             return try applyCodexV4APatch(patchText, workspaceRoot: defaultRoot)
         } else {
@@ -5382,11 +5457,22 @@ struct ApplyPatchTool: AgentTool {
         }
     }
 
-    private func resolveFilePath(_ raw: String, workspaceRoot: String) -> String {
+    /// Resolves a patch target and refuses anything that escapes the workspace
+    /// (absolute paths elsewhere, `~`, `..`, or symlinks pointing outside).
+    private func resolveFilePath(_ raw: String, workspaceRoot: String) throws -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("/") { return trimmed }
-        if trimmed.hasPrefix("~") { return (trimmed as NSString).expandingTildeInPath }
-        return (workspaceRoot as NSString).appendingPathComponent(trimmed)
+        let candidate: String
+        if trimmed.hasPrefix("/") {
+            candidate = trimmed
+        } else if trimmed.hasPrefix("~") {
+            candidate = (trimmed as NSString).expandingTildeInPath
+        } else {
+            candidate = (workspaceRoot as NSString).appendingPathComponent(trimmed)
+        }
+        guard !trimmed.isEmpty, WorkspacePathPolicy.contains(candidate, in: workspaceRoot) else {
+            throw ToolBoxError.executionFailed("apply_patch refused: '\(trimmed)' is outside the active workspace (\(workspaceRoot)).")
+        }
+        return candidate
     }
 
     private func applyCodexV4APatch(_ patch: String, workspaceRoot: String) throws -> String {
@@ -5400,7 +5486,7 @@ struct ApplyPatchTool: AgentTool {
             let line = lines[idx]
             if line.hasPrefix("*** Add File:") {
                 let relPath = String(line.dropFirst("*** Add File:".count)).trimmingCharacters(in: .whitespaces)
-                let fullPath = resolveFilePath(relPath, workspaceRoot: workspaceRoot)
+                let fullPath = try resolveFilePath(relPath, workspaceRoot: workspaceRoot)
                 idx += 1
                 var newLines: [String] = []
                 while idx < lines.count && !lines[idx].hasPrefix("*** ") {
@@ -5422,7 +5508,7 @@ struct ApplyPatchTool: AgentTool {
                 addedFiles.append((fullPath as NSString).lastPathComponent)
             } else if line.hasPrefix("*** Delete File:") {
                 let relPath = String(line.dropFirst("*** Delete File:".count)).trimmingCharacters(in: .whitespaces)
-                let fullPath = resolveFilePath(relPath, workspaceRoot: workspaceRoot)
+                let fullPath = try resolveFilePath(relPath, workspaceRoot: workspaceRoot)
                 if FileManager.default.fileExists(atPath: fullPath) {
                     try FileManager.default.removeItem(atPath: fullPath)
                     deletedFiles.append((fullPath as NSString).lastPathComponent)
@@ -5430,7 +5516,7 @@ struct ApplyPatchTool: AgentTool {
                 idx += 1
             } else if line.hasPrefix("*** Update File:") {
                 let relPath = String(line.dropFirst("*** Update File:".count)).trimmingCharacters(in: .whitespaces)
-                let fullPath = resolveFilePath(relPath, workspaceRoot: workspaceRoot)
+                let fullPath = try resolveFilePath(relPath, workspaceRoot: workspaceRoot)
                 let fileURL = URL(fileURLWithPath: fullPath)
                 var content = try String(contentsOf: fileURL, encoding: .utf8)
                 idx += 1
@@ -5620,6 +5706,9 @@ class MCPClient: ObservableObject {
                 scriptPath = bundleRes
             }
         }
+        #if DEBUG
+        // Dev-only fallbacks (SwiftPM builds without the bundled resource). Release builds must never
+        // execute a `mcp-server.py` supplied by whatever folder the user happened to open.
         if scriptPath == nil || !FileManager.default.fileExists(atPath: scriptPath!) {
             let wsCandidate = (workspacePath as NSString).appendingPathComponent("mcp-server.py")
             if FileManager.default.fileExists(atPath: wsCandidate) {
@@ -5632,6 +5721,7 @@ class MCPClient: ObservableObject {
                 scriptPath = cwdCandidate
             }
         }
+        #endif
         
         guard let path = scriptPath, FileManager.default.fileExists(atPath: path) else {
             print("[MCPClient] Error: mcp-server.py not found across bundle, workspace, CWD, or repo root")
@@ -5657,8 +5747,9 @@ class MCPClient: ObservableObject {
         
         var env = ProcessInfo.processInfo.environment
         env["MICROCODE_WORKSPACE"] = workspacePath
+        env["MICROCODE_BRIDGE_TOKEN"] = MCPServer.bridgeToken
         process.environment = env
-        
+
         let stdin = Pipe()
         let stdout = Pipe()
         
@@ -6689,7 +6780,7 @@ struct SkillEngineTool: AgentTool {
                     scope: ws != nil ? "workspace" : "global",
                     workspacePath: ws
                 )
-                return "✅ Crystallized new skill '\(created.name)' at \(created.filePath) (auto-enabled for JIT routing)."
+                return "✅ Crystallized new skill '\(created.name)' at \(created.filePath) (user-approved; enabled for JIT routing)."
             }
         default:
             return "Unknown skill_engine action '\(action)'. Supported: match, read, run_script, crystallize."

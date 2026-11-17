@@ -31,11 +31,29 @@ class ACPServerService: ObservableObject {
     private var supportsClientWriteTextFile = false
     private var supportsClientTerminal = false
     
+    // MARK: - Protocol stdout
+
+    /// Private handle on the ORIGINAL stdout; only ACP JSON-RPC frames are written to it.
+    private static var protocolOutput: FileHandle?
+
+    /// ACP requires stdout to carry nothing but protocol messages, but the full app prints logs freely.
+    /// Keep a private duplicate of fd 1 for protocol frames and point fd 1 at stderr so every `print()`
+    /// lands in the client's log instead of corrupting the JSON-RPC stream. Idempotent; call as early as possible.
+    static func claimStdoutForProtocol() {
+        guard protocolOutput == nil else { return }
+        fflush(stdout)
+        let privateFD = dup(STDOUT_FILENO)
+        guard privateFD >= 0 else { return }
+        protocolOutput = FileHandle(fileDescriptor: privateFD, closeOnDealloc: true)
+        dup2(STDERR_FILENO, STDOUT_FILENO)
+    }
+
     // MARK: - Server Lifecycle
     
     /// Start serving as an ACP 1.0 JSON-RPC 2.0 agent on stdin/stdout
     func startServing(workspacePath: String) {
         guard !isServing else { return }
+        Self.claimStdoutForProtocol()
         isServing = true
         ndjsonParser.reset()
         readStdinLoop(workspacePath: workspacePath)
@@ -151,14 +169,17 @@ class ACPServerService: ObservableObject {
                         "title": "MicroCode Sovereign Agentic Harness",
                         "version": "2.4.0"
                     ],
+                    // Advertise only what is implemented: history is in-memory (no session/load replay),
+                    // image blocks are not consumed, and client-provided mcpServers are not connected.
                     "agentCapabilities": [
-                        "loadSession": true,
+                        "loadSession": false,
                         "mcpCapabilities": [
-                            "http": true,
-                            "sse": true
+                            "http": false,
+                            "sse": false
                         ],
                         "promptCapabilities": [
-                            "image": true,
+                            "image": false,
+                            "audio": false,
                             "embeddedContext": true
                         ]
                     ],
@@ -231,7 +252,18 @@ class ACPServerService: ObservableObject {
             
         case "session/prompt":
             guard let id = reqId else { return }
-            let sid = params["sessionId"] as? String ?? "default"
+            guard let sid = params["sessionId"] as? String, sessions[sid] != nil else {
+                writeNDJSON(["jsonrpc": "2.0", "id": id, "error": [
+                    "code": -32602, "message": "Unknown sessionId; call session/new first"
+                ]])
+                return
+            }
+            guard activePromptTasks[sid] == nil else {
+                writeNDJSON(["jsonrpc": "2.0", "id": id, "error": [
+                    "code": -32000, "message": "A prompt is already running in this session; cancel it first"
+                ]])
+                return
+            }
             let promptBlocks = params["prompt"] as? [[String: Any]] ?? []
             var promptText = ""
             for block in promptBlocks {
@@ -329,6 +361,7 @@ class ACPServerService: ObservableObject {
 
                 let maxIterations = 12
                 var iteration = 0
+                var finishedNaturally = false
 
                 while iteration < maxIterations {
                     if Task.isCancelled || self.cancelledSessions.contains(sessionId) {
@@ -356,6 +389,7 @@ class ACPServerService: ObservableObject {
 
                     if toolCalls.isEmpty {
                         history.append([("_role", "assistant"), ("text", assistantText)])
+                        finishedNaturally = true
                         break
                     }
 
@@ -459,7 +493,7 @@ class ACPServerService: ObservableObject {
                     "jsonrpc": "2.0",
                     "id": requestId,
                     "result": [
-                        "stopReason": wasCancelled ? "cancelled" : "end_turn"
+                        "stopReason": wasCancelled ? "cancelled" : (finishedNaturally ? "end_turn" : "max_turn_requests")
                     ]
                 ])
             } catch {
@@ -594,6 +628,6 @@ class ACPServerService: ObservableObject {
         guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
         var outputData = data
         outputData.append(0x0A)
-        try? FileHandle.standardOutput.write(contentsOf: outputData)
+        try? (Self.protocolOutput ?? FileHandle.standardOutput).write(contentsOf: outputData)
     }
 }

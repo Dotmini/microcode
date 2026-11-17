@@ -21,7 +21,13 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     let source: String
     let remoteURL: String?
     var customHeaders: [String: String]
+    /// Declared by a config file inside the workspace (repo-controlled): never receives ambient credentials.
+    let isWorkspaceScoped: Bool
     private var mcpSessionId: String? = nil
+    /// Protocol revision agreed in `initialize`; sent as `MCP-Protocol-Version` on later HTTP requests.
+    private(set) var negotiatedProtocolVersion: String?
+    /// Incremented per spawned process so a dying process's termination handler can't tear down its successor.
+    private var processGeneration = 0
     
     @Published var isConnected = false
     @Published private(set) var isHandshakeReady = false
@@ -51,6 +57,22 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         self.source = server.sourcePlatform
         self.remoteURL = server.url ?? ((server.command.hasPrefix("http://") || server.command.hasPrefix("https://")) ? server.command : nil)
         self.customHeaders = server.headers
+        self.isWorkspaceScoped = server.isWorkspaceScoped
+    }
+
+    /// `initialize` params shared by stdio and HTTP transports.
+    private static let initializeParams: [String: Any] = [
+        "protocolVersion": MCPProtocolSupport.latestHandshakeVersion,
+        "capabilities": ["roots": ["listChanged": false]],
+        "clientInfo": ["name": "MicroCode-HyperMesh", "version": MCPProtocolSupport.serverVersion]
+    ]
+
+    private func recordNegotiatedVersion(_ result: Any) {
+        let version = (result as? [String: Any])?["protocolVersion"] as? String
+        negotiatedProtocolVersion = version
+        if let version, !MCPProtocolSupport.supportedVersions.contains(version) {
+            print("[ExternalMCP:\(serverName)] ⚠️ server negotiated unsupported protocol version \(version); continuing best-effort")
+        }
     }
     
     // MARK: - Lifecycle
@@ -63,13 +85,10 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         
         if let httpURL = remoteURL, !httpURL.isEmpty {
             error = nil
-            sendRequest(method: "initialize", params: [
-                "protocolVersion": "2025-06-18",
-                "capabilities": ["roots": ["listChanged": false]],
-                "clientInfo": ["name": "MicroCode-HyperMesh", "version": "3.0.0"]
-            ] as [String: Any]) { [weak self] result in
+            sendRequest(method: "initialize", params: Self.initializeParams) { [weak self] result in
                 switch result {
-                case .success(_):
+                case .success(let initResult):
+                    self?.recordNegotiatedVersion(initResult)
                     self?.isStarting = false
                     self?.isConnected = true
                     self?.isHandshakeReady = true
@@ -103,6 +122,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         // Merge environment + MicroCode Portable Runtime PATH
         var processEnv = ProcessInfo.processInfo.environment
         processEnv.removeValue(forKey: "MICROCODE_LOCAL_API_TOKEN")
+        processEnv.removeValue(forKey: "MICROCODE_BRIDGE_TOKEN")
         let runtimeBins = RuntimeManager.shared.allRuntimeBinDirectories()
         let currentPath = processEnv["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         processEnv["PATH"] = (runtimeBins + ["/opt/homebrew/bin", "/usr/local/bin", currentPath]).joined(separator: ":")
@@ -150,9 +170,13 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         }
         
         // Handle process termination + Autonomous Self-Healing Restart
+        processGeneration += 1
+        let generation = processGeneration
         process.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
-                guard let self else { return }
+                // A restart already spawned a newer process: this stale exit must not clear its state,
+                // fail its pending initialize, or trigger another auto-restart.
+                guard let self, generation == self.processGeneration else { return }
                 self.isStarting = false
                 self.isConnected = false
                 self.isHandshakeReady = false
@@ -186,14 +210,11 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             error = nil
             print("[ExternalMCP:\(serverName)] Started: \(execPath) \(args.joined(separator: " "))")
             
-            // Initialize MCP protocol (supports 2025-06-18 and 2024-11-05)
-            sendRequest(method: "initialize", params: [
-                "protocolVersion": "2025-06-18",
-                "capabilities": ["roots": ["listChanged": false]],
-                "clientInfo": ["name": "MicroCode-HyperMesh", "version": "3.0.0"]
-            ] as [String: Any]) { [weak self] result in
+            // Initialize MCP protocol (offers 2025-11-25; accepts any revision the server negotiates down to)
+            sendRequest(method: "initialize", params: Self.initializeParams) { [weak self] result in
                 switch result {
-                case .success(_):
+                case .success(let initResult):
+                    self?.recordNegotiatedVersion(initResult)
                     self?.isStarting = false
                     self?.isConnected = true
                     self?.isHandshakeReady = true
@@ -226,7 +247,17 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         pendingRequests.removeAll()
         callbacks.forEach { $0(.failure(shutdownError)) }
         
-        process?.terminate()
+        // Graceful stdio shutdown: close stdin (servers exit on EOF), SIGTERM, then SIGKILL if still alive,
+        // so `npx`-launched servers do not linger. Bumping the generation makes the exit handler a no-op.
+        processGeneration += 1
+        try? stdinPipe?.fileHandleForWriting.close()
+        if let running = process, running.isRunning {
+            running.terminate()
+            let pid = running.processIdentifier
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+                if running.isRunning { kill(pid, SIGKILL) }
+            }
+        }
         isConnected = false
         process = nil
         stdinPipe = nil
@@ -358,18 +389,29 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
                 continue
             }
             
-            // Handle server-to-client requests (e.g. ping, roots/list)
-            if let method = json["method"] as? String, let reqId = json["id"] {
-                if method == "ping" {
-                    sendRaw(["jsonrpc": "2.0", "id": reqId, "result": [:] as [String: Any]])
-                } else if method == "roots/list" {
-                    let ws = AppState.shared?.workspaceFolder?.path ?? AppState.shared?.activeTerminalDirectory ?? FileManager.default.currentDirectoryPath
-                    let rootURI = URL(fileURLWithPath: ws).absoluteString
-                    sendRaw([
-                        "jsonrpc": "2.0",
-                        "id": reqId,
-                        "result": ["roots": [["uri": rootURI, "name": URL(fileURLWithPath: ws).lastPathComponent]]]
-                    ])
+            // Server-to-client messages: requests carry an id and MUST be answered; notifications carry none.
+            if let method = json["method"] as? String {
+                if let reqId = json["id"] {
+                    switch method {
+                    case "ping":
+                        sendRaw(["jsonrpc": "2.0", "id": reqId, "result": [:] as [String: Any]])
+                    case "roots/list":
+                        let ws = AppState.shared?.workspaceFolder?.path ?? AppState.shared?.activeTerminalDirectory ?? FileManager.default.currentDirectoryPath
+                        let rootURI = URL(fileURLWithPath: ws).absoluteString
+                        sendRaw([
+                            "jsonrpc": "2.0",
+                            "id": reqId,
+                            "result": ["roots": [["uri": rootURI, "name": URL(fileURLWithPath: ws).lastPathComponent]]]
+                        ])
+                    default:
+                        // sampling/createMessage, elicitation/create, ...: not supported. Answer instead of
+                        // leaving the server blocked until its own timeout.
+                        sendRaw([
+                            "jsonrpc": "2.0",
+                            "id": reqId,
+                            "error": ["code": -32601, "message": "Method not supported by MicroCode client: \(method)"]
+                        ])
+                    }
                 } else if method == "notifications/tools/list_changed" {
                     fetchTools()
                 }
@@ -401,7 +443,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             "method": method,
             "params": params
         ]
-        sendRaw(request)
+        sendRaw(request, timeout: timeout + 5)
         
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -432,27 +474,33 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             return savedToken.lowercased().hasPrefix("bearer ") ? savedToken : "Bearer \(savedToken)"
         }
         let upperName = serverName.uppercased().replacingOccurrences(of: "-", with: "_")
-        let envKeys = [
-            "AUTHORIZATION", "MCP_BEARER_TOKEN", "BEARER_TOKEN", "MCP_TOKEN",
-            "\(upperName)_ACCESS_TOKEN", "\(upperName)_API_KEY", "\(upperName)_TOKEN"
-        ]
-        for k in envKeys {
-            if let v = env[k] ?? ProcessInfo.processInfo.environment[k], !v.isEmpty, !v.hasPrefix("YOUR_") {
+        // Generic names come only from this server's own declared env: MicroCode's process-wide
+        // AUTHORIZATION / BEARER_TOKEN / MCP_TOKEN must never be sent to every remote server.
+        let genericKeys = ["AUTHORIZATION", "MCP_BEARER_TOKEN", "BEARER_TOKEN", "MCP_TOKEN"]
+        let namedKeys = ["\(upperName)_ACCESS_TOKEN", "\(upperName)_API_KEY", "\(upperName)_TOKEN"]
+        for k in genericKeys + namedKeys {
+            // Ambient (process) env only for name-specific keys of user-level servers, never repo-declared ones.
+            let ambient = (namedKeys.contains(k) && !isWorkspaceScoped) ? ProcessInfo.processInfo.environment[k] : nil
+            if let v = env[k] ?? ambient, !v.isEmpty, !v.hasPrefix("YOUR_") {
                 return v.lowercased().hasPrefix("bearer ") ? v : "Bearer \(v)"
             }
         }
         return nil
     }
 
-    private func sendRaw(_ obj: [String: Any]) {
+    private func sendRaw(_ obj: [String: Any], timeout: TimeInterval = 35) {
         guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         if let httpURL = remoteURL, let url = URL(string: httpURL) {
-            var req = URLRequest(url: url, timeoutInterval: 12)
+            // Matches the JSON-RPC request timeout (a fixed 12 s cut off slow tools/call requests allowed 60 s).
+            var req = URLRequest(url: url, timeoutInterval: timeout)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
             if let sid = mcpSessionId, !sid.isEmpty {
                 req.setValue(sid, forHTTPHeaderField: "Mcp-Session-Id")
+            }
+            if let version = negotiatedProtocolVersion {
+                req.setValue(version, forHTTPHeaderField: "MCP-Protocol-Version")
             }
             for (hk, hv) in customHeaders where hk.caseInsensitiveCompare("Authorization") != .orderedSame {
                 req.setValue(hv, forHTTPHeaderField: hk)
@@ -1194,6 +1242,7 @@ class ExternalMCPManager: ObservableObject {
         failedProbeServers.remove(name)
         if let conn = connections[name] {
             conn.stop()
+            conn.autoRestartCount = 0
             conn.start()
         }
     }

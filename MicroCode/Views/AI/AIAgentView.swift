@@ -1707,7 +1707,7 @@ struct AIAgentView: View {
                                         .font(.system(size: 10, weight: .semibold))
                                 }
                                 .disabled(agent.isLoading)
-                                .help("Autonomy for \(external.name)")
+                                .help("Autonomy for \(external.name): \(external.permissionMode.cliBehaviorSummary)")
                             } else if activeExternalAgentConfig == nil {
                                 ToolApprovalModePickerView(manager: toolApprovalManager)
                             }
@@ -3656,7 +3656,7 @@ struct AIAgentView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .disabled(agent.isLoading)
-            .help("Autonomy for \(external.name)")
+            .help("Autonomy for \(external.name): \(external.permissionMode.cliBehaviorSummary)")
         } else if activeExternalAgentConfig == nil {
             ToolApprovalModePickerView(manager: toolApprovalManager)
                 .fixedSize()
@@ -5450,6 +5450,10 @@ struct AIAgentView: View {
                         agent.currentToolExecution = nil
                         agent.saveChats()
                         agent.saveArx()
+                    case .permissionRequest(let request):
+                        // Answer through the agent's permission mode + MicroCode approval prompt (never leave it blocked).
+                        agent.currentToolExecution = "\(activeConfig.name) awaiting approval: \(request.description)"
+                        session.resolvePermission(request)
                     default:
                         break
                     }

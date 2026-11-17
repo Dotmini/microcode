@@ -126,8 +126,27 @@ class ToolApprovalManager: ObservableObject {
         presentNext()
     }
 
+    /// Approval identity for tools whose actions carry very different risk (e.g. `skill_engine` read vs run_script).
+    nonisolated static func approvalIdentity(toolName: String, arguments: [String: String]) -> String {
+        let action = (arguments["action"] ?? "").lowercased()
+        switch (toolName, action) {
+        case ("skill_engine", "run_script"), ("skill_engine", "crystallize"),
+             ("mcp_orchestrator", "connect"), ("mcp_orchestrator", "configure"),
+             ("mcp_orchestrator", "synthesize"), ("mcp_orchestrator", "create"):
+            return "\(toolName).\(action)"
+        default:
+            return toolName
+        }
+    }
+
     func classifyRisk(toolName: String, arguments: [String: String]) -> ToolRiskLevel {
         switch toolName {
+        case "skill_engine.run_script", "skill_engine.crystallize",
+             "mcp_orchestrator.connect", "mcp_orchestrator.configure",
+             "mcp_orchestrator.synthesize", "mcp_orchestrator.create",
+             "execute_code", "computer_use", "agent_desktop":
+            // Runs arbitrary code, spawns new processes, or drives the GUI with the app's TCC permissions.
+            return .dangerous
         case "shell", "adb_shell", "delete_file", "drop_table":
             if let cmd = arguments["command"] ?? arguments["CommandLine"] {
                 if cmd.contains("rm -rf") || cmd.contains("drop") {

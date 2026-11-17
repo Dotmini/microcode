@@ -31,6 +31,24 @@ NATIVE_ENDPOINT = os.environ.get(
 )
 
 
+def _microcode_bridge_headers(extra=None):
+    """Headers for MicroCode.app's local bridge (127.0.0.1:18888). Tool-executing routes require the
+    per-launch token MicroCode publishes at ~/.microcode/run/bridge-token (or MICROCODE_BRIDGE_TOKEN)."""
+    headers = {"Content-Type": "application/json"}
+    if extra:
+        headers.update(extra)
+    token = os.environ.get("MICROCODE_BRIDGE_TOKEN", "").strip()
+    if not token:
+        try:
+            with open(os.path.expanduser("~/.microcode/run/bridge-token"), "r", encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError:
+            token = ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 class MicroCodeComputerUse:
     def __init__(self, app: Optional[str] = None, auto_launch: bool = True):
         self.app = app
@@ -63,7 +81,7 @@ class MicroCodeComputerUse:
         req = urllib.request.Request(
             NATIVE_ENDPOINT,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=_microcode_bridge_headers(),
             method="POST",
         )
         try:

@@ -1749,7 +1749,8 @@ public final class SubAgentHarness: ObservableObject {
                         activeSubagents[idx].logMessages.append("\(icon) [\(acpType.displayName)] \(tr.toolName ?? "tool"): \(tr.content.prefix(90))")
                     }
                 case .permissionRequest(let pr):
-                    acpSession.respondToPermission(pr.id, approved: true)
+                    // Honour the agent's configured permission mode (Review Each by default) instead of auto-approving.
+                    acpSession.resolvePermission(pr)
                 case .complete(let res):
                     if collectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         collectedText = res.result

@@ -122,7 +122,8 @@ public struct WorkspaceEnterprisePolicy: Codable, Equatable {
             "id_rsa*", "secrets/*", "confidential/*", "*credentials*.json"
         ],
         blockedShellPatterns: [
-            #"rm\s+-rf\s+(/|~|\$HOME)\b"#,
+            // Any `rm` (any flag order/quoting) whose target is exactly /, /*, ~, ~/, ~/*, $HOME or ${HOME}.
+            #"\brm\s+(?:-{1,2}[\w-]+\s+)*["']?(?:/|~|\$HOME|\$\{HOME\})/?\*?["']?(?:\s|$|;|&|\|)"#,
             #"curl\s+[^|]*\|\s*(ba)?sh"#,
             #"wget\s+[^|]*\|\s*(ba)?sh"#,
             #"\bterraform\s+destroy\b"#,
@@ -717,7 +718,11 @@ public final class EnterpriseAIAuthService: ObservableObject {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        let patterns = activeWorkspacePolicy?.blockedShellPatterns ?? WorkspaceEnterprisePolicy.defaultTemplate.blockedShellPatterns
+        // Workspace policy may only ADD rules: a repo-supplied policy must never be able to drop the built-in ones.
+        var patterns = WorkspaceEnterprisePolicy.defaultTemplate.blockedShellPatterns
+        for extra in activeWorkspacePolicy?.blockedShellPatterns ?? [] where !patterns.contains(extra) {
+            patterns.append(extra)
+        }
         for pattern in patterns {
             if let regex = try? NSRegularExpression(pattern: pattern, options: []),
                regex.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: (trimmed as NSString).length)) != nil {
@@ -791,10 +796,12 @@ public final class EnterpriseAIAuthService: ObservableObject {
             return
         }
         activeWorkspacePolicy = decoded
-        zeroDataRetention = decoded.enforceZeroDataRetention
-        localDLPRedaction = decoded.enforceBidirectionalDLP
-        commandFirewallEnabled = decoded.enforceCommandFirewall
-        enforceConfidentialSplitRouting = decoded.enforceConfidentialSplitRouting
+        // `.microcode/enterprise-policy.json` lives in the repo, so it is attacker-controllable for cloned
+        // projects. It may only TIGHTEN protections; relaxing them stays a deliberate user action in Settings.
+        zeroDataRetention = zeroDataRetention || decoded.enforceZeroDataRetention
+        localDLPRedaction = localDLPRedaction || decoded.enforceBidirectionalDLP
+        commandFirewallEnabled = commandFirewallEnabled || decoded.enforceCommandFirewall
+        enforceConfidentialSplitRouting = enforceConfidentialSplitRouting || decoded.enforceConfidentialSplitRouting
         if decoded.airGappedLockdown {
             isAirGappedLockdownEnabled = true
         }

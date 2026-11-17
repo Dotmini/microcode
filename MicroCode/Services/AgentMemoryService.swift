@@ -129,7 +129,8 @@ class AgentMemoryService: ObservableObject {
     
     func storeMemory(content: String, chatId: String, role: String, projectPath: String? = nil) {
         guard content.trimmingCharacters(in: .whitespacesAndNewlines).count > 10 else { return }
-        let compactContent = boundedMemoryContent(content)
+        // Memories are persisted and re-injected into future prompts: never store raw secrets.
+        let compactContent = boundedMemoryContent(AgentPrivacyGuard.sanitize(content))
         
         // Calculate importance based on content
         let importance = calculateImportance(compactContent, role: role)
@@ -332,8 +333,9 @@ class AgentMemoryService: ObservableObject {
     
     // MARK: - Conversation Summarization
     
-    func summarizeChat(chatId: String, messages: [(id: String, role: String, content: String)]) {
-        guard messages.count > 4 else { return }
+    func summarizeChat(chatId: String, messages rawMessages: [(id: String, role: String, content: String)]) {
+        guard rawMessages.count > 4 else { return }
+        let messages = rawMessages.map { (id: $0.id, role: $0.role, content: AgentPrivacyGuard.sanitize($0.content)) }
         
         // Extract key information
         var topics = Set<String>()

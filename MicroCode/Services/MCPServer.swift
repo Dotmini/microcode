@@ -15,12 +15,13 @@ import Foundation
 import Combine
 import Network
 import AppKit
+import Security
 
 // MARK: - MCP Protocol Types
 
 struct MCPRequest: Codable {
     let jsonrpc: String
-    let id: Int?
+    let id: MCPRequestID?   // JSON-RPC ids may be strings or numbers
     let method: String
     let params: MCPParams?
 }
@@ -37,6 +38,9 @@ struct MCPParams: Codable {
     let protocolVersion: String?
     let capabilities: MCPClientCapabilities?
     let clientInfo: MCPClientInfo?
+
+    // Request metadata (2026-07-28 carries protocol version / client capabilities here)
+    let _meta: [String: MCPAnyCodable]?
 }
 
 struct MCPClientCapabilities: Codable {
@@ -55,18 +59,18 @@ struct MCPClientInfo: Codable {
 
 struct MCPResponse: Encodable {
     let jsonrpc: String
-    let id: Int?
+    let id: MCPRequestID?
     let result: MCPAnyCodable?
     let error: MCPError?
     
-    init(id: Int?, result: Any?) {
+    init(id: MCPRequestID?, result: Any?) {
         self.jsonrpc = "2.0"
         self.id = id
         self.result = result != nil ? MCPAnyCodable(result!) : nil
         self.error = nil
     }
     
-    init(id: Int?, error: MCPError) {
+    init(id: MCPRequestID?, error: MCPError) {
         self.jsonrpc = "2.0"
         self.id = id
         self.result = nil
@@ -77,9 +81,10 @@ struct MCPResponse: Encodable {
 struct MCPError: Codable, Error {
     let code: Int
     let message: String
-    let data: String?
+    let data: MCPAnyCodable?
     
     static let parseError = MCPError(code: -32700, message: "Parse error", data: nil)
+    static let invalidRequest = MCPError(code: -32600, message: "Invalid Request", data: nil)
     static let methodNotFound = MCPError(code: -32601, message: "Method not found", data: nil)
     static let invalidParams = MCPError(code: -32602, message: "Invalid params", data: nil)
     static let internalError = MCPError(code: -32603, message: "Internal error", data: nil)
@@ -312,17 +317,42 @@ class MCPServer: ObservableObject {
     
     // MARK: - Handle Request
     
+    /// Returns the JSON-RPC response text, or "" for notifications (which must never be answered).
     func handleRequest(_ jsonString: String) async -> String {
         requestCount += 1
         lastActivity = Date()
         
         guard let data = jsonString.data(using: String.Encoding.utf8),
-              let request = try? JSONDecoder().decode(MCPRequest.self, from: data) else {
+              let rawJSON = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return encodeResponse(MCPResponse(id: nil, error: .parseError))
+        }
+        guard let request = try? JSONDecoder().decode(MCPRequest.self, from: data) else {
+            if MCPProtocolSupport.isNotification(rawJSON) { return "" }
+            return encodeResponse(MCPResponse(id: nil, error: .invalidRequest))
+        }
+        if MCPProtocolSupport.isNotification(rawJSON) {
+            // notifications/initialized, notifications/cancelled, ... : no response by definition.
+            log("Notification: \(request.method)", method: request.method, status: .info)
+            return ""
+        }
+
+        // 2026-07-28 (stateless): every request declares its protocol version in `_meta`.
+        let declaredVersion = MCPProtocolSupport.declaredProtocolVersion(params: rawJSON["params"] as? [String: Any])
+        if let declaredVersion, !MCPProtocolSupport.supportedVersions.contains(declaredVersion) {
+            return encodeResponse(MCPResponse(id: request.id, error: MCPError(
+                code: MCPProtocolSupport.unsupportedProtocolVersionCode,
+                message: "Unsupported protocol version \(declaredVersion)",
+                data: MCPAnyCodable(["supported": MCPProtocolSupport.supportedVersions])
+            )))
         }
         
         let response = await processRequest(request)
-        return encodeResponse(response)
+        guard declaredVersion == MCPProtocolSupport.statelessVersion,
+              let resultDict = response.result?.value as? [String: Any] else {
+            return encodeResponse(response)
+        }
+        let decorated = MCPProtocolSupport.decorateResult(resultDict, protocolVersion: declaredVersion)
+        return encodeResponse(MCPResponse(id: response.id, result: decorated))
     }
     
     func handleRequestData(_ data: Data) async -> Data {
@@ -337,8 +367,11 @@ class MCPServer: ObservableObject {
         switch request.method {
         case "initialize":
             return handleInitialize(request)
-        case "initialized":
-            return MCPResponse(id: request.id, result: nil)
+        case "server/discover":
+            return MCPResponse(id: request.id, result: MCPProtocolSupport.discoverResult)
+        case "initialized", "notifications/initialized":
+            // Only reached when a client wrongly sends it as a request (with an id): acknowledge.
+            return MCPResponse(id: request.id, result: [String: Any]())
         case "tools/list":
             return handleToolsList(request)
         case "tools/call":
@@ -350,7 +383,7 @@ class MCPServer: ObservableObject {
         case "prompts/list":
             return handlePromptsList(request)
         case "ping":
-            return MCPResponse(id: request.id, result: ["status": "pong"])
+            return MCPResponse(id: request.id, result: [String: Any]())
         default:
             log("Unknown method: \(request.method)", method: request.method, status: .error)
             return MCPResponse(id: request.id, error: .methodNotFound)
@@ -363,21 +396,13 @@ class MCPServer: ObservableObject {
         connectedClients += 1
         log("Client connected", method: "initialize", status: .info)
         
-        let requestedVersion = request.params?.protocolVersion ?? "2025-06-18"
-        let negotiatedVersion = ["2025-06-18", "2025-03-26", "2024-11-05"].contains(requestedVersion) ? requestedVersion : "2025-06-18"
+        let negotiatedVersion = MCPProtocolSupport.negotiateHandshakeVersion(request.params?.protocolVersion)
         
+        // Advertise only what is implemented (no list_changed notifications / logging are emitted).
         let result: [String: Any] = [
             "protocolVersion": negotiatedVersion,
-            "capabilities": [
-                "tools": ["listChanged": true],
-                "resources": ["subscribe": false, "listChanged": true],
-                "prompts": ["listChanged": false],
-                "logging": [:]
-            ],
-            "serverInfo": [
-                "name": "MicroCode MCP",
-                "version": "3.0.0"
-            ]
+            "capabilities": MCPProtocolSupport.serverCapabilities,
+            "serverInfo": MCPProtocolSupport.serverInfo
         ]
         return MCPResponse(id: request.id, result: result)
     }
@@ -716,15 +741,47 @@ class MCPServer: ObservableObject {
             ]
         ]
         
-        return MCPResponse(id: request.id, result: ["tools": tools])
+        return MCPResponse(id: request.id, result: ["tools": MCPProtocolSupport.finalizeToolList(tools)])
     }
     
     // MARK: - Tool Execution
     
+    /// Tools reachable by EXTERNAL MCP clients that execute code or drive the GUI with MicroCode's
+    /// Accessibility / Screen Recording permissions. They always go through the in-app approval prompt
+    /// (the same ToolApprovalManager policy the built-in agent uses).
+    private func approveExternalExecution(_ name: String, args: [String: Any]) async -> Bool {
+        let action = (args["action"] as? String)?.lowercased()
+        if name == "computer_use", action == nil || action == "status" { return true }
+        if name == "microcode_open_snippet" {
+            let mode = action ?? "open_and_run"
+            if mode != "open_and_run" && mode != "run" { return true }
+        }
+        let approvalName = name == "computer_use" ? "computer_use" : "execute_code"
+        let stringArgs = args.compactMapValues { value -> String? in
+            let text = "\(value)"
+            return text.count > 400 ? String(text.prefix(400)) + "…" : text
+        }
+        let summary = (args["language"] as? String).map { "\($0) code" } ?? (action ?? name)
+        return await ToolApprovalManager.shared.requestApproval(
+            toolName: approvalName,
+            arguments: stringArgs,
+            description: "External MCP client requests `\(name)` (\(summary))"
+        )
+    }
+
     private func handleToolCall(_ request: MCPRequest) async -> MCPResponse {
         guard let name = request.params?.name,
               let args = request.params?.arguments?.mapValues({ $0.value }) else {
             return MCPResponse(id: request.id, error: .invalidParams)
+        }
+
+        let externallyGatedTools: Set<String> = [
+            "computer_use", "microcode_run_playground", "microcode_open_snippet",
+            "execute_code", "playground_run", "microcode_run_cell", "cell_run"
+        ]
+        if externallyGatedTools.contains(name), !(await approveExternalExecution(name, args: args)) {
+            log("Tool declined by user: \(name)", method: "tools/call", status: .error)
+            return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "Declined: the MicroCode user did not approve `\(name)`."]], "isError": true])
         }
         
         // Fast-path tools that don't strictly require sandbox directory
@@ -1336,8 +1393,61 @@ class MCPServer: ObservableObject {
 
     private var httpListener: NWListener?
 
+    // MARK: - Bridge authentication
+
+    /// Ports of MicroCode's own local control surfaces; agent tools (web_fetch) must never reach them.
+    nonisolated static let reservedLocalControlPorts: Set<Int> = [18888]
+
+    /// Per-launch secret required by native (non-browser) callers of the tool-executing routes.
+    /// Published to `~/.microcode/run/bridge-token` (0600) for trusted local clients such as mcp-server.py.
+    nonisolated static let bridgeToken: String = {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            bytes = (0..<32).map { _ in UInt8.random(in: .min ... .max) }
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }()
+
+    nonisolated static var bridgeTokenFileURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".microcode/run", isDirectory: true)
+            .appendingPathComponent("bridge-token")
+    }
+
+    private func publishBridgeToken() {
+        let fm = FileManager.default
+        let dir = Self.bridgeTokenFileURL.deletingLastPathComponent()
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+            // Create a fresh 0600 file (never widen an existing one), then move it into place atomically.
+            let tmp = dir.appendingPathComponent(".bridge-token.\(UUID().uuidString)")
+            guard fm.createFile(atPath: tmp.path, contents: Data(Self.bridgeToken.utf8), attributes: [.posixPermissions: 0o600]) else { return }
+            if rename(tmp.path, Self.bridgeTokenFileURL.path) != 0 {
+                try? fm.removeItem(at: tmp)
+            }
+        } catch {
+            print("⚠️ MicroCode bridge: could not publish bridge token: \(error)")
+        }
+    }
+
+    /// Constant-time check of `Authorization: Bearer <token>` or `X-MicroCode-Bridge-Token: <token>`.
+    nonisolated static func isAuthorizedBridgeCaller(headers: [String: String]) -> Bool {
+        var presented = headers["x-microcode-bridge-token"] ?? ""
+        if presented.isEmpty, let auth = headers["authorization"], auth.lowercased().hasPrefix("bearer ") {
+            presented = String(auth.dropFirst("bearer ".count)).trimmingCharacters(in: .whitespaces)
+        }
+        let expected = Array(bridgeToken.utf8)
+        let given = Array(presented.utf8)
+        guard given.count == expected.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<expected.count { diff |= expected[i] ^ given[i] }
+        return diff == 0
+    }
+
     func startLocalHttpBridge(port: UInt16 = 18888) {
         guard httpListener == nil else { return }
+        publishBridgeToken()
         do {
             let params = NWParameters.tcp
             // SECURITY: this bridge exposes the full MCP tool surface (write_file, edit_file, run_terminal, execute_code, ...)
@@ -1372,9 +1482,38 @@ class MCPServer: ObservableObject {
         httpListener = nil
     }
 
+    /// Upper bound for one bridge request (headers + body); larger requests are dropped.
+    nonisolated static let maxBridgeRequestBytes = 32 * 1024 * 1024
+
+    /// Reads until the full HTTP request (headers + Content-Length body) has arrived. A single receive()
+    /// returned at most 64 KB, silently truncating larger `write_file` / `edit_file` bodies.
+    nonisolated private static func receiveFullRequest(
+        on connection: NWConnection,
+        buffer: Data = Data(),
+        completion: @escaping (Data?) -> Void
+    ) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { content, _, isComplete, error in
+            var accumulated = buffer
+            if let content { accumulated.append(content) }
+            if accumulated.count > maxBridgeRequestBytes {
+                completion(nil)
+                return
+            }
+            if let expected = MCPProtocolSupport.expectedHTTPRequestLength(accumulated), accumulated.count >= expected {
+                completion(accumulated)
+                return
+            }
+            if isComplete || error != nil {
+                completion(accumulated.isEmpty ? nil : accumulated)
+                return
+            }
+            receiveFullRequest(on: connection, buffer: accumulated, completion: completion)
+        }
+    }
+
     nonisolated private func handleIncomingConnection(_ connection: NWConnection) {
         connection.start(queue: DispatchQueue.global(qos: .userInitiated))
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, _, _ in
+        Self.receiveFullRequest(on: connection) { [weak self] content in
             guard let self = self, let content = content, let requestString = String(data: content, encoding: .utf8) else {
                 connection.cancel()
                 return
@@ -1488,6 +1627,15 @@ class MCPServer: ObservableObject {
         if isBrowserRequest && (path.hasPrefix("/v1/mcp") || path.hasPrefix("/v1/computer-use")) {
             return bridgeJSON(status: "403 Forbidden", body: "{\"error\": \"MCP and Computer Use tools are not available to browser origins\"}", origin: corsOrigin)
         }
+
+        // SECURITY GATE 4: native callers of tool-executing routes must present the per-launch bridge token.
+        // Loopback alone is not an authentication boundary (any local process, e.g. an npm postinstall script,
+        // could otherwise drive execute_code / computer_use with MicroCode's TCC permissions).
+        let requiresBridgeToken = path.hasPrefix("/v1/mcp") || path.hasPrefix("/v1/computer-use")
+            || (path.hasPrefix("/v1/run") && !isBrowserRequest)
+        if requiresBridgeToken && !Self.isAuthorizedBridgeCaller(headers: requestHeaders) {
+            return bridgeJSON(status: "401 Unauthorized", body: "{\"error\": \"Missing or invalid MicroCode bridge token (see ~/.microcode/run/bridge-token)\"}", origin: corsOrigin)
+        }
         
         // Extract Body
         var bodyString = ""
@@ -1503,6 +1651,9 @@ class MCPServer: ObservableObject {
                 payload = json
             } else {
                 payload = ["action": "status"]
+            }
+            guard await approveExternalExecution("computer_use", args: payload) else {
+                return bridgeJSON(status: "403 Forbidden", body: "{\"success\": false, \"error\": \"Declined by MicroCode user approval\"}", origin: corsOrigin)
             }
             let resp = await NativeComputerUseService.shared.handleRequest(payload)
             let isAllowed = (resp["success"] as? Bool) ?? true
@@ -1621,7 +1772,7 @@ class MCPServer: ObservableObject {
                 "ai_credit_remaining_thb": auth.entitlement.creditRemainingTHB,
                 "ai_topup_balance_thb": auth.entitlement.aiTopupBalanceTHB,
                 "wallet_thb": Double(CloudGPUService.shared.walletBalance) / 100.0,
-                "mcp_version": "2024-11-05"
+                "mcp_version": MCPProtocolSupport.latestHandshakeVersion
             ]
             let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
             let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
@@ -1648,6 +1799,10 @@ class MCPServer: ObservableObject {
 
         if path.hasPrefix("/v1/mcp") && method == "POST" {
             let mcpRespString = await self.handleRequest(bodyString)
+            if mcpRespString.isEmpty {
+                // Streamable HTTP: a POSTed notification is acknowledged with 202 and no body.
+                return ("HTTP/1.1 202 Accepted\r\n\(acao)Content-Length: 0\r\nConnection: close\r\n\r\n").data(using: .utf8) ?? Data()
+            }
             let respBody = mcpRespString.data(using: .utf8) ?? Data()
             let httpResp = "HTTP/1.1 200 OK\r\n\(acao)Content-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
             var data = httpResp.data(using: .utf8) ?? Data()

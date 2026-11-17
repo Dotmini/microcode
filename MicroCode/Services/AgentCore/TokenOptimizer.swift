@@ -247,9 +247,31 @@ class TokenOptimizer: ObservableObject {
         }
         
         // Strategy 3: Head + Tail preservation if still over budget.
-        // NEVER slice off the tail blindly: Pinned User Constraints, Strict Editing Scope,
-        // and the Provider Harness Contract live at the end of `buildSystemPrompt`.
+        // NEVER slice off the tail blindly: Pinned User Constraints and Strict Editing Scope live at the end
+        // of `buildSystemPrompt`. When the stable/dynamic boundary is present, the stable prefix (core rules +
+        // Provider Harness Contract, also the prompt-cache prefix) stays intact and only dynamic context is condensed.
         let compressedTokens = estimateTokens(compressed)
+        if compressedTokens > budget,
+           let boundary = compressed.range(of: AISystemPromptLayout.dynamicBoundary) {
+            let stablePrefix = String(compressed[..<boundary.lowerBound])
+            let dynamicContext = String(compressed[boundary.upperBound...])
+            let stableTokens = estimateTokens(stablePrefix)
+            if stableTokens < budget {
+                let dynamicTokens = max(1, estimateTokens(dynamicContext))
+                let allowedChars = max(400, Int(Double(dynamicContext.count) * Double(budget - stableTokens) / Double(dynamicTokens)))
+                var condensed = dynamicContext
+                if condensed.count > allowedChars {
+                    let headChars = Int(Double(allowedChars) * 0.45)
+                    let tailChars = max(300, allowedChars - headChars)
+                    condensed = String(condensed.prefix(headChars))
+                        + "\n\n... [per-message context condensed to fit budget] ...\n\n"
+                        + String(condensed.suffix(tailChars))
+                }
+                let result = stablePrefix + AISystemPromptLayout.dynamicBoundary + condensed
+                stats.savedTokens += max(0, tokens - estimateTokens(result))
+                return result
+            }
+        }
         if compressedTokens > budget {
             let ratio = Double(budget) / Double(max(1, compressedTokens))
             let targetChars = max(1_200, Int(Double(compressed.count) * ratio))
@@ -799,7 +821,8 @@ class TokenOptimizer: ObservableObject {
     /// provider KV-prefix caches (Anthropic, OpenAI, Gemini, DeepSeek).
     func compressIterativeToolHistory(
         _ history: [(role: String, content: String)],
-        budget: Int = 120_000
+        budget: Int = 120_000,
+        pinnedObjective: String? = nil
     ) -> [(role: String, content: String)] {
         let isTightLocalBudget = budget <= 20_000
         if !isTightLocalBudget && history.count <= 8 { return history }
@@ -914,7 +937,14 @@ class TokenOptimizer: ObservableObject {
                     let foldedSlice = Array(optimized[1..<foldEnd])
                     let foldedSummary = summarizeMessages(foldedSlice)
                     var rebuilt: [(role: String, content: String)] = [optimized[0]]
-                    let checkpointMsg = "[Earlier autonomous execution checkpoint (\(foldedSlice.count / 2) tool steps folded): \(foldedSummary)]"
+                    // history[0] is the OLDEST message of the conversation, not the task at hand. When the current
+                    // request falls inside the folded span, carry it forward verbatim so the goal is never lost.
+                    var objectiveNote = ""
+                    if let objective = pinnedObjective?.trimmingCharacters(in: .whitespacesAndNewlines), !objective.isEmpty,
+                       foldedSlice.contains(where: { $0.content.contains(String(objective.prefix(200))) }) {
+                        objectiveNote = "\nCurrent objective (verbatim): " + String(objective.prefix(4_000))
+                    }
+                    let checkpointMsg = "[Earlier autonomous execution checkpoint (\(foldedSlice.count / 2) tool steps folded): \(foldedSummary)\(objectiveNote)]"
                     if foldEnd < optimized.count && optimized[foldEnd].role == "assistant" {
                         rebuilt.append((role: "assistant", content: checkpointMsg))
                         rebuilt.append((role: "user", content: "Continue executing from the checkpoint above without repeating completed steps."))

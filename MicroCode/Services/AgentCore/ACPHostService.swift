@@ -88,6 +88,11 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private var activeWorkspacePath: String = ""
     private var initializeReqId: Int?
     private var sessionNewReqId: Int?
+    private var authenticateReqId: Int?
+    private var didAttemptAcpAuthentication = false
+    /// From the agent's `initialize` response (e.g. loadSession, promptCapabilities, mcpCapabilities).
+    private(set) var acpAgentCapabilities: [String: Any] = [:]
+    private var acpAuthMethodIds: [String] = []
     /// True when `.geminiCLI` transparently bridges personal OAuth / AGY-exclusive models (`gemini-4-argon*`) via `agy`.
     private var activeTurnUsesAGYBridge: Bool = false
     private var didRetryGeminiViaAGY: Bool = false
@@ -102,14 +107,8 @@ class ACPAgentSession: ObservableObject, Identifiable {
         if config.type == .goose {
             return true // `goose acp` natively speaks ACP v1 JSON-RPC 2.0 over stdio
         }
-        let cmdLower = config.command.lowercased()
-        let argsLower = config.arguments.map { $0.lowercased() }
-        return cmdLower.contains("-acp")
-            || cmdLower.hasSuffix("/acp")
-            || argsLower.contains("acp")
-            || argsLower.contains("--acp")
-            || argsLower.contains("--acp-server")
-            || argsLower.contains("--experimental-acp")
+        // Also recognizes adapters launched through npx/bunx (e.g. `npx @zed-industries/claude-code-acp@x.y`).
+        return ACPAgentDetection.isACP(command: config.command, arguments: config.arguments)
     }
     
     init(config: ACPAgentConfig) {
@@ -136,6 +135,8 @@ class ACPAgentSession: ObservableObject, Identifiable {
     /// Async stream of events from the agent
     var eventStream: AsyncStream<ACPStreamEvent> {
         AsyncStream { continuation in
+            // One stream per turn: end the previous consumer's stream instead of orphaning it forever.
+            self.eventContinuation?.finish()
             self.eventContinuation = continuation
         }
     }
@@ -495,14 +496,52 @@ class ACPAgentSession: ObservableObject, Identifiable {
     }
     
     /// Respond to a permission request (supports both ACP v1 `session/request_permission` and legacy AGY)
+    /// Decides an agent's permission request according to this agent's permission mode, asking the user
+    /// through MicroCode's approval prompt when the mode requires it. Always answers, so the agent never hangs.
+    func resolvePermission(_ request: ACPPermissionRequest) {
+        if !pendingPermissions.contains(where: { $0.id == request.id }) {
+            pendingPermissions.append(request)
+        }
+        Task { @MainActor in
+            let approved: Bool
+            switch config.permissionMode {
+            case .fullAuto:
+                approved = true
+            case .autoApproveReads where request.isReadOnly:
+                approved = true
+            default:
+                var args: [String: String] = ["agent": config.name, "action": request.tool]
+                if let path = request.filePath { args["path"] = path }
+                if let command = request.command { args["command"] = command }
+                let identity = request.command != nil ? "acp.execute" : (request.kind.map { "acp.\($0.lowercased())" } ?? "acp.action")
+                approved = await ToolApprovalManager.shared.requestApproval(
+                    toolName: identity,
+                    arguments: args,
+                    description: "\(config.name) requests permission: \(request.description)"
+                )
+            }
+            respondToPermission(request.id, approved: approved)
+        }
+    }
+
     func respondToPermission(_ requestId: String, approved: Bool) {
+        let request = pendingPermissions.first(where: { $0.id == requestId })
         if let idx = pendingPermissions.firstIndex(where: { $0.id == requestId }) {
             pendingPermissions[idx].isApproved = approved
         }
         if isStandardACPProtocol {
             let rpcId: Any = Int(requestId) ?? requestId
-            let optionId = approved ? "allow_once" : "reject_once"
-            writeJsonRpc(ACPStandardJsonRpcParser.buildPermissionResponse(requestId: rpcId, optionId: optionId))
+            if let request, !request.options.isEmpty {
+                // Echo the agent-defined optionId; with no matching option, decline via `cancelled`.
+                if let optionId = request.optionId(approved: approved) {
+                    writeJsonRpc(ACPStandardJsonRpcParser.buildPermissionResponse(requestId: rpcId, optionId: optionId))
+                } else {
+                    writeJsonRpc(ACPStandardJsonRpcParser.buildPermissionCancelledResponse(requestId: rpcId))
+                }
+            } else {
+                let optionId = approved ? "allow_once" : "reject_once"
+                writeJsonRpc(ACPStandardJsonRpcParser.buildPermissionResponse(requestId: rpcId, optionId: optionId))
+            }
             return
         }
         // For legacy AGY agents that use stdin for permission responses
@@ -649,7 +688,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         // Build arguments based on agent type (CLI fallback mode)
         switch effectiveType {
         case .claudeCode:
-            process.arguments = buildClaudeCodeArgs(task: task, model: self.model, workspacePath: workspacePath)
+            process.arguments = buildClaudeCodeArgs(task: task, model: self.model, workspacePath: workspacePath, executablePath: executablePath)
         case .agy:
             process.arguments = buildAGYArgs(task: task, model: self.model, extraArgs: safeExtraArgs)
         case .openCode:
@@ -661,21 +700,22 @@ class ACPAgentSession: ObservableObject, Identifiable {
                 workspacePath: workspacePath
             )
         case .geminiCLI:
-            var args = ["-p", task, "--output-format", "stream-json", "--yolo"]
+            // Full Auto only: without --yolo, headless Gemini CLI runs read-only (write/shell tools are not offered).
+            var args = ["-p", task, "--output-format", "stream-json"] + (config.permissionMode.allowsCLIBypass ? ["--yolo"] : [])
             if let sanitizedModel = Self.sanitizeGeminiCLIModel(self.model) {
                 args += ["-m", sanitizedModel]
             }
             args += safeExtraArgs
             process.arguments = args
         case .qwenCode:
-            var args = ["-p", task, "--output-format", "stream-json", "--yolo"]
+            var args = ["-p", task, "--output-format", "stream-json"] + (config.permissionMode.allowsCLIBypass ? ["--yolo"] : [])
             if let model = self.model, !model.isEmpty, model.lowercased().contains("qwen") {
                 args += ["-m", model]
             }
             args += safeExtraArgs
             process.arguments = args
         case .cursorAgent:
-            var args = ["-p", task, "--output-format", "stream-json", "--force"]
+            var args = ["-p", task, "--output-format", "stream-json"] + (config.permissionMode.allowsCLIBypass ? ["--force"] : [])
             if let model = self.model, !model.isEmpty,
                !model.contains("/"), !model.lowercased().contains("argon"), !model.lowercased().contains("5-5") {
                 args += ["--model", model]
@@ -687,7 +727,10 @@ class ACPAgentSession: ObservableObject, Identifiable {
             if URL(fileURLWithPath: executablePath).lastPathComponent == "gh" {
                 args.append("copilot")
             }
-            args += ["-p", task, "--allow-all-tools"]
+            args += ["-p", task]
+            if config.permissionMode.allowsCLIBypass {
+                args.append("--allow-all-tools")
+            }
             if let model = self.model, !model.isEmpty,
                !model.contains("/"), !model.lowercased().contains("argon"), !model.lowercased().contains("5-5") {
                 args += ["--model", model]
@@ -718,7 +761,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
     }
     
     /// Build Claude Code CLI arguments (with automatic MicroCode IDE MCP Superpower Bridge)
-    private func buildClaudeCodeArgs(task: String, model: String? = nil, workspacePath: String? = nil) -> [String] {
+    private func buildClaudeCodeArgs(task: String, model: String? = nil, workspacePath: String? = nil, executablePath: String? = nil) -> [String] {
         var args = [
             "-p", task,
             "--output-format", "stream-json",
@@ -768,8 +811,13 @@ class ACPAgentSession: ObservableObject, Identifiable {
             }
         }
         
-        // Non-interactive `-p` mode requires permission bypass or full tool allowance so it does not stall on TTY approval prompts
-        args += ["--dangerously-skip-permissions"]
+        // Permission bypass only in Full Auto. In the other modes nobody can answer a prompt in `-p` mode,
+        // so anything that would ask is denied instead of stalling (reads still work).
+        if config.permissionMode.allowsCLIBypass {
+            args += ["--dangerously-skip-permissions"]
+        } else if let executablePath, ACPCLICapabilities.helpMentions(executablePath, flag: "--permission-prompts") {
+            args += ["--permission-prompts", "none"]
+        }
         
         // Resume session if available
         if let sid = sessionId {
@@ -793,9 +841,10 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private func buildAGYArgs(task: String, model: String? = nil, extraArgs: [String]? = nil) -> [String] {
         var args = [
             "--output-format", "stream-json",
-            "--disable-slash-commands",
-            "--dangerously-skip-permissions"
+            "--disable-slash-commands"
         ]
+        // Full Auto only; otherwise read-only plan mode so print mode never waits on an unanswerable prompt.
+        args += config.permissionMode.allowsCLIBypass ? ["--dangerously-skip-permissions"] : ["--mode", "plan"]
         
         let resolvedModel = Self.normalizeAGYModel(model)
         args += ["--model", resolvedModel]
@@ -1363,14 +1412,34 @@ class ACPAgentSession: ObservableObject, Identifiable {
                 writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": [:] as [String: Any]])
                 return
 
+            case "session/request_permission":
+                break // surfaced as a .permissionRequest event and answered via resolvePermission
+
             default:
-                break
+                // Every request must be answered; an unanswered one blocks the agent indefinitely.
+                writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32601, "message": "Method not found: \(method)"]])
+                return
             }
+        }
+
+        // `session/new` refused for missing auth: authenticate once with the agent's first advertised method.
+        if let respId = json["id"] as? Int, respId == sessionNewReqId, json["error"] != nil,
+           !didAttemptAcpAuthentication, let methodId = acpAuthMethodIds.first {
+            didAttemptAcpAuthentication = true
+            let authId = jsonRpcIdCounter
+            jsonRpcIdCounter += 1
+            authenticateReqId = authId
+            writeJsonRpc(["jsonrpc": "2.0", "id": authId, "method": "authenticate", "params": ["methodId": methodId]])
+            return
         }
         
         // Progress handshake state machine (`initialize` -> `session/new` -> `session/prompt`)
         if let respId = json["id"] as? Int, let result = json["result"] as? [String: Any] {
-            if respId == initializeReqId {
+            if respId == initializeReqId || respId == authenticateReqId {
+                if respId == initializeReqId {
+                    acpAgentCapabilities = result["agentCapabilities"] as? [String: Any] ?? [:]
+                    acpAuthMethodIds = (result["authMethods"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
+                }
                 let newSessId = jsonRpcIdCounter
                 jsonRpcIdCounter += 1
                 sessionNewReqId = newSessId
@@ -1416,6 +1485,12 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
         events.append(event)
         eventContinuation?.yield(event)
+        if isStandardACPProtocol, event.endsACPTurn {
+            // A persistent ACP agent keeps running between turns, so process exit never ends the stream.
+            // The `session/prompt` response ends this turn: finish it so `for await` consumers return.
+            eventContinuation?.finish()
+            eventContinuation = nil
+        }
         
         switch event {
         case .text(let text):

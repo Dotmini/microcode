@@ -3,7 +3,7 @@ mod executor;
 use std::env;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_hdr_async;
-use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use futures_util::{StreamExt, SinkExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio::sync::mpsc;
@@ -12,7 +12,9 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = env::var("AGENT_PORT").unwrap_or_else(|_| "8080".to_string());
-    let addr = format!("0.0.0.0:{}", port);
+    // Remote/HPC deployments listen on all interfaces by default; set AGENT_BIND=127.0.0.1 for local-only use.
+    let bind = env::var("AGENT_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{}:{}", bind, port);
     
     let token = env::var("AGENT_TOKEN").unwrap_or_else(|_| {
         let generated = Uuid::new_v4().to_string();
@@ -33,24 +35,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Constant-time byte comparison so the token cannot be recovered through response timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn handle_connection(stream: TcpStream, expected_token: String) {
-    let callback = |req: &Request, mut response: Response| {
-        let headers = req.headers();
-        let mut authenticated = false;
-        
-        if let Some(auth_header) = headers.get("Authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if auth_str == format!("Bearer {}", expected_token) {
-                    authenticated = true;
-                }
-            }
+    let callback = |req: &Request, response: Response| -> Result<Response, ErrorResponse> {
+        let presented = req
+            .headers()
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+
+        if constant_time_eq(presented.as_bytes(), expected_token.as_bytes()) {
+            Ok(response)
+        } else {
+            // Returning Err aborts the handshake. (Setting a 401 status on an Ok response still upgraded the
+            // socket, so unauthenticated clients could reach the code executor.)
+            let mut reject = ErrorResponse::new(Some("Unauthorized".to_string()));
+            *reject.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+            Err(reject)
         }
-        
-        if !authenticated {
-            *response.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
-        }
-        
-        Ok(response)
     };
 
     let ws_stream = match accept_hdr_async(stream, callback).await {

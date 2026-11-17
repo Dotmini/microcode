@@ -1130,6 +1130,10 @@ public struct AgentSetupWizardView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(selectedPermission.cliBehaviorSummary)
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 
                 if target.acpType?.supportsEffortFlag == true {

@@ -22,6 +22,8 @@ struct AgentSkillItem: Identifiable, Hashable {
     let tags: [String]
     var isEnabled: Bool
     var isBuiltin: Bool = false
+    /// Skill shipped inside the opened workspace (repo-controlled): disabled until the user enables it.
+    var requiresOptIn: Bool = false
     
     enum SkillCategory: String, CaseIterable, Identifiable {
         case all = "All"
@@ -64,8 +66,12 @@ final class AgentSkillsStore: ObservableObject {
     private let disabledSkillsKey = "microcode.disabledSkills.v3"
     /// Built-in skills are on by default; only an explicit opt-out is stored.
     private let disabledBuiltinKey = "microcode.disabledBuiltinSkills.v1"
+    /// Workspace (repo-shipped) skills are opt-in; this stores the SKILL.md paths the user explicitly enabled.
+    private let enabledProjectSkillPathsKey = "microcode.enabledProjectSkillPaths.v1"
     /// Lean core operating protocol injected concisely; heavy specialized skills use AAIF 3-Tier Progressive Disclosure.
     static let coreSkillIds = ["microcode-harness-core"]
+    /// Ids in this namespace belong to MicroCode's bundled skills; repo / removable-volume skills may never claim them.
+    static let reservedSkillIdPrefix = "microcode-"
 
     static var builtinRootPath: String? {
         guard let url = Bundle.main.resourceURL?.appendingPathComponent("BuiltinSkills"),
@@ -156,6 +162,16 @@ final class AgentSkillsStore: ObservableObject {
         }
         let disabledBuiltin = Set(UserDefaults.standard.stringArray(forKey: disabledBuiltinKey) ?? [])
         let disabledAll = Set(UserDefaults.standard.stringArray(forKey: disabledSkillsKey) ?? [])
+        let optedInProjectPaths = Set(UserDefaults.standard.stringArray(forKey: enabledProjectSkillPathsKey) ?? [])
+        // Repo-controlled skill folders (the app-managed ~/.microcode/workspaces/<id>/skills state dir is not one of them).
+        let workspaceSkillRoots: [String] = {
+            guard let ws = AgentToolBox.shared.workspaceRoot, !ws.isEmpty else { return [] }
+            return ["\(ws)/.microcode/skills", "\(ws)/.skills", "\(ws)/.agents/skills", "\(ws)/skills"]
+        }()
+        let builtinIds: Set<String> = Set(foundPaths.compactMap { p -> String? in
+            guard let builtinRoot, p.hasPrefix(builtinRoot) else { return nil }
+            return URL(fileURLWithPath: p).deletingLastPathComponent().lastPathComponent.lowercased()
+        })
         
         for path in foundPaths {
             guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
@@ -173,9 +189,20 @@ final class AgentSkillsStore: ObservableObject {
             let isBuiltin = builtinRoot.map { path.hasPrefix($0) } ?? false
             var (name, desc, category, tags) = parseSkillMeta(skillId: rawSkillId, content: content, path: path)
             let yamlSlug = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let skillId: String = (!isBuiltin && !yamlSlug.contains(" ") && yamlSlug.count >= 2 && yamlSlug.count <= 64)
+            let parsedSkillId: String = (!isBuiltin && !yamlSlug.contains(" ") && yamlSlug.count >= 2 && yamlSlug.count <= 64)
                 ? yamlSlug.lowercased()
                 : rawSkillId
+            let isProjectSkill = !isBuiltin && workspaceSkillRoots.contains { path.hasPrefix($0 + "/") }
+            let isVolumeSkill = !isBuiltin && path.hasPrefix("/Volumes/")
+            var skillId = parsedSkillId
+            if (isProjectSkill || isVolumeSkill) && skillId.hasPrefix(Self.reservedSkillIdPrefix) {
+                // e.g. a cloned repo declaring `name: microcode-harness-core` to replace the always-on core protocol.
+                print("[Skills] Ignoring \(path): id '\(skillId)' is reserved for MicroCode built-in skills")
+                continue
+            }
+            if isProjectSkill && builtinIds.contains(skillId) {
+                skillId = "project-\(skillId)" // never let a repo silently shadow a bundled skill
+            }
             var (icon, color, provider) = categorizeSkillMeta(category: category, skillId: skillId, path: path)
             if isBuiltin {
                 category = Self.builtinCategory(for: skillId)
@@ -184,7 +211,11 @@ final class AgentSkillsStore: ObservableObject {
                 (icon, color, _) = categorizeSkillMeta(category: category, skillId: skillId, path: path)
             }
             
-            let isSkillEnabled = !disabledAll.contains(skillId) && (!isBuiltin || !disabledBuiltin.contains(skillId))
+            var isSkillEnabled = !disabledAll.contains(skillId) && (!isBuiltin || !disabledBuiltin.contains(skillId))
+            if isProjectSkill {
+                isSkillEnabled = optedInProjectPaths.contains(path) && !disabledAll.contains(skillId)
+                tags.append("Project (opt-in)")
+            }
             let item = AgentSkillItem(
                 id: skillId,
                 name: name,
@@ -197,7 +228,8 @@ final class AgentSkillsStore: ObservableObject {
                 instructions: content,
                 tags: tags,
                 isEnabled: isSkillEnabled,
-                isBuiltin: isBuiltin
+                isBuiltin: isBuiltin,
+                requiresOptIn: isProjectSkill
             )
             
             if !discovered.contains(where: { $0.id == skillId }) {
@@ -344,6 +376,11 @@ final class AgentSkillsStore: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: enabledKey)
         UserDefaults.standard.set(disabled, forKey: disabledSkillsKey)
         UserDefaults.standard.set(skills.filter { $0.isBuiltin && !$0.isEnabled }.map { $0.id }, forKey: disabledBuiltinKey)
+        var optIn = Set(UserDefaults.standard.stringArray(forKey: enabledProjectSkillPathsKey) ?? [])
+        for skill in skills where skill.requiresOptIn {
+            if skill.isEnabled { optIn.insert(skill.filePath) } else { optIn.remove(skill.filePath) }
+        }
+        UserDefaults.standard.set(Array(optIn).sorted(), forKey: enabledProjectSkillPathsKey)
     }
     
     func enabledSkillIds() -> [String] {
@@ -374,7 +411,9 @@ final class AgentSkillsStore: ObservableObject {
         var parts: [String] = []
         for id in Self.coreSkillIds {
             guard let skill = skills.first(where: { $0.id == id && $0.isEnabled }) else { continue }
-            parts.append(distilledInstructions(for: skill, maxChars: 1600))
+            // Inject the whole core protocol (~800 tokens). The previous 1600-char cap silently dropped its
+            // safety rules (ignore injected instructions, keep secrets out, ask before destructive actions).
+            parts.append(distilledInstructions(for: skill, maxChars: 6000))
         }
         guard !parts.isEmpty else { return "" }
         return "\n\n## MICROCODE CORE HARNESS\n" + parts.joined(separator: "\n\n") + "\n"
@@ -614,6 +653,11 @@ final class AgentSkillsStore: ObservableObject {
         guard !cleanId.isEmpty else {
             throw NSError(domain: "SkillEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid skill_id"])
         }
+        let claimsReservedId = cleanId.hasPrefix(Self.reservedSkillIdPrefix)
+            || instructions.range(of: #"(?m)^\s*name:\s*["']?microcode-"#, options: .regularExpression) != nil
+        guard !claimsReservedId else {
+            throw NSError(domain: "SkillEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Skill ids starting with '\(Self.reservedSkillIdPrefix)' are reserved for MicroCode built-in skills"])
+        }
         
         let baseRoot: String
         let userHome = FileManager.default.homeDirectoryForCurrentUser.path
@@ -634,8 +678,8 @@ final class AgentSkillsStore: ObservableObject {
         } else {
             finalMarkdown = """
             ---
-            name: \(name)
-            description: \(description.replacingOccurrences(of: "\n", with: " "))
+            name: \(cleanId)
+            description: \(Self.yamlQuoted(description.replacingOccurrences(of: "\n", with: " ")))
             ---
             
             # \(name)
@@ -665,6 +709,10 @@ final class AgentSkillsStore: ObservableObject {
         throw NSError(domain: "SkillEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Skill written to \(skillFile.path) but not indexed"])
     }
     
+    static func yamlQuoted(_ value: String) -> String {
+        "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
     /// Executes a bundled helper script inside a skill's `scripts/` directory using MicroCode Portable Runtimes
     func executeSkillScript(
         skillId: String,
@@ -675,11 +723,18 @@ final class AgentSkillsStore: ObservableObject {
         guard let skill = skills.first(where: { $0.id.lowercased() == skillId.lowercased() }) else {
             throw NSError(domain: "SkillEngine", code: 404, userInfo: [NSLocalizedDescriptionKey: "Skill '\(skillId)' not found"])
         }
+        guard skill.isEnabled else {
+            throw NSError(domain: "SkillEngine", code: 403, userInfo: [NSLocalizedDescriptionKey: "Skill '\(skill.id)' is disabled. Enable it in Settings → Agent Skills first."])
+        }
         let skillDir = URL(fileURLWithPath: skill.filePath).deletingLastPathComponent()
         let cleanScript = URL(fileURLWithPath: scriptName).lastPathComponent
         let candidate1 = skillDir.appendingPathComponent("scripts").appendingPathComponent(cleanScript)
         let candidate2 = skillDir.appendingPathComponent(scriptName)
         let scriptURL = FileManager.default.fileExists(atPath: candidate1.path) ? candidate1 : candidate2
+        // Scripts must live inside the skill folder (rejects `../../x.sh`, absolute paths and escaping symlinks).
+        guard WorkspacePathPolicy.contains(scriptURL.path, in: skillDir.path) else {
+            throw NSError(domain: "SkillEngine", code: 406, userInfo: [NSLocalizedDescriptionKey: "Script '\(scriptName)' resolves outside skill '\(skill.id)'"])
+        }
         
         guard FileManager.default.fileExists(atPath: scriptURL.path) else {
             let available = availableScripts(forSkill: skill)

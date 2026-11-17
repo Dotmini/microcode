@@ -227,8 +227,7 @@ class AgentService: ObservableObject {
         didSet { UserDefaults.standard.set(tokenShieldEnabled, forKey: "MicroCode.TokenShieldEnabled") }
     }
     @Published var totalTokensSavedByShield: Int = {
-        let saved = UserDefaults.standard.integer(forKey: "MicroCode.TotalTokensSavedByShield")
-        return saved > 0 ? saved : 18_420
+        UserDefaults.standard.integer(forKey: "MicroCode.TotalTokensSavedByShield")
     }() {
         didSet { UserDefaults.standard.set(totalTokensSavedByShield, forKey: "MicroCode.TotalTokensSavedByShield") }
     }
@@ -786,7 +785,7 @@ class AgentService: ObservableObject {
                - Never mark a plan or task complete from prose alone.
             
             ## Strict Multi-Project Isolation Mandate ("ห้ามมั่วข้าม Project เด็ดขาด")
-            - You are operating strictly inside the CURRENT ACTIVE PROJECT WORKSPACE: `\(toolBox.workspaceRoot ?? "No workspace")`.
+            - You are operating strictly inside the CURRENT ACTIVE PROJECT WORKSPACE: `\(toolBox.effectiveWorkspaceRoot ?? "No workspace")`.
             - You MUST NEVER assume, mention, import, edit, or execute code or files belonging to another project, repository, or previous conversation!
             - All relative file paths, tools (`file_read`, `replace_in_file`, `patch_file`, `file_write`, `list_directory_tree`, `grep_search`, `shell`), and compilation commands MUST execute exclusively within this project root.
             - If you notice any reference to another codebase or unfamiliar files in older context, DISREGARD THEM and adhere strictly to the actual files present in this active project workspace.
@@ -815,11 +814,17 @@ class AgentService: ObservableObject {
             - Respond quickly. Avoid unnecessary preamble.
             """
         }
+
+        // Everything above is stable per workspace + provider/model; everything below changes per message
+        // (editor state, memory recall, matched skills, blackboard...). The boundary lets AIClient cache the
+        // stable prefix (Anthropic cache_control) so a new user turn no longer re-bills the whole system prompt.
+        prompt += "\n\n## Provider Harness Contract\n\(providerHarnessProfile(for: provider, model: model))"
+        prompt += AISystemPromptLayout.dynamicBoundary
         
         // Editor/LSP context belongs only to the software agent. Scientific
         // requests use the scientific workspace index and explicit artifacts.
         if domain == .software, !isChatMode, let ctx = editorContext {
-            let wsRoot = toolBox.workspaceRoot
+            let wsRoot = toolBox.effectiveWorkspaceRoot
             var editorInfo = "\n\n## Editor"
             if let file = ctx.activeFile {
                 // Ensure activeFile belongs to the current workspace to avoid project bleed
@@ -858,8 +863,8 @@ class AgentService: ObservableObject {
             prompt += editorInfo
         }
         
-        // Workspace root is stored per session scope.
-        if let root = toolBox.workspaceRoot {
+        // Workspace root is stored per session scope (pinned per run for background chats).
+        if let root = toolBox.effectiveWorkspaceRoot {
             let projectName = URL(fileURLWithPath: root).lastPathComponent
             prompt += "\n\n## Active Project Workspace\n- Project Name: \(projectName)\n- Absolute Root Path: \(root)\n- CRITICAL: Ground all operations strictly inside this project directory. Do not reference, assume, or modify other projects."
         }
@@ -997,8 +1002,6 @@ class AgentService: ObservableObject {
             let allowedNames = scopeGuard.sessionMentionedPaths.map { URL(fileURLWithPath: $0).lastPathComponent }.sorted().joined(separator: ", ")
             prompt += "\n\n## 🎯 Strict Editing Scope\nYou may ONLY modify these explicitly @mentioned/active files: [\(allowedNames)]."
         }
-
-        prompt += "\n\n## Provider Harness Contract\n\(providerHarnessProfile(for: provider, model: model))"
         
         // Apply final compression to system prompt (keep Local LLM system prompt crisp for 16K–32K KV windows while preserving 100% of Harness, Skills & MCP)
         let sysBudget = (provider == .local) ? min(budget.maxSystemTokens, 14_000) : budget.maxSystemTokens
@@ -2452,6 +2455,10 @@ class AgentService: ObservableObject {
         var completeAfterLocalSynthesizedTools = false
         var kernelRecoveryCount = 0
         var followThroughNagCount = 0
+        // Provider-reported reason the latest model turn ended (nil when the provider/bridge does not report one).
+        var lastStopReason: AIStopReason?
+        var maxTokenContinuations = 0
+        var contextOverflowRecoveries = 0
         var recentAssistantOutputs: [String] = []
         var kernelVerified = false
         var pendingVerificationAfterEdit = false
@@ -2507,11 +2514,12 @@ class AgentService: ObservableObject {
                     stickyActiveTools = rebuildActiveTools()
                 }
                 // Compress iterative history dynamically so context never blows up
-                history = tokenOptimizer.compressIterativeToolHistory(history, budget: effectiveHistoryBudget)
+                history = tokenOptimizer.compressIterativeToolHistory(history, budget: effectiveHistoryBudget, pinnedObjective: effectiveObjective)
             }
             
             // Keep the latest user/tool-result turn in history until the model call succeeds,
             // so retries never drop the user prompt or previous tool outputs.
+            lastStopReason = nil
             let nextPrompt = history.last?.content ?? effectiveContent
             let priorHistory = history.count > 1 ? Array(history.dropLast()) : []
             
@@ -2572,6 +2580,9 @@ class AgentService: ObservableObject {
                             gate.touchActivity()
                             toolCalls.append(toolCall)
                         },
+                        onStopReason: { reason in
+                            lastStopReason = reason
+                        },
                         onComplete: { fullText in
                             watchdogTask.cancel()
                             let resolvedTurn = fullText.isEmpty ? turnText : fullText
@@ -2620,7 +2631,7 @@ class AgentService: ObservableObject {
                 }
                 
                 if receivedToolCalls.isEmpty || streamedText.contains("[Tool Call:") {
-                    let parsedCalls = parseTextBasedToolCalls(streamedText)
+                    let parsedCalls = parseTextBasedToolCalls(streamedText, allowLooseCallSyntax: detectedProvider == .local)
                     if !parsedCalls.isEmpty {
                         receivedToolCalls.append(contentsOf: parsedCalls)
                         logActivity(.info, "Parsed \(parsedCalls.count) tool call(s) from text output")
@@ -2663,13 +2674,16 @@ class AgentService: ObservableObject {
                 logActivity(.error, "Tool loop iteration \(iteration): \(errStr)")
                 
                 if isContextLimit {
-                    // Feature #5: Auto-prune bulky tool outputs first before giving up on context limit!
-                    let freed = pruneBulkyToolOutputs()
-                    if freed > 500 && kernelRecoveryCount < 2 {
-                        kernelRecoveryCount += 1
-                        history = tokenOptimizer.compressIterativeToolHistory(history, budget: 24_000)
-                        logActivity(.info, "Context X-Ray Auto-Pruner: Freed ~\(freed) tokens from bulky tool outputs; resuming turn.")
-                        currentToolExecution = "Context Auto-Pruned (~\(freed) tokens freed) — resuming..."
+                    // Recover by compacting the IN-FLIGHT history (what is actually sent). Pruning the UI transcript
+                    // alone freed ~0 tokens after Token Shield had already run, which ended the turn as fatal.
+                    if contextOverflowRecoveries < 2 {
+                        contextOverflowRecoveries += 1
+                        let beforeTokens = history.reduce(0) { $0 + tokenOptimizer.estimateTokens($1.content) }
+                        let recoveryBudget = contextOverflowRecoveries == 1 ? 24_000 : 12_000
+                        history = tokenOptimizer.compressIterativeToolHistory(history, budget: recoveryBudget, pinnedObjective: effectiveObjective)
+                        let freed = max(0, beforeTokens - history.reduce(0) { $0 + tokenOptimizer.estimateTokens($1.content) })
+                        logActivity(.info, "Context overflow: compacted in-flight history (~\(freed) tokens freed, attempt \(contextOverflowRecoveries)/2); resuming turn.")
+                        currentToolExecution = "Context compacted (~\(freed) tokens freed) — resuming..."
                         continue
                     }
                     contextLimitReached = true
@@ -2705,7 +2719,7 @@ class AgentService: ObservableObject {
                     agentPhase = .thinking
                     logActivity(.info, "Auto-Failover: Switched from \(previousLabel) to \(backup.label) to prevent session drop")
                     if isRateLimit {
-                        history = tokenOptimizer.compressIterativeToolHistory(history, budget: 36_000)
+                        history = tokenOptimizer.compressIterativeToolHistory(history, budget: 36_000, pinnedObjective: effectiveObjective)
                     }
                     iteration -= 1 // Do not penalize iteration count for provider handoff
                     try? await Task.sleep(nanoseconds: 350_000_000)
@@ -2721,7 +2735,13 @@ class AgentService: ObservableObject {
                 ) : nil
                 
                 let maxRetries = isRateLimit ? 8 : 5
-                if response?.directive.action == "retry" || isTransient || isRateLimit || (!kernelOnline && kernelRecoveryCount < maxRetries) {
+                // A malformed request (bad params, unknown model, oversized payload) fails identically every time:
+                // never burn retries on it. Unknown errors with the kernel offline get at most 2 retries.
+                let isPermanentRequestError = ["http 400", "invalid_request", "invalid request", "bad request",
+                                               "model not found", "unknown model", "unsupported", "malformed"]
+                    .contains(where: lowerErr.contains)
+                let offlineGenericRetry = !kernelOnline && !isPermanentRequestError && kernelRecoveryCount < 2
+                if response?.directive.action == "retry" || isTransient || isRateLimit || offlineGenericRetry {
                     if kernelRecoveryCount < maxRetries {
                         kernelRecoveryCount += 1
                         let backoffSec = isRateLimit ? min(3 * kernelRecoveryCount, 30) : min(kernelRecoveryCount * 2, 12)
@@ -2736,7 +2756,7 @@ class AgentService: ObservableObject {
                         try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
                         if isRateLimit {
                             // Compress older turns while preserving the latest prompt/tool results at history.last
-                            history = tokenOptimizer.compressIterativeToolHistory(history, budget: 32_000)
+                            history = tokenOptimizer.compressIterativeToolHistory(history, budget: 32_000, pinnedObjective: effectiveObjective)
                         }
                         continue
                     }
@@ -2762,7 +2782,7 @@ class AgentService: ObservableObject {
 
             // If no native tool calls, try to parse text-based tool calls (for local LLMs)
             if receivedToolCalls.isEmpty {
-                let parsedCalls = parseTextBasedToolCalls(streamedText)
+                let parsedCalls = parseTextBasedToolCalls(streamedText, allowLooseCallSyntax: detectedProvider == .local)
                 if !parsedCalls.isEmpty {
                     receivedToolCalls = parsedCalls
                     logActivity(.info, "Parsed \(parsedCalls.count) tool call(s) from text output")
@@ -2788,6 +2808,23 @@ class AgentService: ObservableObject {
                 }
             }
             
+            // Cut off by the output token limit (not a decision to stop): continue the same answer instead of
+            // treating the truncated text as final. Bounded so a model that always runs long cannot loop.
+            if receivedToolCalls.isEmpty, lastStopReason == .maxTokens, maxTokenContinuations < 2,
+               !streamedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                maxTokenContinuations += 1
+                history.append((role: "assistant", content: streamedText))
+                history.append((role: "user", content: """
+                Your previous reply was cut off by the output token limit. Continue exactly where it stopped, \
+                without repeating anything already written. If you were about to call a tool, call it now with \
+                complete arguments (split large file content across several calls).
+                """))
+                logActivity(.info, "Model hit the output token limit; auto-continuing (\(maxTokenContinuations)/2)")
+                currentToolExecution = "Response truncated by token limit — continuing..."
+                agentPhase = .thinking
+                continue
+            }
+
             // A natural-language plan is not evidence of unfinished work. Claude
             // commonly says "I'll …" before a complete answer; using those words
             // as a signal to continue was the source of runaway agent loops.
@@ -2938,7 +2975,9 @@ class AgentService: ObservableObject {
                     // 2) If not an inferred workspace action, auto-prompt the model to call the tool immediately
                     let hasUnfinishedIntent = containsUnfinishedActionIntention(streamedText)
                     let stoppedWithoutVisibleResponse = !allToolResults.isEmpty && !hasVisibleAnswer && filesModified.isEmpty
-                    if (!isChatMode && (hasUnfinishedIntent || (requiresWorkspaceEvidence && !verificationPassed) || (nativeWorkWasPromised && !nativeWorkWasExecuted))) || stoppedWithoutVisibleResponse {
+                    // Never nag after a safety refusal / content filter: re-prompting cannot change that outcome.
+                    if lastStopReason != .refusal,
+                       (!isChatMode && (hasUnfinishedIntent || (requiresWorkspaceEvidence && !verificationPassed) || (nativeWorkWasPromised && !nativeWorkWasExecuted))) || stoppedWithoutVisibleResponse {
                         if !usedDeterministicActionFallback,
                            allToolResults.isEmpty,
                            let fallback = inferredWorkspaceAction(for: streamedText + " " + finalText) {
@@ -3019,6 +3058,7 @@ class AgentService: ObservableObject {
                 currentToolExecution = "Executing \(receivedToolCalls.count) read-only operations concurrently..."
                 agentPhase = .executing("concurrent_tools")
                 
+                let hookWorkspace = currentWorkspace ?? ""
                 let concurrentResults = await withTaskGroup(of: (AIToolCall, String, Bool).self) { group in
                     for toolCall in receivedToolCalls {
                         let signature = self.toolCallSignature(toolCall)
@@ -3028,6 +3068,16 @@ class AgentService: ObservableObject {
                         }
                         
                         group.addTask {
+                            // Same pre_tool policy hooks as the sequential path (e.g. "never read .env").
+                            let preHook = await MultiPlatformRulesEngine.shared.executeHooks(
+                                stage: .preTool,
+                                toolName: toolCall.name,
+                                filePath: (toolCall.arguments["path"] as? String) ?? (toolCall.arguments["file_path"] as? String),
+                                workspaceRoot: hookWorkspace
+                            )
+                            if !preHook.allowed {
+                                return (toolCall, preHook.feedback.isEmpty ? "Blocked by pre_tool hook" : preHook.feedback, false)
+                            }
                             await FlightRecorder.shared.recordToolCall(
                                 toolName: toolCall.name,
                                 arguments: self.truncateArgs(toolCall.arguments),
@@ -3811,12 +3861,26 @@ class AgentService: ObservableObject {
             "บิลด์", "บิวด์", "คอมไพล์",
             "test", "test it", "test สิ", "ทดสอบ", "ลองทดสอบ"
         ]
-        if continuationKeywords.contains(where: { normalized == $0 || normalized.hasPrefix($0) }) {
+        // A continuation nudge is short ("ต่อเลย", "run it", "next"). Prefix matching on long messages turned new
+        // requests such as "Build a REST API…" or "nextjs app…" into continuations of the previous objective.
+        func matchesNudge(_ text: String) -> Bool {
+            guard !text.isEmpty, text.count <= 40 else { return false }
+            return continuationKeywords.contains { keyword in
+                if text == keyword { return true }
+                guard text.hasPrefix(keyword) else { return false }
+                let isLatinKeyword = keyword.unicodeScalars.allSatisfy { $0.isASCII }
+                guard isLatinKeyword else { return true } // Thai has no word spacing: "ต่อเลยครับ"
+                let rest = text.dropFirst(keyword.count)
+                guard let next = rest.first, next == " " || next.isPunctuation else { return false } // "nextjs", "building"
+                return text.split(whereSeparator: { $0 == " " }).count <= 4
+            }
+        }
+        if matchesNudge(normalized) {
             return true
         }
         // Handle typos like "9ต่อ" (leading digits or punctuation)
         let cleaned = normalized.trimmingCharacters(in: CharacterSet.decimalDigits.union(.punctuationCharacters))
-        if !cleaned.isEmpty && continuationKeywords.contains(where: { cleaned == $0 || cleaned.hasPrefix($0) }) {
+        if matchesNudge(cleaned) {
             return true
         }
         return false
@@ -4216,16 +4280,24 @@ class AgentService: ObservableObject {
     /// build/run/test requirement is still unambiguous and must not be handed
     /// back to the user as a button.
     private func inferredWorkspaceAction(for content: String) -> AIToolCall? {
-        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        // Pinned per-run workspace: a project switch mid-run must never redirect harness actions.
+        guard let workspace = toolBox.effectiveWorkspaceRoot, !workspace.isEmpty else { return nil }
         if containsCompletionIndication(content) { return nil }
         let lower = content.lowercased()
+        // Whole-word matching: substrings such as "latest", "restart", "truncate", "contest" must not
+        // trigger a shell action. (Thai has no word spacing, so Thai keywords stay substring matches.)
+        func hasWord(_ words: [String]) -> Bool {
+            words.contains { word in
+                lower.range(of: "\\b\(NSRegularExpression.escapedPattern(for: word))\\b", options: .regularExpression) != nil
+            }
+        }
 
         let action: ProjectAction?
-        if lower.contains("test") || lower.contains("ทดสอบ") {
+        if hasWord(["test", "tests"]) || lower.contains("ทดสอบ") {
             action = .test
-        } else if lower.contains("run") || lower.contains("รัน") || lower.contains("start") {
+        } else if hasWord(["run", "start"]) || lower.contains("รัน") {
             action = .run
-        } else if lower.contains("build") || lower.contains("compile") || lower.contains("คอมไพล์") || lower.contains("สร้าง build") || lower.contains("xcodebuild") {
+        } else if hasWord(["build", "compile", "xcodebuild"]) || lower.contains("คอมไพล์") || lower.contains("สร้าง build") {
             action = .build
         } else {
             action = nil
@@ -4236,7 +4308,8 @@ class AgentService: ObservableObject {
     }
 
     private func runtimeLaunchAction() -> AIToolCall? {
-        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        // Pinned per-run workspace: a project switch mid-run must never redirect harness actions.
+        guard let workspace = toolBox.effectiveWorkspaceRoot, !workspace.isEmpty else { return nil }
         let projectURL = URL(fileURLWithPath: workspace, isDirectory: true)
         let projectType = ProjectManager.shared.detectProjectType(at: projectURL)
         
@@ -4319,7 +4392,8 @@ class AgentService: ObservableObject {
     }
 
     private func autonomousInspectionAction() -> AIToolCall? {
-        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        // Pinned per-run workspace: a project switch mid-run must never redirect harness actions.
+        guard let workspace = toolBox.effectiveWorkspaceRoot, !workspace.isEmpty else { return nil }
         return AIToolCall(
             id: UUID().uuidString,
             name: "list_directory_tree",
@@ -4328,7 +4402,8 @@ class AgentService: ObservableObject {
     }
 
     private func projectAction(_ action: ProjectAction) -> AIToolCall? {
-        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        // Pinned per-run workspace: a project switch mid-run must never redirect harness actions.
+        guard let workspace = toolBox.effectiveWorkspaceRoot, !workspace.isEmpty else { return nil }
         let projectURL = URL(fileURLWithPath: workspace, isDirectory: true)
         let projectType = ProjectManager.shared.detectProjectType(at: projectURL)
         guard let command = ProjectManager.shared.getBuildCommand(
@@ -4564,13 +4639,33 @@ class AgentService: ObservableObject {
         var result: [String] = []
         var lastNonEmpty = ""
         var repeatCount = 0
+        var insideFence = false
         
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("```") {
+                insideFence.toggle()
+                lastNonEmpty = ""
+                repeatCount = 0
+                result.append(line)
+                continue
+            }
+            // Code is never collapsed: repeated `}` / `end` / blank lines are meaningful there.
+            if insideFence {
+                result.append(line)
+                continue
+            }
             if trimmed.isEmpty {
                 if !result.isEmpty && !result.last!.isEmpty {
                     result.append("")
                 }
+                continue
+            }
+            // Only collapse substantial prose lines (echo loops), not short structural lines.
+            if trimmed.count < 12 {
+                lastNonEmpty = ""
+                repeatCount = 0
+                result.append(line)
                 continue
             }
             if trimmed == lastNonEmpty {
@@ -5541,7 +5636,22 @@ class AgentService: ObservableObject {
     // They output tool calls as text like: list_directory_tree(path:".")
     // This parser extracts those into executable AIToolCall objects.
     
-    private func parseTextBasedToolCalls(_ text: String) -> [AIToolCall] {
+    /// Removes fenced code blocks and inline code spans so quoted examples (or file contents the model
+    /// echoes back) can never be mistaken for a loose `tool_name(...)` invocation.
+    static func stripCodeForLooseToolParsing(_ text: String) -> String {
+        var out = text
+        if let fence = try? NSRegularExpression(pattern: "```[\\s\\S]*?(```|$)", options: []) {
+            out = fence.stringByReplacingMatches(in: out, range: NSRange(location: 0, length: (out as NSString).length), withTemplate: " ")
+        }
+        if let inline = try? NSRegularExpression(pattern: "`[^`\\n]*`", options: []) {
+            out = inline.stringByReplacingMatches(in: out, range: NSRange(location: 0, length: (out as NSString).length), withTemplate: " ")
+        }
+        return out
+    }
+
+    /// - Parameter allowLooseCallSyntax: enables the bare `tool_name(...)` fallback (Pattern 3). Only for local
+    ///   LLMs without native tool calling: for cloud models that fallback turned quoted prose into executions.
+    private func parseTextBasedToolCalls(_ text: String, allowLooseCallSyntax: Bool = false) -> [AIToolCall] {
         var calls: [AIToolCall] = []
         let registeredToolNames = Set(toolBox.tools.keys)
         let isKnownTool: (String) -> Bool = { rawName in
@@ -5740,6 +5850,9 @@ class AgentService: ObservableObject {
         if !calls.isEmpty { return calls }
         
         // Pattern 3: tool_name({...}) or tool_name(key:"value", key2:"value2")
+        // Local LLMs only, and never inside code fences / inline code.
+        guard allowLooseCallSyntax else { return calls }
+        let text = Self.stripCodeForLooseToolParsing(text)
         for tool in registeredToolNames {
             guard text.contains("\(tool)(") else { continue }
             let escapedTool = NSRegularExpression.escapedPattern(for: tool)
@@ -5769,6 +5882,8 @@ class AgentService: ObservableObject {
             for match in matches {
                 guard match.numberOfRanges > 1 else { continue }
                 let argsString = nsText.substring(with: match.range(at: 1))
+                // A bare `shell(some words)` in prose must never become a command line.
+                if tool == "shell" && !argsString.contains("command") { continue }
                 let args = parseToolArgs(argsString, toolName: tool)
                 if !args.isEmpty {
                     calls.append(AIToolCall(id: UUID().uuidString, name: tool, arguments: args))

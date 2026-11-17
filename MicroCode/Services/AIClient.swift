@@ -703,6 +703,15 @@ struct AIToolCall: Identifiable {
     let name: String
     let arguments: [String: Any]
     var thoughtSignature: String? = nil
+
+    /// Argument key marking a call whose streamed JSON arguments could not be parsed (usually truncated by
+    /// max_tokens). The call is still surfaced so the model receives an error result for its tool_use id
+    /// instead of the call silently running with empty arguments or disappearing.
+    static let invalidArgumentsKey = "__microcode_invalid_arguments"
+
+    static func withInvalidArguments(id: String, name: String, raw: String) -> AIToolCall {
+        AIToolCall(id: id, name: name, arguments: [invalidArgumentsKey: String(raw.prefix(240))])
+    }
 }
 
 struct AIStructuredToolResult {
@@ -944,6 +953,13 @@ final class AIStreamContext: @unchecked Sendable {
     var streamedText: String = ""
     var pendingTokens: String = ""
     var lastDeliveryUptime: TimeInterval = 0
+    /// Why the provider ended the current attempt (Anthropic stop_reason / OpenAI finish_reason / Gemini finishReason).
+    var stopReason: AIStopReason?
+
+    static func recordStopReason(_ raw: String?) {
+        guard let reason = AIStopReason.normalize(raw) else { return }
+        current?.stopReason = reason
+    }
 }
 
 @MainActor
@@ -1820,6 +1836,7 @@ final class AIClient: ObservableObject {
         tools: [[String: Any]]? = nil,
         onToken: @escaping (String) -> Void,
         onToolCall: ((AIToolCall) -> Void)? = nil,
+        onStopReason: ((AIStopReason?) -> Void)? = nil,
         onComplete: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
     ) {
@@ -2031,11 +2048,27 @@ final class AIClient: ObservableObject {
                     )
                 var retryCount = 0
                 let maxRetries = 3
+                // Callers' callbacks are wrapped per attempt: once an attempt has delivered output (text or a tool
+                // call), retrying here would replay it, duplicating tool calls (a mutating tool could run twice).
+                let callerOnToken = onToken
+                let callerOnToolCall = onToolCall
                 
                 while retryCount <= maxRetries {
                     if retryCount > 0 {
                         self.currentStreamedText = ""
                         self.pendingStreamTokens = ""
+                    }
+                    streamCtx.stopReason = nil
+                    let emission = StreamEmissionTracker()
+                    let onToken: (String) -> Void = { token in
+                        if !token.isEmpty { emission.mark() }
+                        callerOnToken(token)
+                    }
+                    let onToolCall: ((AIToolCall) -> Void)? = callerOnToolCall.map { forward in
+                        { call in
+                            emission.mark()
+                            forward(call)
+                        }
                     }
                     let isLocalCall = (provider == .local || keyMode == "local")
                     let trackedLocalEndpoint = activeBaseURL
@@ -2129,12 +2162,19 @@ final class AIClient: ObservableObject {
                         }
                         
                         self.flushPendingStreamTokens(onToken: onToken)
+                        onStopReason?(streamCtx.stopReason)
                         onComplete(self.currentStreamedText)
                         return // Success
                         
                     } catch let error as NSError {
                         if Task.isCancelled || error.code == NSURLErrorCancelled {
                             onError("Generation stopped by user.")
+                            return
+                        }
+                        // Output already reached the caller: never replay it from here. The agent loop owns recovery
+                        // and re-issues the turn from clean state (no duplicated tool calls or text).
+                        if emission.didEmit {
+                            onError(self.parseErrorMessage(error))
                             return
                         }
                         // Multi-Node Local LLM Pool Failover: if a Local LLM server fails, fail over to the next connected node in the pool
@@ -3576,6 +3616,9 @@ final class AIClient: ObservableObject {
                 latestUsageMetadata = usage
             }
             
+            AIStreamContext.recordStopReason(
+                (json["candidates"] as? [[String: Any]])?.first?["finishReason"] as? String
+            )
             guard let candidates = json["candidates"] as? [[String: Any]],
                   let content = candidates.first?["content"] as? [String: Any],
                   let parts = content["parts"] as? [[String: Any]] else { continue }
@@ -4600,6 +4643,9 @@ final class AIClient: ObservableObject {
                 latestUsageMetadata = usage
             }
             
+            AIStreamContext.recordStopReason(
+                (json["candidates"] as? [[String: Any]])?.first?["finishReason"] as? String
+            )
             guard let candidates = json["candidates"] as? [[String: Any]],
                   let content = candidates.first?["content"] as? [String: Any],
                   let parts = content["parts"] as? [[String: Any]] else { continue }
@@ -5306,8 +5352,15 @@ final class AIClient: ObservableObject {
                     parsedArgs = (try? JSONSerialization.jsonObject(with: Data(trimmedArgs.utf8))) as? [String: Any]
                 }
                 guard let rawArgs = parsedArgs else {
-                    NSLog("⚠️ [streamOpenAI] Skipping truncated/malformed tool call '%@' (args len=%d, finish_reason=length:%d)", buffer.name, trimmedArgs.count, sawLengthTruncation ? 1 : 0)
+                    NSLog("⚠️ [streamOpenAI] Truncated/malformed tool call '%@' (args len=%d, finish_reason=length:%d)", buffer.name, trimmedArgs.count, sawLengthTruncation ? 1 : 0)
                     sawLengthTruncation = true
+                    // Surface it so the model gets an error result for this call id and can re-emit it.
+                    emittedNativeToolCalls = true
+                    onToolCall?(AIToolCall.withInvalidArguments(
+                        id: buffer.id,
+                        name: AgentToolBox.normalizeToolName(buffer.name),
+                        raw: trimmedArgs
+                    ))
                     continue
                 }
                 let canonicalName = AgentToolBox.normalizeToolName(buffer.name)
@@ -5350,6 +5403,7 @@ final class AIClient: ObservableObject {
             guard let choices = json["choices"] as? [[String: Any]],
                   let firstChoice = choices.first else { continue }
             let finishReason = firstChoice["finish_reason"] as? String
+            AIStreamContext.recordStopReason(finishReason)
             if finishReason == "length" {
                 sawLengthTruncation = true
             }
@@ -5669,15 +5723,9 @@ final class AIClient: ObservableObject {
             body["model"] = effectiveModel
         }
         
-        // Anthropic Prompt Caching on System Prompt
+        // Anthropic Prompt Caching on the stable system-prompt prefix
         if let sys = systemPrompt, !sys.isEmpty {
-            body["system"] = [
-                [
-                    "type": "text",
-                    "text": sys,
-                    "cache_control": ["type": "ephemeral"]
-                ]
-            ]
+            body["system"] = AISystemPromptLayout.anthropicSystemBlocks(sys)
         }
         
         // Anthropic Tools with Prompt Caching on last tool
@@ -5770,8 +5818,15 @@ final class AIClient: ObservableObject {
                 }
             case "content_block_stop":
                 if !currentToolName.isEmpty {
-                    let args = (try? JSONSerialization.jsonObject(with: Data(currentToolArgs.utf8))) as? [String: Any] ?? [:]
-                    let toolCall = AIToolCall(id: currentToolId, name: currentToolName, arguments: args)
+                    let trimmedArgs = currentToolArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let toolCall: AIToolCall
+                    if trimmedArgs.isEmpty {
+                        toolCall = AIToolCall(id: currentToolId, name: currentToolName, arguments: [:])
+                    } else if let args = (try? JSONSerialization.jsonObject(with: Data(trimmedArgs.utf8))) as? [String: Any] {
+                        toolCall = AIToolCall(id: currentToolId, name: currentToolName, arguments: args)
+                    } else {
+                        toolCall = AIToolCall.withInvalidArguments(id: currentToolId, name: currentToolName, raw: trimmedArgs)
+                    }
                     onToolCall?(toolCall)
                     currentToolName = ""
                     currentToolArgs = ""
@@ -5787,6 +5842,9 @@ final class AIClient: ObservableObject {
                     anthropicCachedTokens = cachedTok
                 }
             case "message_delta":
+                if let delta = json["delta"] as? [String: Any] {
+                    AIStreamContext.recordStopReason(delta["stop_reason"] as? String)
+                }
                 // Capture output token usage from Anthropic
                 if let usage = json["usage"] as? [String: Any] {
                     let outputTok = usage["output_tokens"] as? Int ?? 0
@@ -5801,6 +5859,13 @@ final class AIClient: ObservableObject {
                         )
                     }
                 }
+            case "error":
+                // Mid-stream API errors (e.g. overloaded_error) must fail the turn, not pass as a complete answer.
+                let errorInfo = json["error"] as? [String: Any]
+                let kind = errorInfo?["type"] as? String ?? "stream_error"
+                let message = errorInfo?["message"] as? String ?? "Anthropic stream error"
+                let code = kind == "overloaded_error" ? 529 : (kind == "rate_limit_error" ? 429 : 500)
+                throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: "Anthropic \(kind): \(message)"])
             default:
                 break
             }
@@ -6184,15 +6249,9 @@ final class AIClient: ObservableObject {
         let effectiveModel = normalizeModelName(model, provider: .anthropic, baseURL: baseURL)
         var body: [String: Any] = ["model": effectiveModel, "max_tokens": maxOutputTokens(for: effectiveModel), "messages": apiMessages]
         
-        // Anthropic Prompt Caching on System Prompt
+        // Anthropic Prompt Caching on the stable system-prompt prefix
         if let sys = systemPrompt, !sys.isEmpty {
-            body["system"] = [
-                [
-                    "type": "text",
-                    "text": sys,
-                    "cache_control": ["type": "ephemeral"]
-                ]
-            ]
+            body["system"] = AISystemPromptLayout.anthropicSystemBlocks(sys)
         }
         
         // Inject tools with Prompt Caching on the last tool
@@ -8243,6 +8302,9 @@ final class AIClient: ObservableObject {
         blocks.append(prompt)
         let fullPrompt = blocks.joined(separator: "\n\n")
 
+        // The CLI is used here as a model backend (MicroCode executes tools itself, with its own approvals).
+        // Its built-in permission bypass is passed only when MicroCode itself runs in YOLO (full-auto) mode.
+        let cliFullAuto = await MainActor.run { ToolApprovalManager.shared.mode == .yolo }
         let args: [String]
         switch kind {
         case "claude":
@@ -8253,9 +8315,10 @@ final class AIClient: ObservableObject {
             args = ["-p", "--tools", "", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--model", alias, "--", fullPrompt]
         case "agy":
             let slug = ACPAgentSession.normalizeAGYModel(model)
-            args = ["--output-format", "stream-json", "--disable-slash-commands", "--dangerously-skip-permissions", "--model", slug, "--print=\(fullPrompt)"]
+            let permissionArgs = cliFullAuto ? ["--dangerously-skip-permissions"] : ["--mode", "plan"]
+            args = ["--output-format", "stream-json", "--disable-slash-commands"] + permissionArgs + ["--model", slug, "--print=\(fullPrompt)"]
         case "gemini":
-            var gArgs = ["-p", fullPrompt, "--output-format", "stream-json", "--yolo"]
+            var gArgs = ["-p", fullPrompt, "--output-format", "stream-json"] + (cliFullAuto ? ["--yolo"] : [])
             if let gm = ACPAgentSession.sanitizeGeminiCLIModel(model) {
                 gArgs += ["-m", gm]
             }

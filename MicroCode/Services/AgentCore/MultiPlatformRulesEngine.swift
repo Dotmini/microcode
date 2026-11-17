@@ -140,6 +140,11 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
     public let env: [String: String]
     public let url: String?
     public let headers: [String: String]
+    /// Non-nil when this server was declared by a config file inside the workspace (repo-controlled).
+    /// Such servers require Workspace Trust before they may be spawned or probed.
+    public let workspaceConfigPath: String?
+
+    public var isWorkspaceScoped: Bool { workspaceConfigPath != nil }
 
     public init(
         id: String = UUID().uuidString,
@@ -149,7 +154,8 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
         args: [String],
         env: [String: String] = [:],
         url: String? = nil,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        workspaceConfigPath: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -159,6 +165,7 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
         self.env = env
         self.url = url
         self.headers = headers
+        self.workspaceConfigPath = workspaceConfigPath
     }
 }
 
@@ -430,18 +437,23 @@ public final class MultiPlatformRulesEngine: ObservableObject {
             }
 
             // 8B. Scan Lifecycle Hooks (pre_tool, post_tool, pre_finish)
-            self.scanLifecycleHooks(rootURL: rootURL, into: &hooks)
+            var hookConfigFiles: [URL] = []
+            self.scanLifecycleHooks(rootURL: rootURL, into: &hooks, contributingFiles: &hookConfigFiles)
 
             // 9. Scan Universal MCP servers across MicroCode, Antigravity (+ Plugins), Claude (+ Plugins), Cursor, Windsurf, VS Code, and Codex
             var mcpServers: [DiscoveredMCPServer] = []
             let homeURL = self.fileManager.homeDirectoryForCurrentUser
             let isolatedWorkspaceMCP = WorkspaceStoragePaths.managedStateFile(named: "mcp.json", workspacePath: rootURL.path)
-            var mcpCandidates: [(URL, String)] = [
-                (isolatedWorkspaceMCP, "MicroCode Workspace State (~/.microcode/workspaces/.../mcp.json)"),
+            // Repo-controlled configs are scanned LAST so they can never shadow a user-level server name
+            // (credentials are looked up by server name) and are flagged for the Workspace Trust gate.
+            let repoMCPCandidates: [(URL, String)] = [
                 (rootURL.appendingPathComponent(".microcode/mcp.json"), "MicroCode Workspace (.microcode/mcp.json)"),
                 (rootURL.appendingPathComponent(".mcp.json"), "MCP Standard (.mcp.json)"),
                 (rootURL.appendingPathComponent(".cursor/mcp.json"), "Cursor (.cursor/mcp.json)"),
-                (rootURL.appendingPathComponent(".vscode/mcp.json"), "VS Code (.vscode/mcp.json)"),
+                (rootURL.appendingPathComponent(".vscode/mcp.json"), "VS Code (.vscode/mcp.json)")
+            ]
+            var mcpCandidates: [(URL, String)] = [
+                (isolatedWorkspaceMCP, "MicroCode Workspace State (~/.microcode/workspaces/.../mcp.json)"),
                 (homeURL.appendingPathComponent(".microcode/mcp.json"), "MicroCode Global (~/.microcode/mcp.json)"),
                 (homeURL.appendingPathComponent(".cursor/mcp.json"), "Cursor User (~/.cursor/mcp.json)"),
                 (homeURL.appendingPathComponent(".codeium/windsurf/mcp_config.json"), "Windsurf (~/.codeium/windsurf/mcp_config.json)"),
@@ -472,7 +484,12 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                 }
             }
 
+            let repoCandidatePaths = Set(repoMCPCandidates.map { $0.0.standardizedFileURL.path })
+            mcpCandidates.append(contentsOf: repoMCPCandidates)
+            var repoMCPConfigFiles: [URL] = []
+
             for (fileURL, label) in mcpCandidates {
+                let isRepoConfig = repoCandidatePaths.contains(fileURL.standardizedFileURL.path)
                 if let data = try? Data(contentsOf: fileURL),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     let serversDict = (json["mcpServers"] as? [String: [String: Any]]) ?? (json["servers"] as? [String: [String: Any]])
@@ -496,8 +513,12 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                                     args: args,
                                     env: env,
                                     url: remoteUrl,
-                                    headers: headers
+                                    headers: headers,
+                                    workspaceConfigPath: isRepoConfig ? fileURL.path : nil
                                 ))
+                                if isRepoConfig && !repoMCPConfigFiles.contains(fileURL) {
+                                    repoMCPConfigFiles.append(fileURL)
+                                }
                             }
                         }
                     }
@@ -505,10 +526,35 @@ public final class MultiPlatformRulesEngine: ObservableObject {
             }
 
             let finalRules = rules
-            let finalHooks = hooks
-            let finalMCPServers = mcpServers
             let finalIgnores = ignores
+            let scannedHooks = hooks
+            let scannedMCPServers = mcpServers
+            let trustFingerprint = WorkspaceTrustService.fingerprint(
+                files: hookConfigFiles + repoMCPConfigFiles,
+                workspaceRoot: rootURL.path
+            )
             DispatchQueue.main.async {
+                // Workspace Trust gate: repo-declared MCP servers and hooks execute programs, so they
+                // stay disabled until the user trusts this exact config (pinned by content hash).
+                let repoServers = scannedMCPServers.filter(\.isWorkspaceScoped)
+                var trustItems: [WorkspaceTrustService.Item] = repoServers.map { server in
+                    let source = server.workspaceConfigPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? server.sourcePlatform
+                    let commandLine = server.url ?? ([server.command] + server.args).joined(separator: " ")
+                    return .init(label: "MCP server `\(server.name)` (\(source))", detail: commandLine)
+                }
+                trustItems += scannedHooks.map { hook in
+                    .init(label: "Hook \(hook.stage.rawValue) `\(hook.name)` (\(hook.sourceFile))", detail: hook.command)
+                }
+                let trusted = MainActor.assumeIsolated {
+                    WorkspaceTrustService.shared.requestTrust(
+                        workspace: root,
+                        kind: .executableConfig,
+                        items: trustItems,
+                        fingerprint: trustFingerprint
+                    )
+                }
+                let finalHooks = trusted ? scannedHooks : []
+                let finalMCPServers = trusted ? scannedMCPServers : scannedMCPServers.filter { !$0.isWorkspaceScoped }
                 self.discoveredRules = finalRules
                 self.discoveredHooks = finalHooks
                 self.discoveredMCPServers = finalMCPServers
@@ -595,7 +641,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
 
     // MARK: - Lifecycle Hooks Discovery & Execution (pre_tool, post_tool, pre_finish)
 
-    private func scanLifecycleHooks(rootURL: URL, into hooks: inout [AgentLifecycleHook]) {
+    private func scanLifecycleHooks(rootURL: URL, into hooks: inout [AgentLifecycleHook], contributingFiles: inout [URL]) {
         let hookCandidates: [(URL, String)] = [
             (rootURL.appendingPathComponent(".microcode/hooks.json"), ".microcode/hooks.json"),
             (rootURL.appendingPathComponent(".txcode/hooks.json"), ".txcode/hooks.json"),
@@ -609,6 +655,10 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
 
             let hooksRoot = (json["hooks"] as? [String: Any]) ?? json
+            let hookCountBefore = hooks.count
+            defer {
+                if hooks.count > hookCountBefore { contributingFiles.append(fileURL) }
+            }
 
             let stageMappings: [(keys: [String], stage: AgentHookStage)] = [
                 (["pre_tool", "preTool", "PreToolUse"], .preTool),

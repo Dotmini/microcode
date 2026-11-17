@@ -825,7 +825,7 @@ def _get_computer_use_engine(app: str = None):
                 req = urllib.request.Request(
                     "http://127.0.0.1:18888/v1/computer-use",
                     data=json.dumps(body).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
+                    headers=_microcode_bridge_headers(),
                     method="POST",
                 )
                 try:
@@ -1211,6 +1211,24 @@ def tool_adb_execute(args: dict) -> str:
 # Live MicroCode IDE Bridge (http://127.0.0.1:18888/v1/mcp)
 # ============================================================
 
+
+def _microcode_bridge_headers(extra=None):
+    """Headers for MicroCode.app's local bridge (127.0.0.1:18888). Tool-executing routes require the
+    per-launch token MicroCode publishes at ~/.microcode/run/bridge-token (or MICROCODE_BRIDGE_TOKEN)."""
+    headers = {"Content-Type": "application/json"}
+    if extra:
+        headers.update(extra)
+    token = os.environ.get("MICROCODE_BRIDGE_TOKEN", "").strip()
+    if not token:
+        try:
+            with open(os.path.expanduser("~/.microcode/run/bridge-token"), "r", encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError:
+            token = ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
 def _forward_to_live_ide_mcp(tool_name: str, args: dict) -> str:
     """Forward live IDE tool calls (ide_browser, preview_control, editor_control, lsp_intelligence)
     directly to the running MicroCode.app HTTP MCP Bridge on port 18888."""
@@ -1228,7 +1246,7 @@ def _forward_to_live_ide_mcp(tool_name: str, args: dict) -> str:
     req = urllib.request.Request(
         "http://127.0.0.1:18888/v1/mcp",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=_microcode_bridge_headers(),
         method="POST"
     )
     try:

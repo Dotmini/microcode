@@ -1584,6 +1584,9 @@ final class CellAgentCoordinator {
                 onStatus("")
                 onError("\(config.name): \(err)")
                 return
+            case .permissionRequest(let request):
+                onStatus("\(config.name) awaiting approval: \(request.description)")
+                session.resolvePermission(request)
             default:
                 break
             }

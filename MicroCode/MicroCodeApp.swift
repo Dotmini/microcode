@@ -77,6 +77,10 @@ struct MicroCodeApp: App {
     }
 
     init() {
+        // ACP stdio server: claim stdout for JSON-RPC frames before anything else can print to it.
+        if CommandLine.arguments.contains("--acp-server") {
+            ACPServerService.claimStdoutForProtocol()
+        }
         // Install crash/error capture as early as possible so Swift traps,
         // signals and exceptions during startup are recorded too.
         CrashReporter.shared.install()
@@ -103,7 +107,7 @@ struct MicroCodeApp: App {
                     "coreSnippetChars": store.coreProtocolSnippet().count,
                     "coreSnippetHead": String(store.coreProtocolSnippet().prefix(160)),
                     "routing": routed,
-                    "promptSnippetHasCore": store.activeSkillsPromptSnippet(forPrompt: "hello").contains("MICROCODE CORE PROTOCOL")
+                    "promptSnippetHasCore": store.activeSkillsPromptSnippet(forPrompt: "hello").contains("MICROCODE CORE HARNESS")
                 ]
                 if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
                     try? data.write(to: URL(fileURLWithPath: dumpOut), options: .atomic)
