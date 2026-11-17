@@ -4442,12 +4442,19 @@ class AppState: ObservableObject {
         )
         
         guard !Task.isCancelled else { return }
-        
-        self.autocompletePrefix = wordPrefix
-        self.lspCompletions = completions
-        self.selectedCompletionIndex = 0
-        self.autocompleteRect = cursorRect
-        self.showingCompletions = !completions.isEmpty
+
+        // Runs on (almost) every keystroke. Every @Published write re-renders all ~150 views observing
+        // AppState, so publish only what actually changes — and nothing at all when there is nothing to show.
+        if completions.isEmpty {
+            if showingCompletions { showingCompletions = false }
+            if !lspCompletions.isEmpty { lspCompletions = [] }
+            return
+        }
+        if autocompletePrefix != wordPrefix { autocompletePrefix = wordPrefix }
+        lspCompletions = completions
+        if selectedCompletionIndex != 0 { selectedCompletionIndex = 0 }
+        if autocompleteRect != cursorRect { autocompleteRect = cursorRect }
+        if !showingCompletions { showingCompletions = true }
     }
     
     /// Request hover info at a position

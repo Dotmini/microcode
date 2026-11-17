@@ -28,6 +28,12 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     private(set) var negotiatedProtocolVersion: String?
     /// Incremented per spawned process so a dying process's termination handler can't tear down its successor.
     private var processGeneration = 0
+    /// Last `WWW-Authenticate` challenge from a remote server that refused us (nil when authorized).
+    @Published private(set) var authChallenge: String?
+    var needsSignIn: Bool { authChallenge != nil }
+    /// Serializes HTTP sends (credential lookup may await a token refresh) so JSON-RPC order is preserved.
+    private var httpSendChain: Task<Void, Never>?
+    private var didAttemptAuthRefresh = false
     
     @Published var isConnected = false
     @Published private(set) var isHandshakeReady = false
@@ -465,13 +471,11 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         sendRaw(request)
     }
     
-    private func resolvedAuthHeaderValue() -> String? {
+    /// Authorization from the server's own config: an explicit header, or a token named in its declared env.
+    /// Stored credentials (OAuth / origin-bound bearer) are resolved asynchronously by MCPAuthCenter.
+    private func configuredAuthHeaderValue() -> String? {
         if let h = customHeaders.first(where: { $0.key.caseInsensitiveCompare("Authorization") == .orderedSame })?.value, !h.isEmpty {
             return h
-        }
-        let savedToken = UserDefaults.standard.string(forKey: "microcode.mcp.bearer.\(serverName.lowercased())") ?? ""
-        if !savedToken.isEmpty {
-            return savedToken.lowercased().hasPrefix("bearer ") ? savedToken : "Bearer \(savedToken)"
         }
         let upperName = serverName.uppercased().replacingOccurrences(of: "-", with: "_")
         // Generic names come only from this server's own declared env: MicroCode's process-wide
@@ -491,6 +495,32 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     private func sendRaw(_ obj: [String: Any], timeout: TimeInterval = 35) {
         guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         if let httpURL = remoteURL, let url = URL(string: httpURL) {
+            let previous = httpSendChain
+            httpSendChain = Task { @MainActor [weak self] in
+                await previous?.value
+                guard let self else { return }
+                let storedAuth: String?
+                if self.configuredAuthHeaderValue() == nil {
+                    storedAuth = await MCPAuthCenter.shared.authorizationHeader(
+                        serverURL: url,
+                        serverName: self.serverName,
+                        allowLegacyMigration: !self.isWorkspaceScoped
+                    )
+                } else {
+                    storedAuth = nil
+                }
+                self.sendHTTP(obj, data: data, url: url, httpURL: httpURL, timeout: timeout, storedAuth: storedAuth)
+            }
+            return
+        }
+        guard let pipe = stdinPipe else { return }
+        var d = data
+        d.append("\n".data(using: .utf8)!)
+        try? pipe.fileHandleForWriting.write(contentsOf: d)
+    }
+
+    private func sendHTTP(_ obj: [String: Any], data: Data, url: URL, httpURL: String, timeout: TimeInterval, storedAuth: String?) {
+        do {
             // Matches the JSON-RPC request timeout (a fixed 12 s cut off slow tools/call requests allowed 60 s).
             var req = URLRequest(url: url, timeoutInterval: timeout)
             req.httpMethod = "POST"
@@ -505,7 +535,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
             for (hk, hv) in customHeaders where hk.caseInsensitiveCompare("Authorization") != .orderedSame {
                 req.setValue(hv, forHTTPHeaderField: hk)
             }
-            if let authVal = resolvedAuthHeaderValue() {
+            if let authVal = configuredAuthHeaderValue() ?? storedAuth {
                 req.setValue(authVal, forHTTPHeaderField: "Authorization")
             }
             req.httpBody = data
@@ -516,17 +546,19 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
                         DispatchQueue.main.async { self.mcpSessionId = newSid }
                     }
                     if httpResp.statusCode == 401 || httpResp.statusCode == 403 {
-                        let wwwAuth = httpResp.value(forHTTPHeaderField: "WWW-Authenticate") ?? "OAuth 2.1 / Bearer token"
+                        let challenge = httpResp.value(forHTTPHeaderField: "WWW-Authenticate")
                         let authErr = NSError(
                             domain: "ExternalMCP",
                             code: httpResp.statusCode,
-                            userInfo: [NSLocalizedDescriptionKey: "AUTH_REQUIRED (HTTP \(httpResp.statusCode) at \(httpURL) — \(wwwAuth)). Provide a Bearer token via `mcp_orchestrator(action: \"connect\", server_name: \"\(self.serverName)\", bearer_token: \"...\")` or Settings → MCP Servers."]
+                            userInfo: [NSLocalizedDescriptionKey: "AUTH_REQUIRED (HTTP \(httpResp.statusCode) at \(httpURL)). Sign in with OAuth from Settings → Agent Ecosystem → MCP, or `mcp_orchestrator(action: \"authenticate\", server_name: \"\(self.serverName)\")`; servers without OAuth accept `mcp_orchestrator(action: \"connect\", server_name: \"\(self.serverName)\", bearer_token: \"...\")`."]
                         )
                         DispatchQueue.main.async {
                             self.error = authErr.localizedDescription
+                            self.authChallenge = challenge ?? "Bearer"
                             if let reqId = obj["id"] as? Int, let cb = self.pendingRequests.removeValue(forKey: reqId) {
                                 cb(.failure(authErr))
                             }
+                            self.recoverFromExpiredOAuthTokenIfPossible(url: url, challenge: challenge)
                         }
                         return
                     }
@@ -566,12 +598,45 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
                     }
                 }
             }.resume()
-            return
         }
-        guard let pipe = stdinPipe else { return }
-        var d = data
-        d.append("\n".data(using: .utf8)!)
-        try? pipe.fileHandleForWriting.write(contentsOf: d)
+    }
+
+    /// A stored OAuth token the server now rejects (`invalid_token`) is refreshed once, silently; a missing
+    /// or unrefreshable credential waits for an explicit user sign-in (never opens a browser by itself).
+    private func recoverFromExpiredOAuthTokenIfPossible(url: URL, challenge: String?) {
+        guard !didAttemptAuthRefresh,
+              MCPAuthCenter.shared.store.tokens(forResource: MCPAuthSupport.canonicalResource(url)) != nil else { return }
+        let error = challenge.flatMap { MCPAuthSupport.parseWWWAuthenticate($0)["error"] }
+        guard error == nil || error == "invalid_token" else { return }
+        didAttemptAuthRefresh = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if await MCPAuthCenter.shared.oauth.validAccessToken(for: url, forceRefresh: true) != nil {
+                self.authChallenge = nil
+                self.error = nil
+                self.stop()
+                self.start()
+            }
+        }
+    }
+
+    /// Interactive OAuth 2.1 sign-in (opens the browser), then reconnects with the new credentials.
+    func signIn() async -> String {
+        guard let urlString = remoteURL, let url = URL(string: urlString) else {
+            return "'\(serverName)' is a local (stdio) server; OAuth sign-in only applies to remote HTTP servers."
+        }
+        do {
+            let tokens = try await MCPAuthCenter.shared.oauth.authorize(serverURL: url, wwwAuthenticate: authChallenge)
+            authChallenge = nil
+            error = nil
+            didAttemptAuthRefresh = false
+            stop()
+            start()
+            return "✅ Signed in to '\(serverName)' via \(tokens.issuer); reconnecting with the new token."
+        } catch {
+            self.error = "OAuth sign-in failed: \(error.localizedDescription)"
+            return "❌ OAuth sign-in to '\(serverName)' failed: \(error.localizedDescription)"
+        }
     }
     
     private func fetchTools() {
@@ -1012,6 +1077,7 @@ class ExternalMCPManager: ObservableObject {
         configRoot["mcpServers"] = serversDict
         if let updatedData = try? JSONSerialization.data(withJSONObject: configRoot, options: [.prettyPrinted, .sortedKeys]) {
             try? updatedData.write(to: configURL)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
         }
         
         // Hot-spawn connection immediately
@@ -1062,9 +1128,7 @@ class ExternalMCPManager: ObservableObject {
             return "Error: `server_name` is required (e.g. 'canva', 'github', 'figma')."
         }
 
-        if let tok = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines), !tok.isEmpty {
-            UserDefaults.standard.set(tok, forKey: "microcode.mcp.bearer.\(cleanName)")
-        }
+        let staticBearer = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Trigger fresh plugin/IDE config discovery if server isn't loaded yet
         if connections[cleanName] == nil && (remoteURL ?? "").isEmpty && (command ?? "").isEmpty {
@@ -1092,15 +1156,17 @@ class ExternalMCPManager: ObservableObject {
                 rootObj = parsed
             }
             var servers = rootObj["mcpServers"] as? [String: Any] ?? [:]
-            var entry: [String: Any] = ["serverUrl": urlStr]
-            if let tok = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines), !tok.isEmpty {
-                let authHeader = tok.lowercased().hasPrefix("bearer ") ? tok : "Bearer \(tok)"
-                entry["headers"] = ["Authorization": authHeader]
+            // Credentials never go into mcp.json: the bearer is sealed in the credential store, bound to this origin.
+            let entry: [String: Any] = ["serverUrl": urlStr]
+            if let tok = staticBearer, !tok.isEmpty, let serverURL = URL(string: urlStr) {
+                MCPAuthCenter.shared.saveStaticBearer(tok, serverURL: serverURL)
             }
             servers[cleanName] = entry
             rootObj["mcpServers"] = servers
             if let out = try? JSONSerialization.data(withJSONObject: rootObj, options: [.prettyPrinted, .sortedKeys]) {
                 try? out.write(to: globalMCP)
+                // MCP configs can carry server env secrets: owner-only.
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: globalMCP.path)
             }
 
             connections[cleanName]?.stop()
@@ -1111,7 +1177,7 @@ class ExternalMCPManager: ObservableObject {
                 args: [],
                 env: [:],
                 url: urlStr,
-                headers: (entry["headers"] as? [String: String]) ?? [:]
+                headers: [:]
             )
             let conn = ExternalMCPConnection(server: spec)
             connections[cleanName] = conn
@@ -1238,6 +1304,14 @@ class ExternalMCPManager: ObservableObject {
     }
     
     /// Restart a specific server
+    /// Interactive OAuth sign-in for a remote server (opens the browser once).
+    func signIn(_ name: String) async -> String {
+        guard let conn = connections[name.lowercased()] ?? connections[name] else {
+            return "MCP server '\(name)' is not connected. Use mcp_orchestrator(action: \"connect\", server_name: ..., url: ...) first."
+        }
+        return await conn.signIn()
+    }
+
     func restartServer(_ name: String) {
         failedProbeServers.remove(name)
         if let conn = connections[name] {

@@ -90,6 +90,12 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private var sessionNewReqId: Int?
     private var authenticateReqId: Int?
     private var didAttemptAcpAuthentication = false
+    /// `session/resume` in flight for this session id (agent restarted; conversation continues without replay).
+    private var sessionResumeReqId: Int?
+    private var resumeTargetSessionId: String?
+    /// Latest `usage_update` (context window / cost) and `session_info_update` title from the agent.
+    @Published private(set) var contextUsage: ACPUsage?
+    @Published private(set) var sessionTitle: String?
     /// From the agent's `initialize` response (e.g. loadSession, promptCapabilities, mcpCapabilities).
     private(set) var acpAgentCapabilities: [String: Any] = [:]
     private var acpAuthMethodIds: [String] = []
@@ -468,8 +474,17 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     /// Reset session state so subsequent commands start a fresh, isolated conversation
     func resetSession() {
+        // An explicit "new conversation": let the agent free the old session (sessionCapabilities.close).
+        if isStandardACPProtocol, let sid = sessionId, let proc = process, proc.isRunning,
+           ACPSessionCapabilities.supports(acpAgentCapabilities, "close") {
+            let closeId = jsonRpcIdCounter
+            jsonRpcIdCounter += 1
+            writeJsonRpc(ACPStandardJsonRpcParser.buildSessionCloseRequest(id: closeId, sessionId: sid))
+        }
         terminateCurrentProcess()
         sessionId = nil
+        contextUsage = nil
+        sessionTitle = nil
         streamingText = ""
         events = []
         pendingPermissions = []
@@ -1422,6 +1437,14 @@ class ACPAgentSession: ObservableObject, Identifiable {
             }
         }
 
+        // `session/resume` refused (unknown / expired session): start a fresh session instead.
+        if let respId = json["id"] as? Int, respId == sessionResumeReqId, json["error"] != nil {
+            sessionResumeReqId = nil
+            resumeTargetSessionId = nil
+            sendSessionNew()
+            return
+        }
+
         // `session/new` refused for missing auth: authenticate once with the agent's first advertised method.
         if let respId = json["id"] as? Int, respId == sessionNewReqId, json["error"] != nil,
            !didAttemptAcpAuthentication, let methodId = acpAuthMethodIds.first {
@@ -1440,13 +1463,23 @@ class ACPAgentSession: ObservableObject, Identifiable {
                     acpAgentCapabilities = result["agentCapabilities"] as? [String: Any] ?? [:]
                     acpAuthMethodIds = (result["authMethods"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
                 }
-                let newSessId = jsonRpcIdCounter
-                jsonRpcIdCounter += 1
-                sessionNewReqId = newSessId
-                let cwd = activeWorkspacePath.isEmpty ? FileManager.default.currentDirectoryPath : activeWorkspacePath
-                writeJsonRpc(ACPStandardJsonRpcParser.buildSessionNewRequest(id: newSessId, cwd: cwd))
+                // The agent process restarted but this conversation already has a session: resume it (no replay)
+                // when the agent supports it, so context survives a restart instead of silently starting over.
+                if ACPSessionCapabilities.bootstrapMethod(agentCapabilities: acpAgentCapabilities, previousSessionId: sessionId) == "session/resume",
+                   let previous = sessionId {
+                    let resumeId = jsonRpcIdCounter
+                    jsonRpcIdCounter += 1
+                    sessionResumeReqId = resumeId
+                    resumeTargetSessionId = previous
+                    writeJsonRpc(ACPStandardJsonRpcParser.buildSessionResumeRequest(id: resumeId, sessionId: previous, cwd: acpWorkingDirectory))
+                    return
+                }
+                sendSessionNew()
                 return
-            } else if respId == sessionNewReqId, let sid = result["sessionId"] as? String {
+            } else if let sid = (respId == sessionNewReqId ? result["sessionId"] as? String : nil)
+                        ?? (respId == sessionResumeReqId ? resumeTargetSessionId : nil) {
+                sessionResumeReqId = nil
+                resumeTargetSessionId = nil
                 self.sessionId = sid
                 self.state = .running(taskId: sid)
                 processEvent(.sessionInit(ACPSessionInit(sessionId: sid, model: self.model, tools: [], capabilities: ["acp-v1"])))
@@ -1465,6 +1498,17 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
     }
     
+    private var acpWorkingDirectory: String {
+        activeWorkspacePath.isEmpty ? FileManager.default.currentDirectoryPath : activeWorkspacePath
+    }
+
+    private func sendSessionNew() {
+        let newSessId = jsonRpcIdCounter
+        jsonRpcIdCounter += 1
+        sessionNewReqId = newSessId
+        writeJsonRpc(ACPStandardJsonRpcParser.buildSessionNewRequest(id: newSessId, cwd: acpWorkingDirectory))
+    }
+
     private func resolveWorkspacePath(_ path: String) -> String {
         if path.hasPrefix("/") { return path }
         let base = activeWorkspacePath.isEmpty ? FileManager.default.currentDirectoryPath : activeWorkspacePath
@@ -1530,7 +1574,11 @@ class ACPAgentSession: ObservableObject, Identifiable {
             }
             state = .running(taskId: init_.sessionId)
             
-        case .systemInfo, .progress:
+        case .systemInfo(let info):
+            if let usage = info.usage { contextUsage = usage }
+            if let title = info.sessionTitle { sessionTitle = title }
+
+        case .progress:
             break
         }
     }

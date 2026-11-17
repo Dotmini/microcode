@@ -2466,6 +2466,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Engine is now owned by the Coordinator (PERSISTENT)
         var engine: SyntaxHighlightingEngine? // Changed to var and optional
         
+        /// Buffer ↔ debounced-binding bookkeeping: lets applyContent tell a stale binding echo (SwiftUI
+        /// re-render during the debounce window) from a genuine external edit.
+        var bindingSync = EditorBindingSyncState()
+
         // Cache for change detection
         var lastText: String = ""
         var lastLanguage: String = ""
@@ -2635,24 +2639,44 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 || darkChanged || transparentChanged || editableChanged
                 || highlightingChanged || lineNumbersChanged
 
+            // STALE BINDING ECHO GUARD:
+            // Keystrokes reach `@Binding text` only after a debounce. Any AppState change in that window
+            // (autocomplete publishing ~25 ms after a keystroke, LSP, console…) re-renders this view with the
+            // OLD binding value. Treating that as an external edit patched the buffer back — the just-typed
+            // characters vanished, the caret jumped, then the text reappeared (or was lost) when the debounce
+            // fired. A stale echo keeps the buffer; a genuine external edit (AI, collaboration, reload) applies.
+            // Never replace the buffer mid-IME-composition (marked text) either.
+            let appliesIncomingBinding = force
+                || (!textView.hasMarkedText() && bindingSync.shouldApplyIncoming(p.text, bufferText: textView.string))
+            let incomingText = appliesIncomingBinding ? p.text : textView.string
+
             // ULTRA-FAST NO-OP PATH DURING LIVE TYPING:
             // When the user types in `textView`, `lastText` and `textView.string` already contain
             // the latest characters. Returning here avoids full-file string normalization,
             // `engine.setDocument` cache resets, redundant full-file re-lexing, and synchronous
             // `ensureLayout` stalls on every keystroke.
-            if !force && !visualConfigChanged && (lastText == p.text || textView.string == p.text) {
+            if !force && !visualConfigChanged && (lastText == incomingText || textView.string == incomingText) {
                 return
             }
 
             configureTextGeometry(for: textView, in: scrollView)
 
             // Raw UTF-8 byte scan (`0x0D`) avoids O(N) Extended Grapheme Cluster breaking in `-Onone`.
-            let normalizedText = p.text.utf8.contains(0x0D) ? p.text.replacingOccurrences(of: "\r\n", with: "\n") : p.text
+            let normalizedText = incomingText.utf8.contains(0x0D) ? incomingText.replacingOccurrences(of: "\r\n", with: "\n") : incomingText
             let textChanged = lastText != normalizedText && textView.string != normalizedText
 
             if !force && !textChanged && !visualConfigChanged {
                 lastText = normalizedText
                 return
+            }
+
+            if appliesIncomingBinding {
+                // The binding is authoritative now: a pending debounced push would overwrite it with older text.
+                if textChanged {
+                    bindingSyncTask?.cancel()
+                    bindingSyncTask = nil
+                }
+                bindingSync.noteAppliedFromBinding(p.text)
             }
 
             lastText = normalizedText
@@ -3264,6 +3288,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // Keep `lastText` synced immediately so SwiftUI's `updateNSView` knows `textView`
             // already has this exact text and skips redundant full-document re-application.
             self.lastText = newText
+            bindingSync.noteLocalEdit()
             
             // Stream live multiplayer caret + typing buffer over WebSocket (110ms debounce for buffer)
             if CollaborationService.shared.currentSession != nil, let fileURL = parent.fileURL {
@@ -3288,6 +3313,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 if self.parent.text != newText {
                     self.parent.text = newText
                 }
+                self.bindingSync.notePushedToBinding(newText)
             }
 
             // Trigger fast incremental highlight (50ms debounce) when syntax highlighting is enabled
@@ -3305,6 +3331,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             if parent.text != finalString {
                 parent.text = finalString
             }
+            bindingSync.notePushedToBinding(finalString)
             if CollaborationService.shared.currentSession != nil, let fileURL = parent.fileURL {
                 CollaborationService.shared.notifyLocalFileEdited(path: fileURL.path, content: finalString)
                 syncCollaborationSelection(in: textView, isTyping: false)

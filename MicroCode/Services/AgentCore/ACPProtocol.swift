@@ -270,7 +270,51 @@ struct ACPPermissionRequest: Identifiable {
 /// System info event (metadata, retry, status)
 struct ACPSystemInfo {
     let message: String
-    let subtype: String?           // "init", "api_retry", "plugin_install"
+    let subtype: String?           // "init", "api_retry", "plugin_install", "usage_update", "session_info_update"
+    /// Context window / cumulative cost reported by the agent (`usage_update`).
+    var usage: ACPUsage? = nil
+    /// Session title reported by the agent (`session_info_update`).
+    var sessionTitle: String? = nil
+}
+
+/// ACP `usage_update`: tokens currently in context, context window size, optional cumulative cost.
+struct ACPUsage: Equatable {
+    let used: Int
+    let size: Int
+    let costAmount: Double?
+    let costCurrency: String?
+
+    var fractionUsed: Double { size > 0 ? Double(used) / Double(size) : 0 }
+
+    var summary: String {
+        var text = "Context \(used.formatted()) / \(size.formatted()) tokens (\(Int((fractionUsed * 100).rounded()))%)"
+        if let costAmount, let costCurrency {
+            text += String(format: " · %@ %.4f", costCurrency, costAmount)
+        }
+        return text
+    }
+}
+
+/// Reads ACP session capabilities from an agent's `initialize` result (`agentCapabilities`).
+enum ACPSessionCapabilities {
+    /// `sessionCapabilities.<name>` is supported when present as an object (omitted / null = unsupported).
+    static func supports(_ agentCapabilities: [String: Any], _ name: String) -> Bool {
+        (agentCapabilities["sessionCapabilities"] as? [String: Any])?[name] is [String: Any]
+    }
+
+    static func supportsLoad(_ agentCapabilities: [String: Any]) -> Bool {
+        agentCapabilities["loadSession"] as? Bool == true
+    }
+
+    /// After `initialize` on a (re)started agent: continue the previous conversation with `session/resume`
+    /// when the agent supports it, otherwise open a new session. (`session/load` would replay history the
+    /// client already shows, so a client that keeps its own transcript prefers resume.)
+    static func bootstrapMethod(agentCapabilities: [String: Any], previousSessionId: String?) -> String {
+        guard let previous = previousSessionId, !previous.isEmpty, supports(agentCapabilities, "resume") else {
+            return "session/new"
+        }
+        return "session/resume"
+    }
 }
 
 /// Progress tracking for long-running tasks
@@ -583,6 +627,22 @@ struct ACPStandardJsonRpcParser {
         ]
     }
     
+    /// `session/resume` (sessionCapabilities.resume): restore a session without replaying history.
+    static func buildSessionResumeRequest(id: Int, sessionId: String, cwd: String, mcpServers: [[String: Any]]? = nil) -> [String: Any] {
+        let resolvedServers = mcpServers ?? ACPMCPBridgeBuilder.acpSessionNewServers(workspacePath: cwd)
+        return [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/resume",
+            "params": ["sessionId": sessionId, "cwd": cwd, "mcpServers": resolvedServers]
+        ]
+    }
+
+    /// `session/close` (sessionCapabilities.close): cancel any work and free the agent's session resources.
+    static func buildSessionCloseRequest(id: Int, sessionId: String) -> [String: Any] {
+        ["jsonrpc": "2.0", "id": id, "method": "session/close", "params": ["sessionId": sessionId]]
+    }
+
     /// `session/request_permission` reply when no option can be selected (or the turn was cancelled).
     static func buildPermissionCancelledResponse(requestId: Any) -> [String: Any] {
         ["jsonrpc": "2.0", "id": requestId, "result": ["outcome": ["outcome": "cancelled"]]]
@@ -656,6 +716,23 @@ struct ACPStandardJsonRpcParser {
                             isError: isError,
                             toolName: update["title"] as? String
                         ))]
+                    }
+                case "usage_update":
+                    // Agents only send this with a real context size; ignore malformed payloads.
+                    if let used = (update["used"] as? NSNumber)?.intValue,
+                       let size = (update["size"] as? NSNumber)?.intValue, size > 0 {
+                        let cost = update["cost"] as? [String: Any]
+                        let usage = ACPUsage(
+                            used: used,
+                            size: size,
+                            costAmount: (cost?["amount"] as? NSNumber)?.doubleValue,
+                            costCurrency: cost?["currency"] as? String
+                        )
+                        return [.systemInfo(ACPSystemInfo(message: usage.summary, subtype: "usage_update", usage: usage))]
+                    }
+                case "session_info_update":
+                    if let title = update["title"] as? String, !title.isEmpty {
+                        return [.systemInfo(ACPSystemInfo(message: "Session: \(title)", subtype: "session_info_update", sessionTitle: title))]
                     }
                 case "plan":
                     if let entries = update["entries"] as? [[String: Any]], !entries.isEmpty {

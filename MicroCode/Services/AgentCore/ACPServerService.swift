@@ -27,6 +27,13 @@ class ACPServerService: ObservableObject {
     private var sessionHistory: [String: [[(String, Any)]]] = [:]
     private var activePromptTasks: [String: Task<Void, Never>] = [:]
     private var cancelledSessions: Set<String> = []
+    /// Durable sessions behind session/list, load (replay), resume, close and delete. Transcripts are redacted on disk.
+    private let sessionStore = ACPSessionStore(
+        directory: ACPSessionStore.defaultDirectory(),
+        redact: { AgentPrivacyGuard.sanitize($0) }
+    )
+    /// Agent text streamed during the current turn, recorded into the transcript when the turn ends.
+    private var turnAgentText: [String: String] = [:]
     private var supportsClientReadTextFile = false
     private var supportsClientWriteTextFile = false
     private var supportsClientTerminal = false
@@ -172,7 +179,14 @@ class ACPServerService: ObservableObject {
                     // Advertise only what is implemented: history is in-memory (no session/load replay),
                     // image blocks are not consumed, and client-provided mcpServers are not connected.
                     "agentCapabilities": [
-                        "loadSession": false,
+                        // Sessions persist on disk: session/load replays them; list/resume/close/delete are supported.
+                        "loadSession": true,
+                        "sessionCapabilities": [
+                            "list": [String: Any](),
+                            "resume": [String: Any](),
+                            "close": [String: Any](),
+                            "delete": [String: Any]()
+                        ],
                         "mcpCapabilities": [
                             "http": false,
                             "sse": false
@@ -198,6 +212,11 @@ class ACPServerService: ObservableObject {
             sessions[sid] = cwd
             sessionModes[sid] = "agent"
             sessionHistory[sid] = []
+            let now = Date()
+            sessionStore.save(ACPSessionRecord(
+                sessionId: sid, cwd: cwd, title: nil, createdAt: now, updatedAt: now,
+                modeId: "agent", modelId: nil, transcript: []
+            ))
             writeNDJSON([
                 "jsonrpc": "2.0",
                 "id": id,
@@ -214,18 +233,58 @@ class ACPServerService: ObservableObject {
                 ]
             ])
             
-        case "session/load":
+        case "session/load", "session/resume":
             guard let id = reqId else { return }
-            let sid = params["sessionId"] as? String ?? ("sess_" + UUID().uuidString.prefix(8))
-            let cwd = params["cwd"] as? String ?? defaultWorkspace
-            sessions[sid] = cwd
-            if sessionHistory[sid] == nil { sessionHistory[sid] = [] }
+            guard let sid = params["sessionId"] as? String, let record = sessionStore.load(sid) else {
+                writeNDJSON(["jsonrpc": "2.0", "id": id, "error": ["code": -32002, "message": "Session not found"]])
+                return
+            }
+            guard activePromptTasks[sid] == nil else {
+                writeNDJSON(["jsonrpc": "2.0", "id": id, "error": ["code": -32000, "message": "Session is busy with a running prompt"]])
+                return
+            }
+            restoreSession(record, cwd: params["cwd"] as? String)
+            if method == "session/load" {
+                // load MUST replay the whole conversation before responding; resume MUST NOT.
+                for notification in ACPSessionStore.replayNotifications(record) {
+                    writeNDJSON(notification)
+                }
+            }
             writeNDJSON(["jsonrpc": "2.0", "id": id, "result": [:] as [String: Any]])
+            if let title = record.title {
+                emitSessionInfo(sessionId: sid, title: title, updatedAt: record.updatedAt)
+            }
+
+        case "session/list":
+            guard let id = reqId else { return }
+            let page = sessionStore.list(cwd: params["cwd"] as? String, cursor: params["cursor"] as? String)
+            var result: [String: Any] = ["sessions": page.sessions.map(ACPSessionStore.sessionInfo)]
+            if let next = page.nextCursor { result["nextCursor"] = next }
+            writeNDJSON(["jsonrpc": "2.0", "id": id, "result": result])
+
+        case "session/close", "session/delete":
+            // Both cancel ongoing work and free in-memory state; delete also removes the stored session.
+            // Unknown / already-closed sessions still succeed (idempotent per spec).
+            if let sid = params["sessionId"] as? String {
+                cancelledSessions.insert(sid)
+                activePromptTasks[sid]?.cancel()
+                activePromptTasks.removeValue(forKey: sid)
+                sessions.removeValue(forKey: sid)
+                sessionHistory.removeValue(forKey: sid)
+                sessionModes.removeValue(forKey: sid)
+                sessionModels.removeValue(forKey: sid)
+                turnAgentText.removeValue(forKey: sid)
+                if method == "session/delete" { sessionStore.delete(sid) }
+            }
+            if let id = reqId {
+                writeNDJSON(["jsonrpc": "2.0", "id": id, "result": [:] as [String: Any]])
+            }
 
         case "session/set_mode", "session/setMode":
             let sid = params["sessionId"] as? String ?? "default"
             if let modeId = params["modeId"] as? String {
                 sessionModes[sid] = modeId
+                updateStoredSession(sid) { $0.modeId = modeId }
             }
             if let id = reqId {
                 writeNDJSON(["jsonrpc": "2.0", "id": id, "result": [:] as [String: Any]])
@@ -235,6 +294,7 @@ class ACPServerService: ObservableObject {
             let sid = params["sessionId"] as? String ?? "default"
             if let modelId = params["modelId"] as? String {
                 sessionModels[sid] = modelId
+                updateStoredSession(sid) { $0.modelId = modelId }
             }
             if let id = reqId {
                 writeNDJSON(["jsonrpc": "2.0", "id": id, "result": [:] as [String: Any]])
@@ -252,6 +312,9 @@ class ACPServerService: ObservableObject {
             
         case "session/prompt":
             guard let id = reqId else { return }
+            if let sid = params["sessionId"] as? String, sessions[sid] == nil, let stored = sessionStore.load(sid) {
+                restoreSession(stored, cwd: nil) // tolerate clients that prompt a stored session without resuming first
+            }
             guard let sid = params["sessionId"] as? String, sessions[sid] != nil else {
                 writeNDJSON(["jsonrpc": "2.0", "id": id, "error": [
                     "code": -32602, "message": "Unknown sessionId; call session/new first"
@@ -296,6 +359,7 @@ class ACPServerService: ObservableObject {
     
     private func handleAcpSessionPrompt(requestId: Any, sessionId: String, promptText: String, workspacePath: String) {
         cancelledSessions.remove(sessionId)
+        turnAgentText[sessionId] = ""
         var history = sessionHistory[sessionId] ?? []
         let activeMode = sessionModes[sessionId] ?? "agent"
         let customModel = sessionModels[sessionId]
@@ -489,6 +553,7 @@ class ACPServerService: ObservableObject {
                 }
                 self.sessionHistory[sessionId] = history
                 self.activePromptTasks.removeValue(forKey: sessionId)
+                self.recordTurn(sessionId: sessionId, prompt: promptText)
                 self.writeNDJSON([
                     "jsonrpc": "2.0",
                     "id": requestId,
@@ -498,6 +563,7 @@ class ACPServerService: ObservableObject {
                 ])
             } catch {
                 self.activePromptTasks.removeValue(forKey: sessionId)
+                self.recordTurn(sessionId: sessionId, prompt: promptText)
                 if Task.isCancelled || self.cancelledSessions.contains(sessionId) {
                     self.writeNDJSON([
                         "jsonrpc": "2.0",
@@ -521,8 +587,51 @@ class ACPServerService: ObservableObject {
         activePromptTasks[sessionId] = task
     }
 
+    // MARK: - Session persistence
+
+    /// Rebuilds in-memory state (cwd, mode, model, model-facing history) from a stored session.
+    private func restoreSession(_ record: ACPSessionRecord, cwd: String?) {
+        let sid = record.sessionId
+        sessions[sid] = (cwd?.isEmpty == false ? cwd! : record.cwd)
+        sessionModes[sid] = record.modeId
+        if let model = record.modelId { sessionModels[sid] = model }
+        sessionHistory[sid] = record.transcript.suffix(26).map { entry in
+            [("_role", entry.role == .user ? "user" : "assistant"), ("text", entry.text)]
+        }
+        cancelledSessions.remove(sid)
+    }
+
+    private func updateStoredSession(_ sessionId: String, _ change: (inout ACPSessionRecord) -> Void) {
+        guard var record = sessionStore.load(sessionId) else { return }
+        change(&record)
+        sessionStore.save(record)
+    }
+
+    /// Appends the finished turn to the stored transcript; titles the session from its first prompt.
+    private func recordTurn(sessionId: String, prompt: String) {
+        let agentText = turnAgentText.removeValue(forKey: sessionId) ?? ""
+        guard var record = sessionStore.load(sessionId) else { return }
+        let isFirstTitle = record.title == nil
+        if isFirstTitle { record.title = ACPSessionStore.title(fromPrompt: prompt) }
+        record.transcript.append(ACPTranscriptEntry(role: .user, text: prompt))
+        if !agentText.isEmpty { record.transcript.append(ACPTranscriptEntry(role: .agent, text: agentText)) }
+        record.updatedAt = Date()
+        sessionStore.save(record)
+        emitSessionInfo(sessionId: sessionId, title: isFirstTitle ? record.title : nil, updatedAt: record.updatedAt)
+    }
+
+    private func emitSessionInfo(sessionId: String, title: String?, updatedAt: Date) {
+        var update: [String: Any] = [
+            "sessionUpdate": "session_info_update",
+            "updatedAt": ISO8601DateFormatter().string(from: updatedAt)
+        ]
+        if let title { update["title"] = title }
+        writeNDJSON(["jsonrpc": "2.0", "method": "session/update", "params": ["sessionId": sessionId, "update": update]])
+    }
+
     private func emitMessageChunk(sessionId: String, text: String) {
         guard !text.isEmpty else { return }
+        turnAgentText[sessionId, default: ""] += text
         writeNDJSON([
             "jsonrpc": "2.0",
             "method": "session/update",

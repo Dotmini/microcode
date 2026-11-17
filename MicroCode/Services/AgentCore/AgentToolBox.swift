@@ -6790,9 +6790,9 @@ struct SkillEngineTool: AgentTool {
 
 struct MCPOrchestratorTool: AgentTool {
     let name = "mcp_orchestrator"
-    let description = "Hyper-Mesh MCP Engine 2.0: Discover & inspect external MCP servers across MicroCode, Antigravity plugins, Claude, Cursor & Codex ('status' / 'discover'), connect or authenticate a remote HTTP or local stdio MCP server ('connect'), search external MCP tools ('search_tools'), restart a server ('restart'), or synthesize a custom Python MCP server ('synthesize')."
+    let description = "Hyper-Mesh MCP Engine 2.0: Discover & inspect external MCP servers across MicroCode, Antigravity plugins, Claude, Cursor & Codex ('status' / 'discover'), connect a remote HTTP or local stdio MCP server ('connect'), sign in to an OAuth-protected remote server in the user's browser ('authenticate'), search external MCP tools ('search_tools'), restart a server ('restart'), or synthesize a custom Python MCP server ('synthesize')."
     let parameters = [
-        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'discover', 'connect', 'search_tools', 'restart', or 'synthesize'", required: true),
+        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'discover', 'connect', 'authenticate', 'search_tools', 'restart', or 'synthesize'", required: true),
         ToolParameter(name: "server_name", type: "string", description: "Target or new MCP server name (e.g. 'canva', 'github', 'figma')", required: false),
         ToolParameter(name: "url", type: "string", description: "Remote Streamable HTTP MCP URL for 'connect' (e.g. 'https://mcp.canva.com/mcp')", required: false),
         ToolParameter(name: "command", type: "string", description: "Local executable command for stdio 'connect' (e.g. 'npx')", required: false),
@@ -6855,6 +6855,13 @@ struct MCPOrchestratorTool: AgentTool {
                     "- `mcp__\($0.serverName)__\($0.tool.name)`: \($0.tool.description)"
                 }.joined(separator: "\n")
             }
+        case "authenticate", "login", "sign_in", "signin":
+            let serverName = ((params["server_name"] as? String) ?? (params["query"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !serverName.isEmpty else {
+                return "Error: `server_name` is required for 'authenticate'."
+            }
+            return await ExternalMCPManager.shared.signIn(serverName)
         case "restart":
             let name = params["server_name"] as? String ?? ""
             await MainActor.run {
@@ -6883,7 +6890,7 @@ struct MCPOrchestratorTool: AgentTool {
                 workspacePath: ws
             )
         default:
-            return "Unknown mcp_orchestrator action '\(action)'. Supported: status, search_tools, restart, synthesize."
+            return "Unknown mcp_orchestrator action '\(action)'. Supported: status, connect, authenticate, search_tools, restart, synthesize."
         }
     }
 }

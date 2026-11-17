@@ -41,6 +41,7 @@ public struct AgentEcosystemConfigView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var acpHost = ACPHostService.shared
     @ObservedObject var rulesEngine = MultiPlatformRulesEngine.shared
+    @ObservedObject private var mcpManager = ExternalMCPManager.shared
     @ObservedObject var bridge = AgentContextProtocolBridge.shared
     @ObservedObject var discovery = LocalEcosystemDiscovery.shared
     @Environment(\.presentationMode) var presentationMode
@@ -869,6 +870,10 @@ public struct AgentEcosystemConfigView: View {
                                     .font(.system(size: 10))
                                     .foregroundColor(.secondary)
                             }
+
+                            if let connection = mcpManager.connections[server.name], connection.remoteURL != nil {
+                                MCPServerAuthRow(connection: connection)
+                            }
                         }
                         .padding(12)
                         .background(cardSurface)
@@ -1314,6 +1319,46 @@ public struct AgentEcosystemConfigView: View {
                     self.testExecutionOutputs[type] = "Execution failed: \(error.localizedDescription)"
                 }
             }
+        }
+    }
+}
+
+/// OAuth status for a remote MCP server: "Sign in" when the server answered 401, "Sign out" otherwise.
+private struct MCPServerAuthRow: View {
+    @ObservedObject var connection: ExternalMCPConnection
+    @State private var isSigningIn = false
+    @State private var status: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if connection.needsSignIn {
+                Image(systemName: "lock.fill").font(.system(size: 10)).foregroundColor(.orange)
+                Text("Authorization required").font(.system(size: 10)).foregroundColor(.secondary)
+                Spacer()
+                Button(isSigningIn ? "Waiting for browser…" : "Sign in") {
+                    isSigningIn = true
+                    Task { @MainActor in
+                        status = await connection.signIn()
+                        isSigningIn = false
+                    }
+                }
+                .controlSize(.small)
+                .disabled(isSigningIn)
+            } else {
+                Image(systemName: "checkmark.shield").font(.system(size: 10)).foregroundColor(.secondary)
+                Text(connection.isConnected ? "Connected" : "Not connected").font(.system(size: 10)).foregroundColor(.secondary)
+                Spacer()
+                Button("Sign out") {
+                    if let urlString = connection.remoteURL, let url = URL(string: urlString) {
+                        MCPAuthCenter.shared.signOut(serverURL: url)
+                        status = "Signed out of \(connection.serverName)"
+                    }
+                }
+                .controlSize(.small)
+            }
+        }
+        if let status {
+            Text(status).font(.system(size: 10)).foregroundColor(.secondary)
         }
     }
 }
