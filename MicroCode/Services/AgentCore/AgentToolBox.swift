@@ -319,11 +319,7 @@ class AgentToolBox: ObservableObject {
             }
         }
         if let raw = params[AIToolCall.invalidArgumentsKey] as? String {
-            throw ToolBoxError.invalidParams("""
-            the arguments for `\(rawToolName)` were not valid JSON (most likely cut off by the output token limit), \
-            so nothing was executed. Re-issue the call with complete arguments; for large content split it into \
-            several smaller calls (e.g. write the file in parts). Received: \(raw.prefix(120))…
-            """)
+            throw ToolBoxError.invalidParams(ToolArgumentDiagnosis.invalidArgumentsMessage(toolName: rawToolName, raw: raw))
         }
         let toolName = Self.normalizeToolName(rawToolName)
         var targetTool = tools[toolName] ?? tools[rawToolName]

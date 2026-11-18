@@ -5335,16 +5335,15 @@ final class AIClient: ObservableObject {
             throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
         
-        // Buffer for streaming tool calls (keyed by integer index for deterministic order)
-        var toolCallBuffers: [Int: (id: String, name: String, args: String)] = [:]
+        // Streamed tool calls, separated by provider id (not by `index` alone, which merged parallel calls).
+        var toolCallAccumulator = StreamedToolCallAccumulator()
         var isStreamingReasoning = false
         var emittedNativeToolCalls = false
         var sawLengthTruncation = false
 
         func flushBufferedToolCalls() {
-            for idx in toolCallBuffers.keys.sorted() {
-                guard let buffer = toolCallBuffers[idx], !buffer.name.isEmpty else { continue }
-                let trimmedArgs = buffer.args.trimmingCharacters(in: .whitespacesAndNewlines)
+            for buffer in toolCallAccumulator.drain() {
+                let trimmedArgs = buffer.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
                 let parsedArgs: [String: Any]?
                 if trimmedArgs.isEmpty {
                     parsedArgs = [:]
@@ -5353,7 +5352,9 @@ final class AIClient: ObservableObject {
                 }
                 guard let rawArgs = parsedArgs else {
                     NSLog("⚠️ [streamOpenAI] Truncated/malformed tool call '%@' (args len=%d, finish_reason=length:%d)", buffer.name, trimmedArgs.count, sawLengthTruncation ? 1 : 0)
-                    sawLengthTruncation = true
+                    if ToolArgumentDiagnosis.topLevelObjectCount(trimmedArgs) < 2 {
+                        sawLengthTruncation = true
+                    }
                     // Surface it so the model gets an error result for this call id and can re-emit it.
                     emittedNativeToolCalls = true
                     onToolCall?(AIToolCall.withInvalidArguments(
@@ -5369,7 +5370,6 @@ final class AIClient: ObservableObject {
                 emittedNativeToolCalls = true
                 onToolCall?(toolCall)
             }
-            toolCallBuffers.removeAll()
         }
         
         for try await line in bytes.lines {
@@ -5442,20 +5442,7 @@ final class AIClient: ObservableObject {
                     onToken("")
                 }
                 for tc in toolCalls {
-                    let idx = tc["index"] as? Int ?? 0
-                    var entry = toolCallBuffers[idx] ?? (id: UUID().uuidString, name: "", args: "")
-                    if let tcId = tc["id"] as? String, !tcId.isEmpty {
-                        entry.id = tcId
-                    }
-                    if let function = tc["function"] as? [String: Any] {
-                        if let name = function["name"] as? String, !name.isEmpty {
-                            entry.name = name
-                        }
-                        if let argChunk = function["arguments"] as? String, !argChunk.isEmpty {
-                            entry.args.append(argChunk)
-                        }
-                    }
-                    toolCallBuffers[idx] = entry
+                    toolCallAccumulator.add(delta: tc)
                 }
             }
             
@@ -5472,7 +5459,7 @@ final class AIClient: ObservableObject {
         flushPendingStreamTokens(onToken: onToken)
         
         // Flush any remaining buffered tool calls (e.g. if provider sent finish_reason: "stop" or nil)
-        if !toolCallBuffers.isEmpty {
+        if !toolCallAccumulator.isEmpty {
             flushBufferedToolCalls()
         }
         
