@@ -18,6 +18,11 @@ class ArdiumLSPService {
             print("❌ Ardium LSP: 'arc' binary not found.")
             return
         }
+        // Arc 3.1 has no `lsp` command yet: launching it only spawned a failing process at every app start.
+        guard ArcToolchain.shared.supports(command: "lsp") else {
+            print("ℹ️ Arc LSP: `\(arcPath) lsp` is not available in this toolchain; skipping.")
+            return
+        }
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: arcPath)

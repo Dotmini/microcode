@@ -322,7 +322,9 @@ class RuntimeManager: ObservableObject {
     func allRuntimeBinDirectories() -> [String] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser.path
-        var bins: [String] = []
+        // Arc 3 shim first: shells, the Terminal and runners use the same `arc` as the Playground, ahead of the
+        // old Ardium 2 `ardium`/`arc` in /usr/local/bin.
+        var bins: [String] = ArcToolchain.shared.pathDirectories()
         
         var roots: [URL] = [
             runtimesDir,

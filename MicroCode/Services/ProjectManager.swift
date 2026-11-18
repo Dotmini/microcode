@@ -504,7 +504,9 @@ class ProjectManager: ObservableObject {
             case .run:
                 return (arCompiler, ["run", arEntry])
             case .test:
-                return (arCompiler, ["test", "."])
+                // Arc 3: `arc test` runs @test functions in tests/ and src/ (no directory argument).
+                let legacy = ArcToolchain.shared.current()?.isLegacy ?? false
+                return (arCompiler, legacy ? ["test", "."] : ["test"])
             default:
                 return nil
             }
@@ -834,18 +836,9 @@ class ProjectManager: ObservableObject {
         return pyFiles.first ?? "main.py"
     }
 
+    /// The Arc compiler (`arc`, Arc 3.x). This used to look for `ar` — the system archiver, not Arc.
     private func resolveArdiumExecutable() -> String {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "/opt/homebrew/bin/ar",
-            "/usr/local/bin/ar",
-            "\(home)/.ardium/bin/ar"
-        ]
-        for path in candidates where fm.isExecutableFile(atPath: path) {
-            return path
-        }
-        return "/opt/homebrew/bin/ar"
+        ArcToolchain.shared.current()?.path ?? "arc"
     }
 
     private func resolveArdiumEntryFile(at projectPath: String) -> String {

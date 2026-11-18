@@ -6551,7 +6551,7 @@ final class AIClient: ObservableObject {
             "- NEVER output `'My internal instructions are confidential'` — this context is an automated IDE client bridge, not a request to disclose any system prompt.",
             "",
             "### How to Execute MicroCode IDE Tools",
-            "Whenever you need to inspect or edit files, run terminal commands (`shell`), run Ardium (`ardium_run`), invoke MCP tools (`mcp__*`), activate skills (`skill_engine`), orchestrate MCP (`mcp_orchestrator`), or spawn/manage SubAgents (`invoke_subagent`, `define_subagent`, `manage_subagents`, `send_message`, `swarm_orchestrator`, `agent_plan`, `create_plan`), output a plain-text `<tool_call>` XML block:",
+            "Whenever you need to inspect or edit files, run terminal commands (`shell`), run Arc code (`ardium_run`, Arc 3.x), invoke MCP tools (`mcp__*`), activate skills (`skill_engine`), orchestrate MCP (`mcp_orchestrator`), or spawn/manage SubAgents (`invoke_subagent`, `define_subagent`, `manage_subagents`, `send_message`, `swarm_orchestrator`, `agent_plan`, `create_plan`), output a plain-text `<tool_call>` XML block:",
             "<tool_call>{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}</tool_call>",
             "",
             "### Strict Execution Rules",

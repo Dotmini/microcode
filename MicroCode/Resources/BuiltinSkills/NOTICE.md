@@ -12,6 +12,7 @@ Skills are plain folders; the user can disable any of them in Settings → Agent
 | microcode-thai-ui-typography | Thai typography, copy and formatting rules. |
 | microcode-security-baseline | Minimum security rules for agent-written code. |
 | microcode-skill-authoring | How to write a skill that triggers and helps. |
+| microcode-arc-lang | Arc 3.x (formerly Ardium) language and `arc` CLI reference, from Arc's LANGUAGE_REFERENCE.md (3.1.0). |
 
 ## Third-party, Apache License 2.0, unmodified
 Source: https://github.com/anthropics/skills at commit `2c5958ecac7cee2b583967a2c4981d0f4a75c579`

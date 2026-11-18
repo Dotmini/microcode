@@ -403,7 +403,8 @@ final class AgentSkillsStore: ObservableObject {
     private static func builtinCategory(for id: String) -> AgentSkillItem.SkillCategory {
         switch id {
         case "frontend-design", "webapp-testing", "theme-factory",
-             "microcode-anti-slop", "microcode-swift-macos-ui", "microcode-thai-ui-typography":
+             "microcode-anti-slop", "microcode-swift-macos-ui", "microcode-thai-ui-typography",
+             "microcode-arc-lang":
             return .coding
         default:
             return .engineering

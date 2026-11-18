@@ -308,7 +308,10 @@ struct SkillSearchIndex {
         let id = record.id.lowercased()
         let ext = context.openFileExtensions
         var boost = 0.0
-        if id.contains("ardium") && (ext.contains("ar") || q.contains("ardium")) { boost += 8 }
+        if (id.contains("ardium") || id.hasSuffix("arc-lang")),
+           ext.contains("ar") || q.contains("ardium") || queryTerms.contains("arc") {
+            boost += 8
+        }
         if record.isScience && (!ext.isDisjoint(with: ["pdb", "cif", "mmcif"]) || ["protein", "alphafold", "uniprot"].contains(where: { q.contains($0) })) {
             boost += 6
         }

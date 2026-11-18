@@ -151,6 +151,7 @@ let package = Package(
                 "Services/AgentCore/FileFreshnessGuard.swift",
                 "Services/AgentCore/AgentToolTrace.swift",
                 "Services/AgentCore/SkillRouter.swift",
+                "Services/ArcToolchain.swift",
                 "Services/SubAgentSpawnPolicy.swift",
                 "Services/GitUntrackedSnapshot.swift",
                 "Services/AgentCore/AgentContextProtocolBridge.swift",

@@ -6049,9 +6049,9 @@ struct DynamicMCPTool: AgentTool {
 
 struct ArdiumRunTool: AgentTool {
     let name = "ardium_run"
-    let description = "Execute Ardium source code (.ar) directly with native arc / ardium compiler and return standard output and errors."
+    let description = "Run Arc source code (Arc 3.x, formerly Ardium; `.ar` files) with the `arc` compiler MicroCode resolved (`arc run`) and return its output and errors. Programs still running after 120 s are stopped, so start servers in the terminal instead. Load the `microcode-arc-lang` skill before writing Arc."
     let parameters = [
-        ToolParameter(name: "code", type: "string", description: "Ardium source code to execute", required: true)
+        ToolParameter(name: "code", type: "string", description: "Arc source code to run (Arc 3 syntax, with `fn main()`)", required: true)
     ]
     
     func execute(params: [String: Any]) async throws -> String {

@@ -48,6 +48,7 @@ let fixtures: [SkillRouteRecord] = [
     rec("chrome-devtools", "Debug web pages with Chrome DevTools: network, console, performance and memory.", .pluginCache),
     rec("gcp-spark", "Run Apache Spark jobs on Google Cloud Dataproc server clusters.", .pluginCache),
     rec("wix-app", "Build a Wix app with the Wix editor and APIs.", .pluginCache),
+    rec("microcode-arc-lang", "Arc programming language 3.x (formerly Ardium) - syntax, types and the arc CLI. Use when writing or running Arc code or .ar files.", .builtin),
     rec("old-disabled-skill", "A disabled skill about PDF reports.", enabled: false)
 ]
 let coreIds: Set<String> = ["microcode-harness-core"]
@@ -97,6 +98,12 @@ check(ids(index.search("debug the android app on the emulator")).contains("andro
 check(index.search("ทดสอบเว็บด้วย playwright").first?.id == "webapp-testing", "Thai Playwright request → webapp-testing")
 check(ids(index.search("add a widget test", context: ts)).isEmpty, "Flutter widget test is gated outside Flutter projects")
 check(!ids(index.search("explain this protein structure")).isEmpty, "science boost still works")
+
+// Arc work finds the Arc skill: by name, by the old name, or from open .ar files (2026-11-18: "Arc" found nothing).
+check(index.search("ทดสอบ เขียน WebApp ด้วย Arc 100%").first?.id == "microcode-arc-lang", "Thai request naming Arc → Arc skill first: \(ids(index.search("ทดสอบ เขียน WebApp ด้วย Arc 100%")))")
+check(index.search("fix this ardium program").first?.id == "microcode-arc-lang", "old name ardium → Arc skill")
+check(index.search("make it faster", context: .init(openFileExtensions: ["ar"])).first?.id == "microcode-arc-lang", "open .ar file → Arc skill")
+check(!ids(index.search("search the archive for invoices")).contains("microcode-arc-lang"), "words merely containing 'arc' do not match")
 
 // MARK: catalog
 let listing = SkillCatalog.build(fixtures, excluding: coreIds)
