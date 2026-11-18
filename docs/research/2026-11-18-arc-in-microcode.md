@@ -120,6 +120,14 @@
 
 ตัวเลขขนาดงานเป็นการประมาณ ยังไม่ได้วัด
 
+**สถานะ (2026-11-18):**
+- **ลำดับ 1 เสร็จแล้ว** (commit `3b4bf9e`): `ArcToolchain` ที่ใช้ร่วมกันทุกจุด, shim บน PATH, runner ที่มี timeout และหยุดทั้ง process tree, skill `microcode-arc-lang`
+- **ลำดับ 2 เสร็จแล้ว** (`ArcToolchainUpdater`)
+  - build HEAD ที่ commit แล้วจาก repo Arc ในเครื่อง ใช้เวลาจริง 17–28 วินาที
+  - เช็กทุกชั่วโมง ตรวจด้วย `arc doctor` ก่อนสลับ `current` แบบ atomic และเก็บเวอร์ชันก่อนหน้าไว้ rollback
+  - การ build ครั้งแรกในแอปล้มเหลวเพราะ Make ไม่รองรับ path ที่มีช่องว่าง (`Application Support`) จึงย้ายไป build ในโฟลเดอร์ temp แทน
+  - ยังรอ: แหล่ง GitHub Releases (ต้องแก้ release workflow ของ Arc ก่อน) และ `runner.rs` / `mcp-server.py`
+
 ## 6. สิ่งที่ต้องตัดสินใจ
 1. เริ่มจากลำดับที่ 1 (แก้การเชื่อม + toolchain ตัวเดียว) หรือไม่
 2. แหล่งอัปเดตหลักจะเป็น GitHub Releases (ต้องแก้ CI ของ Arc) หรือ build จาก repo ในเครื่อง หรือใช้ทั้งสองแบบ

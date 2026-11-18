@@ -270,6 +270,16 @@ final class ArcToolchain: @unchecked Sendable {
         return ArcToolchainResolver.helpLists(command: command, in: help)
     }
 
+    /// LANGUAGE_REFERENCE.md of the resolved toolchain when it is a MicroCode-managed install.
+    var referencePath: String? {
+        guard let resolution = current() else { return nil }
+        let managedBin = URL(fileURLWithPath: managedBinary).resolvingSymlinksInPath().path
+        guard URL(fileURLWithPath: resolution.path).resolvingSymlinksInPath().path == managedBin else { return nil }
+        let reference = URL(fileURLWithPath: managedBin).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("share/LANGUAGE_REFERENCE.md").path
+        return FileManager.default.fileExists(atPath: reference) ? reference : nil
+    }
+
     /// One-line status for diagnostics and error messages.
     var statusDescription: String {
         guard let resolution = current() else {

@@ -489,6 +489,16 @@ final class AgentSkillsStore: ObservableObject {
         SkillLookup.resolve(query, records: routeRecords())
     }
     
+    /// Live facts appended to a skill when it is loaded (the Arc skill states the installed toolchain).
+    func runtimeNote(forSkillId id: String) -> String? {
+        guard id == "microcode-arc-lang" else { return nil }
+        var note = "Installed toolchain: \(ArcToolchain.shared.statusDescription)."
+        if let reference = ArcToolchain.shared.referencePath {
+            note += " Full reference for exactly this version: `\(reference)` (read it with file_read when unsure)."
+        }
+        return note
+    }
+
     /// Distills the actionable core of a SKILL.md (stripping YAML frontmatter) for Zero-Round-Trip JIT injection
     func distilledInstructions(for skill: AgentSkillItem, maxChars: Int = 1500) -> String {
         var body = skill.instructions
@@ -531,6 +541,7 @@ final class AgentSkillsStore: ObservableObject {
                 snippet += "- Helper Scripts (`skill_engine(action: \"run_script\", query: \"\(skill.id)\", script: ...)`): `\(scripts.joined(separator: "`, `"))`\n"
             }
             snippet += "\(distilledInstructions(for: skill, maxChars: 16_000))\n"
+            if let note = runtimeNote(forSkillId: skill.id) { snippet += "\(note)\n" }
         }
         return snippet
     }

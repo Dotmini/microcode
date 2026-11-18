@@ -6784,7 +6784,9 @@ struct SkillEngineTool: AgentTool {
                 guard let skill = store.skills.first(where: { $0.id == resolvedId }) else {
                     return "Skill '\(resolvedId)' not found."
                 }
-                let distilled = store.distilledInstructions(for: skill, maxChars: 4000)
+                // Whole body (Agent Skills spec: < 5000 tokens); the old 4000-char cut dropped the end of skills.
+                var distilled = store.distilledInstructions(for: skill, maxChars: 20_000)
+                if let note = store.runtimeNote(forSkillId: skill.id) { distilled += "\n\n" + note }
                 let scripts = store.availableScripts(forSkill: skill)
                 return """
                 # Skill: \(skill.name)

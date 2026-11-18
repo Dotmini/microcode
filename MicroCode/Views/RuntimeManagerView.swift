@@ -22,6 +22,7 @@ struct RuntimeManagerView: View {
             // Runtime List
             ScrollView {
                 LazyVStack(spacing: 12) {
+                    ArcToolchainCard(updater: ArcToolchainUpdater.shared)
                     ForEach(manager.runtimes) { runtime in
                         RuntimeCard(runtime: runtime, onInstall: {
                             manager.install(runtime.type)
@@ -204,5 +205,94 @@ struct RuntimeCard: View {
         .padding()
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(12)
+    }
+}
+
+// MARK: - Arc Toolchain Card
+
+/// Arc (formerly Ardium) toolchain: what is installed, where updates come from, and the update state.
+struct ArcToolchainCard: View {
+    @ObservedObject var updater: ArcToolchainUpdater
+    @State private var toolchain = ArcToolchain.shared.statusDescription
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .frame(width: 50, height: 50)
+                .background(Color.accentColor.opacity(0.15))
+                .cornerRadius(12)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Arc")
+                    .font(.headline)
+                Text(toolchain)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(updater.sourcePath.map { "Source: \($0)" } ?? "Source: Arc repo not found")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(updater.statusText)
+                    .font(.caption)
+                    .foregroundColor(statusColor)
+                    .lineLimit(2)
+                if let last = updater.lastChecked {
+                    Text("Last checked: \(last.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 8) {
+                HStack(spacing: 6) {
+                    if updater.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Button("Check Now") {
+                        Task { await updater.check(manual: true) }
+                    }
+                    .disabled(updater.isBusy)
+                }
+                Button("Choose Source…", action: chooseSource)
+                    .disabled(updater.isBusy)
+                Toggle("Auto-update", isOn: $updater.autoUpdate)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            .font(.caption)
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(12)
+        .onReceive(updater.$status) { _ in
+            toolchain = ArcToolchain.shared.statusDescription
+        }
+    }
+
+    private var statusColor: Color {
+        switch updater.status {
+        case .failed, .noSource: return .orange
+        case .installed: return .green
+        default: return .secondary
+        }
+    }
+
+    private func chooseSource() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the Arc source repository (the folder with VERSION, Makefile and src/compiler)."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        updater.setSourceRepo(url.path)
+        Task { await updater.check(manual: true) }
     }
 }

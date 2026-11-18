@@ -577,6 +577,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
         }
 
+        // Keep the Arc toolchain on the newest commit of the Arc source repo (first check ~20 s after launch, then hourly).
+        ArcToolchainUpdater.shared.start()
+
         // Attach window delegate to primary workspace windows so closing the window (Cmd+W / red close button)
         // hides the window instead of destroying the view hierarchy or killing in-flight AI work.
         attachWindowDelegates()
