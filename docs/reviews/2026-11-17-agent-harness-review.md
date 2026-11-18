@@ -377,6 +377,60 @@ commit แล้ว (2026-11-18), `Scripts/tests/run-phase3a-harness.sh` ผ่�
 4. **รวม rules เหลือ pipeline เดียว:** dedupe ตาม canonical path, กำหนด precedence ให้ชัด, แสดง budget ใน UI, ใช้ AGENTS.md ที่ใกล้ไฟล์ที่สุด และทำให้ import ปลอดภัยต่อ symlink
 5. **ทำ loader ให้ตรงสเปก:** ใช้ YAML parser จริง, ตรวจด้วย `skills-ref validate`, สแกน `<ws>/.claude/skills`, rescan เมื่อเปลี่ยน workspace, ทำรายการ skill ให้คงที่เพื่อให้ cache ได้, ให้ `read` คืน body ทั้งหมด และรองรับ `/skill-name`
 
+### 6.4 Skill เปิดไม่ตรงงาน (วิจัยเพิ่ม 2026-11-18)
+
+**วิธีวิจัย:** เขียน replica ของ `loadAndScanSkills` + `rankSkills` + `activeSkillsPromptSnippet` เป็น Python แล้วรันกับ skill จริงบนเครื่องนี้ ซึ่งมี 236 ตัว เปิดใช้ทั้งหมดตามค่าเริ่มต้น และ 165 ตัวมาจาก `~/.gemini/config/plugins`
+
+| Prompt | สิ่งที่เกิดขึ้น |
+|---|---|
+| "ต่อ", "ช่วยดู bug ว่าทำไมแอปค้าง", "hello" | ไม่มี skill ไหน match แต่ catalog ยังใส่ 14 ตัวเรียงตามตัวอักษร (kc_constructs, presentations, spreadsheets, alphafold…) พร้อมคำสั่ง "MUST read" |
+| "add a unit test for the json parser" (ไฟล์ `.ts`) | inject `dart-add-unit-test` เข้า prompt ล่วงหน้า (score 76) |
+| "run the server with uvicorn" | inject skill `uv` เพราะ "uv" เป็น substring ของ "uvicorn" |
+| "fix the build error in AgentService.swift" | inject `microcode-swift-macos-ui` ซึ่งเป็น skill ด้าน UI |
+| "explain what this function does" | catalog เต็มไปด้วย canva/figma/chrome เพราะคำว่า this/what/does |
+
+**สาเหตุ:**
+1. skill ที่เปิดอยู่ได้ 10 คะแนนฟรี (`AgentSkillsView.swift:490`) ทุกตัวจึงผ่าน `score > 0` ผลคือ catalog ถูกเติมจนครบ 14 ตัวเสมอแม้จะไม่เกี่ยวกับงาน
+2. match description แบบ substring และไม่มี stopword (`:510-514`) คำอย่าง "with" และ "this" จึงได้คะแนน และ "test" ไป match กับ "latest"
+3. ชื่อหรือ ID ที่สั้นอย่าง `uv`, `pdf`, `swarm`, `pets` ถ้าไป match แบบ substring จะได้ +55 (`:497`) ซึ่งพอให้ถึงเกณฑ์ inject 58 ได้ทันที
+4. ไม่กรองตาม stack ของโปรเจกต์ skill ของ Dart, Flutter, Firebase, BigQuery, Figma, Wix (แต่ละกลุ่มมี 7–16 ตัว) จึงถูก rank ในโปรเจกต์ที่ไม่เกี่ยวข้อง
+5. ภาษาไทยไม่มีช่องว่าง ทั้งประโยคจึงกลายเป็น token เดียว ไม่ match อะไรเลย แล้วได้ filler แทน
+6. rank ใหม่จากข้อความล่าสุดทุกครั้ง พอพิมพ์ "ต่อ" skill ที่ใช้อยู่ก็หายไปและได้ filler มาแทน ซึ่งทำให้ prompt cache ไม่ hit ด้วย
+7. `skill_engine read` (`AgentToolBox.swift:6777`) ใช้ `name.contains(query)` ถ้า query ว่างจะเปิด skill ตัวแรกในรายการ, query สั้นจะได้ตัวแรกที่บังเอิญ match และไม่ตรวจว่า skill ถูกปิดอยู่หรือไม่
+8. prompt ผลักให้โมเดลเปิด skill: "MUST read its SKILL.md" (`AgentSkillsView.swift:610`) และ "ALWAYS … check `<available_skills>` via `skill_engine` FIRST" (`AgentService.swift:752`)
+
+**แนวปฏิบัติ** ([agentskills.io: How to add skills support](https://agentskills.io/integrate-skills)):
+- catalog ประกอบด้วย name + description ของ skill ที่เปิดอยู่ และ**ให้โมเดลตัดสินใจเอง** แทนที่ harness จะจับ keyword
+- ซ่อน skill ที่ถูกปิดไว้ออกจาก catalog
+- ผู้ใช้เรียก skill ตรงได้ด้วย `/skill-name` หรือ `$skill-name`
+- จำกัดชื่อที่ activation tool รับได้ให้เป็นชื่อ skill ที่มีอยู่จริง
+- Claude Code จำกัด listing ไว้ราว 1% ของ context (ตัวเลขนี้มาจาก community ยังไม่ได้ยืนยันจาก doc ทางการ)
+
+**ต้นทุน catalog:**
+- ใส่ครบ 236 ตัว ราว 10k token ต่อ request (ตัด description ที่ 150 ตัวอักษร) หรือ 24k token ถ้าไม่ตัด ซึ่งใหญ่เกินไปสำหรับ local model
+- ถ้าใส่เฉพาะ built-in + user-level (19 ตัว) ราว 1.2k token
+
+**แผน Phase 3c** (เปลี่ยนพฤติกรรม จึงต้องรอผู้ใช้ตัดสินใจก่อน):
+1. เลิก inject skill ล่วงหน้าจาก keyword จะ inject ก็ต่อเมื่อผู้ใช้เรียก `/skill-name` หรือ `$skill-name`
+2. ทำ catalog ให้คงที่ (เรียงตาม id ไม่ rank ใหม่ทุกข้อความ) และอยู่ภายใน budget ที่ผูกกับขนาด context ของโมเดล
+   - ใส่ built-in, user-level และ project skill ที่ opt-in ไว้ก่อน
+   - ที่เหลือ (plugin cache ของ Gemini/Codex) ให้ค้นผ่าน `skill_engine match`
+3. เขียน `match` ใหม่
+   - วิธี: BM25 + stopword + match เฉพาะคำเต็ม + ตัดคำไทยด้วย `NLTokenizer` + กรองตาม platform family (dart/flutter/firebase… ต้องมีสัญญาณใน prompt หรือ workspace) + เลิกให้คะแนนฟรี + ตั้ง threshold
+   - ผลจากต้นแบบ Python: dart ไม่โผล่ในโปรเจกต์ TS แต่โผล่ในโปรเจกต์ Dart, `uv` ไม่โผล่จาก "uvicorn" และข้อความไทยที่ไม่เกี่ยวข้องจะได้คำตอบว่าไม่มี skill ที่ตรง
+   - ยังมี noise จากคำเดี่ยวคะแนนต่ำอยู่ ต้องปรับ threshold ด้วยชุด eval
+4. `read` ให้ match ตามลำดับ: exact id → exact name → prefix ที่ไม่ซ้ำกับตัวอื่น ถ้า query ว่างหรือกำกวมให้คืน error พร้อมตัวเลือก และปฏิเสธ skill ที่ถูกปิด
+5. เปลี่ยนคำสั่งใน prompt เป็น "เมื่องานตรงกับ description ของ skill"
+6. ทำชุด eval ของ prompt ไทยและอังกฤษ โดยระบุ skill ที่คาดหวังหรือ "ไม่มี" แล้วใช้เป็น regression gate
+
+**สถานะ Phase 3c (2026-11-18):** ทำครบทั้ง 6 ข้อแล้ว
+- โค้ดอยู่ที่ `SkillRouter.swift` (ไฟล์ใหม่), `AgentSkillsView.swift`, `AgentToolBox.swift` (`skill_engine`) และ `AgentService.swift` (บรรทัด MCP)
+- regression `Scripts/tests/run-skill-routing.sh` ผ่าน ส่วน `--live` ใช้รายงานผลกับ skill จริงบนเครื่อง
+- ผลกับ skill จริง 235 ตัว: catalog แสดง 38 ตัว (ราว 2.1k token) และซ่อนไว้ 196 ตัวให้ค้นผ่าน `match`
+  - "ต่อ", "hello", "explain…", "uvicorn" และ "Editor ไม่ smooth" ไม่ได้ skill ใดเลย
+  - BigQuery, MCP builder และ Figma ได้ skill ที่ตรงเป็นอันดับแรก
+- สิ่งที่รู้แล้ว: description ของ `frontend-design` ฉบับ built-in ไม่มีคำว่า web/landing page จึงหาด้วย `match` ไม่เจอ แต่เป็น built-in ที่อยู่ใน catalog ทุกครั้ง โมเดลจึงยังเห็นและเลือกเองได้
+
 ---
 
 ## 7. สถาปัตยกรรมและการลดความซ้ำซ้อน

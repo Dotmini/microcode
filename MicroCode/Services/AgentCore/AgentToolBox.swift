@@ -6739,7 +6739,7 @@ struct SkillEngineTool: AgentTool {
     let description = "Autonomous Skill Engine 2.0: Rank & discover skills ('match'), read distilled SKILL.md instructions without file_read ('read'), execute a skill's bundled helper script with MicroCode Portable Runtime ('run_script'), or crystallize a solved workflow into a reusable skill ('crystallize')."
     let parameters = [
         ToolParameter(name: "action", type: "string", description: "Action: 'match', 'read', 'run_script', or 'crystallize'", required: true),
-        ToolParameter(name: "query", type: "string", description: "Search query, skill name, or skill ID", required: false),
+        ToolParameter(name: "query", type: "string", description: "For 'match': what the task needs. For 'read' / 'run_script': the exact skill id (from <available_skills> or match results)", required: false),
         ToolParameter(name: "script", type: "string", description: "Script filename inside the skill's scripts/ directory (for 'run_script')", required: false),
         ToolParameter(name: "args", type: "string", description: "Space-separated arguments for 'run_script'", required: false),
         ToolParameter(name: "description", type: "string", description: "Skill description (for 'crystallize')", required: false),
@@ -6758,7 +6758,7 @@ struct SkillEngineTool: AgentTool {
             return await MainActor.run {
                 let ranked = Array(AgentSkillsStore.shared.rankSkills(forPrompt: query, workspacePath: ws).prefix(8))
                 if ranked.isEmpty {
-                    return "No matching skills found for '\(query)'."
+                    return "No installed skill matches '\(query)'. Continue without a skill."
                 }
                 return ranked.map { item in
                     let scripts = AgentSkillsStore.shared.availableScripts(forSkill: item.skill)
@@ -6769,12 +6769,24 @@ struct SkillEngineTool: AgentTool {
         case "read", "distill", "activate":
             return await MainActor.run {
                 let store = AgentSkillsStore.shared
-                guard let skill = store.skills.first(where: {
-                    $0.id.lowercased() == query.lowercased() ||
-                    $0.name.lowercased() == query.lowercased() ||
-                    $0.name.lowercased().contains(query.lowercased())
-                }) else {
-                    return "Skill '\(query)' not found. Use action='match' to search available skills."
+                let resolvedId: String
+                switch store.resolveSkill(query) {
+                case .found(let id):
+                    resolvedId = id
+                case .emptyQuery:
+                    return "skill_engine read needs the exact skill id in `query` (from <available_skills> or action='match')."
+                case .disabled(let id):
+                    return "Skill '\(id)' is disabled (Settings → Agent Skills). Continue without it."
+                case .ambiguous(let ids):
+                    return "'\(query)' matches several skills: \(ids.joined(separator: ", ")). Call read again with the exact id of the one that fits the task, or continue without a skill."
+                case .notFound:
+                    let closest = store.rankSkills(forPrompt: query, workspacePath: ws).prefix(5).map { "`\($0.skill.id)`" }
+                    return closest.isEmpty
+                        ? "Skill '\(query)' not found and no installed skill matches it. Continue without a skill."
+                        : "Skill '\(query)' not found. Closest installed skills: \(closest.joined(separator: ", ")). Read one only if it clearly fits the task."
+                }
+                guard let skill = store.skills.first(where: { $0.id == resolvedId }) else {
+                    return "Skill '\(resolvedId)' not found."
                 }
                 let distilled = store.distilledInstructions(for: skill, maxChars: 4000)
                 let scripts = store.availableScripts(forSkill: skill)

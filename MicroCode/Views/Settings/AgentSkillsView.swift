@@ -52,14 +52,18 @@ struct AgentSkillItem: Identifiable, Hashable {
 final class AgentSkillsStore: ObservableObject {
     static let shared = AgentSkillsStore()
     
-    @Published var skills: [AgentSkillItem] = []
+    @Published var skills: [AgentSkillItem] = [] {
+        didSet { skillsRevision &+= 1 }
+    }
+    private var skillsRevision = 0
+    private var searchIndexCache: (revision: Int, index: SkillSearchIndex)?
     @Published var selectedCategory: AgentSkillItem.SkillCategory = .all
     @Published var searchText: String = ""
     @Published var activeCount: Int = 0
     @Published var selectedSkillForDetail: AgentSkillItem? = nil
     @Published var isScanning: Bool = false
+    /// Skills the user invoked by name (`/skill-id` or `$skill-id`) in the latest message; their full instructions are injected.
     @Published var autoActivatedSkillIds: Set<String> = []
-    @Published var jitAutoRouterEnabled: Bool = true
     
     private let enabledKey = "microcode.enabledSkills.real.v2"
     /// Opt-out set for discovered ecosystem/plugin/built-in skills (v3): all valid skills are enabled by default unless explicitly disabled by the user.
@@ -419,40 +423,6 @@ final class AgentSkillsStore: ObservableObject {
         return "\n\n## MICROCODE CORE HARNESS\n" + parts.joined(separator: "\n\n") + "\n"
     }
 
-    /// Intent-based boost for bundled skills; keyword lists are deliberately specific so a skill is not injected on unrelated turns.
-    private static func builtinAffinity(id: String, prompt: String, openExts: Set<String>) -> (Int, String)? {
-        func has(_ words: [String]) -> Bool { words.contains { prompt.contains($0) } }
-        let hasThai = prompt.unicodeScalars.contains { (0x0E00...0x0E7F).contains($0.value) }
-        switch id {
-        case "frontend-design":
-            if has(["landing page", "website", "web page", "webpage", "frontend", "front-end", "redesign", "หน้าเว็บ", "ออกแบบเว็บ"]) ||
-                !openExts.isDisjoint(with: ["html", "css", "scss", "tsx", "jsx", "vue", "svelte"]) { return (34, "UI / frontend design task") }
-        case "microcode-anti-slop":
-            if has(["landing page", "copywriting", "anti-slop", "no slop", "เขียนบทความ", "หน้าเว็บ"]) { return (28, "Anti-slop quality guard") }
-        case "theme-factory":
-            if has(["theme", "palette", "slides", "deck", "color scheme", "colour scheme", "ธีม", "โทนสี", "ชุดสี"]) { return (30, "Theme / palette task") }
-        case "microcode-swift-macos-ui":
-            if has(["swiftui", "appkit", "macos", "nsview", "nswindow", "xcode", "toolbar", "sidebar", "swift "]) || openExts.contains("swift") { return (30, "Swift / macOS UI") }
-        case "microcode-thai-ui-typography":
-            let explicit = has(["thai", "ภาษาไทย", "th_th", "th-th", "localiz", "i18n", "พ.ศ."])
-            let textIntent = has(["ui", "form", "report", "label", "copy", "font", "text", "document", "pdf", "translate", "แปล", "ฟอนต์", "ตัวอักษร", "ฟอร์ม", "รายงาน", "เอกสาร", "ข้อความ", "ปุ่ม"])
-            if explicit || (hasThai && textIntent) { return (36, "Thai text / UI") }
-        case "microcode-security-baseline":
-            if has(["security", "secure", "auth", "token", "secret", "password", "vulnerab", "injection", "xss", "csrf", "encrypt", "keychain", "oauth", "credential", "ช่องโหว่", "ความปลอดภัย", "รหัสผ่าน"]) { return (32, "Security-sensitive change") }
-        case "mcp-builder":
-            // ONLY trigger mcp-builder when the user asks to BUILD/WRITE/IMPLEMENT an MCP server in code — NEVER when connecting/using an existing MCP like Canva!
-            let isConnectingExistingMCP = has(["เชื่อม", "ต่อ mcp", "connect", "install", "login", "enable", "canva", "figma", "github", "gmail", "notion", "supabase"])
-            let isBuildingNewMCPServer = has(["build mcp", "create mcp", "write mcp", "develop mcp", "fastmcp", "mcp sdk", "สร้าง mcp server", "เขียน mcp", "พัฒนา mcp"])
-            if isBuildingNewMCPServer && !isConnectingExistingMCP { return (48, "Authoring new MCP server") }
-        case "webapp-testing":
-            if has(["playwright", "e2e", "browser test", "web app test", "ทดสอบเว็บ"]) { return (38, "Web app testing") }
-        case "microcode-skill-authoring":
-            if has(["skill.md", "crystalliz", "write a skill", "create a skill", "new skill", "สร้าง skill"]) { return (44, "Skill authoring") }
-        default: break
-        }
-        return nil
-    }
-
     // MARK: - Zero-Round-Trip Semantic JIT Skill Router & Autonomous Crystallizer
     
     func availableScripts(forSkill skill: AgentSkillItem) -> [String] {
@@ -464,107 +434,58 @@ final class AgentSkillsStore: ObservableObject {
         return items.filter { !$0.hasPrefix(".") }.sorted()
     }
     
-    /// Ranks all discovered skills against user prompt intent, workspace stack, and open editor files.
+    /// Router view of the installed skills (see SkillRouter.swift).
+    func routeRecords() -> [SkillRouteRecord] {
+        let home = NSHomeDirectory()
+        return skills.map { skill in
+            SkillRouteRecord(
+                id: skill.id,
+                name: skill.name,
+                description: skill.description,
+                isEnabled: skill.isEnabled,
+                tier: SkillCatalogTier.classify(path: skill.filePath, isBuiltin: skill.isBuiltin, isProjectSkill: skill.requiresOptIn, home: home),
+                isScience: skill.category == .science
+            )
+        }
+    }
+
+    private func searchIndex() -> SkillSearchIndex {
+        if let cache = searchIndexCache, cache.revision == skillsRevision { return cache.index }
+        let core = Set(Self.coreSkillIds)
+        let index = SkillSearchIndex(records: routeRecords().filter { !core.contains($0.id) })
+        searchIndexCache = (skillsRevision, index)
+        return index
+    }
+
+    static func workspaceMarkers(at root: String) -> Set<String> {
+        guard !root.isEmpty else { return [] }
+        let fm = FileManager.default
+        return Set(SkillSearchIndex.markerFiles.filter { fm.fileExists(atPath: (root as NSString).appendingPathComponent($0)) })
+    }
+
+    /// Searches enabled skills (BM25 over whole words, Thai segmented, platform-gated). Only skills with real
+    /// evidence are returned — an unrelated prompt returns nothing. Used by `skill_engine match`, never to inject.
     func rankSkills(
         forPrompt prompt: String,
         workspacePath: String? = nil,
         openFiles: [String] = []
     ) -> [(skill: AgentSkillItem, score: Int, reason: String)] {
-        let lowPrompt = prompt.lowercased()
-        let promptTokens = Set(
-            lowPrompt.components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { $0.count >= 3 }
-        )
         let wsRoot = workspacePath ?? AgentToolBox.shared.workspaceRoot ?? ""
-        let fm = FileManager.default
-        
-        // Workspace stack signals
-        let hasPackageJson = !wsRoot.isEmpty && fm.fileExists(atPath: (wsRoot as NSString).appendingPathComponent("package.json"))
-        let hasPubspec = !wsRoot.isEmpty && fm.fileExists(atPath: (wsRoot as NSString).appendingPathComponent("pubspec.yaml"))
-        let hasFirebaseJson = !wsRoot.isEmpty && fm.fileExists(atPath: (wsRoot as NSString).appendingPathComponent("firebase.json"))
-        let openExts = Set(openFiles.map { URL(fileURLWithPath: $0).pathExtension.lowercased() })
-        
-        var ranked: [(skill: AgentSkillItem, score: Int, reason: String)] = []
-        
-        for skill in skills {
-            var score = skill.isEnabled ? 10 : 0
-            var reasons: [String] = []
-            let lowId = skill.id.lowercased()
-            let lowName = skill.name.lowercased()
-            let lowDesc = skill.description.lowercased()
-            
-            // 1. Direct ID or Name match in prompt
-            if !lowPrompt.isEmpty && (lowPrompt.contains(lowId) || lowPrompt.contains(lowName)) {
-                score += 55
-                reasons.append("Direct prompt mention")
-            }
-            
-            // 2. Keyword overlap between prompt tokens and skill ID/name/tags/description
-            let idTokens = Set(lowId.components(separatedBy: CharacterSet(charactersIn: "-_.")).filter { $0.count >= 3 })
-            let matchedIdTokens = promptTokens.intersection(idTokens)
-            if !matchedIdTokens.isEmpty {
-                score += matchedIdTokens.count * 18
-                reasons.append("Matched keywords: \(matchedIdTokens.sorted().joined(separator: ", "))")
-            }
-            
-            for token in promptTokens where token.count >= 4 {
-                if lowDesc.contains(token) {
-                    score += 6
-                }
-            }
-            
-            // 3. Workspace & file extension stack affinity
-            if (openExts.contains("ar") || lowPrompt.contains("ardium")) && lowId.contains("ardium") {
-                score += 45
-                reasons.append("Ardium (.ar) context")
-            }
-            if (hasPubspec || openExts.contains("dart") || lowPrompt.contains("flutter")) && (lowId.contains("flutter") || lowId.contains("dart")) {
-                score += 30
-                reasons.append("Flutter/Dart project")
-            }
-            if (hasFirebaseJson || lowPrompt.contains("firebase") || lowPrompt.contains("firestore")) && (lowId.contains("firebase") || lowId.contains("firestore")) {
-                score += 32
-                reasons.append("Firebase workspace")
-            }
-            if hasPackageJson && (lowPrompt.contains("lcp") || lowPrompt.contains("devtools") || lowPrompt.contains("a11y") || lowPrompt.contains("memory leak")) {
-                if ["chrome-devtools", "debug-optimize-lcp", "a11y-debugging", "memory-leak-debugging"].contains(lowId) {
-                    score += 35
-                    reasons.append("Web diagnostics match")
-                }
-            }
-            if (lowPrompt.contains("simulator") || lowPrompt.contains("emulator") || lowPrompt.contains("adb") || lowPrompt.contains("android") || lowPrompt.contains("ios")) &&
-               ["device-automation", "android-cli", "mobile-release-automation", "xcode-project-setup"].contains(lowId) {
-                score += 38
-                reasons.append("Mobile device/runtime task")
-            }
-            if (openExts.contains("pdb") || openExts.contains("cif") || openExts.contains("mmcif") || lowPrompt.contains("protein") || lowPrompt.contains("alphafold") || lowPrompt.contains("uniprot")) &&
-               skill.category == .science {
-                score += 35
-                reasons.append("Biomolecular/Science task")
-            }
-            if (lowPrompt.contains("runpod") || lowPrompt.contains("gpu")) && lowId == "runpod-orchestrator" {
-                score += 45
-                reasons.append("RunPod GPU orchestration")
-            }
-            if (lowPrompt.contains("omni") || lowPrompt.contains("o1x") || lowPrompt.contains("tpat")) && lowId == "dotmini-omni-ai" {
-                score += 45
-                reasons.append("Dotmini Omni AI")
-            }
-            
-            if skill.isBuiltin, let boost = Self.builtinAffinity(id: lowId, prompt: lowPrompt, openExts: openExts) {
-                score += boost.0
-                reasons.append(boost.1)
-            }
-            
-            if score > 0 {
-                ranked.append((skill, score, reasons.isEmpty ? "User enabled" : reasons.joined(separator: " • ")))
-            }
+        let context = SkillSearchIndex.Context(
+            openFileExtensions: Set(openFiles.map { URL(fileURLWithPath: $0).pathExtension.lowercased() }.filter { !$0.isEmpty }),
+            workspaceMarkers: Self.workspaceMarkers(at: wsRoot)
+        )
+        let byId = Dictionary(skills.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return searchIndex().search(prompt, context: context, limit: 14).compactMap { hit in
+            guard let skill = byId[hit.id] else { return nil }
+            let reason = hit.matchedTerms.isEmpty ? "Workspace context" : "Matched: \(hit.matchedTerms.joined(separator: ", "))"
+            return (skill, Int((hit.score * 10).rounded()), reason)
         }
-        
-        return ranked.sorted {
-            if $0.score != $1.score { return $0.score > $1.score }
-            return $0.skill.name < $1.skill.name
-        }
+    }
+
+    /// `skill_engine read`: exact id, exact name or unique prefix; never a disabled skill.
+    func resolveSkill(_ query: String) -> SkillLookup.Result {
+        SkillLookup.resolve(query, records: routeRecords())
     }
     
     /// Distills the actionable core of a SKILL.md (stripping YAML frontmatter) for Zero-Round-Trip JIT injection
@@ -580,12 +501,12 @@ final class AgentSkillsStore: ObservableObject {
         return String(body.prefix(maxChars)) + "\n... [Full skill at \(skill.filePath)]"
     }
     
-    /// AAIF 3-Tier Progressive Disclosure Skill Router:
-    /// - Tier 1 (Always lightweight): Injects a compact `<available_skills>` table-of-contents (ID + 1-line description + path)
-    ///   for the top relevant enabled skills (~40 tokens/skill, zero prompt bloat).
-    /// - Tier 2 (On-Demand Activation): The LLM reads full `SKILL.md` via `skill_engine(action: "read", query: "<id>")` or `file_read`
-    ///   ONLY when user intent genuinely requires that skill (plus at most 1 ultra-high-precision match `score >= 58` pre-warmed).
-    /// - Tier 3 (Executable Resources): Bundled `scripts/` and `references/` are invoked on demand via `skill_engine(action: "run_script")`.
+    /// Agent Skills progressive disclosure (agentskills.io):
+    /// - Tier 1: a stable `<available_skills>` catalog (id + short description) within a token budget; the model
+    ///   decides which skill applies. The rest stay searchable with `skill_engine(action: "match")`.
+    /// - Tier 2: full instructions are loaded by the model via `skill_engine(action: "read")`, or injected here only
+    ///   when the user invokes a skill by name (`/skill-id …` or `$skill-id`). No keyword-based pre-injection.
+    /// - Tier 3: bundled scripts run on demand via `skill_engine(action: "run_script")`.
     func activeSkillsPromptSnippet(
         forPrompt prompt: String = "",
         workspacePath: String? = nil,
@@ -593,45 +514,23 @@ final class AgentSkillsStore: ObservableObject {
     ) -> String {
         let core = coreProtocolSnippet()
         let coreIds = Set(Self.coreSkillIds)
-        let ranked = rankSkills(forPrompt: prompt, workspacePath: workspacePath, openFiles: openFiles)
-            .filter { $0.skill.isEnabled && !coreIds.contains($0.skill.id) }
-        guard !ranked.isEmpty else { return core }
-        
-        // Only pre-warm 1 unambiguous exact-intent skill (score >= 58); everything else uses Progressive Disclosure!
-        let jitPreloaded = jitAutoRouterEnabled ? Array(ranked.filter { $0.score >= 58 }.prefix(1)) : []
-        let jitIds = Set(jitPreloaded.map { $0.skill.id })
-        if autoActivatedSkillIds != jitIds {
-            autoActivatedSkillIds = jitIds
+        let enabled = skills.filter { $0.isEnabled && !coreIds.contains($0.id) }
+        let invokedIds = SkillInvocation.explicitIds(in: prompt, enabledIds: enabled.map(\.id))
+        if autoActivatedSkillIds != Set(invokedIds) {
+            autoActivatedSkillIds = Set(invokedIds)
         }
-        
-        let catalogSkills = Array(ranked.filter { !jitIds.contains($0.skill.id) }.prefix(14))
-        
-        var snippet = core + "\n\n## AVAILABLE AGENT SKILLS (Progressive Disclosure)\n"
-        snippet += "- If a listed skill clearly applies to the user's request, MUST read its `SKILL.md` instructions first via `skill_engine(action: \"read\", query: \"<skill_id>\")` or `file_read` before executing.\n"
-        snippet += "- Do NOT activate unrelated skills. You can also search all \(skills.count) installed skills via `skill_engine(action: \"match\", query: \"...\")`.\n"
-        
-        if !jitPreloaded.isEmpty {
-            for entry in jitPreloaded {
-                let s = entry.skill
-                let scripts = availableScripts(forSkill: s)
-                snippet += "\n### Active Skill: `\(s.id)` (\(s.name)) — Path: `\(s.filePath)`\n"
-                if !scripts.isEmpty {
-                    snippet += "- Helper Scripts (`skill_engine(action: \"run_script\", query: \"\(s.id)\", script: ...)`): `\(scripts.joined(separator: "`, `"))`\n"
-                }
-                snippet += "\(distilledInstructions(for: s, maxChars: 1100))\n"
+        guard !enabled.isEmpty else { return core }
+
+        var snippet = core + SkillCatalog.render(SkillCatalog.build(routeRecords(), excluding: coreIds))
+        for id in invokedIds {
+            guard let skill = enabled.first(where: { $0.id == id }) else { continue }
+            snippet += "\n### Skill invoked by the user: `\(skill.id)`\nThe user asked for this skill; follow these instructions for the task.\n"
+            let scripts = availableScripts(forSkill: skill)
+            if !scripts.isEmpty {
+                snippet += "- Helper Scripts (`skill_engine(action: \"run_script\", query: \"\(skill.id)\", script: ...)`): `\(scripts.joined(separator: "`, `"))`\n"
             }
+            snippet += "\(distilledInstructions(for: skill, maxChars: 16_000))\n"
         }
-        
-        if !catalogSkills.isEmpty {
-            snippet += "\n<available_skills>\n"
-            for entry in catalogSkills {
-                let s = entry.skill
-                let oneLineDesc = s.description.replacingOccurrences(of: "\n", with: " ").prefix(150)
-                snippet += "- \(s.id) (\(s.filePath)): \(oneLineDesc)\n"
-            }
-            snippet += "</available_skills>\n"
-        }
-        
         return snippet
     }
     
@@ -968,7 +867,7 @@ struct AgentSkillsView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .lineLimit(1)
                         if store.autoActivatedSkillIds.contains(skill.id) {
-                            Text("JIT AUTO")
+                            Text("INVOKED")
                                 .font(.system(size: 8, weight: .bold))
                                 .foregroundColor(.teal)
                                 .padding(.horizontal, 4)
