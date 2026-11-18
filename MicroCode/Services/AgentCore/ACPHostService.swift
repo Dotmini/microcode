@@ -1637,8 +1637,11 @@ class ACPHostService: ObservableObject {
     }
     
     /// Whether any ACP external agent session is currently executing
+    /// A prompt is in progress in some ACP session (used for quit confirmation, the Dock badge and the
+    /// background notification). Connected-but-idle sessions do not count: they made every quit ask about a
+    /// "running" AI task once any ACP agent had been used.
     var isAnySessionRunning: Bool {
-        sessions.values.contains { $0.state.isActive }
+        sessions.values.contains { $0.state.isRunningTask }
     }
     
     // MARK: - Agent Detection

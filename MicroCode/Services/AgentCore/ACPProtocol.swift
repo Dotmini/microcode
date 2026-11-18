@@ -148,11 +148,18 @@ enum ACPConnectionState: Equatable {
     case running(taskId: String)
     case error(String)
     
+    /// Connected (idle or working): drives the session's "connected" styling in the UI.
     var isActive: Bool {
         switch self {
         case .ready, .running: return true
         default: return false
         }
+    }
+
+    /// A prompt is in progress. An idle, connected agent (`.ready`) is not working.
+    var isRunningTask: Bool {
+        if case .running = self { return true }
+        return false
     }
     
     var statusLabel: String {

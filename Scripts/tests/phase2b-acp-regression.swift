@@ -9,6 +9,7 @@ import Foundation
         replayAndTitle()
         clientParsing()
         capabilities()
+        busyState()
         print("PHASE2B ACP REGRESSION: PASS")
     }
 
@@ -97,6 +98,17 @@ import Foundation
         precondition((resume["params"] as? [String: Any])?["sessionId"] as? String == "s1")
         let close = ACPStandardJsonRpcParser.buildSessionCloseRequest(id: 6, sessionId: "s1")
         precondition(close["method"] as? String == "session/close")
+    }
+
+    /// Quit / Dock badge / "still working in background" must count only a prompt in progress. A connected, idle
+    /// agent (`.ready`) is not working: counting it made every quit ask about a running AI task once any ACP agent
+    /// had been used.
+    static func busyState() {
+        precondition(ACPConnectionState.running(taskId: "s1").isRunningTask)
+        for idle in [ACPConnectionState.ready, .connecting, .initializing, .disconnected, .error("x")] {
+            precondition(!idle.isRunningTask, "\(idle) is not a running task")
+        }
+        precondition(ACPConnectionState.ready.isActive, "UI 'connected' indicator keeps treating ready as active")
     }
 
     static func capabilities() {
