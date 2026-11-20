@@ -3,6 +3,7 @@ rem Builds out-dev\MicroCode.exe, compiles each test program against it and runs
 rem   PreviewTests        File Preview, Markdown links, PDF, LaTeX
 rem   AgentPlatformTests  Consensus Engine + PNS 24/7 (sandbox, real git worktrees, the pnsd daemon)
 rem   NotebookTests       Cell Mode: @param, DAG, .ipynb/.py/.mcnb/.mic (LZFSE), warm Python kernel, polyglot cells, cell_* agent tools
+rem   StudioTests         API Studio (cURL, environments, route scan, .env, real loopback requests) + first-launch onboarding
 setlocal
 set FW=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319
 set WPF=%FW%\WPF
@@ -19,6 +20,8 @@ if errorlevel 1 set FAILED=1
 call :suite AgentPlatformTests
 if errorlevel 1 set FAILED=1
 call :suite NotebookTests
+if errorlevel 1 set FAILED=1
+call :suite StudioTests
 if errorlevel 1 set FAILED=1
 exit /b %FAILED%
 

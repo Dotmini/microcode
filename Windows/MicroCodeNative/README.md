@@ -33,9 +33,11 @@ out\MicroCode.exe --snapshot ctx.png --folder C:\repo --mode agent --seed-chat -
 out\MicroCode.exe --snapshot web.png --folder C:\repo --web http://localhost:5173/ --web-viewport iphone --web-eval web.json --wait 5
     :: WebApp Preview ในกรอบ iPhone — หน้าเว็บจาก WebView2 ถูกจับภาพมาประกอบ, web.json = innerWidth/UA/touch ที่หน้าเว็บรายงานจริง
 out\MicroCode.exe --snapshot and.png --set androidSdkPath=C:\Android\Sdk --android-avd Pixel_7 --wait 150   :: บูต AVD แบบไม่มีหน้าต่างในแท็บ Android
+out\MicroCode.exe --snapshot api.png --mode api --api-url http://127.0.0.1:8000/users --api-method GET --api-send --wait 3   :: API Studio ยิง request จริง
+out\MicroCode.exe --snapshot hello.png --first-launch      :: การ์ดต้อนรับครั้งแรก (ปกติโหมด snapshot จะไม่แสดง)
 ```
 
-ชุดทดสอบอัตโนมัติ (File Preview, ลิงก์ไฟล์, PDF, Markdown, LaTeX, กัน Save ทับไฟล์ binary + Consensus Engine / PNS 24/7: sandbox, git worktree จริง, daemon `pnsd`) — สร้างไฟล์และ repo ทดสอบเองในโฟลเดอร์ชั่วคราว:
+ชุดทดสอบอัตโนมัติ (File Preview, ลิงก์ไฟล์, PDF, Markdown, LaTeX, กัน Save ทับไฟล์ binary + Consensus Engine / PNS 24/7: sandbox, git worktree จริง, daemon `pnsd` + Cell Mode + API Studio ยิง request จริงผ่าน loopback + การ์ดต้อนรับ) — สร้างไฟล์และ repo ทดสอบเองในโฟลเดอร์ชั่วคราว:
 
 ```bat
 tests\run-tests.cmd
@@ -69,6 +71,8 @@ tests\run-tests.cmd
 | ข้อความ error อ่านง่ายพร้อมปุ่มแก้ (401 คีย์ผิด, 402 เครดิตหมด, 429, 5xx, เน็ตหลุด) | `parseErrorMessage` | ✅ |
 | Cell Mode (เขียนใหม่ตาม `NotebookView.swift` ปัจจุบัน): sidebar แบบ GroupBox (Cell Sheets, kernel + เลือก Python/venv, Data Files นำเข้า/สร้าง CSV/เปลี่ยนชื่อ/ลงถังขยะ/Insert Loader Cell/Sync จากโปรเจกต์, Run… by Color/Tag), toolbar 28pt (Python pill, แคปซูล [+ ▶ ▶▶ ▾], DAG, Compute, Vars, App, Open, Export, จำนวนรัน, โมเดล, Agent), การ์ด cell แบบ Mac ([n] + ปุ่มรัน, ภาษา 13 ภาษา, compute ต่อ cell, tag, สี 14 แบบ + กำหนดเอง, ป้าย Stale/ปลายทาง DAG, เวลา/หน่วยความจำ, ประวัติเวอร์ชัน + Restore, ยุบ/ย้าย/ลบ), `# @param` เป็น slider/ปุ่ม/สวิตช์, แบนเนอร์ diff เมื่อ AI แก้ (Accept/Revert), Markdown cell (Edit/Render, `{{ ตัวแปร }}`, LaTeX), คิวรันทีละ cell + Reactive DAG, kernel Python อุ่นต่อ sheet (stream สด, หยุดได้โดยตัวแปรไม่หาย, ตัวแปร/RAM/CUDA, DataFrame → ตาราง Table/Chart/Stats + SQL/CSV, จับกราฟ matplotlib/PIL/plotly/IPython display และไฟล์ที่ cell เขียน), SQL บน DataFrame สด, R/Julia/Rust/Go/C++/Java/C#/R Markdown/LaTeX ผ่าน toolchain ในเครื่อง, การ์ด output (log, Auto-Fix/Ask, กราฟ+Zoom, PDF, Markdown/TeX, HTML → แท็บ WebApp Preview), แถบตัวแปรสด, โหมด App (dashboard), ไฟล์ .mic (LZFSE แบบเดียวกับ Mac) / .ipynb / .mcnb / .py `# %%`, Open in Colab, autosave | `NotebookView.swift`, `DataFrameView.swift`, `KernelClient.swift`, `SharedMemoryService.swift`, `MicFormat.swift` | ✅ (ทดสอบ 58 ข้อ: kernel, pandas, SQL, C++, ไฟล์, เครื่องมือ cell_*) — Ardium/Objective-C รันได้เฉพาะ Mac, compute ระยะไกล (Colab/MicroCode Cloud/SSH) และ Shared Memory ยังไม่มีบน Windows, การถอด .mic ที่บีบอัดแบบ FSE ของ Mac ยังไม่ได้ทดสอบกับไฟล์จริงจาก Mac |
 | Notebook Agent (แผงขวาของ Cell Mode ตาม `NotebookAIPanel.swift`): หัว "Agent · N cells ▾" (ทั้ง sheet / เฉพาะ cell ที่เลือก, Quote cell), แถบ error + Auto-Fix, หน้าเริ่มพร้อมคำแนะนำภาษาไทย, ข้อความแบบ IDE (thought, timeline ของ tool, Markdown/TeX, code block + Insert/Apply/Run/Copy), composer (+ แนบ, @ ตัวแปร/@Cell#, Agent/Ask, โมเดล + บทบาท 9 แบบ, ส่ง/หยุด), Agent cell ในหน้า, เครื่องมือ `cell_list/read/create/update/delete/run` บน tool loop เดียวกับ Agent หลัก | `NotebookAIPanel.swift`, `CellAIAgentEngine.swift`, `AgentToolBox.swift` (Cell tools) | ✅ (เครื่องมือ cell_* ทดสอบอัตโนมัติ; **ยังไม่ได้ทดสอบกับโมเดลจริง**) |
+| API Studio (More Mode → API Client): แถบหัว (Scan Routes, Load .env, Code Snippet, Exit to Code), sidebar History / Collections / Environments + ค้นหา, แถบ request (method 7 แบบ, URL — วาง cURL แล้วนำเข้าให้เอง, Send, Save / Export / Import cURL), แท็บ Body (เลือก Content-Type) / Headers / Params / Auth (Bearer / Basic / API Key ใน header หรือ query), ตัวแปร `{{var}}` จาก environment, response (สถานะ · เวลา · ขนาด, Body แบบ pretty JSON / Headers / Raw / AI Tests = เช็ค status, latency SLA 1500 ms, body, รูปแบบ JSON, Content-Type), สแกน route จากโค้ด (FastAPI/Flask, Express, Next.js app router, Axum, Go), นำเข้า `.env` เป็น environment "Project (.env)", code snippet cURL / Swift / TypeScript / Python / Rust, ประวัติและ collection แยกต่อโปรเจกต์ | `APIClientView.swift`, `APIClientService.swift` | ✅ (ทดสอบ 24 ข้อ รวม request จริงผ่าน loopback) |
+| First-Launch Onboarding: การ์ดต้อนรับครั้งแรกทับหน้าต่าง — Continue with Google (ผ่านสะพาน 127.0.0.1:18888), Dotmini ID อีเมล/รหัสผ่าน, Continue without signing in; ไม่โผล่อีกเมื่อมีไฟล์ `.welcome_done` หรือ sign-in Dotmini อยู่แล้ว | `FirstLaunchWelcomeView.swift` | ✅ (ยังไม่ได้ทดสอบ sign-in ด้วยบัญชีจริง) |
 | Settings แบบเต็ม 12 แท็บ (General, Editor, AI & Agent, Connect with Phone, Team Collaboration, Cloud GPU, Skills, MCP Servers, Tools, Extensions, Account & License, About), Cancel / Save Changes | `SettingsView` | ✅ |
 | AI & Agent: 5 โหมด (Dotmini Cloud / Web Subscription / Direct API Key / Enterprise / Local LLM), ผู้ให้บริการ 15 เจ้า + Base URL + Fetch Models, คีย์เข้ารหัส DPAPI (ตัดช่องว่าง/ขึ้นบรรทัดที่ติดมาตอนวางคีย์) | `aiSettingsContent` | ✅ |
 | Dotmini Cloud ใช้งานได้จริง: เข้าสู่ระบบ Dotmini ID ด้วยอีเมล/รหัสผ่าน, สร้างบัญชี, ลืมรหัสผ่าน, Continue with Google / เว็บเบราว์เซอร์ (ส่ง session กลับผ่าน 127.0.0.1:18888 เหมือน Mac), refresh token อัตโนมัติ, แผนและเครดิต, สมัครแพ็กเกจ/เติมเงินผ่าน Beam Checkout, Platform key + 1-Click Connect code, แชตผ่าน microcode.dotmini.net/v1 | `SupabaseAuthService`, `DotminiPlatformKeyService`, `MicroCodeLicenseSettingsView` | ✅ (ยังไม่ได้ทดสอบด้วยบัญชีจริง) |
@@ -90,8 +94,8 @@ tests\run-tests.cmd
 
 ## ยังไม่ได้พอร์ต
 
-Remote Explorer (SSH), Science, IDE Web Browser, Embed & IoT Studio, API Studio, Extension Studio,
-Agent: sub-agents, MCP (แผง PNS จึงแสดง MCP tract ว่าง), ACP, `/arx` `/compare` `/squad`, First-Launch Onboarding,
+Remote Explorer (SSH), Science, IDE Web Browser, Embed & IoT Studio, Extension Studio,
+Agent: sub-agents, MCP (แผง PNS จึงแสดง MCP tract ว่าง), ACP, `/arx` `/compare` `/squad`,
 บริการเบื้องหลังของแท็บ Settings: Phone Companion, Realtime Collaboration, Cloud GPU, MCP server, Web Subscription login ของ ChatGPT/Claude/Gemini (หน้าจอมีแล้ว แต่ระบบยังไม่ทำงานบน Windows),
 LSP / autocomplete, Collaboration, terminal แบบ ConPTY — โหมดที่ยังไม่พอร์ตจะแสดงหน้า "being ported"
 
@@ -113,7 +117,8 @@ LSP / autocomplete, Collaboration, terminal แบบ ConPTY — โหมดท
 ```
 src/Core      UI.cs (HStack/VStack/Spacer/Button/เมนูแบบ NSMenu), Theme.cs, ThemeTable.g.cs, Sym.cs, AppState.cs, Native.cs
 src/Editor    CodeEditorView.cs, Highlighter.cs
-src/Views     MainWindow.cs, XcodeSidebar.cs, FileTreeView.cs, EditorArea.cs (+ MarkdownView), MathView.cs (LaTeX), PdfRender.cs, WelcomeScreen.cs, ModeViews.cs, Settings.cs
+src/Views     MainWindow.cs, XcodeSidebar.cs, FileTreeView.cs, EditorArea.cs (+ MarkdownView), MathView.cs (LaTeX), PdfRender.cs, WelcomeScreen.cs, ModeViews.cs, Settings.cs,
+              ApiStudio.cs (API Studio + บริการ HTTP/cURL/route scan), FirstLaunch.cs (การ์ดต้อนรับครั้งแรก)
 src/Preview   WebView2.cs (WebView2 แบบ COM ตรง), WebAppPreview.cs, DeviceFrames.cs (กรอบอุปกรณ์วาดเอง), DevRuntime.cs (port + dev server),
               AndroidPreview.cs (adb/emulator), DeviceDock.cs (แถบแท็บ Preview), FileViews.cs (หัวแถบ preview ไฟล์แบบ Mac)
 src/Notebook  NbView.cs (Cell Mode: sidebar/toolbar/คิวรัน/ไฟล์), NbCell.cs (การ์ด cell + output + ตาราง DataFrame), NbAgent.cs (แผง Agent + เครื่องมือ cell_*),
@@ -121,7 +126,7 @@ src/Notebook  NbView.cs (Cell Mode: sidebar/toolbar/คิวรัน/ไฟล
 src/Agent     Agent.cs (หน้า Agent), AgentRunner.cs (tool loop + สตรีม), AgentPanels.cs (Plan/Task/Walkthrough), DiffViews.cs, Inspector.cs (แผงขวา + File Preview),
               AIConfig.cs (โหมด/คีย์/endpoint/error), Dotmini.cs (Dotmini ID, Platform key, Cloud models, สะพาน 18888), Skills.cs,
               Consensus.cs (Consensus Engine + sandbox / git / การอนุมัติของ run แยก), Pns.cs (PNS 24/7: worktree, mission, daemon pnsd), PnsView.cs
-tests         PreviewTests.cs + AgentPlatformTests.cs + NotebookTests.cs + run-tests.cmd (คอมไพล์อ้างอิง out-dev\MicroCode.exe แล้วรันทุกชุด)
+tests         PreviewTests.cs + AgentPlatformTests.cs + NotebookTests.cs + StudioTests.cs + run-tests.cmd (คอมไพล์อ้างอิง out-dev\MicroCode.exe แล้วรันทุกชุด)
 tools         extract_themes.py (ดึงสีธีมจาก Swift), icns_to_png.py + MakeIco.cs (ไอคอนแอป), GlyphAtlas.cs (ตารางไอคอน Segoe)
 ```
 
@@ -131,7 +136,7 @@ tools         extract_themes.py (ดึงสีธีมจาก Swift), icns_
 python tools\extract_themes.py ..\..\MicroCode\Models\AppState.swift src\Core\ThemeTable.g.cs
 ```
 
-ข้อมูลผู้ใช้เก็บที่ `%APPDATA%\MicroCode` (settings.json, chats.json, notebooks.json, cloud-models.json, checkpoints\); API key, Platform key และ session ของ Dotmini เข้ารหัสด้วย Windows DPAPI
+ข้อมูลผู้ใช้เก็บที่ `%APPDATA%\MicroCode` (settings.json, chats.json, notebooks.json, cloud-models.json, checkpoints\, api-client\<โปรเจกต์>\ ของ API Studio, .welcome_done); API key, Platform key และ session ของ Dotmini เข้ารหัสด้วย Windows DPAPI
 settings.json เขียนแบบรวมค่า (อ่านไฟล์ล่าสุด → ใส่เฉพาะค่าที่หน้าต่างนี้เปลี่ยน → เขียนผ่านไฟล์ชั่วคราวแล้วสลับ) เปิดหลายหน้าต่างพร้อมกันก็ไม่ทับคีย์กัน
 PNS เก็บที่ `~/.microcode/pns` เหมือน Mac (missions.json, synaptic_weights.json, procedural_playbooks.json, semantic_invariants.json, synaptic_wal.jsonl, daemon.token / .port / .pid, pnsd.log, worktrees\);
 sandbox ของ Consensus อยู่ที่ `%TEMP%\MicroCode-Sandbox` และถูกลบเมื่อรันจบ (การเปลี่ยนแปลงถูกเก็บในหน่วยความจำจนกว่าจะ Apply)

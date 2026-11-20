@@ -1,4 +1,4 @@
-// Mode surfaces reachable from "More Mode": Playground is ported; the remaining studios show their entry surface.
+// Mode surfaces reachable from "More Mode": Playground, Cell Mode and API Studio are ported; the remaining studios show their entry surface.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -20,6 +20,7 @@ namespace MicroCode.Views
         {
             if (mode == EditorMode.Playground) return new PlaygroundView(app);
             if (mode == EditorMode.Notebook) return new NotebookView(app);
+            if (mode == EditorMode.ApiClient) return new ApiStudioView(app);
             return new StudioPlaceholder(EditorModeInfo.DisplayName(mode), EditorModeInfo.Icon(mode));
         }
 

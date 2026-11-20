@@ -97,6 +97,8 @@ namespace MicroCode
             Styles.Install(app);
             AgentStore.Load();
 
+            // first-launch onboarding stays out of snapshots unless asked for
+            FirstLaunchWelcome.Suppressed = snapshot != null && !args.Contains("--first-launch");
             var win = new MainWindow(state);
             string folder = Arg(args, "--folder") ?? Positional(args).FirstOrDefault(a => Directory.Exists(a));
             string file = Arg(args, "--file") ?? Positional(args).FirstOrDefault(a => File.Exists(a));
@@ -105,6 +107,14 @@ namespace MicroCode
             string mode = Arg(args, "--mode");
             if (mode == "agent") state.SwitchToMode(EditorMode.AIAgent);
             else if (mode == "playground") state.SwitchToMode(EditorMode.Playground);
+            else if (mode == "api")
+            {
+                // snapshot/test hook: preload a request (and send it once the view is shown)
+                ApiStudioView.InitialUrl = Arg(args, "--api-url");
+                ApiStudioView.InitialMethod = Arg(args, "--api-method");
+                ApiStudioView.AutoSend = args.Contains("--api-send");
+                state.SwitchToMode(EditorMode.ApiClient);
+            }
             else if (mode == "notebook")
             {
                 if (args.Contains("--notebook-demo"))
@@ -202,7 +212,7 @@ namespace MicroCode
             AgentStore.Notify();
         }
 
-        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd", "--notebook-file", "--nb-scroll" };
+        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd", "--notebook-file", "--nb-scroll", "--api-url", "--api-method" };
 
         /// <summary>Arguments that are neither flags nor a flag's value — e.g. a file or folder passed by Explorer's Open with.</summary>
         static IEnumerable<string> Positional(string[] args)

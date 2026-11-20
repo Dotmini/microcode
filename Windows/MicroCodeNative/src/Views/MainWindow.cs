@@ -66,6 +66,12 @@ namespace MicroCode.Views
             _menuStrip = new MenuStrip(this, app);
             _root.Children.Add(_menuStrip);
             Content = _root;
+            if (FirstLaunchWelcome.ShouldShow)
+            {
+                FirstLaunchWelcome welcome = null;
+                welcome = new FirstLaunchWelcome(() => _root.Children.Remove(welcome));
+                _root.Children.Add(welcome);
+            }
             _revealed = app.SidebarVisible ? app.SidebarWidth : 0;
 
             SourceInitialized += delegate { Native.StyleWindow(this, Theme.Current.IsDark); };

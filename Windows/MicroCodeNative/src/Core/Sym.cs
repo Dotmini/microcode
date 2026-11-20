@@ -86,7 +86,7 @@ namespace MicroCode.UI
             {"tablecells.badge.ellipsis",0xF0E2},{"sparkles.rectangle.stack",0xF4A5},{"exclamationmark.bubble",0xE783},
             {"list.number",0xE8FD},{"applelogo",0xE7F8},{"apple.logo",0xE7F8},{"doc.zipper",0xE7B8},{"chart.bar",0xE9D2},
             {"paintbrush.pointed",0xE771},{"arrow.triangle.2.circlepath.circle",0xE895},{"text.line.first.and.arrowtriangle.forward",0xE8E4},
-            {"hourglass",0xE916},{"stop.circle",0xECCB},{"xmark.square",0xE711},
+            {"hourglass",0xE916},{"arrow.up.message",0xE724},{"key.fill",0xE8D7},{"stop.circle",0xECCB},{"xmark.square",0xE711},
             {"brain.filled.head.profile",0}, {"brain",0}, {"brain.head.profile",0}
         };
 
