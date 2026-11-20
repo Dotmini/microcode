@@ -66,5 +66,35 @@ All captures use a neutral demo workspace (`MicroCodeDemo`: `src/main.py`, `src/
 | [57-welcome-ai-architect.png](57-welcome-ai-architect.png) | Welcome — AI Architect | Welcome ▸ AI Architect | Agent chat embedded in the welcome shell |
 | [58-first-launch-onboarding.png](58-first-launch-onboarding.png) | First-launch onboarding | Help ▸ **First-Launch Onboarding…** | Welcome sheet, optional Google / Dotmini ID sign-in |
 | [59-keyboard-shortcuts.png](59-keyboard-shortcuts.png) | Keyboard Shortcuts | Help ▸ **Keyboard Shortcuts…** | Searchable shortcut list by category (49 shortcuts) |
+| [60-git-branches.png](60-git-branches.png) | Source Control — Branches | Sidebar Git ▸ **Branches** | Branch list (empty: demo repo has no commits) |
+| [61-git-history.png](61-git-history.png) | Source Control — History | Sidebar Git ▸ **History** | Commit history (empty) |
+| [62-git-stash.png](62-git-stash.png) | Source Control — Stash | Sidebar Git ▸ **Stash** | Stash message field + button, "No stashes" |
+| [63-git-cicd.png](63-git-cicd.png) | Source Control — CI/CD | Sidebar Git ▸ **CI/CD** | GitHub Actions runs, "No CI/CD runs" |
+| [64-editor-html-file.png](64-editor-html-file.png) | Editor — HTML file | Open `web/index.html` | HTML syntax highlighting, language badge |
+| [65-device-dock-webapp-preview.png](65-device-dock-webapp-preview.png) | Device Preview Dock — WebApp | View ▸ **Toggle Device Preview Dock** | Right dock: WebApp Preview / iOS Sim / Android Emu tabs, URL bar, responsive picker, build prompt |
+| [66-device-dock-ios-simulator.png](66-device-dock-ios-simulator.png) | Device Preview Dock — iOS Sim | Dock ▸ **iOS Sim** | Apple Simulator Preview placeholder, device picker, Start Simulator / Web Preview, hot-reload tooltip |
+| [67-device-dock-simulator-menu.png](67-device-dock-simulator-menu.png) | Device Preview Dock — device menu | Dock ▸ **iPhone Sim ▾** | Choose Device & Run…, Refresh Simulators |
 
-**Not captured:** a dedicated ACP chat screen — `MicroCode/Views/AI/ACPAgentChatView.swift` exists but no current UI presents it; ACP agents are reached through screens 22–26 and the composer picker (13). The "Toggle Git Panel" menu item opened nothing beyond the sidebar Source Control view (08). Physical device / simulator docks were not opened (no device attached).
+## Zoomed detail crops
+
+Cut from the redacted captures above (2× upscale where small), for pixel-level reference of dense areas.
+
+| File | Source | What it shows |
+|---|---|---|
+| [d01-editor-toolbar.png](d01-editor-toolbar.png) | 01 | Editor title bar, sidebar icons, tabs, breadcrumbs |
+| [d02-agent-toolbar.png](d02-agent-toolbar.png) | 12 | Agent toolbar: Chat / Plan / Task / More / Preview / Team / Actions / mode switcher |
+| [d03-agent-composer.png](d03-agent-composer.png) | 12 | Project Briefing card and composer controls |
+| [d04-runtime-arc-card.png](d04-runtime-arc-card.png) | 40 | Arc toolchain card (paths redacted) |
+| [d05-overflow-menu.png](d05-overflow-menu.png) | 03 | Toolbar ⋯ menu |
+| [d06-model-picker-menu.png](d06-model-picker-menu.png) | 13 | Provider picker with submenu |
+| [d07-agent-mode-menu.png](d07-agent-mode-menu.png) | 16 | Agent mode / multi-agent team menu |
+| [d08-actions-menu.png](d08-actions-menu.png) | 22 | Actions menu |
+| [d09-notebook-toolbar.png](d09-notebook-toolbar.png) | 27 | Notebook header, cell toolbar, agent header |
+| [d10-skills-cards.png](d10-skills-cards.png) | 48 | Skills search, filters, skill cards |
+| [d11-embed-studio-sidebar.png](d11-embed-studio-sidebar.png) | 32 | Embed & IoT Studio tool sidebar |
+| [d12-preview-popover.png](d12-preview-popover.png) | 04 | Live Preview popover |
+
+**Not captured:**
+- A dedicated ACP chat screen: `MicroCode/Views/AI/ACPAgentChatView.swift` exists, but no current UI presents it. ACP agents are reached through screens 22–26 and the composer picker (13).
+- The "Toggle Git Panel" menu item showed nothing beyond the sidebar Source Control view (08, 60–63).
+- A running simulator, a physical device or the Android emulator. None was started.
