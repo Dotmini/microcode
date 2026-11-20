@@ -1,0 +1,33 @@
+@echo off
+rem Builds out-dev\MicroCode.exe, compiles each test program against it and runs its checks (no SDK needed).
+rem   PreviewTests        File Preview, Markdown links, PDF, LaTeX
+rem   AgentPlatformTests  Consensus Engine + PNS 24/7 (sandbox, real git worktrees, the pnsd daemon)
+setlocal
+set FW=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319
+set WPF=%FW%\WPF
+set ROOT=%~dp0..
+call "%ROOT%\build.cmd" out-dev >nul
+if errorlevel 1 (
+  echo BUILD FAILED
+  exit /b 1
+)
+set REFS=/r:"%ROOT%\out-dev\MicroCode.exe" /r:"%WPF%\PresentationFramework.dll" /r:"%WPF%\PresentationCore.dll" /r:"%WPF%\WindowsBase.dll" /r:"%FW%\System.Xaml.dll" /r:System.dll /r:System.Core.dll /r:System.Net.Http.dll /r:System.Web.Extensions.dll
+set FAILED=0
+call :suite PreviewTests
+if errorlevel 1 set FAILED=1
+call :suite AgentPlatformTests
+if errorlevel 1 set FAILED=1
+exit /b %FAILED%
+
+rem compile tests\<name>.cs against out-dev\MicroCode.exe and run it; errorlevel 1 when it fails to build or a check fails
+:suite
+"%FW%\csc.exe" /nologo /target:exe /platform:anycpu /utf8output /codepage:65001 /out:"%ROOT%\out-dev\%1.exe" %REFS% "%ROOT%\tests\%1.cs"
+if errorlevel 1 goto :suitebuild
+echo.
+echo == %1
+"%ROOT%\out-dev\%1.exe"
+if errorlevel 1 exit /b 1
+exit /b 0
+:suitebuild
+echo TEST BUILD FAILED: %1
+exit /b 1

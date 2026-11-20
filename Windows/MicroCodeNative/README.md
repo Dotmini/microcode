@@ -1,0 +1,134 @@
+# MicroCode for Windows (Native)
+
+MicroCode เวอร์ชัน Windows แบบ native ล้วน: **WPF บน .NET Framework 4.8 (C#)** วาดหน้าจอด้วย DirectX ของ Windows ไม่มี Electron / WebView
+หน้าตาและพฤติกรรมพอร์ตตรงจากซอร์ส SwiftUI ใน `../../MicroCode/` (ขนาด, สี, ระยะ, ข้อความ อ่านจากโค้ดจริง ไม่ได้กะจากภาพ)
+
+## Build & Run
+
+ไม่ต้องติดตั้ง SDK, NuGet หรือสิทธิ์ admin — ใช้ตัวคอมไพล์ C# ที่มากับ Windows 10/11
+
+```bat
+build.cmd
+out\MicroCode.exe
+out\MicroCode.exe C:\path\to\project        :: เปิดโฟลเดอร์
+```
+
+ผลลัพธ์คือ `out\MicroCode.exe` ไฟล์เดียว (~900 KB) + `MicroCode.ico` รันได้ทันทีบน Windows 10/11 ทุกเครื่อง (.NET Framework 4.8 มีในตัวระบบ)
+
+### ตรวจหน้าจออัตโนมัติ (ไม่ต้องเปิดหน้าต่าง)
+
+```bat
+out\MicroCode.exe --snapshot code.png --size 1440x900 --folder C:\repo --file C:\repo\main.swift
+out\MicroCode.exe --snapshot agent.png --mode agent
+out\MicroCode.exe --snapshot run.png --file hello.py --run      :: กด Run จริงแล้วถ่ายภาพ Console
+out\MicroCode.exe --snapshot nb.png --mode notebook --notebook-demo --run-cells --wait 6   :: รันเซลล์ผ่าน kernel จริง
+out\MicroCode.exe --snapshot settings.png --settings-tab 2 --size 1000x700              :: หน้า Settings แท็บใดก็ได้
+out\MicroCode.exe --snapshot chat.png --folder C:\repo --mode agent --seed-chat     :: ตัวอย่างบทสนทนา (ไม่บันทึก)
+out\MicroCode.exe --snapshot run.png --fresh --folder C:\repo --mode agent --set ai_key_mode=local --set toolApprovalMode=yolo ^
+    --agent-prompt "Fix the bug" --wait 30   :: รัน Agent กับโมเดลจริง (เช่น LM Studio) แล้วถ่ายภาพ
+out\MicroCode.exe --snapshot pv.png --folder C:\repo --preview C:\repo\README.md --preview C:\repo\spec.pdf --wait 4   :: เปิดไฟล์ในแผง Preview
+out\MicroCode.exe --snapshot ctx.png --folder C:\repo --mode agent --seed-chat --inspector-tab context            :: แท็บ Context / Preview / Plan / Tasks
+out\MicroCode.exe --snapshot web.png --folder C:\repo --web http://localhost:5173/ --web-viewport iphone --web-eval web.json --wait 5
+    :: WebApp Preview ในกรอบ iPhone — หน้าเว็บจาก WebView2 ถูกจับภาพมาประกอบ, web.json = innerWidth/UA/touch ที่หน้าเว็บรายงานจริง
+out\MicroCode.exe --snapshot and.png --set androidSdkPath=C:\Android\Sdk --android-avd Pixel_7 --wait 150   :: บูต AVD แบบไม่มีหน้าต่างในแท็บ Android
+```
+
+ชุดทดสอบอัตโนมัติ (File Preview, ลิงก์ไฟล์, PDF, Markdown, LaTeX, กัน Save ทับไฟล์ binary + Consensus Engine / PNS 24/7: sandbox, git worktree จริง, daemon `pnsd`) — สร้างไฟล์และ repo ทดสอบเองในโฟลเดอร์ชั่วคราว:
+
+```bat
+tests\run-tests.cmd
+```
+
+ภาพออกมาที่ความละเอียด 2x เทียบกับภาพ Retina ของ macOS ได้ตรงๆ
+
+โหมด `--snapshot` ใช้โฟลเดอร์ข้อมูลแยก (`%TEMP%\MicroCode-snapshot` หรือ `--data-dir <dir>`) จึงไม่แตะ settings / คีย์ / แชตจริงของผู้ใช้
+`--fresh` ล้างโฟลเดอร์ทดสอบนั้น, `--set key=value` กำหนดค่าตั้ง, `--set-key provider=key` ใส่ API key, `--agent-prompt "..."` ส่งข้อความให้ Agent ทันทีที่เปิด,
+`--consensus-run "..."` กด Run Consensus, `--pns-launch "..."` กด Launch 24/7 (ใช้คู่ `--agent-bar task:6` / `task:7` และ `--wait N`)
+`--pns-launch` จะเปิด daemon `pnsd` แยกโปรเซส (ใช้ `--data-dir` เดียวกัน) ซึ่ง**รันต่อหลังภาพเสร็จ** — ปิดด้วยปุ่ม Stop pnsd หรือ `POST /pns/shutdown` (header `X-PNS-Token` จาก `<data-dir>\.microcode\pns\daemon.token`)
+
+## สิ่งที่พอร์ตแล้ว
+
+| ส่วน | ต้นฉบับ (Swift) | สถานะ |
+|---|---|---|
+| หน้าต่างหลัก, แถบข้างเลื่อนเปิด/ปิด 0.12s, ลากปรับความกว้าง 160–600 | `ContentView.swift` (`NativeSidebarSplitContainer`) | ✅ |
+| แถบหัว 36pt (ขนาด regular/compact/tight/ultraTight), Run/Build/Preview/Console, Agent / Code Editor / More Mode | `WorkspaceUnifiedHeaderBar` | ✅ |
+| ปุ่มหน้าต่างแบบ traffic lights ซ่อนอัตโนมัติ (โผล่เมื่อชี้มุมซ้ายบน 82×36) | `WindowTrafficLightsController` | ✅ |
+| แถบข้าง Xcode: Project / Source Control / Search / Issues, ต้นไม้ไฟล์ 24pt, Filter | `XcodeEditorSidebar`, `AuthenticFileTree` | ✅ |
+| แท็บไฟล์, breadcrumb, Inline Edit (Ctrl+K), ป้ายภาษา, Markdown Rendered/Source, CSV/TSV Table/Source, รูป / PDF / ไฟล์ binary เปิดเป็น preview แบบอ่านอย่างเดียว (กด Save ก็ไม่เขียนทับ) | `EditorArea`, `CodeEditor` | ✅ |
+| ตัวแก้โค้ด: ไฮไลต์ ~40 ภาษา, เลขบรรทัด, ไฮไลต์บรรทัดปัจจุบัน, auto-indent | `SyntaxHighlightedCodeView`, `LineNumberRulerView` | ✅ |
+| Console: OUTPUT / TERMINAL / PROBLEMS / ANALYSIS, รันโค้ดจริง | `DebugArea` | ✅ |
+| หน้า Welcome: Projects / Templates / AI Architect / Settings | `WelcomeScreen` | ✅ |
+| Playground (Editor, Output, Auto-run, Hot Reload, Run) | `PlaygroundView` | ✅ |
+| Agent: หน้าว่าง + กล่องพิมพ์ (+, Connect AI, Scope Lock, Local, Smart, Agent, ไมค์ = Windows Voice Typing, ส่ง/หยุด/คิว), คำตอบสตรีมสดระหว่างใช้เครื่องมือ | `AIAgentView` | ✅ |
+| เมนูเลือกโมเดลแบบ Mac: Enterprise / Subscription / BYOK (ทุกเจ้า + Fetch Live Models + Custom ID) / Local LLM (สแกน Ollama 11434, LM Studio 1234/1235, llama.cpp 8080, vLLM 8000, Jan 1337 พร้อมกัน) / ACP / Dotmini Cloud (โมเดลสดจาก microcode.dotmini.net/v1 แยกตามผู้ให้บริการ + ราคา ฿/1M) | `presentNativeModelMenu` | ✅ |
+| แนบไฟล์/รูป (ปุ่ม +, วาง Ctrl+V, ลากวาง), @mention ไฟล์ในโปรเจกต์ (popup), คำสั่ง / ทั้ง 19 ตัวของ Mac (popup), โหมด Plan + การ์ด Plan Review (Approve Plan & Proceed / Reject) | `SlashCommandService`, `approvalActionCard` | ✅ |
+| Agent ข้อความ: ฟองผู้ใช้, Thought for Ns, แถวเครื่องมือ, การ์ดโค้ด (Editor/Copy), ตาราง, ปุ่ม คัดลอก/ลองใหม่/ย้อนกลับ/ลบ, จุดสามจุดตอนรอ | `RichMessageRow`, `AICellContentHost`, `NativeCodeBlockView` | ✅ |
+| Agent ใช้เครื่องมือชื่อเดียวกับ Mac: list_directory_tree, file_read, grep_search, file_search, file_write, replace_in_file, shell, read_skill (จำกัดในโฟลเดอร์งาน), แถว "Analyzed / Edited +A −R / Ran", การ์ดอนุมัติในแชต (Reject / Always Allow / Approve), Scope Lock ใช้งานจริง, จุดย้อนกลับคืนไฟล์ (Restore Checkpoint), XML tool bridge สำหรับโมเดลที่ไม่มี function calling | `AgentService`, `AgentToolBox`, `ToolApprovalView` | ✅ (ยังไม่ได้ทดสอบกับโมเดลจริง — เปิด LM Studio server หรือ login Dotmini แล้วทดสอบได้ทันที) |
+| ข้อความ error อ่านง่ายพร้อมปุ่มแก้ (401 คีย์ผิด, 402 เครดิตหมด, 429, 5xx, เน็ตหลุด) | `parseErrorMessage` | ✅ |
+| Cell Mode: Cell Sheets, kernel Python คงสถานะ (แสดงค่าบรรทัดสุดท้าย, กราฟ matplotlib), การ์ดเซลล์, Run All / Clear / Restart, Data Files, แผง AI + Apply to Cell | `NotebookView`, `NotebookAIPanel` | ✅ |
+| Settings แบบเต็ม 12 แท็บ (General, Editor, AI & Agent, Connect with Phone, Team Collaboration, Cloud GPU, Skills, MCP Servers, Tools, Extensions, Account & License, About), Cancel / Save Changes | `SettingsView` | ✅ |
+| AI & Agent: 5 โหมด (Dotmini Cloud / Web Subscription / Direct API Key / Enterprise / Local LLM), ผู้ให้บริการ 15 เจ้า + Base URL + Fetch Models, คีย์เข้ารหัส DPAPI (ตัดช่องว่าง/ขึ้นบรรทัดที่ติดมาตอนวางคีย์) | `aiSettingsContent` | ✅ |
+| Dotmini Cloud ใช้งานได้จริง: เข้าสู่ระบบ Dotmini ID ด้วยอีเมล/รหัสผ่าน, สร้างบัญชี, ลืมรหัสผ่าน, Continue with Google / เว็บเบราว์เซอร์ (ส่ง session กลับผ่าน 127.0.0.1:18888 เหมือน Mac), refresh token อัตโนมัติ, แผนและเครดิต, สมัครแพ็กเกจ/เติมเงินผ่าน Beam Checkout, Platform key + 1-Click Connect code, แชตผ่าน microcode.dotmini.net/v1 | `SupabaseAuthService`, `DotminiPlatformKeyService`, `MicroCodeLicenseSettingsView` | ✅ (ยังไม่ได้ทดสอบด้วยบัญชีจริง) |
+| Skills: อ่าน SKILL.md จาก ~/.microcode, ~/.agents, ~/.codex, ~/.claude และโปรเจกต์ เปิด/ปิดได้, Agent โหลดผ่านเครื่องมือ read_skill | `AgentSkillsView` | ✅ |
+| ธีม 40 แบบ (สีดึงอัตโนมัติจาก `AppState.swift`) | `AppTheme` | ✅ |
+| เมนูบาร์ macOS (กด Alt), คีย์ลัดทั้งหมด | `MicroCodeApp.swift` commands | ✅ |
+| แผงขวา Inspector (Ctrl+I): Context (ไฟล์ที่เปิด, ไฟล์ที่ Agent อ่าน/แก้, ไฟล์แนบ, rules/skills) · Preview · Plan · Tasks, ลากปรับ 220–760, ดับเบิลคลิกคืนค่า, อัปเดตตาม Agent สด | `AgenticContextInspector` | ✅ |
+| Preview Dock แบบ Mac: แถบแท็บ WebApp Preview · iOS Sim · Android Emu · ไฟล์ · diff (ปิดได้, ปุ่ม + เพิ่ม, ลากไฟล์มาวาง), เปิดเอกสารแล้วแท็บ runtime ที่ว่างอยู่หลบให้, ปุ่ม "Preview ▾" บนหัวเปิด/ปิดแผงและมีเมนูอุปกรณ์ | `EmbeddedDeviceDockView`, `DevicePreviewHeaderMenu` | ✅ |
+| WebApp Preview: Edge WebView2 ฝังแบบ native (ไม่ใช้ SDK/NuGet — runtime มากับ Windows 11), แถบ ‹ › ↻ · Viewport (Responsive + breakpoint 320–1440 ลากขอบปรับได้, iPhone, iPhone Duo นอก/ใน, iPad, MacBook, หมุนจอ, ซ่อนกรอบ, Fit/100%) · URL + จับ dev server อัตโนมัติ · Inspect เลือกจุดบนหน้าเว็บส่งให้ Agent · Port radar (Preview/เปิดเบราว์เซอร์/Kill) · Build ▶ รัน `npm/pnpm/yarn/bun run dev` แล้วเปิด URL ที่มันพิมพ์ · Live reload เมื่อบันทึก · แถบ error ของหน้าเว็บ + "Fix in Agent" · DevTools · Hard Reload | `EmbeddedWebAppPreviewView` | ✅ (CSS viewport ตรงเครื่องจริง: iPhone 402×874, iPad 834×1210, MacBook 1512×982 — ยืนยันจากหน้าเว็บ) |
+| Android Emu: หาจาก Android SDK ที่มีอยู่ (ANDROID_HOME, Android Studio, หรือชี้ adb.exe ครั้งเดียว), รายการ AVD + มือถือ USB, บูต AVD แบบไม่มีหน้าต่าง, สตรีมจอผ่าน `adb exec-out screencap` ลงกรอบมือถือ, คลิก=แตะ ลาก=ปัด ล้อเมาส์=เลื่อน, Back/Home/Recents/พิมพ์ข้อความ, หยุด emulator, สร้าง AVD | `EmbeddedAndroidDeviceView` | ✅ (หน้าจอ/รายการ AVD ทดสอบแล้ว; การบูตและสตรีมยังไม่ผ่านบนเครื่องนี้) |
+| iOS Sim: บอกตรงๆ ว่า Simulator ของ Xcode รันได้เฉพาะ macOS และเสนอดูเว็บแอปในกรอบ iPhone หรือใช้ Android แทน | `EmbeddedAppleSimulatorView` | ➖ ทำไม่ได้บน Windows |
+| File Preview: โค้ด (breadcrumb, #L ช่วงบรรทัด, Diff กับ git HEAD, Copy, Open in Editor), Markdown (Preview/Raw), HTML/SVG (Live Preview → WebApp tab), รูป (ซูม −/%/+/Fit, Ctrl+ล้อ, ลากเลือกหลายจุดพร้อมโน้ตส่งให้ Agent), PDF native ผ่าน Windows.Data.Pdf (Continuous/Single Page, เรนเดอร์เฉพาะหน้าที่เห็น), CSV/TSV เป็นตาราง, .diff/.patch, diff ของ Agent + Split View, ไฟล์ binary (ไฟล์ที่รันได้ เช่น .exe .bat .ps1 จะไม่ถูกเปิดจาก preview) — ทุกแท็บโหลดใหม่เองเมื่อไฟล์เปลี่ยน | `InteractiveCodePreviewView`, `InteractivePDFPreviewView`, `InteractiveImagePreviewView` | ✅ |
+| คลิกชื่อไฟล์ในแถวเครื่องมือ / การ์ดแก้ไฟล์ / ไฟล์แนบ / ป้าย +N −M / Split Diff → เปิดในแผง Preview แบบ Mac | `openTargetFileInPreviewDock`, `openDiff` | ✅ |
+| Markdown: หัวข้อ (# และ ===), ลิสต์ซ้อน + checkbox, ตาราง GFM จัดซ้าย/กลาง/ขวา, quote + GitHub alerts ([!NOTE] ฯลฯ), code block ไฮไลต์ (Editor/Copy), รูป (ในเครื่อง/เว็บ/badge), ลิงก์ไฟล์และ `file.py` → Preview, HTML แบบ README (`<p align=center>`, `<img>`, `<a>`), front matter, ~~ขีดฆ่า~~, autolink | `RenderedMarkdownDocumentView`, `MarkdownAttrCache` | ✅ |
+| LaTeX วาดเองแบบ native (ไม่ใช้ WebView/MathJax): `$…$`, `\(…\)`, `$$…$$`, `\[…\]`, `\begin{align/cases/pmatrix…}`, ```` ```math ````; เศษส่วน, ราก, ∑/∫/lim, matrix, cases, accent, `\mathbb` ฯลฯ, `\text{}` ภาษาไทย, ปุ่มดู source / คัดลอก LaTeX | `LaTeXBlockView` | ✅ |
+| Task editor (Checklist / Spec / Walkthrough / Logs / Cost / Audit), Walkthrough, แผง Implementation Plan + การ์ดอนุมัติ, การ์ด diff (Revert/Restore) + Split Diff | `taskEditorView`, `PendingChangeCard` | ✅ |
+| Consensus Engine (Task → Consensus): Builder แก้โค้ดใน sandbox copy ของโปรเจกต์ → Auditor เขียนเทสต์ใน `.consensus/` และบอกคำสั่งรันทีละเทสต์ → MicroCode รันเองแล้วตัดสินจาก exit code (ไม่เชื่อคำตอบโมเดล) + สแกนแบบ Mac (secret / SQL injection / Swift force unwrap) → โหวต Strict / Non-strict → apply เข้าโปรเจกต์เฉพาะตอนผ่าน (Auto-apply หรือกด Apply / Override); ไม่ทับไฟล์ที่ผู้ใช้แก้ระหว่างรัน, เคารพ Scope Lock, Auditor แก้โค้ด Builder ไม่ได้ (ถูกคืนค่าก่อนรันเทสต์), คำสั่ง shell ขออนุมัติตามโหมด Safe/Smart/Full Auto | `ConsensusEngine.swift`, `ConsensusEngineView.swift` | ✅ (pipeline ทดสอบอัตโนมัติ + กด Run ในแอปจริงกับโมเดลที่ต่อไม่ติด; **ยังไม่ได้รันกับโมเดลจริง**) |
+| PNS 24/7 (Task → PNS 24/7, `/pns <งาน>`): mission → planner แตก subtask (ล้มเหลว → แผนสำรอง 3 fiber แบบ Mac) → motor fiber รันใน git worktree แยกบน branch `pns/auto-*` → verify command → commit บน branch หรือ 3-way merge เข้า working tree (`git merge-file --theirs` = กติกา Mac), owned-path lease, retry, Hebbian synapse, REM → playbook / inhibition, spinal reflex, homeostasis จากสถานะไฟ/แบต (Windows ไม่มี thermal state), daemon `pnsd` (`MicroCode.exe --pns-daemon`, 127.0.0.1 + token) ที่**รันต่อหลังปิดแอป**, เปิดตอน sign-in (HKCU Run แทน launchd) | `PNSOrchestrator.swift`, `PNSMotorWorktreePlexus.swift`, `PNSGanglionRouter.swift`, `PNSModels.swift`, `PNSNeuralDashboardView.swift` | ✅ (worktree / merge / daemon / mission ทดสอบจริง; **fiber ที่ทำงานสำเร็จกับโมเดลจริงยังไม่ได้ทดสอบ**; MCP tract ว่างเพราะยังไม่มี MCP client) |
+
+## ยังไม่ได้พอร์ต
+
+Remote Explorer (SSH), Science, IDE Web Browser, Embed & IoT Studio, API Studio, Extension Studio,
+Agent: sub-agents, MCP (แผง PNS จึงแสดง MCP tract ว่าง), ACP, `/arx` `/compare` `/squad`, First-Launch Onboarding,
+บริการเบื้องหลังของแท็บ Settings: Phone Companion, Realtime Collaboration, Cloud GPU, MCP server, Web Subscription login ของ ChatGPT/Claude/Gemini (หน้าจอมีแล้ว แต่ระบบยังไม่ทำงานบน Windows),
+LSP / autocomplete, Collaboration, terminal แบบ ConPTY — โหมดที่ยังไม่พอร์ตจะแสดงหน้า "being ported"
+
+## สิ่งที่ "เหมือน 100%" ไม่ได้ตามกฎหมาย และตัวที่ใช้แทน
+
+| macOS | Windows | เหตุผล |
+|---|---|---|
+| SF Symbols | Segoe Fluent Icons (ไอคอนระบบ Windows 11) + เวกเตอร์วาดเองสำหรับตัวที่ไม่มี (เช่น brain) | Apple อนุญาต SF Symbols เฉพาะบนแพลตฟอร์ม Apple |
+| SF Pro | Segoe UI | เหตุผลเดียวกัน |
+| SF Mono | Consolas | เหตุผลเดียวกัน |
+| ⌘ / ⌥ / ⌃+เลข | Ctrl / Alt / Alt+เลข (เช่น Ctrl+R รัน, Alt+1…9 สลับโหมด) | ธรรมเนียม Windows |
+| เมนูบาร์บนสุดของจอ | กด Alt เพื่อแสดงเมนูในหน้าต่าง | Windows ไม่มีเมนูบาร์ระบบ |
+| กรอบอุปกรณ์ PNG ของ Apple (iPhone/iPad/MacBook bezel) | กรอบวาดเป็น vector สัดส่วนเดียวกัน (จอ, ขอบ, มุมโค้ง, Dynamic Island) | ภาพอุปกรณ์ของ Apple ไม่ได้อนุญาตให้ใช้ในแอป Windows |
+| WKWebView | Edge WebView2 (มากับ Windows 11) | engine เว็บของระบบ Windows ใช้เฉพาะแสดงหน้าเว็บที่ preview — ตัว IDE ยังเป็น native WPF |
+| iOS Simulator (Xcode) | ไม่มี — แท็บ iOS Sim อธิบายและพาไปดูเว็บในกรอบ iPhone | Xcode/Simulator มีเฉพาะ macOS |
+
+## โครงสร้าง
+
+```
+src/Core      UI.cs (HStack/VStack/Spacer/Button/เมนูแบบ NSMenu), Theme.cs, ThemeTable.g.cs, Sym.cs, AppState.cs, Native.cs
+src/Editor    CodeEditorView.cs, Highlighter.cs
+src/Views     MainWindow.cs, XcodeSidebar.cs, FileTreeView.cs, EditorArea.cs (+ MarkdownView), MathView.cs (LaTeX), PdfRender.cs, WelcomeScreen.cs, ModeViews.cs, Settings.cs
+src/Preview   WebView2.cs (WebView2 แบบ COM ตรง), WebAppPreview.cs, DeviceFrames.cs (กรอบอุปกรณ์วาดเอง), DevRuntime.cs (port + dev server),
+              AndroidPreview.cs (adb/emulator), DeviceDock.cs (แถบแท็บ Preview), FileViews.cs (หัวแถบ preview ไฟล์แบบ Mac)
+src/Agent     Agent.cs (หน้า Agent), AgentRunner.cs (tool loop + สตรีม), AgentPanels.cs (Plan/Task/Walkthrough), DiffViews.cs, Inspector.cs (แผงขวา + File Preview),
+              AIConfig.cs (โหมด/คีย์/endpoint/error), Dotmini.cs (Dotmini ID, Platform key, Cloud models, สะพาน 18888), Skills.cs,
+              Consensus.cs (Consensus Engine + sandbox / git / การอนุมัติของ run แยก), Pns.cs (PNS 24/7: worktree, mission, daemon pnsd), PnsView.cs
+tests         PreviewTests.cs + AgentPlatformTests.cs + run-tests.cmd (คอมไพล์อ้างอิง out-dev\MicroCode.exe แล้วรันทั้งสองชุด)
+tools         extract_themes.py (ดึงสีธีมจาก Swift), icns_to_png.py + MakeIco.cs (ไอคอนแอป), GlyphAtlas.cs (ตารางไอคอน Segoe)
+```
+
+สร้างตารางสีธีมใหม่เมื่อ `AppState.swift` เปลี่ยน:
+
+```bat
+python tools\extract_themes.py ..\..\MicroCode\Models\AppState.swift src\Core\ThemeTable.g.cs
+```
+
+ข้อมูลผู้ใช้เก็บที่ `%APPDATA%\MicroCode` (settings.json, chats.json, notebooks.json, cloud-models.json, checkpoints\); API key, Platform key และ session ของ Dotmini เข้ารหัสด้วย Windows DPAPI
+settings.json เขียนแบบรวมค่า (อ่านไฟล์ล่าสุด → ใส่เฉพาะค่าที่หน้าต่างนี้เปลี่ยน → เขียนผ่านไฟล์ชั่วคราวแล้วสลับ) เปิดหลายหน้าต่างพร้อมกันก็ไม่ทับคีย์กัน
+PNS เก็บที่ `~/.microcode/pns` เหมือน Mac (missions.json, synaptic_weights.json, procedural_playbooks.json, semantic_invariants.json, synaptic_wal.jsonl, daemon.token / .port / .pid, pnsd.log, worktrees\);
+sandbox ของ Consensus อยู่ที่ `%TEMP%\MicroCode-Sandbox` และถูกลบเมื่อรันจบ (การเปลี่ยนแปลงถูกเก็บในหน่วยความจำจนกว่าจะ Apply)
+
+© Dotmini Company Limited — อยู่ภายใต้ LICENSE ของ repository นี้

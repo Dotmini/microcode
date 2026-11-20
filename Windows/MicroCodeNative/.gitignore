@@ -1,0 +1,4 @@
+# build outputs of build.cmd / tests\run-tests.cmd (out = release, out-dev / out-pv = working builds)
+/out/
+/out-*/
+*.pdb
