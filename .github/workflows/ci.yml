@@ -144,8 +144,14 @@ jobs:
         run: |
           brew install protobuf 2>/dev/null || true
           export PATH="$HOME/.cargo/bin:$PATH"
+          # The runner's own stable Rust may be newer than the pinned toolchain (sqlx 0.7 breaks on 1.100).
+          if command -v rustup &>/dev/null; then
+            rustup toolchain install "$RUST_TOOLCHAIN" --profile default
+            rustup default "$RUST_TOOLCHAIN"
+          fi
           if [ -d "backend" ] && command -v cargo &>/dev/null; then
             cd backend
+            cargo --version
             cargo check
             cargo clippy --all-targets -- -W clippy::all 2>&1 | tail -30 || true
           fi
