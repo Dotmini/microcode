@@ -39,6 +39,9 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  # Pinned: sqlx-postgres 0.7.4 does not compile on Rust 1.100.0 (2026-11-09) ("the trait bound
+  # `!: sqlx_core::io::Decode<'_>` is not satisfied"); 1.99.1 is the last toolchain that built a release (v2.5.40).
+  RUST_TOOLCHAIN: "1.99.1"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -188,7 +191,7 @@ jobs:
           elif git describe --tags --abbrev=0 2>/dev/null; then
             VERSION="$(git describe --tags --abbrev=0 | sed 's/^v//')"
           else
-            VERSION="2.5.42"
+            VERSION="2.5.43"
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)
@@ -213,7 +216,7 @@ jobs:
 
           # Install Rust via rustup.rs (the canonical way)
           if ! command -v rustup &>/dev/null || ! ~/.cargo/bin/cargo --version &>/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN" --no-modify-path
           fi
 
           # Source the cargo environment NOW for this step
@@ -221,6 +224,10 @@ jobs:
 
           # Add to GITHUB_PATH so ALL subsequent steps see it first
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+          # Use the pinned toolchain even when rustup was already installed
+          ~/.cargo/bin/rustup toolchain install "$RUST_TOOLCHAIN" --profile default
+          ~/.cargo/bin/rustup default "$RUST_TOOLCHAIN"
 
           # Add cross-compilation target
           RUST_TARGET=${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
@@ -281,7 +288,7 @@ jobs:
           # If cargo still not found, re-install
           if ! command -v cargo &>/dev/null; then
             echo "⚠️ cargo not found, re-installing Rust..."
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN"
             source "$HOME/.cargo/env"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
@@ -401,9 +408,11 @@ jobs:
           brew unlink rustup 2>/dev/null || true
           brew unlink rustup-init 2>/dev/null || true
           if ! ~/.cargo/bin/cargo --version &>/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN" --no-modify-path
           fi
           source "$HOME/.cargo/env"
+          ~/.cargo/bin/rustup toolchain install "$RUST_TOOLCHAIN" --profile default
+          ~/.cargo/bin/rustup default "$RUST_TOOLCHAIN"
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           ~/.cargo/bin/cargo --version
           ~/.cargo/bin/rustc --version
