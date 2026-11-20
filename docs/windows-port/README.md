@@ -40,6 +40,23 @@ Use this if the stack is not decided yet; if it is, keep the *behaviour* and map
 
 ## 1. UI/UX specification
 
+**Screenshot map** (59 captures from MicroCode 2.5.43, demo workspace, private data redacted — full list in [`screenshots/index.md`](screenshots/index.md)):
+
+| Spec section | Screenshots |
+|---|---|
+| §1.1–1.2 shell & header | [01 editor](screenshots/01-editor-mode.png) · [02 More Mode](screenshots/02-more-mode-menu.png) · [03 overflow](screenshots/03-overflow-menu.png) · [04 preview](screenshots/04-preview-menu.png) · [39 context inspector](screenshots/39-context-inspector.png) |
+| §1.3 sidebars | [08 git](screenshots/08-sidebar-git.png) · [09 search](screenshots/09-sidebar-search.png) · [10 problems](screenshots/10-sidebar-problems.png) · [11 git settings](screenshots/11-git-settings.png) |
+| §1.4 editor bottom panel | [05 output](screenshots/05-console-output.png) · [06 terminal](screenshots/06-console-terminal.png) · [07 analysis](screenshots/07-console-analysis.png) |
+| §1.5 modes | [27 cells](screenshots/27-notebook-cell-mode.png) · [28 playground](screenshots/28-playground-mode.png) · [29 science](screenshots/29-science-mode.png) · [30 browser](screenshots/30-ide-web-browser.png) · [31 SSH](screenshots/31-remote-explorer-ssh.png) · [32 embed/IoT](screenshots/32-embed-iot-studio.png) · [33 API](screenshots/33-api-studio.png) · [34 extensions](screenshots/34-extension-studio.png) · [35 database](screenshots/35-database-studio.png) · [36 container](screenshots/36-apple-container-studio.png) · [37 CI/CD](screenshots/37-cicd-pipelines.png) · [38 collaboration](screenshots/38-realtime-collaboration.png) |
+| §1.6 agent panel | [12 chat](screenshots/12-agent-chat.png) · [13 model picker](screenshots/13-composer-model-picker.png) · [14 + menu](screenshots/14-composer-plus-menu.png) · [15 autonomy](screenshots/15-composer-autonomy-menu.png) · [16 agent mode](screenshots/16-composer-agent-mode-menu.png) · [17 run target](screenshots/17-composer-run-target-menu.png) · [18 plan](screenshots/18-agent-plan.png) · [19 task](screenshots/19-agent-task.png) · [20 more](screenshots/20-agent-more-menu.png) · [21 team](screenshots/21-agent-team-menu.png) · [22 actions](screenshots/22-agent-actions-menu.png) |
+| §3.8–3.9 ACP & MCP | [23 agent connections](screenshots/23-acp-agent-connections.png) · [24 rules](screenshots/24-acp-ecosystem-rules.png) · [25 external agents](screenshots/25-acp-external-agents.png) · [26 MCP servers](screenshots/26-acp-mcp-servers.png) · [50 settings MCP](screenshots/50-settings-mcp-servers.png) |
+| §1.7 welcome, onboarding, settings | [55 projects](screenshots/55-welcome-projects.png) · [56 templates](screenshots/56-welcome-templates.png) · [57 AI architect](screenshots/57-welcome-ai-architect.png) · [58 onboarding](screenshots/58-first-launch-onboarding.png) · [42 general](screenshots/42-settings-general.png) · [43 editor](screenshots/43-settings-editor.png) · [44 AI & agent](screenshots/44-settings-ai-agent.png) · [51 tools](screenshots/51-settings-tools.png) · [52 extensions](screenshots/52-settings-extensions.png) · [54 about](screenshots/54-settings-about.png) · [59 shortcuts](screenshots/59-keyboard-shortcuts.png) |
+| §3.7 skills | [48 skills](screenshots/48-settings-skills.png) · [49 skills (Arc)](screenshots/49-settings-skills-arc.png) |
+| §4 accounts & billing | [53 account & license](screenshots/53-settings-account.png) |
+| §5 connectivity | [45 connect with phone](screenshots/45-settings-connect-phone.png) · [46 team collaboration](screenshots/46-settings-team-collaboration.png) · [47 cloud GPU](screenshots/47-settings-cloud-gpu.png) · [40 runtime manager / Arc](screenshots/40-runtime-manager-arc.png) · [41 runtimes](screenshots/41-runtime-manager-list.png) |
+
+Not captured: device/simulator docks (no device attached) and a standalone ACP chat window (not reachable in the current UI; ACP is covered by 13 and 22–26).
+
 All paths below are relative to `MicroCode/`. Sizes are points on Mac — use the same numbers as effective pixels (epx) on Windows at 100% scale.
 
 ### 1.1 Window and app shell
