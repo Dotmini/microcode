@@ -81,6 +81,12 @@ namespace MicroCode.UI
             {"scope",0xF272},{"text.cursor",0xE8D2},{"iphone.radiowaves.left.and.right",0xE8EA},{"person.badge.key",0xE8D7},{"building.2",0xEC08},{"puzzlepiece.extension.fill",0xEA86},{"bookmark",0xE8EC},{"paperplane.fill",0xE725},{"paperplane",0xE724},{"cup.and.saucer.fill",0xEC32},{"tag.fill",0xE8EC},{"lock.shield",0xEA18},{"flame.fill",0xECAD},{"flame",0xECAD},{"lock.open",0xE785},
             {"n.square.fill",0xF16B},{"speedometer",0xEC48},{"apps.iphone",0xE8EA},{"leaf",0xF1E8},{"v.circle.fill",0xEA3A},
             {"shield",0xEA18},{"airplane.circle",0xE709},{"arrow.down.doc",0xE74E},{"arrow.left.and.right.square",0xE8AB},{"arrow.uturn.forward",0xE7A6},{"checkmark.shield.fill",0xEA18},{"checkmark.square.fill",0xE73A},{"list.bullet.clipboard.fill",0xE77F},{"minus.circle",0xE738},{"questionmark.circle.fill",0xE9CE},{"square",0xE739},{"tablecells",0xF0E2},{"play.tv",0xE7F4},{"arrow.triangle.swap",0xE8AB},{"minus.magnifyingglass",0xE71F},{"plus.magnifyingglass",0xE8A3},{"scroll",0xE7C3},{"book.closed",0xE736},{"viewfinder",0xE8B3},{"candybarphone",0xE8EA},{"ipad",0xE70A},{"rotate.right",0xE7AD},{"cable.connector",0xE88E},{"shield.lefthalf.filled",0xEA18},{"exclamationmark.shield.fill",0xE7BA},{"point.3.connected.trianglepath.dotted",0xF003},{"checkmark.seal",0xEC61},{"safari",0xE774},{"person.crop.circle.badge.checkmark",0xE8D7},{"folder.badge.questionmark",0xE8B7},{"bubble.left.fill",0xE8BD},{"arrow.up.circle.fill",0xF0AD},
+            {"cylinder",0xEE94},{"cylinder.fill",0xEE94},{"sparkles.tv",0xE7F4},{"sparkles.tv.fill",0xE7F4},
+            {"exclamationmark.arrow.triangle.2.circlepath",0xE895},{"bolt.badge.automatic.fill",0xE945},{"bolt.circle",0xE945},
+            {"tablecells.badge.ellipsis",0xF0E2},{"sparkles.rectangle.stack",0xF4A5},{"exclamationmark.bubble",0xE783},
+            {"list.number",0xE8FD},{"applelogo",0xE7F8},{"apple.logo",0xE7F8},{"doc.zipper",0xE7B8},{"chart.bar",0xE9D2},
+            {"paintbrush.pointed",0xE771},{"arrow.triangle.2.circlepath.circle",0xE895},{"text.line.first.and.arrowtriangle.forward",0xE8E4},
+            {"hourglass",0xE916},{"stop.circle",0xECCB},{"xmark.square",0xE711},
             {"brain.filled.head.profile",0}, {"brain",0}, {"brain.head.profile",0}
         };
 
@@ -88,6 +94,15 @@ namespace MicroCode.UI
         static readonly Dictionary<string, string> Vectors = new Dictionary<string, string>
         {
             // brain: two lobed hemispheres with a central fissure and folds
+            {"arrow.turn.right.down", "M2.5,3.5 L9.5,3.5 C11.7,3.5 12.5,4.6 12.5,6.5 L12.5,13.5 M9.6,10.6 L12.5,13.5 L15.4,10.6"},
+            {"chart.xyaxis.line", "M2,1.5 L2,14 L14.5,14 M4.2,11.2 L7,7.4 L9.6,9.4 L13.6,3.6"},
+            {"plus.rectangle.on.rectangle", "M5,1.8 L14.2,1.8 L14.2,10.8 L5,10.8 Z M2,4.6 L2,14.2 L11.4,14.2 M9.6,4 L9.6,8.6 M7.3,6.3 L11.9,6.3"},
+            {"plus.rectangle", "M1.8,3 L14.2,3 L14.2,13 L1.8,13 Z M8,5.4 L8,10.6 M5.4,8 L10.6,8"},
+            {"arrow.up.right", "M3.6,12.4 L12.2,3.8 M6,3.6 L12.4,3.6 L12.4,10"},
+            {"rectangle.grid.1x2", "M2,2 L14,2 L14,7.2 L2,7.2 Z M2,8.8 L14,8.8 L14,14 L2,14 Z"},
+            {"number.square", "M2,2 L14,2 L14,14 L2,14 Z M6.7,4.4 L5.7,11.6 M10.3,4.4 L9.3,11.6 M4.6,6.5 L11.6,6.5 M4.3,9.5 L11.3,9.5"},
+            {"waveform.path.ecg", "M1,8.4 L4.2,8.4 L5.6,4.2 L7.6,12.2 L9.6,5.8 L10.7,8.4 L15,8.4"},
+            {"circle.dotted", "M8,1.8 L8,2.9 M12.4,3.6 L11.6,4.4 M14.2,8 L13.1,8 M12.4,12.4 L11.6,11.6 M8,14.2 L8,13.1 M3.6,12.4 L4.4,11.6 M1.8,8 L2.9,8 M3.6,3.6 L4.4,4.4"},
             {"brain", "M8,2.6 C7.3,1.7 5.7,1.6 4.9,2.6 C3.6,2.6 2.8,3.7 3,4.8 C1.9,5.3 1.6,6.8 2.3,7.7 C1.5,8.6 1.8,10.2 2.9,10.7 C2.8,12.1 4,13.2 5.3,13 C5.9,14.1 7.3,14.4 8,13.6 Z M8,2.6 C8.7,1.7 10.3,1.6 11.1,2.6 C12.4,2.6 13.2,3.7 13,4.8 C14.1,5.3 14.4,6.8 13.7,7.7 C14.5,8.6 14.2,10.2 13.1,10.7 C13.2,12.1 12,13.2 10.7,13 C10.1,14.1 8.7,14.4 8,13.6 M8,2.6 L8,13.6 M5,5.2 C5.8,5.4 6.3,6 6.2,6.8 M3.2,8.6 C4.2,8.4 5.1,8.9 5.4,9.8 M11,5.2 C10.2,5.4 9.7,6 9.8,6.8 M12.8,8.6 C11.8,8.4 10.9,8.9 10.6,9.8"},
         };
 
@@ -112,6 +127,35 @@ namespace MicroCode.UI
         {
             var box = new SymbolIcon { VerticalAlignment = VerticalAlignment.Center, SnapsToDevicePixels = true };
             double em = Math.Round(size * Scale * 2) / 2;
+            var letter = System.Text.RegularExpressions.Regex.Match(name ?? "", @"^([a-z]|number)\.circle(\.fill)?$");
+            if (letter.Success)
+            {
+                // SF "x.circle.fill": a filled disc with the letter knocked out (drawn in the surface colour).
+                bool filled = letter.Groups[2].Success;
+                double d = Math.Round(em * 0.86 * 2) / 2;
+                var disc = new Ellipse { Width = d, Height = d, Fill = filled ? fg : Brushes.Transparent, Stroke = filled ? null : fg, StrokeThickness = 1.1 };
+                var ch = new TextBlock
+                {
+                    Text = letter.Groups[1].Value == "number" ? "#" : letter.Groups[1].Value, FontFamily = UIFonts.UI, FontWeight = FontWeights.Bold,
+                    FontSize = Math.Max(6, d * 0.68), Foreground = filled ? (Brush)Core.Theme.Current.ElevatedBackground : fg,
+                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, d * 0.08)
+                };
+                box.Width = em; box.Height = em;
+                box.Children.Add(disc); box.Children.Add(ch);
+                return box;
+            }
+            if (name == "function")
+            {
+                var fx = new TextBlock
+                {
+                    Text = "ƒx", FontFamily = new FontFamily("Cambria Math"), FontStyle = FontStyles.Italic, FontSize = em * 0.92, Foreground = fg,
+                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+                };
+                box.Glyph = fx;
+                box.Height = em; box.MinWidth = em;
+                box.Children.Add(fx);
+                return box;
+            }
             string key = name;
             if (key == "brain.head.profile" || key == "brain.filled.head.profile") key = "brain";
             string geo;

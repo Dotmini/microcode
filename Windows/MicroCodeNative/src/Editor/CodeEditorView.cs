@@ -116,10 +116,45 @@ namespace MicroCode.Editor
             Redraw();
         }
 
+        bool _transparent;
+        /// <summary>SyntaxHighlightedCodeView(isTransparent: true): no editor/gutter fill and the current-line highlight only while
+        /// focused, so the editor sits on its container (Cell Mode cards).</summary>
+        public bool Transparent
+        {
+            get { return _transparent; }
+            set
+            {
+                _transparent = value;
+                Background = value ? Brushes.Transparent : Theme.B(Syn.Background);
+                Box.GotKeyboardFocus -= OnFocusRedraw; Box.LostKeyboardFocus -= OnFocusRedraw;
+                if (value) { Box.GotKeyboardFocus += OnFocusRedraw; Box.LostKeyboardFocus += OnFocusRedraw; }
+                Redraw();
+            }
+        }
+        void OnFocusRedraw(object s, KeyboardFocusChangedEventArgs e) { Redraw(); }
+
+        public int LineCount { get { return LineStarts.Count; } }
+        public double LineHeightPx { get { return LineHeight; } }
+
+        /// <summary>Width of the longest line in the editor font (decides whether a horizontal scrollbar will show).</summary>
+        public double LongestLineWidth
+        {
+            get
+            {
+                int longest = 0;
+                for (int l = 0; l < LineStarts.Count; l++)
+                {
+                    int s = LineStarts[l], e = l + 1 < LineStarts.Count ? LineStarts[l + 1] - 1 : Text.Length;
+                    longest = Math.Max(longest, e - s);
+                }
+                return longest * CharWidth + 16;
+            }
+        }
+
         public void ApplySyntaxTheme()
         {
             Syn = Theme.Current.Syntax;
-            Background = Theme.B(Syn.Background);
+            Background = _transparent ? Brushes.Transparent : Theme.B(Syn.Background);
             Box.CaretBrush = Theme.B(Syn.Cursor);
             Box.SelectionBrush = Theme.B(Syn.Selection);
             _layer.Cache.Clear();
@@ -288,7 +323,7 @@ namespace MicroCode.Editor
             int first = Math.Max(0, (int)Math.Floor((vOff - oy) / lh));
             int last = Math.Min(ed.LineStarts.Count - 1, (int)Math.Ceiling((vOff + h - oy) / lh));
             // current line highlight (ThemeManager editorLineHighlight)
-            if (ed.Box.SelectionLength == 0 && ed.CaretLine >= first && ed.CaretLine <= last)
+            if (ed.Box.SelectionLength == 0 && ed.CaretLine >= first && ed.CaretLine <= last && (!ed.Transparent || ed.Box.IsKeyboardFocused))
             {
                 double y = oy + ed.CaretLine * lh - vOff;
                 dc.DrawRectangle(Theme.B(ed.Syn.LineHighlight), null, new Rect(0, Math.Round(y), w, Math.Round(lh)));
@@ -372,7 +407,8 @@ namespace MicroCode.Editor
         {
             var ed = _ed;
             double w = ActualWidth, h = ActualHeight;
-            dc.DrawRectangle(Theme.B(ed.Syn.Gutter), null, new Rect(0, 0, w, h));
+            if (!ed.Transparent) dc.DrawRectangle(Theme.B(ed.Syn.Gutter), null, new Rect(0, 0, w, h));
+            else dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, w, h));
             var sep = Theme.B(Theme.WithAlpha(Theme.Current.IsDark ? Colors.White : Colors.Black, 0.2 * 0.5));
             dc.DrawRectangle(sep, null, new Rect(w - 1, 0, 1, h));
             double lh = ed.LineHeight;

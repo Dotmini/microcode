@@ -43,6 +43,15 @@ namespace MicroCode.Views
         public Func<ToolStep, Dictionary<string, object>, Task<bool>> Approve;
     }
 
+    /// <summary>Extra tools for one agent run (Cell Mode adds cell_list … cell_run). Execute returns null for names it does not own;
+    /// it runs on a worker thread and may block until the tool finishes.</summary>
+    public class ToolExtension
+    {
+        public List<Dictionary<string, object>> Schemas = new List<Dictionary<string, object>>();
+        public Func<string, Dictionary<string, object>, ToolStep, CancellationToken, string> Execute;
+        public Func<string, Dictionary<string, object>, string> Target;
+    }
+
     public class AgentResult
     {
         public string Text = "", Thinking = "", Model;
@@ -88,6 +97,15 @@ namespace MicroCode.Views
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { return "Error: " + ex.Message; }
             finally { Isolated.Value = prev; }
+        }
+
+        static readonly AsyncLocal<ToolExtension> Extension = new AsyncLocal<ToolExtension>();
+
+        /// <summary>Runs an agent turn with <paramref name="ext"/>'s tools added to the standard workspace tools.</summary>
+        public static async Task<AgentResult> RunWithTools(ToolExtension ext, List<ChatMessage> history, string system, bool readOnly, string sessionId, AgentCallbacks cb, CancellationToken ct)
+        {
+            Extension.Value = ext;
+            return await Run(history, system, true, readOnly, sessionId, cb, ct);
         }
 
         // ── tool schemas (AgentToolBox canonical names) ─────────────────────────
@@ -156,6 +174,8 @@ namespace MicroCode.Views
             bool xml = XmlBridge.Contains(ep.BaseUrl + "::" + ep.Model);
             var msgs = BuildMessages(history, anthropic, ep);
             var schemas = tools ? ToolSchemas(readOnly) : null;
+            var ext = Extension.Value;
+            if (schemas != null && ext != null) schemas.AddRange(ext.Schemas);
             int maxIter = (int)Defaults.Num("agentMaxIterations", 0); if (maxIter <= 0) maxIter = 500;
             bool refreshed = false;
             for (int iter = 0; iter < maxIter; iter++)
@@ -203,7 +223,8 @@ namespace MicroCode.Views
                 {
                     ct.ThrowIfCancellationRequested();
                     string name = Normalize(call.Name);
-                    var step = new ToolStep { Name = name, Target = Target(name, call.Args), Path = Arg(call.Args, "path"), At = res.Text.Length };
+                    string extTarget = ext != null && ext.Target != null ? ext.Target(name, call.Args) : null;
+                    var step = new ToolStep { Name = name, Target = extTarget ?? Target(name, call.Args), Path = Arg(call.Args, "path"), At = res.Text.Length };
                     string result;
                     if (readOnly && (IsEdit(name) || name == "shell")) { result = "Error: Plan mode is read-only. Describe this change in the plan instead of making it."; step.Ok = false; step.Approval = "blocked"; }
                     else if (!await Approve(step, call.Args, cb, ct)) { result = "User denied this tool call."; step.Ok = false; }
@@ -212,7 +233,7 @@ namespace MicroCode.Views
                         Say(cb.OnActivity, Headline(step) + "…");
                         if (cb.OnStepStart != null) cb.OnStepStart(step);
                         var args = call.Args;
-                        try { result = await Task.Run(() => Execute(name, args, step, sessionId, ct), ct); }
+                        try { result = await Task.Run(() => { string own = ext != null && ext.Execute != null ? ext.Execute(name, args, step, ct) : null; return own ?? Execute(name, args, step, sessionId, ct); }, ct); }
                         catch (OperationCanceledException) { throw; }
                         catch (Exception ex) { result = "Error: " + ex.Message; }
                         if (result.StartsWith("Error:")) step.Ok = false;

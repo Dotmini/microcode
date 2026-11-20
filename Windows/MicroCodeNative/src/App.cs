@@ -118,6 +118,16 @@ namespace MicroCode
                     NotebookView.AutoRunAll = args.Contains("--run-cells");
                     NotebookView.ForceShowAI = args.Contains("--nb-agent");
                 }
+                else if (Arg(args, "--notebook-file") != null)
+                {
+                    // snapshot/test hook: open a .mic / .mcnb / .ipynb / .py sheet in memory (never persisted)
+                    NbStore.Seed = new List<NbDoc> { NbFormats.Load(Path.GetFullPath(Arg(args, "--notebook-file"))) };
+                    NotebookView.AutoRunAll = args.Contains("--run-cells");
+                    NotebookView.ForceShowAI = args.Contains("--nb-agent");
+                }
+                NotebookView.ForceVars = args.Contains("--nb-vars");
+                int nbScroll; if (int.TryParse(Arg(args, "--nb-scroll") ?? "", out nbScroll)) NotebookView.ScrollToCell = nbScroll;
+                NotebookView.ForceAppMode = args.Contains("--nb-app");
                 state.SwitchToMode(EditorMode.Notebook);
             }
             else if (mode == "welcome") { state.ShowingWelcomeHome = true; state.Notify("mode"); }
@@ -192,7 +202,7 @@ namespace MicroCode
             AgentStore.Notify();
         }
 
-        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd" };
+        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd", "--notebook-file", "--nb-scroll" };
 
         /// <summary>Arguments that are neither flags nor a flag's value — e.g. a file or folder passed by Explorer's Open with.</summary>
         static IEnumerable<string> Positional(string[] args)

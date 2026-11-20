@@ -653,6 +653,13 @@ window.__mcInspect={toggle:function(){on=!on;if(!on){box.style.display='none';ta
             _inspect.BorderBrush = t.Separator; _inspect.BorderThickness = new Thickness(0, 1, 0, 0);
         }
 
+        /// <summary>Shows a URL or local HTML/SVG file in the Preview dock's WebApp tab (Cell Mode HTML / Plotly outputs).</summary>
+        public static void OpenInDock(string urlOrPath)
+        {
+            PreviewDock.SelectStandard("web");
+            Shared.Open(urlOrPath, null);
+        }
+
         /// <summary>Opens a URL or file from elsewhere (header menu, Live Preview of an HTML file).</summary>
         public void Open(string urlOrPath, string viewportId)
         {

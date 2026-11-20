@@ -633,7 +633,10 @@ namespace MicroCode.Views
         }
 
         // ── model menu (presentNativeModelMenu) ────────────────────────────────
-        List<MenuItemSpec> ModelMenu()
+        List<MenuItemSpec> ModelMenu() { return BuildModelMenu(_app); }
+
+        /// <summary>The model menu shared by the Agent composer and Cell Mode's model pills (CellAIModelMenuPresenter).</summary>
+        public static List<MenuItemSpec> BuildModelMenu(AppState _app)
         {
             DotminiCloud.EnsureFresh();
             string mode = AIConfig.Mode;
@@ -725,9 +728,9 @@ namespace MicroCode.Views
 
         static readonly Dictionary<string, List<string>> LiveModels = new Dictionary<string, List<string>>();
 
-        void FetchLiveModels(string pid)
+        static void FetchLiveModels(string pid)
         {
-            var disp = Dispatcher;
+            var disp = Application.Current.Dispatcher;
             Task.Run(async () =>
             {
                 string url = AIConfig.BaseUrlFor(pid).TrimEnd('/') + "/models", key = AIConfig.KeyFor(pid);
@@ -743,9 +746,9 @@ namespace MicroCode.Views
             }).ContinueWith(tk => disp.BeginInvoke(new Action(() => { if (!tk.IsFaulted && tk.Result.Count > 0) LiveModels[pid] = tk.Result.OrderBy(x => x).ToList(); })));
         }
 
-        void ScanLocal()
+        static void ScanLocal()
         {
-            var disp = Dispatcher;
+            var disp = Application.Current.Dispatcher;
             // the configured endpoint first, then Ollama 11434, LM Studio 1234 (1235 when 1234 is taken),
             // llama.cpp / LocalAI 8080, vLLM 8000 and Jan 1337 — probed in parallel, first hit in this order wins
             var candidates = new[] { AIConfig.BaseUrlFor("local"), "http://localhost:11434/v1", "http://localhost:1234/v1", "http://localhost:1235/v1", "http://localhost:8080/v1", "http://localhost:8000/v1", "http://localhost:1337/v1" }.Distinct().ToList();
