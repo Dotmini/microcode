@@ -5519,7 +5519,8 @@ struct AIAgentView: View {
                             timestamp: agent.messages[idx].timestamp,
                             turnTelemetryLabel: agent.messages[idx].turnTelemetryLabel,
                             attachmentHistoryContext: digest.isEmpty ? nil : digest,
-                            attachments: items
+                            attachments: items,
+                            harnessTrace: agent.messages[idx].harnessTrace
                         )
                         agent.saveChats()
                     }

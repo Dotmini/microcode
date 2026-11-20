@@ -170,6 +170,8 @@ class AgentToolBox: ObservableObject {
         register(EmbeddedDecodeCrashTool())
         // Feature 14: Native macOS Computer Use Engine (Set-of-Mark + AXPress + Apple Vision OCR)
         register(NativeComputerUseTool())
+        register(AgentDesktopTool())
+        register(OpenThaiOCRTool())
     }
     
     func register(_ tool: any AgentTool) {

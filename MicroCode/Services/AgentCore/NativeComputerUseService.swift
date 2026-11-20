@@ -1159,11 +1159,45 @@ public final class NativeComputerUseService {
 
         if action == "permissions" || action == "status" {
             let prompt = (payload["prompt"] as? Bool) ?? false
-            return [
+            var resp: [String: Any] = [
                 "success": true,
                 "permissions": permissionStatus(promptIfNeeded: prompt),
+                "agent_desktop_ffi_ready": AgentDesktopFFILoader.shared.isReady,
+                "openthai_ocr_ready": OpenThaiOCREngine.shared.isModelBundled,
                 "windows": listWindows(appFilter: appName)
             ]
+            if let adStatus = AgentDesktopFFILoader.shared.status() {
+                resp["agent_desktop"] = adStatus
+            }
+            return resp
+        }
+
+        // Semantic Accessibility Fast-Path (`vercel-labs/agent-desktop` ABI v7 + `@<snapshot_id>:e<N>` refs)
+        let semanticOnlyActions: Set<String> = [
+            "snapshot", "skeleton", "drill", "observe_tree", "find",
+            "surfaces", "list_surfaces", "open_system_surface", "open-system-surface",
+            "cursor_overlay", "cursor-overlay", "notifications", "list_notifications",
+            "dismiss_notification", "trace_export", "trace-export"
+        ]
+        if semanticOnlyActions.contains(action) {
+            var adParams = payload
+            adParams["command"] = action
+            let adRes = await AgentDesktopBridge.shared.execute(adParams)
+            var wrapped = adRes
+            wrapped["success"] = (adRes["ok"] as? Bool) ?? true
+            return wrapped
+        }
+
+        // If caller passed a snapshot-qualified `@<snapshot_id>:e<N>` ref to click/type/select/scroll/hover, dispatch via `AgentDesktopBridge`
+        let candidateRef = (payload["ref"] as? String) ?? (payload["ref_id"] as? String) ?? (payload["target"] as? String)
+        if AgentDesktopBridge.isSnapshotQualifiedRef(candidateRef) {
+            var adParams = payload
+            adParams["command"] = action
+            adParams["ref"] = candidateRef
+            let adRes = await AgentDesktopBridge.shared.execute(adParams)
+            var wrapped = adRes
+            wrapped["success"] = (adRes["ok"] as? Bool) ?? false
+            return wrapped
         }
 
         if action == "windows" || action == "list_windows" {
@@ -1512,19 +1546,43 @@ public final class NativeComputerUseService {
     private nonisolated static func recognizeOCRTextBoxes(
         in cgImage: CGImage
     ) async -> [(text: String, normalizedRect: CGRect)] {
-        await withCheckedContinuation { continuation in
+        // 1. Primary: OpenThai 2.0 OCR (4.2MB ONNX CPU warm daemon) — supports accurate Thai + English UI labels & Canvas text!
+        if OpenThaiOCREngine.shared.isModelBundled,
+           let ot = await OpenThaiOCREngine.shared.recognizeCGImage(cgImage, includeMarkdown: false),
+           ot.ok, !ot.blocks.isEmpty {
+            var otOut: [(String, CGRect)] = []
+            for block in ot.blocks.prefix(95) {
+                let str = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard str.count >= 2 && str.count <= 110 else { continue }
+                // Convert top-left normalized rect back to bottom-left normalized rect expected by `inspectElements`
+                let tl = block.normalizedTopLeftRect
+                let bottomLeftNorm = CGRect(
+                    x: tl.origin.x,
+                    y: max(0.0, 1.0 - tl.origin.y - tl.height),
+                    width: tl.width,
+                    height: tl.height
+                )
+                otOut.append((str, bottomLeftNorm))
+            }
+            if !otOut.isEmpty {
+                return otOut
+            }
+        }
+
+        // 2. Fallback: Apple Vision (`VNRecognizeTextRequest` `.accurate` so `th-TH` & CJK never throw and drop to English-only)
+        return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let req = VNRecognizeTextRequest()
-                req.recognitionLevel = .fast
+                req.recognitionLevel = .accurate
                 req.usesLanguageCorrection = true
-                req.recognitionLanguages = ["en-US", "th-TH", "zh-Hans", "ja-JP"]
-                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-                do {
-                    try handler.perform([req])
-                } catch {
+                if let supported = try? req.supportedRecognitionLanguages() {
+                    let wanted = ["en-US", "th-TH", "zh-Hans", "ja-JP"].filter { supported.contains($0) }
+                    req.recognitionLanguages = wanted.isEmpty ? ["en-US"] : wanted
+                } else {
                     req.recognitionLanguages = ["en-US"]
-                    try? handler.perform([req])
                 }
+                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                try? handler.perform([req])
                 var out: [(String, CGRect)] = []
                 for obs in (req.results ?? []).prefix(85) {
                     if let top = obs.topCandidates(1).first {

@@ -1897,28 +1897,51 @@ class AppState: ObservableObject {
         showingNewFileDialog = true
     }
     
-    func createNewFileWithLanguage(name: String, language: String) {
-        let ext = extensionForLanguage(language)
-        var filename = name.isEmpty ? "Untitled.\(ext)" : (name.hasSuffix(".\(ext)") ? name : "\(name).\(ext)")
+    func createNewFileWithLanguage(
+        name: String,
+        language: String,
+        directory: URL? = nil,
+        customExtension: String? = nil,
+        templateOverride: String? = nil
+    ) {
+        let trimmedCustomExt = (customExtension ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let ext = trimmedCustomExt.isEmpty ? extensionForLanguage(language) : trimmedCustomExt
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var filename: String = {
+            if trimmedName.isEmpty { return "Untitled.\(ext)" }
+            if ext.isEmpty { return trimmedName }
+            if trimmedName.lowercased().hasSuffix(".\(ext.lowercased())") { return trimmedName }
+            if trimmedName.contains(".") && trimmedCustomExt.isEmpty && !language.hasPrefix("roblox-") {
+                return trimmedName
+            }
+            return "\(trimmedName).\(ext)"
+        }()
         
-        let content = templateForLanguage(language)
+        let content = templateOverride ?? templateForLanguage(language)
         var filePath = ""
         var isUnsaved = true
         
-        // AUTO-SAVE: If workspace is open, create the file on disk immediately
-        if let workspace = workspaceFolder {
+        // AUTO-SAVE: If a directory or workspace is open, create the file on disk immediately
+        if let targetDir = directory ?? workspaceFolder {
             let fm = FileManager.default
-            var targetURL = workspace.appendingPathComponent(filename)
+            if !fm.fileExists(atPath: targetDir.path) {
+                try? fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+            }
+            var targetURL = targetDir.appendingPathComponent(filename)
             
             // Collision handling: check if exists
             if fm.fileExists(atPath: targetURL.path) {
-                let basename = (filename as NSString).deletingPathExtension
+                let nsName = filename as NSString
+                let basename = nsName.deletingPathExtension
+                let actualExt = nsName.pathExtension
                 var counter = 1
-                while fm.fileExists(atPath: workspace.appendingPathComponent("\(basename) \(counter).\(ext)").path) {
+                while fm.fileExists(atPath: targetDir.appendingPathComponent(actualExt.isEmpty ? "\(basename) \(counter)" : "\(basename) \(counter).\(actualExt)").path) {
                     counter += 1
                 }
-                filename = "\(basename) \(counter).\(ext)"
-                targetURL = workspace.appendingPathComponent(filename)
+                filename = actualExt.isEmpty ? "\(basename) \(counter)" : "\(basename) \(counter).\(actualExt)"
+                targetURL = targetDir.appendingPathComponent(filename)
             }
 
             do {
@@ -1940,12 +1963,16 @@ class AppState: ObservableObject {
             }
         }
         
+        let resolvedCodeLanguage: String = {
+            if language.hasPrefix("roblox-") || language == "luau" { return "lua" }
+            return language
+        }()
         let newFile = CodeFile(
             id: UUID(),
             name: filename,
             path: filePath,
             content: content,
-            language: language,
+            language: resolvedCodeLanguage,
             isUnsaved: isUnsaved
         )
         openFiles.append(newFile)
@@ -1992,37 +2019,76 @@ class AppState: ObservableObject {
         case "python": return "py"
         case "javascript": return "js"
         case "typescript": return "ts"
+        case "jsx": return "jsx"
+        case "tsx": return "tsx"
+        case "vue": return "vue"
         case "rust": return "rs"
         case "go": return "go"
         case "java": return "java"
+        case "csharp", "c#": return "cs"
+        case "dart": return "dart"
+        case "ardium": return "ar"
+        case "roblox-server": return "server.luau"
+        case "roblox-local": return "client.luau"
+        case "roblox-module", "luau": return "luau"
+        case "lua": return "lua"
         case "c": return "c"
         case "cpp", "c++": return "cpp"
         case "objective-c", "objc": return "m"
         case "objective-cpp", "objcpp": return "mm"
+        case "zig": return "zig"
+        case "metal": return "metal"
         case "php": return "php"
         case "svelte": return "svelte"
         case "html": return "html"
         case "css": return "css"
         case "less": return "less"
-        case "sass": return "sass"
-        case "scss": return "scss"
+        case "sass", "scss": return "scss"
         case "kotlin": return "kt"
         case "scala": return "scala"
         case "ruby": return "rb"
+        case "elixir": return "ex"
+        case "sql": return "sql"
         case "json": return "json"
+        case "yaml": return "yaml"
+        case "toml": return "toml"
+        case "xml": return "xml"
+        case "graphql": return "graphql"
         case "markdown": return "md"
+        case "shell": return "sh"
+        case "dockerfile": return "dockerfile"
         default: return "txt"
         }
     }
     
     private func templateForLanguage(_ language: String) -> String {
         switch language.lowercased() {
+        case "roblox-server":
+            return "--!strict\nlocal ReplicatedStorage = game:GetService(\"ReplicatedStorage\")\nlocal Players = game:GetService(\"Players\")\n\nPlayers.PlayerAdded:Connect(function(player: Player)\n\tprint(player.Name .. \" joined\")\nend)\n"
+        case "roblox-local":
+            return "--!strict\nlocal Players = game:GetService(\"Players\")\nlocal ReplicatedStorage = game:GetService(\"ReplicatedStorage\")\n\nlocal localPlayer = Players.LocalPlayer\nprint(\"Client initialized for \" .. localPlayer.Name)\n"
+        case "roblox-module", "luau":
+            return "--!strict\nlocal Module = {}\n\nfunction Module.init()\n\tprint(\"Module initialized\")\nend\n\nreturn Module\n"
+        case "lua":
+            return "local function main()\n    print(\"Hello, World!\")\nend\n\nmain()\n"
         case "swift":
             return "import Foundation\n\n// MARK: - Main\n\nfunc main() {\n    print(\"Hello, World!\")\n}\n\nmain()\n"
         case "python":
             return "#!/usr/bin/env python3\n\"\"\"Module description.\"\"\"\n\n\ndef main():\n    \"\"\"Main entry point.\"\"\"\n    print(\"Hello, World!\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
         case "javascript":
             return "// @ts-check\n\"use strict\";\n\n/**\n * Main function\n */\nfunction main() {\n    console.log(\"Hello, World!\");\n}\n\nmain();\n"
+        case "typescript":
+            return "/**\n * Main function\n */\nfunction main(): void {\n    console.log(\"Hello, World!\");\n}\n\nmain();\n"
+        case "tsx":
+            return "import React from \"react\";\n\nexport function Component() {\n    return <div>Hello, World!</div>;\n}\n"
+        case "jsx":
+            return "import React from \"react\";\n\nexport function Component() {\n    return <div>Hello, World!</div>;\n}\n"
+        case "dart":
+            return "void main() {\n  print('Hello, World!');\n}\n"
+        case "csharp", "c#":
+            return "using System;\n\nclass Program\n{\n    static void Main()\n    {\n        Console.WriteLine(\"Hello, World!\");\n    }\n}\n"
+        case "ardium":
+            return "fn main() {\n    println(\"Hello, World!\")\n}\n"
         case "rust":
             return "//! Module documentation\n\nfn main() {\n    println!(\"Hello, World!\");\n}\n"
         case "go":
@@ -2043,6 +2109,20 @@ class AppState: ObservableObject {
             return "body {\n    margin: 0;\n    padding: 0;\n    font-family: sans-serif;\n}\n"
         case "svelte":
             return "<script>\n  let name = 'world';\n</script>\n\n<h1>Hello {name}!</h1>\n"
+        case "vue":
+            return "<script setup lang=\"ts\">\nconst message = 'Hello, World!'\n</script>\n\n<template>\n  <div>{{ message }}</div>\n</template>\n"
+        case "json":
+            return "{\n    \"name\": \"project\",\n    \"version\": \"1.0.0\"\n}\n"
+        case "yaml":
+            return "name: project\nversion: 1.0.0\n"
+        case "toml":
+            return "[package]\nname = \"project\"\nversion = \"0.1.0\"\n"
+        case "sql":
+            return "SELECT * FROM table_name;\n"
+        case "markdown":
+            return "# Title\n\nDescription.\n"
+        case "shell":
+            return "#!/usr/bin/env bash\nset -euo pipefail\n\necho \"Hello, World!\"\n"
         default:
             return ""
         }

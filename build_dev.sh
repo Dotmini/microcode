@@ -364,6 +364,34 @@ if [ -d "Vendor/serve-sim/0.1.46" ]; then
     chmod +x "$SERVE_SIM_DEST/dist/serve-sim.js" 2>/dev/null || true
     chmod +x "$SERVE_SIM_DEST/bin/xcrun" 2>/dev/null || true
 fi
+if [ -d "Vendor/agent-desktop/1.3.1" ]; then
+    echo "   Bundling Semantic Computer-Use runtime (agent-desktop 1.3.1 + FFI)..."
+    AD_DEST="$BUNDLE_NAME/Contents/Resources/agent-desktop"
+    mkdir -p "$AD_DEST/bin" "$AD_DEST/lib"
+    if [ -f "Vendor/agent-desktop/1.3.1/cli/agent-desktop" ]; then
+        cp -f "Vendor/agent-desktop/1.3.1/cli/agent-desktop" "$AD_DEST/bin/agent-desktop"
+        chmod +x "$AD_DEST/bin/agent-desktop"
+    fi
+    if [ -f "Vendor/agent-desktop/1.3.1/cli/agent-desktop-macos-helper" ]; then
+        cp -f "Vendor/agent-desktop/1.3.1/cli/agent-desktop-macos-helper" "$AD_DEST/bin/agent-desktop-macos-helper"
+        chmod +x "$AD_DEST/bin/agent-desktop-macos-helper"
+    fi
+    AD_FFI_DIR="Vendor/agent-desktop/1.3.1/ffi/agent-desktop-ffi-v1.3.1-aarch64-apple-darwin/lib"
+    if [ -f "$AD_FFI_DIR/libagent_desktop_ffi.dylib" ]; then
+        cp -f "$AD_FFI_DIR/libagent_desktop_ffi.dylib" "$AD_DEST/lib/libagent_desktop_ffi.dylib"
+        if [ -f "$AD_FFI_DIR/agent-desktop-macos-helper" ]; then
+            cp -f "$AD_FFI_DIR/agent-desktop-macos-helper" "$AD_DEST/lib/agent-desktop-macos-helper"
+            chmod +x "$AD_DEST/lib/agent-desktop-macos-helper"
+        fi
+    fi
+fi
+if [ -d "Vendor/openthai-ocr/2.0" ]; then
+    echo "   Bundling OpenThai 2.0 OCR runtime (4.2MB ONNX CPU + Table Engine)..."
+    OT_DEST="$BUNDLE_NAME/Contents/Resources/openthai-ocr"
+    mkdir -p "$OT_DEST"
+    cp -R "Vendor/openthai-ocr/2.0/." "$OT_DEST/"
+    chmod +x "$OT_DEST/openthai_ocr_daemon.py" 2>/dev/null || true
+fi
 
 # 6. Bundle Runtimes (only if --with-runtimes flag is passed)
 if [ "$BUNDLE_RUNTIMES" = true ]; then
@@ -380,6 +408,16 @@ if [ -f "MicrocodeCoreSupport/libmicrocode_core.dylib" ]; then
     echo "   Copying libmicrocode_core.dylib into Frameworks..."
     cp "MicrocodeCoreSupport/libmicrocode_core.dylib" "$BUNDLE_NAME/Contents/Frameworks/"
     install_name_tool -id @rpath/libmicrocode_core.dylib "$BUNDLE_NAME/Contents/Frameworks/libmicrocode_core.dylib" 2>/dev/null || true
+fi
+AD_FFI_SRC="Vendor/agent-desktop/1.3.1/ffi/agent-desktop-ffi-v1.3.1-aarch64-apple-darwin/lib"
+if [ -f "$AD_FFI_SRC/libagent_desktop_ffi.dylib" ]; then
+    echo "   Copying libagent_desktop_ffi.dylib into Frameworks..."
+    cp -f "$AD_FFI_SRC/libagent_desktop_ffi.dylib" "$BUNDLE_NAME/Contents/Frameworks/"
+    install_name_tool -id @rpath/libagent_desktop_ffi.dylib "$BUNDLE_NAME/Contents/Frameworks/libagent_desktop_ffi.dylib" 2>/dev/null || true
+    if [ -f "$AD_FFI_SRC/agent-desktop-macos-helper" ]; then
+        cp -f "$AD_FFI_SRC/agent-desktop-macos-helper" "$BUNDLE_NAME/Contents/Frameworks/agent-desktop-macos-helper"
+        chmod +x "$BUNDLE_NAME/Contents/Frameworks/agent-desktop-macos-helper"
+    fi
 fi
 for emb_dylib in \
     "$BUILD_ROOT/cargo-target/$SWIFT_CONFIG/libmicrocode_embedded.dylib" \

@@ -1,0 +1,28 @@
+{
+  "id": "02-python-run-show-output",
+  "note": "'run ผลลัพธ์มา' must show the real output.",
+  "fixture": "fixtures/py-sensors",
+  "history": [
+    {
+      "role": "user",
+      "content": "เขียนสคริปต์ Python สรุปค่าเซนเซอร์"
+    },
+    {
+      "role": "assistant",
+      "content": "สร้าง stats.py แล้ว",
+      "wroteFiles": [
+        "stats.py"
+      ]
+    }
+  ],
+  "prompt": "run ผลลัพธ์มา",
+  "checks": {
+    "mustRunCommand": true,
+    "mustNotCreateFiles": true,
+    "answerMustShowOutput": true,
+    "answerContainsAny": [
+      "sensor summary"
+    ],
+    "maxInterventions": 4
+  }
+}

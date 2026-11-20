@@ -135,6 +135,9 @@ struct MicroCodeApp: App {
             }
         }
         
+        // Replay eval of the real agent loop: `MICROCODE_AGENT_EVAL_CASES` + `MICROCODE_AGENT_EVAL_OUT` (Scripts/eval/run-agent-eval.sh).
+        AgentEvalRunner.runIfRequested()
+
         // Launch ACP 1.0 JSON-RPC stdio server when invoked with `--acp-server`
         let args = CommandLine.arguments
         if args.contains("--acp-server") {

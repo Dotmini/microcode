@@ -949,29 +949,21 @@ class YourCloudKernel: ComputeKernel {
             
             if !password.isEmpty {
                 let unique = ProcessInfo.processInfo.globallyUniqueString
-                let passPath = "/tmp/mc_pass_\(unique).txt"
                 let askPath = "/tmp/mc_ask_\(unique).sh"
-                
-                try? (password + "\n").write(toFile: passPath, atomically: true, encoding: .utf8)
-                let chmodP = Process()
-                chmodP.executableURL = URL(fileURLWithPath: "/bin/chmod")
-                chmodP.arguments = ["600", passPath]
-                try? chmodP.run()
-                chmodP.waitUntilExit()
-                
-                let askScript = "#!/bin/sh\ncat \"\(passPath)\"\n"
-                try? askScript.write(toFile: askPath, atomically: true, encoding: .utf8)
-                let chmodA = Process()
-                chmodA.executableURL = URL(fileURLWithPath: "/bin/chmod")
-                chmodA.arguments = ["700", askPath]
-                try? chmodA.run()
-                chmodA.waitUntilExit()
-                
+                // Never write the password to disk (it used to sit in /tmp, world-readable until chmod ran):
+                // the askpass helper prints it from the child's in-memory environment, like AgentToolBox's SSH path.
+                let askScript = "#!/bin/sh\nprintf '%s\\n' \"$MC_SSH_SECRET\"\n"
+                FileManager.default.createFile(
+                    atPath: askPath,
+                    contents: Data(askScript.utf8),
+                    attributes: [.posixPermissions: 0o700]
+                )
+                env["MC_SSH_SECRET"] = password
                 env["SSH_ASKPASS"] = askPath
                 env["SSH_ASKPASS_REQUIRE"] = "force"
                 env["DISPLAY"] = ":0"
                 tempAskPass = askPath
-                tempPassFile = passPath
+                tempPassFile = nil
             }
             
             process.environment = env

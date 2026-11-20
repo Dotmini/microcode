@@ -48,12 +48,13 @@ struct ToolScope {
         
         let deviceAndWebHits = [
             "preview", "browser", "simulator", "emulator", "screenshot", "inspect", "device",
-            "computer_use", "computer use", "window", "click", "double_click", "right_click", "hover", "drag", "scroll", "shortcut", "zoom",
+            "computer_use", "computer use", "agent_desktop", "agent-desktop", "accessibility", "menubar", "dock",
+            "window", "click", "double_click", "right_click", "hover", "drag", "scroll", "shortcut", "zoom",
             "webapp", "frontend", "localhost", "127.0.0.1", "http://", "https://", "dom", "css", "html",
             "ui", "ux", "layout", "button", "modal", "navbar", "sidebar", "vite", "next", "react", "vue",
             "android", "ios", "adb", "simctl",
             "หน้าเว็บ", "หน้าจอ", "หน้าต่าง", "พรีวิว", "เปิดเว็บ", "เบราว์เซอร์", "บราวเซอร์", "มือถือ", "จำลอง",
-            "แอนดรอยด์", "ไอโฟน", "เช็คหน้า", "ดูหน้า", "ปุ่ม", "แสดงผล", "ดีไซน์", "บัง", "เพี้ยน", "คลิก", "กด", "ควบคุม", "แคปจอ"
+            "แอนดรอยด์", "ไอโฟน", "เช็คหน้า", "ดูหน้า", "ปุ่ม", "แสดงผล", "ดีไซน์", "บัง", "เพี้ยน", "คลิก", "กด", "ควบคุม", "แคปจอ", "เมนูบาร์"
         ]
         if hasMobilePreview || deviceAndWebHits.contains(where: { lower.contains($0) }) {
             tiers.insert(.device)
@@ -133,6 +134,7 @@ struct ToolScope {
         "device_runtime": .device,
         "visual_regression": .device,
         "computer_use": .device,
+        "agent_desktop": .device,
         "mcp__local__computer_use_observe": .device,
         "mcp__local__computer_use_act": .device,
         "mcp__local__computer_use_batch": .device,
@@ -155,8 +157,8 @@ struct ToolScope {
         // Science
         "science_inspect": .science, "alphafold_validate": .science,
         "alphafold_input_validate": .science,
-        // Multimodal & Media Generation (inspect_image & extract_pdf in .core so 100% of models can inspect files anytime)
-        "inspect_image": .core, "extract_pdf": .core,
+        // Multimodal & Media Generation (inspect_image, extract_pdf & openthai_ocr in .core so 100% of models can inspect files anytime)
+        "inspect_image": .core, "extract_pdf": .core, "openthai_ocr": .core,
         "generate_image": .multimodal, "generate_video": .multimodal,
         "generate_music": .multimodal, "voice_coding": .multimodal,
         // Studio
