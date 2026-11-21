@@ -134,6 +134,10 @@ namespace MicroCode.Views
             }
         }
 
+        /// <summary>The workspace agent (created on first use): Team Collaboration runs teammates' @ai requests through it so they
+        /// appear in the host's chat and follow the host's tool-approval mode.</summary>
+        public AgentView Agent { get { if (_agentView == null) _agentView = new AgentView(_app, false); return _agentView; } }
+
         public void Render()
         {
             var t = Theme.Current;

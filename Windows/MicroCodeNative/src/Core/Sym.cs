@@ -49,7 +49,7 @@ namespace MicroCode.UI
             {"bubble.left.and.bubble.right",0xE8F2},{"bubble.left",0xE8BD},{"text.bubble",0xE8BD},{"ellipsis.bubble",0xE8F2},
             {"list.bullet.clipboard",0xF0E3},{"checklist",0xE9D5},{"doc.text.magnifyingglass",0xE773},
             {"chart.bar.xaxis",0xE9D2},{"chart.line.uptrend.xyaxis",0xEAFC},{"shield.checkered",0xEA18},{"checkmark.shield",0xF760},
-            {"person.2",0xE716},{"person.2.fill",0xE716},{"person",0xE77B},{"person.fill",0xE77B},{"person.crop.circle",0xE77B},
+            {"person.2",0xE716},{"person.2.slash",0xE8F8},{"person.2.fill",0xE716},{"person",0xE77B},{"person.fill",0xE77B},{"person.crop.circle",0xE77B},
             {"link.badge.plus",0xE71B},{"link",0xE71B},{"slider.horizontal.3",0xE9E9},{"database",0xEE94},
             {"shippingbox",0xF158},{"shippingbox.fill",0xF158},{"shippingbox.and.arrow.backward",0xF158},{"cube",0xF158},{"cube.fill",0xF158},
             {"arrow.down.doc.fill",0xE896},{"arrow.uturn.backward",0xE7A7},{"arrow.counterclockwise",0xE7A7},{"trash",0xE74D},

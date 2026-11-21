@@ -196,8 +196,41 @@ namespace MicroCode.Views
         class Call { public string Id, Name; public Dictionary<string, object> Args; }
         class Turn { public string Text = "", Thinking = ""; public List<Call> Calls = new List<Call>(); public object Assistant; public bool Xml; public int InTok = -1, OutTok = -1; }
 
+        // ── workspace-agent activity (AgentService.isLoading + AgentToolBox pre/post tool hooks) ──
+        // Raised for the main workspace agent only, never for sandboxed Consensus / PNS runs. Team Collaboration uses them to
+        // show the agent as the "MicroCode AI" teammate and to carry its file edits to the room. Handlers run on worker threads.
+        public static event Action<bool> RunStateChanged;
+        public static event Action<ToolStep, Dictionary<string, object>> ToolStarting;
+        public static event Action<ToolStep, Dictionary<string, object>> ToolFinished;
+        static int _activeRuns;
+        public static bool IsWorkspaceRunActive { get { return Thread.VolatileRead(ref _activeRuns) > 0; } }
+
+        static void Raise(Action<ToolStep, Dictionary<string, object>> ev, ToolStep step, Dictionary<string, object> args)
+        {
+            if (ev == null || InIsolation) return;
+            try { ev(step, args); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("agent tool observer: " + ex); }
+        }
+
+        static void RaiseRun(bool active)
+        {
+            var ev = RunStateChanged;
+            if (ev == null) return;
+            try { ev(active); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("agent run observer: " + ex); }
+        }
+
         /// <summary>Runs one agent turn (with the tool loop when tools are enabled) and returns the final reply.</summary>
         public static async Task<AgentResult> Run(List<ChatMessage> history, string system, bool tools, bool readOnly, string sessionId, AgentCallbacks cb, CancellationToken ct)
+        {
+            if (InIsolation) return await RunCore(history, system, tools, readOnly, sessionId, cb, ct);
+            Interlocked.Increment(ref _activeRuns);
+            RaiseRun(true);
+            try { return await RunCore(history, system, tools, readOnly, sessionId, cb, ct); }
+            finally { if (Interlocked.Decrement(ref _activeRuns) == 0) RaiseRun(false); }
+        }
+
+        static async Task<AgentResult> RunCore(List<ChatMessage> history, string system, bool tools, bool readOnly, string sessionId, AgentCallbacks cb, CancellationToken ct)
         {
             // external MCP servers (main agent only: sandboxed Consensus / PNS runs keep to workspace tools)
             bool mcp = tools && !InIsolation;
@@ -301,6 +334,7 @@ namespace MicroCode.Views
                     {
                         Say(cb.OnActivity, Headline(step) + "…");
                         if (cb.OnStepStart != null) cb.OnStepStart(step);
+                        Raise(ToolStarting, step, call.Args);
                         var args = call.Args;
                         bool blocked = false;
                         try
@@ -328,6 +362,7 @@ namespace MicroCode.Views
                     }
                     step.Result = result.Length > 6000 ? result.Substring(0, 6000) + "\n…" : result;
                     res.Steps.Add(step);
+                    Raise(ToolFinished, step, call.Args);
                     if (cb.OnStep != null) cb.OnStep(step);
                     if (step.Children != null)
                         foreach (var child in step.Children) { child.At = step.At; res.Steps.Add(child); if (cb.OnStep != null) cb.OnStep(child); }

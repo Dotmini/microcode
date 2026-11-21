@@ -40,6 +40,16 @@ class TestIde : ICollabIde
         }
     }
     public void SetOpen(string full, string content) { lock (_l) Open[full] = content; }
+
+    // @ai requests: the test plugs in a real AgentRunner run (against a scripted loopback model)
+    public Func<string, Tuple<string, string>> Agent;
+    public readonly List<string> Prompts = new List<string>();
+    public void RunAgentPrompt(string prompt, Action<string, string> done)
+    {
+        lock (_l) Prompts.Add(prompt);
+        var agent = Agent;
+        System.Threading.Tasks.Task.Run(() => { var r = agent != null ? agent(prompt) : Tuple.Create<string, string>(null, "no agent"); done(r.Item1, r.Item2); });
+    }
     public string Get(string full) { lock (_l) { string s; return Open.TryGetValue(full, out s) ? s : null; } }
 }
 
@@ -401,6 +411,9 @@ static class CollabTests
             var rd = Js.DeserializeObject(host.RelayResponseFor(new Dictionary<string, object> { { "id", "r3" }, { "method", "GET" }, { "target", "/" } }, dead).Result) as Dictionary<string, object>;
             Check(Convert.ToInt32(rd["status"]) == 502 && Encoding.UTF8.GetString(Convert.FromBase64String((string)rd["body_b64"])) == "Local collaboration host unreachable", "relay: an unreachable local host answers 502");
 
+            TeamTaskTests(host, peer, hostIde, peerIde, ws, mirror, baseUrl, root);
+            AITeammateTests(host, peer, hostIde, peerIde, ws, mirror);
+
             var wsEvents = peer.TraceLog.Where(ev => ev.Contains(" ws connected") || ev.Contains(" ws error") || ev.Contains(" ws io") || ev.Contains("sync failed")).ToList();
             Console.WriteLine("      peer transport events: " + wsEvents.Count);
             foreach (var ev in wsEvents.Take(20)) Console.WriteLine("        " + ev);
@@ -432,6 +445,214 @@ static class CollabTests
             if (host != null && host.Session != null) host.LeaveSession().Wait();
         }
         return Finish(root);
+    }
+
+    // ── Team Tasks ────────────────────────────────────────────────────────────
+
+    static void TeamTaskTests(CollabService host, CollabService peer, TestIde hostIde, TestIde peerIde, string ws, string mirror, string baseUrl, string root)
+    {
+        const int Live = 1500;
+        Check(host.Tasks.WorkspacePath == ws && peer.Tasks.WorkspacePath == mirror, "tasks: the host's board is its workspace, the peer's is the mirror");
+
+        // host → peer (whole list over the room, the Windows host also pushes it over WebSocket)
+        var t1 = host.Tasks.CreateTask("Ship collaboration", "Port Team Tasks and the AI teammate", "src/Collab");
+        Check(t1 != null && t1.Status == TeamTaskStatus.Planned && t1.Owner == "Hana (host)" && t1.Followers.SequenceEqual(new[] { "Hana (host)" }), "tasks: a new task is Planned, owned and followed by its creator");
+        Check(Until(() => peer.Tasks.Tasks.Any(t => t.Id == t1.Id && t.Title == "Ship collaboration" && t.Scope == "src/Collab"), Live), "tasks host→peer: a new task reaches the peer at once");
+        Check(Until(() => File.Exists(TaskFiles.Managed(mirror, "team-tasks.json")) && File.ReadAllText(TaskFiles.Managed(mirror, "team-tasks.json")).Contains("Ship collaboration"), Live), "tasks host→peer: the peer saves the room's board in the mirror's task file");
+        string hostFile = File.ReadAllText(TaskFiles.Managed(ws, "team-tasks.json"));
+        Check(hostFile.Contains("\"schemaVersion\" : 1") && hostFile.Contains("\"status\" : \"planned\"") && System.Text.RegularExpressions.Regex.IsMatch(hostFile, "\"createdAt\" : \"\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ\""), "tasks: team-tasks.json is the Mac document (schemaVersion, raw status, whole-second ISO-8601 dates)");
+        Check(!hostFile.Contains("sourceChatID"), "tasks: a missing sourceChatID is omitted, not null (Swift Codable)");
+
+        // the sync payload carries the list as a JSON string the Mac decoder accepts
+        var payload = Js.DeserializeObject(Get(baseUrl + "/api/collab/sync").Item2) as Dictionary<string, object>;
+        string tj = payload["teamTasksJSON"] as string;
+        var parsed = TeamTaskJson.ParseArray(tj);
+        Check(tj != null && parsed != null && parsed.Any(t => t.Id == t1.Id) && !System.Text.RegularExpressions.Regex.IsMatch(tj, "\\d\\d:\\d\\d:\\d\\d\\.\\d"), "tasks: teamTasksJSON is a JSON string of the whole board without fractional seconds");
+
+        // peer → host (the peer POSTs its whole list to /api/collab/sync, which a Mac host also understands)
+        var t2 = peer.Tasks.CreateTask("Review merge rules", "", "");
+        Check(Until(() => host.Tasks.Tasks.Any(t => t.Id == t2.Id && t.Owner == "Pim (peer)"), Live), "tasks peer→host: a task created on the peer reaches the host");
+        peer.Tasks.Claim(t1.Id);
+        Check(Until(() => host.Tasks.Tasks.Any(t => t.Id == t1.Id && t.Owner == "Pim (peer)" && t.Status == TeamTaskStatus.Active && t.Followers.Contains("Pim (peer)")), Live), "tasks peer→host: Claim makes the peer owner and moves Planned to In progress");
+        peer.Tasks.AddDecision("  Keep whole-list sync for Mac interop  ", t1.Id);
+        Check(Until(() => host.Tasks.Tasks.Any(t => t.Id == t1.Id && t.Decisions.Any(d => d.Text == "Keep whole-list sync for Mac interop" && d.Author == "Pim (peer)")), Live), "tasks peer→host: a decision (trimmed) reaches the host with its author");
+        host.Tasks.Delete(t2.Id);
+        Check(Until(() => !peer.Tasks.Tasks.Any(t => t.Id == t2.Id), Live), "tasks host→peer: a delete reaches the peer");
+        for (int i = 0; i < 30; i++) host.Tasks.AddDecision("note " + i, t1.Id);
+        Check(host.Tasks.Tasks.First(t => t.Id == t1.Id).Decisions.Count == 24, "tasks: the decision log keeps the last 24");
+        Check(Until(() => peer.Tasks.Tasks.Any(t => t.Id == t1.Id && t.Decisions.Count == 24 && t.Decisions.Last().Text == "note 29"), Live), "tasks: the trimmed log reaches the peer");
+
+        // activeTaskTitle: each side advertises its selected task
+        peer.Tasks.Select(t1.Id);
+        Check(Until(() => host.Participants.Any(p => p.UserId == "usr-peer0002" && p.ActiveTaskTitle == "Ship collaboration"), 4000), "tasks: the peer's selected task shows as its activeTaskTitle on the host");
+
+        // the web portal / API route: the host is the actor, as on the Mac
+        Post(baseUrl + "/api/collab/task", new Dictionary<string, object> { { "action", "create" }, { "title", "  Web task  " }, { "objective", "from the portal" }, { "scope", "a.txt" }, { "author", "Browser Bo" } });
+        var web = host.Tasks.Tasks.FirstOrDefault(t => t.Title == "Web task");
+        Check(web != null && web.Owner == "Hana (host)" && web.Objective == "from the portal", "task route create: the title is trimmed and the host owns the new task");
+        Check(host.Activity.Any(a => a.Action == "created task" && a.ActorName == "Browser Bo" && a.ActorColor == "#10B981" && a.Target == "Web task"), "task route create: logged as 'created task' by the author");
+        Post(baseUrl + "/api/collab/task", new Dictionary<string, object> { { "action", "status" }, { "taskId", web.Id }, { "status", "review" } });
+        Check(host.Tasks.Tasks.First(t => t.Id == web.Id).Status == TeamTaskStatus.Review, "task route status: sets the status");
+        Post(baseUrl + "/api/collab/task", new Dictionary<string, object> { { "action", "status" }, { "taskId", web.Id }, { "status", "bogus" } });
+        Check(host.Tasks.Tasks.First(t => t.Id == web.Id).Status == TeamTaskStatus.Review, "task route status: an unknown status is ignored");
+        Post(baseUrl + "/api/collab/task", new Dictionary<string, object> { { "action", "claim" }, { "taskId", web.Id }, { "author", "Browser Bo" } });
+        var claimed = host.Tasks.Tasks.First(t => t.Id == web.Id);
+        Check(claimed.Owner == "Browser Bo" && claimed.Status == TeamTaskStatus.Active && claimed.Decisions.Any(d => d.Text == "Handed off to Browser Bo." && d.Author == "Hana (host)"), "task route claim: hands off to the author and sets In progress (Mac semantics)");
+        var bad = Http.PostAsync(baseUrl + "/api/collab/task", new StringContent("{not json", Encoding.UTF8, "application/json")).Result;
+        Check((int)bad.StatusCode == 200 && bad.Content.ReadAsStringAsync().Result.Contains("teamTasksJSON"), "task route: bad JSON still answers 200 with the room state");
+        Check(Until(() => peer.Tasks.Tasks.Any(t => t.Id == web.Id && t.Owner == "Browser Bo"), Live), "task route: the result reaches the peer");
+
+        // an invalid task in a pushed list drops the whole list (Swift decodes all-or-nothing)
+        int before = host.Tasks.Count;
+        Post(baseUrl + "/api/collab/sync", new Dictionary<string, object> { { "userId", "web-111" }, { "teamTasksJSON", "[{\"id\":\"x\",\"title\":\"broken\"}]" } });
+        Check(host.Tasks.Count == before, "tasks: a pushed list with an invalid task is ignored as a whole");
+
+        // the agent sees only the selected contract
+        host.Tasks.Select(t1.Id);
+        string ctx = host.Tasks.ContextForSelectedTask();
+        Check(ctx != null && ctx.StartsWith("## Shared Team Task Contract\nTask: Ship collaboration\nStatus: In progress\nOwner: Pim (peer)") && ctx.Contains("Recent decisions:\n- note 26") && ctx.EndsWith("Report blockers and validation evidence clearly."), "tasks: the agent context is the Mac's contract block with the last 4 decisions");
+        host.Integrations.SetAgentContextEnabled(false);
+        Check(host.Tasks.ContextForSelectedTask() == null, "tasks: no contract reaches the agent when 'Let the Agent use the selected task' is off");
+        host.Integrations.SetAgentContextEnabled(true);
+
+        // webhooks: validation, DPAPI storage, and the posted text
+        Check(TeamIntegrations.Validate("https://hooks.slack.com/services/T/B/x", "slack") && !TeamIntegrations.Validate("https://evil.example/hook", "slack") && !TeamIntegrations.Validate("http://hooks.slack.com/x", "slack")
+            && TeamIntegrations.Validate("https://prod-12.westus.logic.azure.com/workflows/x", "teams") && !TeamIntegrations.Validate("https://192.168.1.2/x", "teams") && !TeamIntegrations.Validate("https://hooks.slack.com/x", "teams"),
+            "webhooks: https only, Slack host and Teams suffixes allow-listed, private hosts refused");
+        var hook = new TcpListener(IPAddress.Loopback, 0); hook.Start();
+        int hookPort = ((IPEndPoint)hook.LocalEndpoint).Port;
+        string received = null;
+        var hookTask = System.Threading.Tasks.Task.Run(() => { using (var c = hook.AcceptTcpClient()) received = ReadHttpBody(c.GetStream(), "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"); });
+        TeamIntegrations.AllowLoopbackForTests = true;
+        bool saved = host.Integrations.SaveWebhook("http://127.0.0.1:" + hookPort + "/hook", "slack");
+        string stored = Defaults.Str("teamWebhook:TEAM_WEBHOOK_SLACK", "");
+        Check(saved && host.Integrations.IsEnabled("slack") && stored.Length > 0 && !stored.Contains("127.0.0.1"), "webhooks: the URL is saved DPAPI-encrypted and the connector is enabled");
+        var t3 = host.Tasks.CreateTask("Notify the channel", "Tell the team", "");
+        hookTask.Wait(8000); hook.Stop();
+        string hookText = null;
+        try { var hj = received != null ? Js.DeserializeObject(received) as Dictionary<string, object> : null; hookText = hj != null ? hj["text"] as string : null; } catch (ArgumentException) { }
+        Check(hookText == "MicroCode team task created\n• Notify the channel\nStatus: Planned · Owner: Hana (host)\nObjective: Tell the team", "webhooks: a created task posts exactly the Mac's summary text");
+        host.Integrations.Remove("slack");
+        TeamIntegrations.AllowLoopbackForTests = false;
+        Check(!host.Integrations.IsConfigured("slack") && Defaults.Get("teamWebhook:TEAM_WEBHOOK_SLACK") == null, "webhooks: Remove deletes the stored URL");
+        host.Tasks.Delete(t3.Id);
+        Check(Until(() => peer.Tasks.Count == host.Tasks.Count, Live), "tasks: host and peer end with the same board");
+    }
+
+    static string ReadHttpBody(NetworkStream s, string reply)
+    {
+        var head = new List<byte>();
+        while (true) { int b = s.ReadByte(); if (b < 0) break; head.Add((byte)b); int n = head.Count; if (n >= 4 && head[n - 4] == 13 && head[n - 3] == 10 && head[n - 2] == 13 && head[n - 1] == 10) break; }
+        string h = Encoding.ASCII.GetString(head.ToArray());
+        if (h.IndexOf("Expect: 100-continue", StringComparison.OrdinalIgnoreCase) >= 0) { var c = Encoding.ASCII.GetBytes("HTTP/1.1 100 Continue\r\n\r\n"); s.Write(c, 0, c.Length); }
+        var m = System.Text.RegularExpressions.Regex.Match(h, @"Content-Length:\s*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        int len = m.Success ? int.Parse(m.Groups[1].Value) : 0; var body = new byte[len]; int got = 0;
+        while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
+        var rb = Encoding.UTF8.GetBytes(reply); s.Write(rb, 0, rb.Length);
+        return Encoding.UTF8.GetString(body, 0, got);
+    }
+
+    // ── AI teammate ───────────────────────────────────────────────────────────
+
+    /// <summary>A scripted OpenAI-compatible model on loopback: each request gets the next canned reply.</summary>
+    static System.Threading.Tasks.Task ScriptedModel(string[] replies, List<string> bodies, out int port)
+    {
+        var tcp = new TcpListener(IPAddress.Loopback, 0); tcp.Start();
+        port = ((IPEndPoint)tcp.LocalEndpoint).Port;
+        return System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                foreach (var reply in replies)
+                    using (var client = tcp.AcceptTcpClient())
+                    {
+                        client.ReceiveTimeout = 20000;
+                        var payload = Encoding.UTF8.GetBytes(reply);
+                        string body = ReadHttpBody(client.GetStream(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + payload.Length + "\r\nConnection: close\r\n\r\n" + reply);
+                        lock (bodies) bodies.Add(body);
+                    }
+            }
+            finally { tcp.Stop(); }
+        });
+    }
+
+    static string ToolCall(string id, string name, string argsJson) { return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"" + id + "\",\"type\":\"function\",\"function\":{\"name\":\"" + name + "\",\"arguments\":" + Js.Serialize(argsJson) + "}}]}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}"; }
+    static string TextReply(string t) { return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":" + Js.Serialize(t) + "}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}"; }
+
+    /// <summary>The real agent loop (AgentRunner.Run, main-agent mode) on the given workspace.</summary>
+    static Tuple<string, string> RunAgent(string workspace, string prompt)
+    {
+        AppState.Shared.WorkspaceFolder = workspace;
+        try
+        {
+            var res = AgentRunner.Run(new List<ChatMessage> { new ChatMessage { Role = "user", Content = prompt } }, "You are a test agent.", true, false, "collab-test", new AgentCallbacks(), CancellationToken.None).GetAwaiter().GetResult();
+            return Tuple.Create(res.Text, (string)null);
+        }
+        catch (Exception ex) { return Tuple.Create((string)null, ex.GetBaseException().Message); }
+    }
+
+    static void AITeammateTests(CollabService host, CollabService peer, TestIde hostIde, TestIde peerIde, string ws, string mirror)
+    {
+        // @ai parsing (CollaborationService.handleCollabChatAIMentionIfApplicable)
+        Check(CollabService.ExtractAIPrompt("@ai fix the build") == "fix the build" && CollabService.ExtractAIPrompt("/ai: add tests") == "add tests" && CollabService.ExtractAIPrompt("@Agent - go") == "go"
+            && CollabService.ExtractAIPrompt("hey @ai please look") == "hey @ai please look" && CollabService.ExtractAIPrompt("hello team") == null && CollabService.ExtractAIPrompt("@ai") == "",
+            "@ai: prefixes are stripped, a mention mid-message keeps the whole text, plain chat is not a request");
+
+        // the AI teammate as a participant
+        Check(host.Participants.Any(p => p.UserId == CollabService.AITeammateUserId && p.Role == "AI Agent" && p.DisplayName == "MicroCode AI" && p.Color == "#94A3B8" && p.IsOnline), "AI teammate: the host lists MicroCode AI (AI Agent, #94A3B8)");
+        Check(Until(() => peer.Participants.Any(p => p.UserId == CollabService.AITeammateUserId && p.Role == "AI Agent")), "AI teammate: the peer sees it through the host's participant list");
+        host.SetAITeammateEnabled(false);
+        Check(!host.Participants.Any(p => p.UserId == CollabService.AITeammateUserId) && Until(() => !peer.Participants.Any(p => p.UserId == CollabService.AITeammateUserId)), "AI teammate: Agent · OFF removes it for everyone");
+        Thread.Sleep(300);
+        peer.SendChatMessage("@ai this must not run").Wait();
+        Thread.Sleep(800);
+        lock (hostIde.Prompts) Check(hostIde.Prompts.Count == 0, "@ai: ignored while the AI teammate is off");
+        host.SetAITeammateEnabled(true);
+        Check(Until(() => peer.Participants.Any(p => p.UserId == CollabService.AITeammateUserId)), "AI teammate: Agent · ON brings it back");
+
+        // @ai from the peer → the host's real agent loop edits a file → the edit reaches the peer as the AI's fileBuffer
+        host.AttachAgentEvents();
+        Defaults.Set("toolApprovalMode", "yolo");
+        var bodies = new List<string>();
+        int modelPort;
+        string notesHost = Path.Combine(ws, "notes.md"), notesPeer = Path.Combine(mirror, "notes.md");
+        string greeting = "# notes\nchanged on disk\nHello from MicroCode AI\n";
+        var model = ScriptedModel(new[] { ToolCall("c1", "file_write", Js.Serialize(new Dictionary<string, object> { { "path", "notes.md" }, { "content", greeting } })), TextReply("Added the greeting to notes.md.") }, bodies, out modelPort);
+        Defaults.Set("ai_key_mode", "local"); Defaults.Set("ai_base_local", "http://127.0.0.1:" + modelPort + "/v1"); Defaults.Set("ai_model_local", "scripted");
+        hostIde.Agent = prompt => RunAgent(ws, prompt);
+        hostIde.Current = Path.Combine(ws, "a.txt");
+        peer.SendChatMessage("@ai please add a greeting to notes.md").Wait();
+        Check(Until(() => { lock (hostIde.Prompts) return hostIde.Prompts.Count == 1; }), "@ai: a peer's request reaches the host's agent");
+        string sent; lock (hostIde.Prompts) sent = hostIde.Prompts[0];
+        Check(sent == "[Collab Session Request from teammate 'Pim (peer)' (Current file: a.txt)]: please add a greeting to notes.md", "@ai: the agent gets the Mac's request line with the sender and the host's current file");
+        Check(Until(() => ReadText(notesPeer) == greeting, 10000), "@ai: the agent's file edit reaches the peer's mirror");
+        Check(Until(() => peer.Chat.Any(c => c.UserId == CollabService.AITeammateUserId && c.DisplayName == "MicroCode AI" && c.Message == "Added the greeting to notes.md.")), "@ai: the agent's reply is posted to the room's chat as MicroCode AI");
+        Check(host.Activity.Any(a => a.ActorName == "MicroCode AI" && a.Action == "started task for Pim (peer)") && host.Activity.Any(a => a.ActorName == "MicroCode AI" && a.Action == "AI edited" && a.Target.StartsWith("notes.md:")), "@ai: activity shows the request and the AI's edit");
+        Check(Until(() => peer.Participants.Any(p => p.UserId == CollabService.AITeammateUserId && p.Cursor != null && p.Cursor.FilePath == "notes.md")), "AI teammate: its cursor moved to the file it edited");
+        Check(Until(() => peer.Participants.Any(p => p.UserId == CollabService.AITeammateUserId && !p.IsAIActive && p.AiStatusText == "Ready in Collab"), 4000), "AI teammate: back to 'Ready in Collab' when the turn ends");
+        model.Wait(5000);
+        Check(bodies.Count == 2 && bodies[0].Contains("[Collab Session Request from teammate"), "@ai: two model calls (tool call, then the reply)");
+
+        // a model that is not configured: the requester gets an answer instead of silence
+        Defaults.Set("ai_key_mode", "direct"); Defaults.Set("ai_provider", "openai"); Defaults.Remove("ai_base_local");
+        host.SendChatMessage("@ai summarise the session").Wait();
+        Check(Until(() => peer.Chat.Any(c => c.UserId == CollabService.AITeammateUserId && c.Message.StartsWith("I couldn't run this request:"))), "@ai: when no model is set up, the chat says the request could not run");
+        Check(!peer.Chat.Any(c => c.UserId == CollabService.AITeammateUserId && c.Message == "@ai summarise the session"), "@ai: the AI never answers its own messages");
+
+        // the peer's own agent: its edits reach the host as the peer's edits, not as a second "MicroCode AI"
+        host.DetachAgentEvents();
+        peer.AttachAgentEvents();
+        bodies.Clear();
+        string mainNew = "# host header\nprint('hi')\nprint('peer')\nprint('from the peer agent')\n";
+        model = ScriptedModel(new[] { ToolCall("p1", "file_write", Js.Serialize(new Dictionary<string, object> { { "path", "src/main.py" }, { "content", mainNew } })), TextReply("done") }, bodies, out modelPort);
+        Defaults.Set("ai_key_mode", "local"); Defaults.Set("ai_base_local", "http://127.0.0.1:" + modelPort + "/v1");
+        var peerRun = RunAgent(mirror, "edit main.py");
+        peer.DetachAgentEvents();
+        Check(peerRun.Item2 == null, "peer agent: the run completes (" + (peerRun.Item2 ?? "ok") + ")");
+        Check(Until(() => ReadText(Path.Combine(ws, "src", "main.py")) == mainNew, 6000), "peer agent: its file edit reaches the host's disk");
+        Check(host.Activity.Any(a => a.ActorName == "Pim (peer)" && a.Target == "src/main.py") && !host.Activity.Any(a => a.ActorName == "MicroCode AI" && a.Target.StartsWith("src/main.py")), "peer agent: the edit is the peer's, not a second MicroCode AI");
+        model.Wait(5000);
+        hostIde.Agent = null;
     }
 
     static int Finish(string root)

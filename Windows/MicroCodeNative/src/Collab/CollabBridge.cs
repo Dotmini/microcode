@@ -85,6 +85,16 @@ namespace MicroCode.Views
 
         public void RefreshTree() { Ui(() => AppState.Shared.RefreshFileTree()); }
 
+        public void RunAgentPrompt(string prompt, Action<string, string> done)
+        {
+            Ui(() =>
+            {
+                var win = Application.Current != null ? Application.Current.MainWindow as MainWindow : null;
+                if (win == null) { done(null, "MicroCode's main window is not open on the host."); return; }
+                win.Agent.RunPromptWithReply(prompt, m => done(m.Content, m.Error));
+            });
+        }
+
         public void PathMoved(string oldFullPath, string newFullPath)
         {
             Ui(() =>

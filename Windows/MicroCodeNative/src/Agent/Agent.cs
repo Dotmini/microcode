@@ -268,6 +268,14 @@ namespace MicroCode.Views
             if (_running) { _queue.Add(new Queued { Text = prompt, Files = new List<string>() }); RenderQueue(); return; }
             Start(prompt, new List<string>(), plan);
         }
+
+        /// <summary>Runs (or queues) a prompt in the active chat and hands back the reply of THAT turn — its own message, never
+        /// "the last assistant message" (which could be an earlier run's when the prompt had to wait in the queue).</summary>
+        public void RunPromptWithReply(string prompt, Action<ChatMessage> onReply)
+        {
+            if (_running) { _queue.Add(new Queued { Text = prompt, Files = new List<string>(), OnReply = onReply }); RenderQueue(); return; }
+            Start(prompt, new List<string>(), null, onReply);
+        }
         public void StopRun() { Stop(); }
         readonly bool _embeddedInWelcome;
         readonly StackPanel _transcript = new StackPanel();
@@ -286,7 +294,7 @@ namespace MicroCode.Views
         bool _running;
         LiveTurn _live;
         readonly List<string> _attachments = new List<string>();
-        class Queued { public string Text; public List<string> Files; }
+        class Queued { public string Text; public List<string> Files; public Action<ChatMessage> OnReply; }
         readonly List<Queued> _queue = new List<Queued>();
         Queued _sendAfterStop;
         TaskCompletionSource<bool> _pendingApproval;
@@ -571,7 +579,43 @@ namespace MicroCode.Views
 
             _attachBar.Margin = new Thickness(0, 0, 0, 2);
             _attachBar.Visibility = Visibility.Collapsed;
-            var bottom = V.H(5, plus, model, scope, env, V.Sp(4), approval, sub, mic, _sendHost);
+            // UnifiedAgentActionsMenu "Team" pill: the shared task board and its settings; a dot when a task contract is active
+            var teamRow = V.H(3);
+            var team = V.Button(V.Box(teamRow, V.P(6, 4), t.P(0.06), 6), null);
+            team.ToolTip = "Team Tasks & Collaboration";
+            Action renderTeam = () =>
+            {
+                var integ = CollabService.Shared.Integrations;
+                var sel = CollabService.Shared.Tasks.SelectedTask;
+                bool active = integ.TeamTasksEnabled && (sel != null || TeamIntegrations.All.Any(i => integ.IsEnabled(i)));
+                team.Visibility = integ.TeamTasksEnabled ? Visibility.Visible : Visibility.Collapsed;
+                teamRow.Children.Clear();
+                teamRow.Children.Add(Sym.Icon("person.2", 9.5, active ? t.Primary : t.Secondary, FontWeights.Medium));
+                teamRow.Children.Add(V.T("Team", 11, active ? FontWeights.SemiBold : FontWeights.Medium, active ? t.Primary : t.Secondary));
+                if (sel != null) teamRow.Children.Add(V.Dot(5, t.Accent));
+            };
+            team.MenuItems = () =>
+            {
+                var items = new List<MenuItemSpec>
+                {
+                    MenuItemSpec.Item("Team Tasks", "checklist", () => TeamTasksView.ShowWindow(() => AgentStore.ActiveId, null)),
+                    MenuItemSpec.Item("Configure Team Collaboration", "slider.horizontal.3", () => TeamTasksView.ShowIntegrations(Window.GetWindow(this)))
+                };
+                var sel = CollabService.Shared.Tasks.SelectedTask;
+                if (sel != null)
+                {
+                    items.Add(MenuItemSpec.Sep());
+                    items.Add(new MenuItemSpec { Title = "Active: " + sel.Title, Disabled = true });
+                    items.Add(new MenuItemSpec { Title = TeamTaskStatusInfo.Label(sel.Status) + " · " + sel.Owner, Disabled = true });
+                }
+                return items;
+            };
+            Action teamChanged = () => Dispatcher.BeginInvoke(renderTeam);
+            CollabService.Shared.Tasks.Changed += teamChanged;
+            CollabService.Shared.Integrations.Changed += teamChanged;
+            Unloaded += delegate { CollabService.Shared.Tasks.Changed -= teamChanged; CollabService.Shared.Integrations.Changed -= teamChanged; };
+            renderTeam();
+            var bottom = V.H(5, plus, model, scope, env, team, V.Sp(4), approval, sub, mic, _sendHost);
             var stack = V.VLead(6, V.Self(_attachBar, Cross.Stretch), V.Self(V.Box(field, V.P(2, 2, 2, 0), null, 0), Cross.Stretch), V.Self(V.Box(bottom, V.P(0, 2, 0, 0), null, 0), Cross.Stretch));
             var card = V.Box(stack, V.P(12, 9), Theme.B(Theme.WithAlpha(Colors.White, 0.04)), 14, t.P(0.10), 1);
             _input.GotKeyboardFocus += delegate { card.BorderBrush = t.P(0.24); };
@@ -1208,10 +1252,13 @@ namespace MicroCode.Views
             if (persona == "explorer") sb.Append("\n[EXPLORER] Research the codebase read-only and report findings with file:line references. Do not edit files.\n");
             else if (persona == "reviewer") sb.Append("\n[REVIEWER] Act as a senior code reviewer: find correctness bugs, security issues and risky patterns, most severe first, with file:line references. Do not edit files unless asked.\n");
             sb.Append(AgentContext.Extra(ws));
+            // Shared tasks are explicit, reviewable contracts: only the selected contract, never another person's prompts
+            string teamTask = CollabService.HasShared ? CollabService.Shared.Tasks.ContextForSelectedTask() : null;
+            if (teamTask != null) sb.Append("\n\n").Append(teamTask);
             return sb.ToString();
         }
 
-        void Start(string text, List<string> files, bool? planOverride)
+        void Start(string text, List<string> files, bool? planOverride, Action<ChatMessage> onReply = null)
         {
             var s = AgentStore.Active ?? AgentStore.NewChat(_app.WorkspaceFolder, false);
             if (s.Messages.Count == 0) s.Name = text.Length > 0 ? (text.Length > 48 ? text.Substring(0, 48) + "…" : text) : Path.GetFileName(files.FirstOrDefault() ?? "Attachment");
@@ -1235,8 +1282,10 @@ namespace MicroCode.Views
             AgentStore.Notify(); // sidebar + header pick up the new conversation title
             if (!AIConfig.IsConfigured)
             {
-                s.Messages.Add(new ChatMessage { Role = "assistant", Content = "", Error = AIClient.NotConnectedText(), ErrorFix = AIConfig.Mode == "cloud" ? "account" : "ai" });
+                var notConnected = new ChatMessage { Role = "assistant", Content = "", Error = AIClient.NotConnectedText(), ErrorFix = AIConfig.Mode == "cloud" ? "account" : "ai" };
+                s.Messages.Add(notConnected);
                 AgentStore.Save(); AgentStore.Notify();
+                if (onReply != null) onReply(notConnected);
                 return;
             }
             string persona = Defaults.Str("agentPersona", "main");
@@ -1298,8 +1347,15 @@ namespace MicroCode.Views
                 AgentStore.Save();
                 RenderSend();
                 AgentStore.Notify();
-                if (_sendAfterStop != null) { var q = _sendAfterStop; _sendAfterStop = null; Start(q.Text, q.Files, null); }
-                else if (_queue.Count > 0 && task.Status == TaskStatus.RanToCompletion) { var q = _queue[0]; _queue.RemoveAt(0); RenderQueue(); Start(q.Text, q.Files, null); }
+                if (onReply != null) { try { onReply(reply); } catch (Exception cbEx) { System.Diagnostics.Debug.WriteLine("agent reply observer: " + cbEx); } }
+                if (_sendAfterStop != null) { var q = _sendAfterStop; _sendAfterStop = null; Start(q.Text, q.Files, null, q.OnReply); }
+                else if (_queue.Count > 0 && task.Status == TaskStatus.RanToCompletion) { var q = _queue[0]; _queue.RemoveAt(0); RenderQueue(); Start(q.Text, q.Files, null, q.OnReply); }
+                else if (_queue.Count > 0)
+                {
+                    // the run failed or was stopped, so the queue waits for the user; requests from teammates get an answer now
+                    foreach (var q in _queue.Where(x => x.OnReply != null).ToList()) { _queue.Remove(q); q.OnReply(new ChatMessage { Role = "assistant", Content = "", Error = "The agent's previous run did not finish, so this request was not started." }); }
+                    RenderQueue();
+                }
             })));
         }
 

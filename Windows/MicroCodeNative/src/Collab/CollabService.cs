@@ -93,11 +93,14 @@ namespace MicroCode.Views
         void RefreshTree();
         /// <summary>A collaborator renamed a file or folder: open buffers under the old path follow it.</summary>
         void PathMoved(string oldFullPath, string newFullPath);
+        /// <summary>A teammate's @ai request: run it in the host's workspace agent and call done(reply, error) once, for this
+        /// request, when its turn ends (on any thread).</summary>
+        void RunAgentPrompt(string prompt, Action<string, string> done);
     }
 
     public enum CollabStatus { Disconnected, Connecting, Connected, Reconnecting, Error }
 
-    public class CollabService
+    public partial class CollabService
     {
         public static readonly string[] Palette = { "#64748B", "#5B8DEF", "#4E9F86", "#C28E5C", "#7C8EA6", "#8C7A6B", "#5F9EA0", "#94A3B8" };
         const string RoomAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -107,7 +110,7 @@ namespace MicroCode.Views
 
         static CollabService _shared;
         /// <summary>The app's service, bound to AppState.</summary>
-        public static CollabService Shared { get { if (_shared == null) _shared = new CollabService(new AppCollabIde(), null); return _shared; } }
+        public static CollabService Shared { get { if (_shared == null) { _shared = new CollabService(new AppCollabIde(), null); _shared.AttachAgentEvents(); } return _shared; } }
         public static bool HasShared { get { return _shared != null; } }
 
         readonly ICollabIde _ide;
@@ -196,6 +199,92 @@ namespace MicroCode.Views
                 LocalDisplayName = s != null && !string.IsNullOrWhiteSpace(s.DisplayName) ? s.DisplayName : Environment.UserName;
             }
             RefreshNetworkAddresses();
+            Integrations = new TeamIntegrations();
+            Tasks = new TeamTaskStore(() => LocalDisplayName, Integrations);
+            Tasks.LocalChange += BroadcastTeamTasksIfActive;
+            Tasks.Changed += Fire;
+        }
+
+        // ── Team Tasks (TeamTaskService / TeamIntegrationService) ──
+
+        /// <summary>The workspace's shared task board. In a room the host's list is the room's list (whole-list replace,
+        /// as on the Mac).</summary>
+        public readonly TeamTaskStore Tasks;
+        public readonly TeamIntegrations Integrations;
+        DateTime _tasksPushedAt = DateTime.MinValue;
+
+        string SelectedTaskTitle { get { var t = Tasks.SelectedTask; return t != null ? t.Title : null; } }
+
+        /// <summary>broadcastTeamTasksIfActive. A peer POSTs its whole list to /api/collab/sync (what a Mac host understands);
+        /// a Windows host also pushes the list over WebSocket as {"type":"teamTasks"} so Windows peers update at once — Mac
+        /// peers ignore the unknown type and keep polling.</summary>
+        void BroadcastTeamTasksIfActive(List<TeamTask> tasks)
+        {
+            var s = Session;
+            if (s == null) return;
+            string json = TeamTaskJson.ArrayJson(tasks);
+            if (s.IsHostingLocally)
+            {
+                Server.Broadcast(Json(new Dictionary<string, object> { { "type", "teamTasks" }, { "teamTasksJSON", json } }), null);
+                return;
+            }
+            _tasksPushedAt = DateTime.UtcNow;
+            var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "teamTasksJSON", json } };
+            var _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
+                    using (var resp = await Http.PostAsync(s.RemoteEndpoint + "/api/collab/sync", new StringContent(Json(body), Encoding.UTF8, "application/json"), cts.Token))
+                        Trace("tasks pushed " + (int)resp.StatusCode);
+                }
+                catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Trace("tasks push failed: " + ex.Message); }
+            });
+        }
+
+        /// <summary>A list from the room (sync payload or the teamTasks WebSocket message). Swift decodes the array all-or-nothing:
+        /// one invalid task drops the whole list, and so does this.</summary>
+        void ApplyRoomTasks(string json, bool authoritative)
+        {
+            if (json == null) return;
+            var list = TeamTaskJson.ParseArray(json);
+            if (list == null) { Trace("tasks: invalid list ignored"); return; }
+            // a poll answer that left the host before our own push landed must not undo it (the WS echo is authoritative)
+            if (!authoritative && (DateTime.UtcNow - _tasksPushedAt).TotalMilliseconds < 1500) return;
+            Tasks.ApplyRemoteTasks(list);
+        }
+
+        /// <summary>POST /api/collab/task (web portal and API clients): create / status / claim / decision, applied by the host
+        /// exactly as the Mac does — the host is the actor, "claim" = hand off to the author + set In progress.</summary>
+        void HandleTaskAction(Dictionary<string, object> body)
+        {
+            Integrations.SetTeamTasksEnabled(true);
+            if (Tasks.WorkspacePath == null) Tasks.Load(SharedRoot ?? _ide.WorkspaceFolder);
+            string action = S(body, "action") ?? "", taskId = S(body, "taskId");
+            switch (action)
+            {
+                case "create":
+                {
+                    var t = Tasks.CreateTask(S(body, "title") ?? "", S(body, "objective") ?? "", S(body, "scope") ?? "");
+                    if (t != null) RecordActivity(S(body, "author") ?? "Team", "#10B981", "created task", t.Title);
+                    break;
+                }
+                case "status":
+                {
+                    string raw = S(body, "status");
+                    if (taskId != null && TeamTaskStatusInfo.All.Any(x => TeamTaskStatusInfo.Raw(x) == raw)) Tasks.UpdateStatus(TeamTaskStatusInfo.Parse(raw), taskId);
+                    break;
+                }
+                case "claim":
+                {
+                    string author = S(body, "author");
+                    if (taskId != null && !string.IsNullOrEmpty(author)) { Tasks.Handoff(taskId, author); Tasks.UpdateStatus(TeamTaskStatus.Active, taskId); }
+                    break;
+                }
+                case "decision":
+                    if (taskId != null && S(body, "text") != null) Tasks.AddDecision(S(body, "text"), taskId);
+                    break;
+            }
         }
 
         /// <summary>For tests: a separate identity per instance (two collaborators in one process).</summary>
@@ -389,7 +478,7 @@ namespace MicroCode.Views
         void UpdateSelfInParticipants()
         {
             if (Session == null) return;
-            lock (_gate) Upsert(LocalUserId, LocalDisplayName, Session.IsHostingLocally ? "Host" : LocalRole, LocalColor, CurrentLocalCursor(), _localMouse);
+            lock (_gate) UpsertSelf();
         }
 
         CollabCursor CurrentLocalCursor()
@@ -490,6 +579,8 @@ namespace MicroCode.Views
             string code = GenerateShareCode();
             string ws = _ide.WorkspaceFolder;
             string wsName = ws != null ? Path.GetFileName(Path.GetFullPath(ws).TrimEnd('\\')) : "Workspace";
+            Integrations.SetTeamTasksEnabled(true);
+            Tasks.Load(ws);
             lock (_gate)
             {
                 SharedRoot = ws != null ? Path.GetFullPath(ws).TrimEnd('\\') : null;
@@ -500,7 +591,7 @@ namespace MicroCode.Views
                 if (!Server.Start()) { Status = CollabStatus.Error; StatusError = "No free port in 8490-8515"; Fire(); return null; }
                 Session = new CollabSession { Id = code, ShareCode = code, ProjectId = wsName, WorkspaceName = wsName, WorkspaceLang = DetectWorkspaceLang(ws), HostUserId = LocalUserId, HostDisplayName = LocalDisplayName, IsHostingLocally = true, RemoteEndpoint = "http://" + SelectedLanAddress + ":" + Server.Port };
                 _participants = new List<CollabParticipant>();
-                Upsert(LocalUserId, LocalDisplayName, "Host", LocalColor, CurrentLocalCursor(), _localMouse);
+                UpsertSelf(); EnsureAITeammate();
                 _chat.Clear(); _activity.Clear();
                 Status = CollabStatus.Connected; StatusError = null; IsWebSocketRealtimeActive = true;
                 IndexLocalWorkspaceFiles(true);
@@ -922,7 +1013,7 @@ namespace MicroCode.Views
 
         string BuildSyncPayload(string assignedColor)
         {
-            Upsert(LocalUserId, LocalDisplayName, "Host", LocalColor, CurrentLocalCursor(), _localMouse);
+            UpsertSelf(); EnsureAITeammate();
             IndexLocalWorkspaceFiles(false);
             var buffers = new Dictionary<string, object>(); var bufferRevs = new Dictionary<string, object>();
             foreach (var f in _ide.OpenFiles().Take(24))
@@ -948,8 +1039,8 @@ namespace MicroCode.Views
                 { "openBuffers", buffers }, { "fileRevisions", bufferRevs },
                 { "chatMessages", _chat.Skip(Math.Max(0, _chat.Count - 50)).Select(m => new Dictionary<string, object> { { "id", m.Id }, { "userId", m.UserId }, { "displayName", m.DisplayName }, { "userColor", m.UserColor }, { "message", m.Message }, { "timestamp", Iso(m.Timestamp) } }).ToList() },
                 { "activityLog", _activity.Skip(Math.Max(0, _activity.Count - 30)).Select(a => new Dictionary<string, object> { { "id", a.Id }, { "actorName", a.ActorName }, { "actorColor", a.ActorColor }, { "action", a.Action }, { "target", a.Target }, { "timestamp", Iso(a.Timestamp) } }).ToList() },
-                // Team Tasks are not ported to Windows yet: an empty list keeps Mac peers' task boards as they are
-                { "teamTasksJSON", "[]" }
+                // the whole board as a JSON string (Codable [TeamTask], ISO-8601 dates), like the Mac host
+                { "teamTasksJSON", TeamTaskJson.ArrayJson(Tasks.Tasks) }
             };
             if (assignedColor != null) payload["assignedColor"] = assignedColor;
             return Json(payload);
@@ -1019,12 +1110,14 @@ namespace MicroCode.Views
                     case "POST /api/collab/chat":
                     {
                         string text = S(body, "message");
-                        if (text != null && text.Trim().Length > 0) { AddChat(S(body, "userId") ?? "peer", S(body, "displayName") ?? "Collaborator", S(body, "color") ?? "#3B82F6", text, null); FireAsync(); }
+                        if (text != null && text.Trim().Length > 0) { AddChat(S(body, "userId") ?? "peer", S(body, "displayName") ?? "Collaborator", S(body, "color") ?? "#3B82F6", text, null); HandleChatAIMention(S(body, "userId") ?? "peer", S(body, "displayName") ?? "Collaborator", text); FireAsync(); }
                         return CollabResponse.Json("{\"ok\":true}");
                     }
                     case "POST /api/collab/task":
-                        // Team Tasks are not on Windows yet: acknowledge with the current state so web clients stay in sync
-                        return CollabResponse.Json(BuildSyncPayload(null));
+                        // always 200 with the full payload (even for bad JSON or an unknown action), as on the Mac
+                        if (body != null) HandleTaskAction(body);
+                        FireAsync();
+                        return new CollabResponse { ContentType = "application/json", Body = Encoding.UTF8.GetBytes(BuildSyncPayload(null)) };
                     case "POST /api/collab/leave":
                     {
                         string uid = S(body, "userId");
@@ -1068,6 +1161,13 @@ namespace MicroCode.Views
             string color = AssignDistinctColor(S(body, "color"), uid);
             var mouse = ParseMouse(Obj(body, "mouse"));
             Upsert(uid, name, role, color, ParseCursor(Obj(body, "cursor")), mouse, S(body, "activeTaskTitle"), B(body, "isAIActive") ?? false, S(body, "aiStatusText"));
+            // a peer's whole task board (sent after every local task change): replaces the room's list
+            string tasksJson = S(body, "teamTasksJSON");
+            if (tasksJson != null)
+            {
+                var list = TeamTaskJson.ParseArray(tasksJson);
+                if (list != null) { Tasks.ApplyRemoteTasks(list); BroadcastTeamTasksIfActive(Tasks.Tasks); }
+            }
             var edits = Arr(body, "fileEdits");
             if (edits != null)
                 foreach (var e in edits.OfType<Dictionary<string, object>>())
@@ -1090,7 +1190,8 @@ namespace MicroCode.Views
             var msg = new CollabChat { UserId = uid, DisplayName = name, UserColor = color, Message = text };
             if (id != null) msg.Id = id;
             _chat.Add(msg);
-            RecordActivity(name, color, "posted message", text.Length > 40 ? text.Substring(0, 40) : text);
+            // the AI's replies are not "posted message" activity on the Mac either
+            if (uid != AITeammateUserId) RecordActivity(name, color, "posted message", text.Length > 40 ? text.Substring(0, 40) : text);
             Server.Broadcast(Json(new Dictionary<string, object> { { "type", "chat" }, { "id", msg.Id }, { "userId", uid }, { "displayName", name }, { "userColor", color }, { "message", text } }), null);
         }
 
@@ -1105,7 +1206,9 @@ namespace MicroCode.Views
             lock (_gate)
             {
                 string uid = S(msg, "userId") ?? client.UserId ?? "";
-                if (uid.Length > 0) client.UserId = uid;
+                // a socket keeps the identity it said hello with: a Mac peer's local agent sends frames as "ai-agent-teammate",
+                // and rebinding the socket to that id (as the Mac host does) makes later echoes skip the wrong client
+                if (uid.Length > 0 && uid != AITeammateUserId && (client.UserId == null || type == "hello")) client.UserId = uid;
                 var known = uid.Length > 0 ? Find(uid) : null;
                 switch (type)
                 {
@@ -1157,6 +1260,7 @@ namespace MicroCode.Views
                         string t = S(msg, "message");
                         if (t == null || t.Trim().Length == 0) return;
                         AddChat(uid, S(msg, "displayName") ?? "Collaborator", known != null ? known.Color : (S(msg, "color") ?? "#3B82F6"), t, null);
+                        HandleChatAIMention(uid, S(msg, "displayName") ?? "Collaborator", t);
                         break;
                     }
                     default: return;
@@ -1172,10 +1276,10 @@ namespace MicroCode.Views
             lock (_gate)
             {
                 FlushPendingWrites();
-                Upsert(LocalUserId, LocalDisplayName, "Host", LocalColor, CurrentLocalCursor(), _localMouse);
+                UpsertSelf(); EnsureAITeammate();
                 IndexLocalWorkspaceFiles(true);
                 var cutoff = DateTime.UtcNow.AddSeconds(-15);
-                foreach (var p in _participants.Where(x => x.UserId != LocalUserId && x.IsOnline && x.LastSeenAt < cutoff)) { p.IsOnline = false; changed = true; }
+                foreach (var p in _participants.Where(x => x.UserId != LocalUserId && x.UserId != AITeammateUserId && x.IsOnline && x.LastSeenAt < cutoff)) { p.IsOnline = false; changed = true; }
                 if (changed) BroadcastParticipants();
             }
             Fire();
@@ -1293,6 +1397,9 @@ namespace MicroCode.Views
             catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException || ex is IOException)) throw; Debug.WriteLine("collab bundle: " + ex.Message); }
             if (mount)
             {
+                // the room's board lives in the mirrored workspace's task file (TeamTaskService.load(mirrorRoot))
+                Integrations.SetTeamTasksEnabled(true);
+                Tasks.Load(SharedRoot);
                 string activeFull = hostActive.Length > 0 ? FullPathOf(SanitizeRelativePath(hostActive)) : null;
                 _ide.MountWorkspace(SharedRoot, activeFull != null && File.Exists(activeFull) ? activeFull : null);
             }
@@ -1332,6 +1439,7 @@ namespace MicroCode.Views
             if (Session == null) return;
             if (S(json, "workspaceName") != null) Session.WorkspaceName = S(json, "workspaceName");
             if (S(json, "workspaceLang") != null) Session.WorkspaceLang = S(json, "workspaceLang");
+            ApplyRoomTasks(S(json, "teamTasksJSON"), false);
             var parr = Arr(json, "participants");
             if (parr != null) ApplyParticipantsArray(parr);
             bool treeChanged = false;
@@ -1536,6 +1644,7 @@ namespace MicroCode.Views
                         break;
                     }
                     case "fsEvent": ApplyFileSystemEvent(msg, false, null); break;
+                    case "teamTasks": ApplyRoomTasks(S(msg, "teamTasksJSON"), true); break;
                     case "chat":
                     {
                         string t = S(msg, "message");
@@ -1558,7 +1667,7 @@ namespace MicroCode.Views
             {
                 try
                 {
-                    var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "isAIActive", false }, { "aiStatusText", "" }, { "activeTaskTitle", "" } };
+                    var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "isAIActive", false }, { "aiStatusText", "" }, { "activeTaskTitle", SelectedTaskTitle ?? "" } };
                     var cur = CurrentLocalCursor();
                     if (cur != null) body["cursor"] = CursorDict(cur);
                     if (_localMouse != null) body["mouse"] = MouseDict(_localMouse);
@@ -1639,7 +1748,7 @@ namespace MicroCode.Views
             {
                 Session = null; _participants = new List<CollabParticipant>(); _sharedFiles = new List<CollabSharedFile>(); _sharedDirs = new List<string>();
                 _contents.Clear(); _revisions.Clear(); _snapshots.Clear(); _peerBaseRevisions.Clear(); _lastSynced.Clear(); _diskMod.Clear();
-                FollowingUserId = null; _localCursor = null; _localMouse = null; SharedRoot = null; _syncFailures = 0; _pendingDisk.Clear();
+                FollowingUserId = null; _localCursor = null; _localMouse = null; SharedRoot = null; _syncFailures = 0; _pendingDisk.Clear(); ResetAITeammate();
                 Status = CollabStatus.Disconnected; IsWebSocketRealtimeActive = false;
             }
             Fire();
@@ -1735,7 +1844,7 @@ namespace MicroCode.Views
             string clean = (message ?? "").Trim();
             var s = Session;
             if (clean.Length == 0 || s == null) return;
-            if (s.IsHostingLocally) { lock (_gate) AddChat(LocalUserId, LocalDisplayName, LocalColor, clean, null); Fire(); return; }
+            if (s.IsHostingLocally) { lock (_gate) { AddChat(LocalUserId, LocalDisplayName, LocalColor, clean, null); HandleChatAIMention(LocalUserId, LocalDisplayName, clean); } Fire(); return; }
             if (IsWebSocketRealtimeActive) { await SendPeer(new Dictionary<string, object> { { "type", "chat" }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor }, { "message", clean } }); return; }
             try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8))) (await Http.PostAsync(s.RemoteEndpoint + "/api/collab/chat", new StringContent(Json(new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor }, { "message", clean } }), Encoding.UTF8, "application/json"), cts.Token)).Dispose(); }
             catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Debug.WriteLine("collab chat: " + ex.Message); }

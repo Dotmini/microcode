@@ -176,10 +176,10 @@ macOS มีแอปรุ่นที่สองชื่อ **MicroCode AI**
 | Database Studio | `DatabaseStudioView`, `DatabaseService` | ❌ placeholder | — |
 | Container Studio | `ContainerView` (965), `ContainerService` (929) | ❌ placeholder | — |
 | CI/CD Pipelines | `CICDPipelineView` (1,435), `CICDService`, `LocalPipelineRunner` | ❌ placeholder | — |
-| Realtime Collaboration | `CollaborationView` (2,155), `CollaborationService` (5,803), `CRDTEngine` | ✅ host / join / mirror / realtime edit + 3-way merge / realtime CRUD ทั้งสองทาง / presence / follow / chat / web portal / relay | Team Tasks, AI teammate + `@ai`, Bonjour discovery, QR, SSH tunnel (localhost.run), cursor ของเพื่อนใน editor, presence bar บน title bar; ยังไม่ได้ทดสอบข้ามเครื่อง / กับ Mac / กับ relay จริง |
+| Realtime Collaboration | `CollaborationView` (2,155), `CollaborationService` (5,803), `CRDTEngine` | ✅ host / join / mirror / realtime edit + 3-way merge / realtime CRUD ทั้งสองทาง / presence / follow / chat / web portal / relay / AI teammate + `@ai` | Bonjour discovery, QR, SSH tunnel (localhost.run), cursor ของเพื่อนใน editor, presence bar บน title bar; ยังไม่ได้ทดสอบข้ามเครื่อง / กับ Mac / กับ relay จริง |
 | Connect with Phone | `PhoneCompanionService` (6,500+), `PhoneCompanionSettingsView` | ⚪ | — |
 | Cloud GPU | `CloudGPUView`, `CloudGPUService`, `RemoteGPUService` | ⚪ | — |
-| Team Tasks | `TeamTasksView`, `TeamTaskService`, `TeamIntegrationService` | ❌ | — |
+| Team Tasks | `TeamTasksView`, `TeamTaskService`, `TeamIntegrationService` | ✅ บอร์ด + composer + Slack/Teams webhook + sync ในห้อง + contract ให้ Agent + ปุ่ม Team ใน Agent | ยังไม่ได้ยิง webhook จริง |
 | Runtime / Python env / Node version | `RuntimeManagerView`, `PythonEnvSheet`, `NodeVersionPicker`, `ProjectRuntimeView` | 🟡 เลือก Python ใน Cell Mode | หน้าจัดการ runtime |
 | Mobile dev bar / อุปกรณ์จริง / Store lifecycle / Asset matrix / Build report | `MobileDevCommandBarView`, `PhysicalDeviceSurfaceView`, `StoreLifecycleModalView`, `AssetMatrixModalView`, `BuildReportView` | ❌ | — |
 | Keyboard shortcuts cheat sheet, Theme picker | `KeyboardShortcutsCheatSheetView`, `ThemePickerView` | 🟡 เลือกธีมได้ใน Settings | cheat sheet |
