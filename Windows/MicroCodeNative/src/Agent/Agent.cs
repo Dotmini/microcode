@@ -1690,7 +1690,7 @@ namespace MicroCode.Views
             resultBox.Visibility = Visibility.Collapsed;
             resultBox.Margin = new Thickness(0, 2, 0, 4);
             var chev = Sym.Icon("chevron.right", 8.5, t.S(0.55), FontWeights.SemiBold);
-            bool isEdit = (step.Name == "file_write" || step.Name == "replace_in_file") && step.Ok && !string.IsNullOrEmpty(step.Checkpoint);
+            bool isEdit = AgentRunner.IsFileEdit(step.Name) && step.Ok && !string.IsNullOrEmpty(step.Checkpoint);
             Func<string> before = () => step.Existed ? (AgentRunner.ReadSnapshot(step.Checkpoint) ?? "") : "";
             Func<string> after = () => AgentRunner.ReadSnapshot(step.After) ?? "";
             bool diffBuilt = false;
@@ -1736,7 +1736,7 @@ namespace MicroCode.Views
                     if (range != null) line.Children.Add(V.Mono(range, 11, FontWeights.Normal, t.S(0.6)));
                     break;
                 }
-                case "file_write": case "replace_in_file":
+                case "file_write": case "replace_in_file": case "multi_replace_in_file": case "patch_file": case "apply_patch":
                 {
                     if (!step.Ok)
                     {

@@ -135,7 +135,7 @@ namespace MicroCode.Views
             var autoRun = V.H(6, V.T("Auto-run", 11, FontWeights.Normal, t.Primary), MiniSwitch(_autoRun, v => { _autoRun = v; }));
             var bar = V.H(4, lang, gear, V.Size(V.Line(t.Separator, false), 1, 16), seg,
                 Toggle("folder.badge.gearshape", "Open", false, OpenFile), Toggle("square.and.arrow.down", "Save", false, SaveFile),
-                Toggle("doc.text.fill", "Document", false, () => { }), V.Sp(),
+                V.Sp(), // the Mac's "Document" sheet is not ported yet; the button is left out rather than doing nothing
                 Toggle("folder", "Data", _showData, () => { _showData = !_showData; Render(); }),
                 Toggle("terminal", "Output", _showOutput, () => { _showOutput = !_showOutput; Render(); }),
                 Toggle("macwindow", "Preview", _showPreview, () => { _showPreview = !_showPreview; Render(); }),

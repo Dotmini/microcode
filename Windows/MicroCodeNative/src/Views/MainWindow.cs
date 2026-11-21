@@ -385,7 +385,8 @@ namespace MicroCode.Views
             list.Add(Tuple.Create<string, Func<List<MenuItemSpec>>>("File", () => new List<MenuItemSpec> {
                 I("New File", null, "Ctrl+N", a.NewFile), I("New AI Conversation", null, "Ctrl+Shift+N", () => { a.SwitchToMode(EditorMode.AIAgent); a.Notify("agent:new"); }),
                 I("Open File...", null, "Ctrl+O", a.OpenFileDialog), I("Open Folder...", null, "Ctrl+Shift+O", a.OpenFolderDialog), MenuItemSpec.Sep(),
-                I("Import .ARX Capsule…", null, null, () => a.Notify("agent:importArx")), I("Export .ARX Capsule…", null, null, () => a.Notify("agent:exportArx")), MenuItemSpec.Sep(),
+                // .ARX capsules (ARXCapsuleService) are not ported yet: shown disabled instead of a menu item that does nothing
+                new MenuItemSpec { Title = "Import .ARX Capsule… (not on Windows yet)", Disabled = true }, new MenuItemSpec { Title = "Export .ARX Capsule… (not on Windows yet)", Disabled = true }, MenuItemSpec.Sep(),
                 I("Close Tab", null, "Ctrl+W", () => { if (a.CurrentFile != null) a.CloseFile(a.CurrentFile); }),
                 I("Close Other Tabs", null, "Ctrl+Alt+W", () => { var cur = a.CurrentFile; foreach (var f in a.OpenFiles.Where(x => x != cur).ToList()) a.CloseFile(f); }),
                 I("Close Workspace", null, "Ctrl+Shift+W", a.CloseWorkspace), MenuItemSpec.Sep(),
@@ -697,10 +698,11 @@ namespace MicroCode.Views
                 MenuItemSpec.Item("Team Tasks…", "checklist", () => AgentStore.SelectTask()),
                 MenuItemSpec.Item("Configure Team Collaboration…", "person.2", () => SettingsWindow.Show(_app)),
                 MenuItemSpec.Sep(),
-                MenuItemSpec.Item("Index Project", "database", () => _app.Notify("agent:index")),
+                // codebase index (RepoMapService) and .ARX capsules are not ported yet: disabled, not silent no-ops
+                new MenuItemSpec { Title = "Index Project (not on Windows yet)", Icon = "database", Disabled = true },
                 MenuItemSpec.Sep(),
-                MenuItemSpec.Item("Export .ARX Capsule…", "shippingbox.and.arrow.backward", () => _app.Notify("agent:exportArx")),
-                MenuItemSpec.Item("Import .ARX Capsule…", "shippingbox", () => _app.Notify("agent:importArx")),
+                new MenuItemSpec { Title = "Export .ARX Capsule… (not on Windows yet)", Icon = "shippingbox.and.arrow.backward", Disabled = true },
+                new MenuItemSpec { Title = "Import .ARX Capsule… (not on Windows yet)", Icon = "shippingbox", Disabled = true },
                 MenuItemSpec.Sep(),
                 MenuItemSpec.Item("Undo Last", "arrow.uturn.backward", () => _app.Notify("agent:undoLast")),
                 new MenuItemSpec { Title = "Clear Chat", Icon = "trash", Destructive = true, Action = () => _app.Notify("agent:clear") }

@@ -861,7 +861,7 @@ namespace MicroCode.Views
                     {
                         foreach (var st in m.Steps)
                         {
-                            bool edit = st.Name == "file_write" || st.Name == "replace_in_file";
+                            bool edit = AgentRunner.IsFileEdit(st.Name);
                             evs.Add(new Ev { Time = st.Time, Icon = edit ? "pencil" : st.Name == "shell" ? "terminal" : "doc.text", Kind = edit ? "FILE WRITE" : st.Name == "shell" ? "SHELL" : "READ", Text = AgentRunner.Headline(st) + (edit && st.Ok ? "  +" + st.Added + " -" + st.Removed : ""),
                                 Detail = "approval: " + st.Approval + (st.Ok ? "" : " · failed") + (st.Reverted ? " · reverted" : "") + (st.Path != null ? " · " + AgentRunner.DisplayPath(st.Path) : ""),
                                 Color = !st.Ok ? Color.FromRgb(255, 69, 58) : edit ? Color.FromRgb(255, 159, 10) : st.Name == "shell" ? Color.FromRgb(191, 90, 242) : Color.FromRgb(142, 142, 147) });

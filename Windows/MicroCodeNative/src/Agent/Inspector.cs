@@ -323,7 +323,7 @@ namespace MicroCode.Views
             if (s != null)
                 foreach (var st in s.Messages.SelectMany(m => m.Steps).Reverse())
                 {
-                    if (st.Name != "file_read" && st.Name != "file_write" && st.Name != "replace_in_file") continue;
+                    if (st.Name != "file_read" && !AgentRunner.IsFileEdit(st.Name)) continue;
                     string p = st.Path;
                     if (string.IsNullOrEmpty(p)) continue;
                     if (!System.IO.Path.IsPathRooted(p) && _app.WorkspaceFolder != null) p = System.IO.Path.Combine(_app.WorkspaceFolder, p.Split('#')[0].Replace('/', '\\'));
@@ -341,6 +341,19 @@ namespace MicroCode.Views
                 string rules = System.IO.Path.Combine(_app.WorkspaceFolder, ".microcode", "rules.md");
                 if (File.Exists(rules)) fileRow(rules, "rules");
                 if (TaskFiles.Exists(_app.WorkspaceFolder, "agent.md")) fileRow(TaskFiles.PathFor(_app.WorkspaceFolder, "agent.md"), "spec");
+                // rule files the agent imports from other platforms (AGENTS.md, CLAUDE.md, .cursorrules …)
+                foreach (var r in RulesEngine.ScanRules(_app.WorkspaceFolder).Where(r => !r.RelativePath.StartsWith("~") && r.RelativePath != ".microcode/rules.md" && r.RelativePath != ".microcode/agent.md"))
+                {
+                    string rp = System.IO.Path.Combine(_app.WorkspaceFolder, r.RelativePath.Replace('/', '\\'));
+                    if (File.Exists(rp)) fileRow(rp, r.Badge.ToLowerInvariant());
+                }
+                int hooks = RulesEngine.ScanHooks(_app.WorkspaceFolder, null).Count;
+                if (hooks > 0)
+                {
+                    var hookRow = V.Box(V.T(hooks + " lifecycle hook" + (hooks == 1 ? "" : "s") + " · run once you trust this workspace", 11.5, FontWeights.Normal, t.S(0.75)), V.P(6, 2), null, 0);
+                    hookRow.ToolTip = "pre_tool / post_tool / pre_finish hooks from .microcode/hooks.json, .cursor/hooks.json or .claude/settings.json";
+                    list.Children.Add(hookRow);
+                }
                 int skills = SkillStore.Skills.Count(k => k.Enabled);
                 list.Children.Add(V.Box(V.T(skills + " active skill" + (skills == 1 ? "" : "s") + " available to the agent", 11.5, FontWeights.Normal, t.S(0.75)), V.P(6, 2), null, 0));
             }

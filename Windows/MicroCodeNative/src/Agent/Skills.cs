@@ -97,6 +97,8 @@ namespace MicroCode.Views
             {
                 string rules = System.IO.Path.Combine(ws, ".microcode", "rules.md");
                 try { if (File.Exists(rules)) sb.Append("\n\nProject rules (.microcode/rules.md):\n").Append(File.ReadAllText(rules)); } catch { }
+                // AGENTS.md, CLAUDE.md, .cursorrules, .cursor/rules, Windsurf, Cline, Copilot, Zed (MultiPlatformRulesEngine, 800-token budget)
+                sb.Append(RulesEngine.PromptSection(ws, 800));
             }
             if (SkillStore.Skills.Count == 0) SkillStore.Rescan();
             var active = SkillStore.Skills.Where(s => s.Enabled).Take(60).ToList();
