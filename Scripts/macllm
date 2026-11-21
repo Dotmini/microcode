@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# macLLM CLI — 100% Native macOS vLLM-Architecture Inference Engine & Metal PagedAttention Kernel
+# Created by Dotmini Software (Tirawat Nantamas)
+
+set -euo pipefail
+
+MACLLM_HOST="${MACLLM_HOST:-127.0.0.1}"
+MACLLM_PORT="${MACLLM_PORT:-11436}"
+BASE_URL="http://${MACLLM_HOST}:${MACLLM_PORT}"
+
+cmd="${1:-status}"
+shift || true
+
+case "$cmd" in
+  status|stats)
+    curl -sS "${BASE_URL}/v1/macllm/stats" | python3 -m json.tool
+    ;;
+  bench|benchmark)
+    echo "⚡ Running macLLM Metal PagedAttention GPU Kernel & Unified Memory Benchmark..."
+    curl -sS -X POST "${BASE_URL}/v1/macllm/benchmark" | python3 -m json.tool
+    ;;
+  models)
+    curl -sS "${BASE_URL}/v1/models" | python3 -m json.tool
+    ;;
+  run|chat)
+    MODEL="${1:-omni-o1:latest}"
+    PROMPT="${2:-Write a fast C++ hello world in 4 lines.}"
+    curl -sS -X POST "${BASE_URL}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"${PROMPT}\"}],\"max_tokens\":256,\"temperature\":0.0}" \
+      | python3 -m json.tool
+    ;;
+  *)
+    echo "Usage: macllm [status | bench | models | run <model> <prompt>]"
+    exit 1
+    ;;
+esac

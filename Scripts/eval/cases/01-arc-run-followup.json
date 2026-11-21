@@ -1,0 +1,27 @@
+{
+  "id": "01-arc-run-followup",
+  "note": "18 Nov Arc chat: 'run' after writing use cases produced new files instead of output.",
+  "fixture": "fixtures/arc-usecases",
+  "history": [
+    {
+      "role": "user",
+      "content": "เขียน Arc อีก หลายๆ Use Case"
+    },
+    {
+      "role": "assistant",
+      "content": "เพิ่มตัวอย่าง Arc 3 Use Case ใน use_cases.ar: สรุปข้อมูลเซนเซอร์ และตรวจสอบรายการสั่งซื้อ",
+      "wroteFiles": [
+        "use_cases.ar"
+      ]
+    }
+  ],
+  "prompt": "run",
+  "checks": {
+    "mustRunCommand": true,
+    "mustNotCreateFiles": true,
+    "mustNotModifyFiles": true,
+    "answerMustShowOutput": true,
+    "mustNotClaimWithoutEvidence": true,
+    "maxInterventions": 4
+  }
+}

@@ -755,6 +755,69 @@ public struct ProgrammingLanguageIconView: View {
                     .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
                     .foregroundColor(.white)
             }
+
+        case "luau", "lua":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.09, green: 0.36, blue: 0.88)) // Official Luau Blue
+                Text(resolvedKey == "luau" ? "Luau" : "Lua")
+                    .font(.system(size: size * (resolvedKey == "luau" ? 0.34 : 0.40), weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+
+        case "cs", "csharp":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.42, green: 0.20, blue: 0.78))
+                Text("C#")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+
+        case "rb", "ruby":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.80, green: 0.18, blue: 0.24))
+                Text("Rb")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+
+        case "zig":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.96, green: 0.64, blue: 0.12))
+                Text("Z")
+                    .font(.system(size: size * 0.56, weight: .black, design: .rounded))
+                    .foregroundColor(.black)
+            }
+
+        case "php":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.47, green: 0.49, blue: 0.72))
+                Text("php")
+                    .font(.system(size: size * 0.36, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+
+        case "ex", "exs", "elixir":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.46, green: 0.26, blue: 0.68))
+                Text("Ex")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+
+        case "metal":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.32, green: 0.34, blue: 0.42))
+                Text("Mt")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
             
         default:
             ZStack {

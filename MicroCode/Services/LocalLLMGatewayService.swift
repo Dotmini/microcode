@@ -97,6 +97,7 @@ final class LocalLLMGatewayService: ObservableObject {
         didSet { regenerateQRCode() }
     }
     @Published private(set) var apiToken: String = ""
+    private static let tokenAccount = "local-llm-gateway.token.v1"
     @Published private(set) var tunnelState: OnlineTunnelState = .stopped {
         didSet { regenerateQRCode() }
     }
@@ -121,12 +122,21 @@ final class LocalLLMGatewayService: ObservableObject {
            let mode = LocalLLMShareTransportMode(rawValue: savedMode) {
             self.transportMode = mode
         }
-        if let savedToken = UserDefaults.standard.string(forKey: "microcode.localLLMGateway.token"), !savedToken.isEmpty {
-            self.apiToken = savedToken
+        // The gateway token unlocks the local LLM for LAN / tunnel clients: keep it in the secret store, not in
+        // plain UserDefaults (migrated once from the legacy key, which is then removed).
+        let legacyKey = "microcode.localLLMGateway.token"
+        if let stored = KeychainManager.shared.readIntegrationSecret(account: Self.tokenAccount), !stored.isEmpty {
+            self.apiToken = stored
+        } else if let legacy = UserDefaults.standard.string(forKey: legacyKey), !legacy.isEmpty,
+                  KeychainManager.shared.saveIntegrationSecret(legacy, account: Self.tokenAccount) {
+            self.apiToken = legacy
         } else {
             let fresh = Self.generateAPIToken()
             self.apiToken = fresh
-            UserDefaults.standard.set(fresh, forKey: "microcode.localLLMGateway.token")
+            _ = KeychainManager.shared.saveIntegrationSecret(fresh, account: Self.tokenAccount)
+        }
+        if KeychainManager.shared.readIntegrationSecret(account: Self.tokenAccount) == self.apiToken {
+            UserDefaults.standard.removeObject(forKey: legacyKey)
         }
         refreshNetworkAddresses()
         if isEnabled {
@@ -187,7 +197,7 @@ final class LocalLLMGatewayService: ObservableObject {
     func rotateToken() {
         let fresh = Self.generateAPIToken()
         apiToken = fresh
-        UserDefaults.standard.set(fresh, forKey: "microcode.localLLMGateway.token")
+        _ = KeychainManager.shared.saveIntegrationSecret(fresh, account: Self.tokenAccount)
         connectedClients.removeAll()
         regenerateQRCode()
     }

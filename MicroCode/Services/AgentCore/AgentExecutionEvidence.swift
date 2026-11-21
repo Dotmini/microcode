@@ -77,6 +77,19 @@ struct AgentExecutionEvidence {
         return scaffoldPhrases.contains(where: lower.contains)
     }
 
+    static func taskRequiresPDFExport(_ task: String) -> Bool {
+        let lower = task.lowercased()
+        let readOnly = ["read-only", "read only", "ห้ามแก้", "อย่าแก้", "อ่าน pdf", "สรุป pdf", "extract pdf", "ocr "]
+        if readOnly.contains(where: lower.contains) && !lower.contains("export") && !lower.contains("สร้าง pdf") {
+            return false
+        }
+        let pdfPhrases = [
+            "export pdf", "export เป็น pdf", "เป็น pdf", "เป็นไฟล์ pdf", "ออกเป็น pdf",
+            "สร้าง pdf", "ทำ pdf", "แปลงเป็น pdf", "ออกรายงาน pdf", "save as pdf", "generate pdf", "to pdf"
+        ]
+        return pdfPhrases.contains(where: lower.contains)
+    }
+
     static func taskRequiresMutation(
         _ task: String,
         workspaceRoot: String? = nil,
@@ -104,11 +117,20 @@ struct AgentExecutionEvidence {
             return false
         }
 
+        if taskRequiresPDFExport(value) {
+            return true
+        }
+
         let pureQuestionOrReview = [
             "ทำไม", "เพราะอะไร", "คืออะไร", "อธิบาย", "เล่าให้ฟัง", "วิเคราะห์", "รีวิว", "ช่วยดู", "เป็นไง", "ดีไหม",
             "research", "explain", "why ", "what is", "what does", "how does", "review ", "critique"
         ]
-        let explicitAction = ["ช่วยแก้โค้ด", "เริ่มปรับโค้ด", "แก้ไขไฟล์", "สร้างไฟล์", "เขียนโค้ด", "implement", "refactor", "fix bug", "patch "]
+        let explicitAction = [
+            "ช่วยแก้", "เริ่มปรับ", "แก้ไข", "แก้ไฟล์", "สร้างไฟล์", "สร้างโปรเจกต์", "สร้างเว็บ", "สร้างแอป",
+            "เขียนโค้ด", "เขียนโปรแกรม", "เขียนเอกสาร", "สร้างเอกสาร", "ทำเว็บ", "ทำแอป", "ทำระบบ", "เพิ่มฟีเจอร์",
+            "แล้วแก้", "และแก้", "พร้อมแก้", "ให้เสร็จ", "export",
+            "implement", "refactor", "fix ", "patch ", "create ", "write ", "build a ", "update ", "add "
+        ]
         if pureQuestionOrReview.contains(where: value.contains) && !explicitAction.contains(where: value.contains) {
             return false
         }

@@ -74,6 +74,9 @@ All captures use a neutral demo workspace (`MicroCodeDemo`: `src/main.py`, `src/
 | [65-device-dock-webapp-preview.png](65-device-dock-webapp-preview.png) | Device Preview Dock — WebApp | View ▸ **Toggle Device Preview Dock** | Right dock: WebApp Preview / iOS Sim / Android Emu tabs, URL bar, responsive picker, build prompt |
 | [66-device-dock-ios-simulator.png](66-device-dock-ios-simulator.png) | Device Preview Dock — iOS Sim | Dock ▸ **iOS Sim** | Apple Simulator Preview placeholder, device picker, Start Simulator / Web Preview, hot-reload tooltip |
 | [67-device-dock-simulator-menu.png](67-device-dock-simulator-menu.png) | Device Preview Dock — device menu | Dock ▸ **iPhone Sim ▾** | Choose Device & Run…, Refresh Simulators |
+| [68-composer-acp-harness-menu.png](68-composer-acp-harness-menu.png) | Composer — ACP Harnesses submenu | Composer provider ▸ **ACP Harnesses ▸** | Harness list (AGY, Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Copilot, Goose, Cline, Qwen Code, Aider) and the AGY model list |
+| [69-notebook-vars-inspector.png](69-notebook-vars-inspector.png) | Notebook — Live Kernel Memory | Notebook toolbar **Vars** | Variable / memory inspector strip (empty: 0 vars) |
+| [70-notebook-app-mode.png](70-notebook-app-mode.png) | Notebook — App / dashboard mode | Notebook toolbar **App** | Presentation mode: cell outputs only (tables, logs, error output; paths redacted) |
 
 ## Zoomed detail crops
 
@@ -98,3 +101,5 @@ Cut from the redacted captures above (2× upscale where small), for pixel-level 
 - A dedicated ACP chat screen: `MicroCode/Views/AI/ACPAgentChatView.swift` exists, but no current UI presents it. ACP agents are reached through screens 22–26 and the composer picker (13).
 - The "Toggle Git Panel" menu item showed nothing beyond the sidebar Source Control view (08, 60–63).
 - A running simulator, a physical device or the Android emulator. None was started.
+- Science mode Structure / Results / Paper tabs and Cloud GPU Wallet / Git Ingest / SSH tabs. These are SwiftUI segmented pickers that did not react to the synthetic clicks used for capture; only the default tab of each is shown (29, 47).
+- Notebook **DAG** is a reactive-mode setting toggle, not a panel; it was switched back off and not captured.

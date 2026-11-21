@@ -97,6 +97,10 @@ public final class AppleVisionEngine: @unchecked Sendable {
         includeSceneClassification: Bool? = nil
     ) async -> VisionAnalysisResult {
         let runRichScenePass = includeSceneClassification ?? (!fastPreview)
+        // Run bundled OpenThai 2.0 OCR (4.2MB ONNX CPU warm daemon) on full analysis passes for 99.5% Thai+English & table accuracy
+        let openThaiPrepass: OpenThaiOCRResponse? = (!fastPreview && OpenThaiOCREngine.shared.isModelBundled)
+            ? await OpenThaiOCREngine.shared.recognizeImageData(data, includeMarkdown: true)
+            : nil
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 guard let cgImage = Self.decodeCGImage(from: data) else {
@@ -202,12 +206,32 @@ public final class AppleVisionEngine: @unchecked Sendable {
                     }
                 }
 
+                // 2B. Fuse OpenThai 2.0 OCR spatial blocks whenever Thai script is present or OpenThai extracted richer text
+                var openThaiMarkdownTable: String? = nil
+                if let ot = openThaiPrepass, ot.ok, !ot.blocks.isEmpty {
+                    let anetext = rawBlocks.map(\.text).joined(separator: " ")
+                    let preferOpenThai = OpenThaiOCREngine.containsThaiScript(ot.text)
+                        || rawBlocks.isEmpty
+                        || ot.text.count > Int(Double(anetext.count) * 1.15)
+                    if preferOpenThai {
+                        rawBlocks = ot.blocks
+                        if ot.markdown.contains("<table>") {
+                            openThaiMarkdownTable = ot.markdown
+                        }
+                    }
+                }
+
                 // 3. Reconstruct 2D Reading Order & Markdown Tables from Spatial Bounding Boxes
                 let reconstructed = Self.reconstructSpatialLayout(blocks: rawBlocks)
                 let sortedBlocks = reconstructed.orderedBlocks
                 let recognizedLines = reconstructed.plainLines
                 let extractedText = recognizedLines.joined(separator: "\n")
-                let spatialLayoutText = reconstructed.formattedSpatialText
+                let spatialLayoutText: String = {
+                    if let mdTable = openThaiMarkdownTable, !mdTable.isEmpty {
+                        return mdTable
+                    }
+                    return reconstructed.formattedSpatialText
+                }()
 
                 var detectedElements: [String] = []
                 var decodedBarcodes: [String] = []

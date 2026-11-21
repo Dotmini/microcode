@@ -719,7 +719,13 @@ class AgentService: ObservableObject {
             - When the user writes in Thai, respond in Thai. When in English, respond in English.
             - Be direct. No filler. Lead with the most important information.
             - CRITICAL — NEVER DUMP SOURCE CODE FILES IN CHAT: When creating or modifying project files, ALWAYS execute `file_write`, `replace_in_file`, `multi_replace_in_file`, or `apply_patch` directly in the workspace. NEVER write or paste full file source code or multi-file code dumps into the chat response! The IDE automatically renders compact file pills and the interactive Proposed Changes diff preview card from your tool calls. Keep chat prose concise (summaries, architectural notes, and clickable `file://` links).
-            
+
+            ## Follow-ups and Honest Results
+            - Answer the user's LATEST message. A short follow-up such as "run", "รัน", "test", "build", "ไหน" or "ต่อ" is about the work already in this conversation: run, open or show that work. Do not start new files or new examples unless the user asks for them.
+            - Show real results: when you run, build, test or benchmark something, include the relevant real output (trimmed, in a code block) and say plainly whether it passed or failed. Never say something ran, passed, or was exported unless a tool result in this conversation shows it.
+            - Never fake verification: do not swap in a placeholder program, a file that only prints "success", or another language (for example a Python script) to stand in for the user's code. If the real run fails or a toolchain is missing, report the actual error and fix the cause.
+            - When the user says they cannot see something ("ไหน", "ไม่เห็นมี"), check what really exists on disk or re-run the command and show it. If an earlier claim was wrong, say so in one sentence and then do the work.
+
             ## Performance & Efficiency Mandate (AGY + Codex Autonomous Architecture)
             - Fast Convergence: Aim to complete user requests in 3 to 6 iterations. Do not loop reading file after file endlessly.
             - Batch Independent Tools: Call multiple tools in parallel in a single turn whenever possible (e.g. read multiple related files together, or run `grep_search` + `find_symbol` concurrently).
@@ -936,7 +942,7 @@ class AgentService: ObservableObject {
         }
         
         // Inject task.md ONLY when working on an active multi-step engineering mutation or explicit plan
-        if domain == .software, !isChatMode, let taskMd = taskMdContent, !taskMd.isEmpty,
+        if domain == .software, !isChatMode, let taskMd = taskMdContent.flatMap(AgentTaskFile.promptContext),
            (AgentExecutionEvidence.taskRequiresMutation(message, workspaceRoot: toolBox.workspaceRoot) || ImplementationPlanManager.shared.currentPlan != nil) {
             let sanitizedTaskMd = AgentPrivacyGuard.sanitize(taskMd)
             let compressed = tokenOptimizer.compressText(sanitizedTaskMd, targetTokens: 900)
@@ -1465,7 +1471,7 @@ class AgentService: ObservableObject {
         4. **Phase 4: Privacy & Git Safety Audit**
            - Review git status and diff (`git diff`) before finalizing.
            - Verify that NO private secrets or credentials have been written into `.microcode/` or workspace files.
-           - Update `.microcode/task.md` checklist with completion evidence.
+           - If you wrote a plan in `.microcode/task.md`, check off a step only when a tool result proves it.
 
         ## 4. Multi-Model Collaboration & Task Partitioning
         - When delegating subtasks to subagents via `invoke_subagent`, each subtask must have a distinct, non-overlapping owner.
@@ -1480,62 +1486,8 @@ class AgentService: ObservableObject {
         let safeObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "<!-- Describe the objective here -->"
             : String(objective.trimmingCharacters(in: .whitespacesAndNewlines).prefix(8000))
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        
-        return """
-        # Workspace Autonomous Task
-        <!-- microcode:managed-task -->
-
-        ## 📋 Task Overview
-        - **Objective**: \(safeObjective)
-        - **Status**: 🟡 IN_PROGRESS  <!-- PENDING | IN_PROGRESS | COMPLETED | FAILED -->
-        - **Active Owner**: main
-        - **Last Updated**: \(timestamp)
-
-        ---
-
-        ## 🎯 Scope Boundaries
-        - **In Scope**: Targeted changes requested for this objective.
-        - **Out of Scope**: Unrelated refactoring, third-party library additions, modifying secrets.
-
-        ---
-
-        ## 🚀 Execution Phases & Structured TODOs
-
-        ### Phase 1: Inspection & Baseline Analysis
-        - [ ] **1.1** Inspect workspace files, dependencies, and existing architectural patterns.
-        - [ ] **1.2** Check compiler diagnostics, LSP errors, and current git status.
-        - [ ] **1.3** Formulate atomic changes and verify preconditions.
-
-        ### Phase 2: Implementation & Code Changes
-        - [ ] **2.1** Implement core changes surgically using targeted edit tools.
-        - [ ] **2.2** Ensure full backward compatibility and adhere to project code style.
-        - [ ] **2.3** Preserve all existing functionality and comments.
-
-        ### Phase 3: Verification & Evidence Capture
-        - [ ] **3.1** Run build/compilation tool and ensure zero errors.
-        - [ ] **3.2** Run test suite to verify no regressions.
-        - [ ] **3.3** Verify live app behavior or inspect UI elements.
-
-        ### Phase 4: Privacy Audit & Completion
-        - [ ] **4.1** Verify git diff to ensure no unexpected files were touched.
-        - [ ] **4.2** 🔒 **PRIVACY CHECK**: Confirm ZERO API keys, tokens, credentials, or PII are present in `.microcode/` or project files.
-        - [ ] **4.3** Mark task as COMPLETED and report verified results.
-
-        ---
-
-        ## 🛡️ Active Constraints & Safety Guidelines
-        1. **Zero Secret Storage**: Never write passwords, keys, or auth headers into this file.
-        2. **Autonomous Execution**: Run build and test tools directly; do not offload execution to the user.
-        3. **Evidence-Based Completion**: Mark items `[x]` ONLY after tool verification has succeeded.
-
-        ---
-
-        ## 📊 Verification Log
-        - Baseline check: Pending
-        - Build status: Pending
-        - Privacy audit: Clean
-        """
+        // A generic checklist made agents perform the checklist instead of the task (see AgentTaskFile).
+        return AgentTaskFile.managedMarkdown(objective: safeObjective, timestamp: ISO8601DateFormatter().string(from: Date()))
     }
     
     // MARK: - Load agent.md / task.md / AI.arx (Isolated under ~/.microcode/workspaces/<id>/)
@@ -2087,7 +2039,8 @@ class AgentService: ObservableObject {
                     timestamp: messages[msgIdx].timestamp,
                     turnTelemetryLabel: messages[msgIdx].turnTelemetryLabel,
                     attachmentHistoryContext: enrichedDigest.isEmpty ? nil : enrichedDigest,
-                    attachments: enrichedItems.isEmpty ? messages[msgIdx].attachments : enrichedItems
+                    attachments: enrichedItems.isEmpty ? messages[msgIdx].attachments : enrichedItems,
+                    harnessTrace: messages[msgIdx].harnessTrace
                 )
                 saveCurrentChatMessages()
             } else if let cid = runChatId, var bgBuf = backgroundChatMessages[cid], let msgIdx = bgBuf.firstIndex(where: { $0.id == userMessage.id }) {
@@ -2100,7 +2053,8 @@ class AgentService: ObservableObject {
                     timestamp: bgBuf[msgIdx].timestamp,
                     turnTelemetryLabel: bgBuf[msgIdx].turnTelemetryLabel,
                     attachmentHistoryContext: enrichedDigest.isEmpty ? nil : enrichedDigest,
-                    attachments: enrichedItems.isEmpty ? bgBuf[msgIdx].attachments : enrichedItems
+                    attachments: enrichedItems.isEmpty ? bgBuf[msgIdx].attachments : enrichedItems,
+                    harnessTrace: bgBuf[msgIdx].harnessTrace
                 )
                 backgroundChatMessages[cid] = bgBuf
             }
@@ -2211,13 +2165,19 @@ class AgentService: ObservableObject {
         }
         
         // Detect task complexity and choose budget (preserving the original objective across continuation turns)
-        let isContinuation = isContinuationRequest(content)
-        let effectiveObjective: String = {
-            guard isContinuation else { return content }
-            if let priorUser = messages.last(where: { $0.role == .user && $0.id != userMessage.id && !isContinuationRequest($0.content) }) {
-                return priorUser.content
+        // A short nudge ("run", "ไหน", "ต่อ") is about the earlier request; what it asks of that work decides
+        // whether the earlier "change files" requirement carries over (see FollowUpIntent).
+        let followUpKind: FollowUpKind = isContinuationRequest(content) ? FollowUpIntent.classify(nudge: content) : .newRequest
+        let isContinuation = followUpKind != .newRequest
+        let objectiveMessage: AgentMessageModel? = isContinuation
+            ? messages.last(where: { $0.role == .user && $0.id != userMessage.id && !isContinuationRequest($0.content) })
+            : nil
+        let effectiveObjective = FollowUpIntent.objective(kind: followUpKind, content: content, earlierRequest: objectiveMessage?.content)
+        let workspaceChangedSinceObjective: Bool = {
+            guard let objectiveMessage, let start = messages.firstIndex(where: { $0.id == objectiveMessage.id }) else { return false }
+            return messages[messages.index(after: start)...].contains {
+                $0.role == .assistant && (!$0.pendingChanges.isEmpty || $0.toolResults.contains(where: didMutateWorkspace))
             }
-            return content
         }()
         let detectedComplexity = tokenOptimizer.detectComplexity(effectiveObjective)
         let complexity: TokenBudget.TaskComplexity = detectedComplexity == .chat ? .moderate : detectedComplexity
@@ -2227,12 +2187,22 @@ class AgentService: ObservableObject {
         let isPlanModePrompt = content.contains("[PLAN MODE")
         let hasApprovedActivePlan = ImplementationPlanManager.shared.currentPlan?.approvalState == .approved
         let hasTurnMedia = !attachments.isEmpty
-        let priorUserRequestedMutation = isContinuation && messages.contains(where: {
-            $0.role == .user && requestRequiresMutation($0.content, workspaceRoot: pinnedWorkspace, hasMediaAttachments: !$0.attachments.isEmpty)
-        })
+        // Only the request being continued counts (not any message in the chat), and never for run/build/test.
+        let priorUserRequestedMutation = FollowUpIntent.inheritsMutation(
+            followUpKind,
+            objectiveRequiredMutation: objectiveMessage.map {
+                requestRequiresMutation($0.content, workspaceRoot: pinnedWorkspace, hasMediaAttachments: !$0.attachments.isEmpty)
+            } ?? false,
+            workspaceChangedSinceObjective: workspaceChangedSinceObjective
+        )
         let requiresNativeExecution = domain == .software && !isChatMode && (requestRequiresNativeExecution(content) || (isContinuation && requestRequiresNativeExecution(effectiveObjective)))
         let requiresRuntimeLaunch = domain == .software && !isChatMode && (requestRequiresRuntimeLaunch(content) || (isContinuation && requestRequiresRuntimeLaunch(effectiveObjective)))
+        let requiresPDFExport = !isChatMode && !isPlanModePrompt && (
+            AgentExecutionEvidence.taskRequiresPDFExport(content) ||
+            (isContinuation && AgentExecutionEvidence.taskRequiresPDFExport(effectiveObjective))
+        )
         var requiresMutation = domain == .software && !isChatMode && !isPlanModePrompt && (
+            requiresPDFExport ||
             requestRequiresMutation(content, workspaceRoot: pinnedWorkspace, hasMediaAttachments: hasTurnMedia) ||
             hasApprovedActivePlan ||
             priorUserRequestedMutation
@@ -2420,6 +2390,9 @@ class AgentService: ObservableObject {
         var history = tokenOptimizer.compressHistory(rawHistory, budget: effectiveHistoryBudget)
         let externallyModifiedFiles = detectExternalFileDrift()
         var turnPromptWithDrift = effectiveContent
+        if let followUpNote = FollowUpIntent.turnNote(kind: followUpKind, earlierRequest: objectiveMessage?.content) {
+            turnPromptWithDrift += "\n\n" + followUpNote
+        }
         if !enrichedAttachments.isEmpty {
             let maxInlineAttachmentBudget = (detectedProvider == .local) ? 14_000 : (detectedProvider == .aipass ? 28_000 : 90_000)
             let groundedAttachmentPackage = UniversalAttachmentEngine.shared.buildGroundedTurnPackage(
@@ -2473,6 +2446,12 @@ class AgentService: ObservableObject {
         var recentUncachedBatchFingerprints: [String] = []
         var effectiveApiKey = apiKey
         var failoverTriedModels: Set<String> = ["\(detectedProvider.rawValue)/\(resolvedModel)"]
+        // Saved with the assistant message: which model answered and every time the harness steered it.
+        var turnTrace = AgentTurnTrace(
+            provider: detectedProvider.rawValue,
+            model: resolvedModel,
+            followUp: followUpKind == .newRequest ? nil : "\(followUpKind)"
+        )
 
         while effectiveIterationLimit.map({ iteration < $0 }) ?? true {
             if isRunCancelled(forChatId: runChatId) || Task.isCancelled { break }
@@ -2682,6 +2661,7 @@ class AgentService: ObservableObject {
                     // alone freed ~0 tokens after Token Shield had already run, which ended the turn as fatal.
                     if contextOverflowRecoveries < 2 {
                         contextOverflowRecoveries += 1
+                        turnTrace.note("recovery.context_overflow")
                         let beforeTokens = history.reduce(0) { $0 + tokenOptimizer.estimateTokens($1.content) }
                         let recoveryBudget = contextOverflowRecoveries == 1 ? 24_000 : 12_000
                         history = tokenOptimizer.compressIterativeToolHistory(history, budget: recoveryBudget, pinnedObjective: effectiveObjective)
@@ -2691,6 +2671,7 @@ class AgentService: ObservableObject {
                         continue
                     }
                     contextLimitReached = true
+                    turnTrace.end("context_limit")
                     let limitNotice = """
                     ⚠️ **Conversation Context Limit Reached**
                     The current session has reached the model's maximum context capacity (\(iteration) turns executed).
@@ -2718,6 +2699,7 @@ class AgentService: ObservableObject {
                     resolvedModel = backup.model
                     effectiveApiKey = backup.apiKey
                     failoverTriedModels.insert("\(backup.provider.rawValue)/\(backup.model)")
+                    turnTrace.note("failover"); turnTrace.failovers.append("\(backup.provider.rawValue)/\(backup.model)")
                     lastFailoverBanner = "Auto-Failover: \(previousLabel) → \(backup.label)"
                     currentToolExecution = "Auto-Failover → \(backup.label) (resuming turn seamlessly...)"
                     agentPhase = .thinking
@@ -2748,6 +2730,7 @@ class AgentService: ObservableObject {
                 if response?.directive.action == "retry" || isTransient || isRateLimit || offlineGenericRetry {
                     if kernelRecoveryCount < maxRetries {
                         kernelRecoveryCount += 1
+                        turnTrace.note("retry")
                         let backoffSec = isRateLimit ? min(3 * kernelRecoveryCount, 30) : min(kernelRecoveryCount * 2, 12)
                         let delayMs = response?.directive.retryAfterMs ?? UInt64(backoffSec * 1000)
                         
@@ -2767,6 +2750,7 @@ class AgentService: ObservableObject {
                 }
                 
                 terminationNotice = response?.directive.reason ?? "Execution stopped: \(errStr)"
+                turnTrace.end("error")
                 let userFriendlyNotice = isRateLimit 
                     ? "⚠️ Rate limit reached from provider API (HTTP 429: Requests or Tokens Per Minute quota exceeded on your API key). Please wait a moment for the provider quota window to reset, start a new chat, or check your quota in Google AI Studio / provider console."
                     : "⚠️ Execution error: \(errStr)"
@@ -2817,6 +2801,7 @@ class AgentService: ObservableObject {
             if receivedToolCalls.isEmpty, lastStopReason == .maxTokens, maxTokenContinuations < 2,
                !streamedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 maxTokenContinuations += 1
+                turnTrace.note("continue.max_tokens")
                 history.append((role: "assistant", content: streamedText))
                 history.append((role: "user", content: """
                 Your previous reply was cut off by the output token limit. Continue exactly where it stopped, \
@@ -2833,7 +2818,11 @@ class AgentService: ObservableObject {
             // commonly says "I'll …" before a complete answer; using those words
             // as a signal to continue was the source of runaway agent loops.
             if receivedToolCalls.isEmpty {
+                let hasExecutedPDFExport = allToolResults.contains {
+                    $0.success && normalizeToolName($0.toolName) == "export_pdf"
+                }
                 let hasMutationCheckpoint = allToolResults.contains(where: didMutateWorkspace)
+                    && (!requiresPDFExport || hasExecutedPDFExport)
                 let docExtensions: Set<String> = ["md", "pdf", "txt", "rst", "adoc"]
                 let onlyModifiedDocs = !filesModified.isEmpty && filesModified.allSatisfy {
                     docExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
@@ -2841,10 +2830,12 @@ class AgentService: ObservableObject {
                 let hasVerificationCheckpoint: Bool
                 if let latestMutation = allToolResults.lastIndex(where: didMutateWorkspace) {
                     let latestMutTool = normalizeToolName(allToolResults[latestMutation].toolName)
-                    let isSelfVerifiedDocExport = (latestMutTool == "export_pdf") || onlyModifiedDocs
-                    hasVerificationCheckpoint = isSelfVerifiedDocExport || allToolResults
-                        .dropFirst(latestMutation + 1)
-                        .contains(where: isVerificationCheckpoint)
+                    let isSelfVerifiedDocExport = (latestMutTool == "export_pdf") || (onlyModifiedDocs && !requiresPDFExport)
+                    hasVerificationCheckpoint = (!requiresPDFExport || hasExecutedPDFExport) && (
+                        isSelfVerifiedDocExport || allToolResults
+                            .dropFirst(latestMutation + 1)
+                            .contains(where: isVerificationCheckpoint)
+                    )
                 } else {
                     hasVerificationCheckpoint = false
                 }
@@ -2861,6 +2852,7 @@ class AgentService: ObservableObject {
                     finalText = ""
                     receivedToolCalls = [fallback]
                     usedAutonomousInspectionFallback = true
+                    turnTrace.note("fallback.inspect")
                     logActivity(.info, "Harness fallback: inspecting workspace before implementation")
 
                 // After a mutation, verification is the agent's job. A model
@@ -2873,6 +2865,7 @@ class AgentService: ObservableObject {
                           let fallback = projectAction(.build) {
                     receivedToolCalls = [fallback]
                     usedPostMutationVerificationFallback = true
+                    turnTrace.note("fallback.build")
                     logActivity(.info, "Harness fallback: verifying changed source with native build")
 
                 // Some providers occasionally return a prose plan for a very
@@ -2887,6 +2880,7 @@ class AgentService: ObservableObject {
                           let fallback = runtimeLaunchAction() {
                     receivedToolCalls = [fallback]
                     usedRuntimeLaunchFallback = true
+                    turnTrace.note("fallback.launch")
                     logActivity(.info, "Harness fallback: launching the built app on the selected runtime")
 
                 } else if (requiresNativeExecution || containsNativeWorkCommitment(streamedText) || containsNativeWorkCommitment(finalText)),
@@ -2895,6 +2889,7 @@ class AgentService: ObservableObject {
                    let fallback = inferredWorkspaceAction(for: content.isEmpty ? (streamedText + " " + finalText) : (content + " " + streamedText + " " + finalText)) {
                     receivedToolCalls = [fallback]
                     usedDeterministicActionFallback = true
+                    turnTrace.note("fallback.inferred_action")
                     logActivity(.info, "Harness fallback: executing \(fallback.name) for the requested project action")
                 } else {
                     let nativeWorkWasPromised = requiresNativeExecution || containsNativeWorkCommitment(streamedText) || containsNativeWorkCommitment(finalText)
@@ -2903,20 +2898,38 @@ class AgentService: ObservableObject {
                     let visibleStreamedText = AIStructuredTurnCodec.stripThoughtTags(streamedText).trimmingCharacters(in: .whitespacesAndNewlines)
                     let visibleFinalText = AIStructuredTurnCodec.stripThoughtTags(finalText).trimmingCharacters(in: .whitespacesAndNewlines)
                     let hasVisibleAnswer = !visibleStreamedText.isEmpty || !visibleFinalText.isEmpty
-                    let isStaticVerifiedMutation = !filesModified.isEmpty && !nativeWorkWasPromised && projectAction(.build) == nil && !containsUnfinishedActionIntention(streamedText)
-                    let verificationPassed = (!requiresWorkspaceEvidence && !visibleStreamedText.isEmpty)
-                        || hasDeterministicVerification(
-                            in: allToolResults,
-                            requiresNativeExecution: nativeWorkWasPromised,
-                            requiresRuntimeLaunch: requiresRuntimeLaunch,
-                            requiresMutation: requiresMutation
+                    let hasLazyCodeDumpWithoutMutation: Bool = {
+                        guard requiresMutation && filesModified.isEmpty else { return false }
+                        let codeBlockMatches = visibleStreamedText.components(separatedBy: "```")
+                        guard codeBlockMatches.count >= 3 else { return false }
+                        let codeBody = codeBlockMatches[1]
+                        let lineCount = codeBody.components(separatedBy: .newlines).count
+                        return lineCount >= 6
+                    }()
+                    let missingRequiredPDF = requiresPDFExport && !hasExecutedPDFExport
+                    let isStaticVerifiedMutation = !filesModified.isEmpty
+                        && !missingRequiredPDF
+                        && !nativeWorkWasPromised
+                        && projectAction(.build) == nil
+                        && !containsUnfinishedActionIntention(streamedText)
+                    let verificationPassed = !missingRequiredPDF
+                        && !hasLazyCodeDumpWithoutMutation
+                        && (
+                            (!requiresWorkspaceEvidence && !visibleStreamedText.isEmpty)
+                            || hasDeterministicVerification(
+                                in: allToolResults,
+                                requiresNativeExecution: nativeWorkWasPromised,
+                                requiresRuntimeLaunch: requiresRuntimeLaunch,
+                                requiresMutation: requiresMutation
+                            )
+                            || isStaticVerifiedMutation
+                            || (hasSuccessfulTools && hasVisibleAnswer && !requiresMutation && !containsUnfinishedActionIntention(streamedText))
                         )
-                        || isStaticVerifiedMutation
-                        || (hasSuccessfulTools && hasVisibleAnswer && !requiresMutation && !containsUnfinishedActionIntention(streamedText))
 
                     if !isChatMode, verificationPassed {
                         if !filesModified.isEmpty && !usedPreFinishHookCheck {
                             usedPreFinishHookCheck = true
+                            turnTrace.note("check.pre_finish")
                             let preFinish = await MultiPlatformRulesEngine.shared.executeHooks(
                                 stage: .preFinish,
                                 filePath: filesModified.last,
@@ -2941,6 +2954,7 @@ class AgentService: ObservableObject {
                         kernelVerified = true
                         currentToolExecution = nil
                         logActivity(.success, "Objective verification passed")
+                        turnTrace.end("verified")
                         break
                     }
 
@@ -2956,11 +2970,13 @@ class AgentService: ObservableObject {
                         kernelVerified = true
                         currentToolExecution = nil
                         logActivity(.success, "Objective completed successfully")
+                        turnTrace.end("kernel_complete")
                         break
                     }
                     if kernelResponse?.directive.action == "stalled" {
                         let stallDetail = kernelResponse?.directive.reason ?? "Agent execution stalled without forward progress."
                         terminationNotice = stallDetail
+                        turnTrace.end("kernel_stalled")
                         currentToolExecution = nil
                         logActivity(.error, stallDetail)
                         break
@@ -2969,6 +2985,7 @@ class AgentService: ObservableObject {
                     // Circuit Breaker: Detect repetitive loops across recent assistant responses
                     if isRepetitiveOutput(streamedText, previousOutputs: recentAssistantOutputs) {
                         logActivity(.info, "Repetition loop detected in model output: breaking out of autonomous monologue cycle.")
+                        turnTrace.end("repetition")
                         currentToolExecution = nil
                         break
                     }
@@ -2979,24 +2996,30 @@ class AgentService: ObservableObject {
                     // 2) If not an inferred workspace action, auto-prompt the model to call the tool immediately
                     let hasUnfinishedIntent = containsUnfinishedActionIntention(streamedText)
                     let stoppedWithoutVisibleResponse = !allToolResults.isEmpty && !hasVisibleAnswer && filesModified.isEmpty
+                    let hasPendingDeliverables = (requiresMutation && filesModified.isEmpty)
+                        || missingRequiredPDF
+                        || (nativeWorkWasPromised && !nativeWorkWasExecuted)
+                        || hasLazyCodeDumpWithoutMutation
                     // Never nag after a safety refusal / content filter: re-prompting cannot change that outcome.
                     if lastStopReason != .refusal,
-                       (!isChatMode && (hasUnfinishedIntent || (requiresWorkspaceEvidence && !verificationPassed) || (nativeWorkWasPromised && !nativeWorkWasExecuted))) || stoppedWithoutVisibleResponse {
+                       (!isChatMode && (hasUnfinishedIntent || hasPendingDeliverables || (requiresWorkspaceEvidence && !verificationPassed))) || stoppedWithoutVisibleResponse {
                         if !usedDeterministicActionFallback,
                            allToolResults.isEmpty,
                            let fallback = inferredWorkspaceAction(for: streamedText + " " + finalText) {
                             receivedToolCalls = [fallback]
                             usedDeterministicActionFallback = true
+                            turnTrace.note("fallback.inferred_action")
                             logActivity(.info, "Harness follow-through: automatically executing \(fallback.name) from model intention")
                             // Fall through to tool execution loop
-                        } else if followThroughNagCount < 3,
-                                  kernelRecoveryCount < 4,
-                                  (allToolResults.isEmpty || (requiresMutation && filesModified.isEmpty) || stoppedWithoutVisibleResponse),
+                        } else if followThroughNagCount < 4,
+                                  kernelRecoveryCount < 5,
+                                  (allToolResults.isEmpty || hasPendingDeliverables || hasUnfinishedIntent || stoppedWithoutVisibleResponse),
                                   kernelResponse?.directive.action != "blocked" {
                             followThroughNagCount += 1
+                            turnTrace.note("nag." + (missingRequiredPDF ? "pdf_missing" : hasLazyCodeDumpWithoutMutation ? "code_dump" : (requiresMutation && filesModified.isEmpty) ? "files_missing" : (nativeWorkWasPromised && !nativeWorkWasExecuted) ? "run_missing" : stoppedWithoutVisibleResponse ? "no_answer" : hasUnfinishedIntent ? "unfinished_intent" : "no_evidence"))
                             kernelRecoveryCount += 1
                             usedFollowThroughRecovery = true
-                            logActivity(.info, "Harness follow-through: model stopped before completing required action (attempt \(followThroughNagCount)/3). Auto-prompting immediate tool execution...")
+                            logActivity(.info, "Harness follow-through: model stopped before completing required deliverables (attempt \(followThroughNagCount)/4, recovery=\(usedFollowThroughRecovery)). Auto-prompting immediate tool execution...")
                             if kernelResponse?.directive.action == "retry",
                                let delay = kernelResponse?.directive.retryAfterMs {
                                 currentToolExecution = "Waiting to retry from the durable checkpoint..."
@@ -3005,11 +3028,28 @@ class AgentService: ObservableObject {
                             }
                             history.append((role: "assistant", content: streamedText.isEmpty ? "<thought>Completed preliminary inspection.</thought>" : streamedText))
                             let followUpPrompt: String
-                            if requiresMutation && filesModified.isEmpty {
+                            if missingRequiredPDF {
                                 followUpPrompt = """
-                                CRITICAL: You have inspected the workspace files, but `filesModified` is STILL EMPTY (zero files have been edited on disk!).
-                                Do NOT stop or claim the task is complete before modifying the actual files.
-                                Immediately call `replace_in_file`, `patch_file`, or `file_write` RIGHT NOW to implement the requested changes in the target file(s).
+                                CRITICAL DELIVERABLE MISSING: The user explicitly requested a PDF document, but `export_pdf` has NOT been executed yet!
+                                Do NOT stop after reading files or writing Markdown alone.
+                                Immediately call `export_pdf` RIGHT NOW (passing `"path"` and either `"markdown"` or `"source_path"`) to generate the final PDF file on disk.
+                                """
+                            } else if hasLazyCodeDumpWithoutMutation {
+                                followUpPrompt = """
+                                CRITICAL: You pasted source code into the chat response instead of writing it to disk (`filesModified` is STILL EMPTY)!
+                                Never dump unapplied code blocks for the user to copy-paste manually.
+                                Immediately call `file_write`, `replace_in_file`, or `patch_file` RIGHT NOW to apply the code directly to the workspace file(s).
+                                """
+                            } else if requiresMutation && filesModified.isEmpty {
+                                followUpPrompt = """
+                                CRITICAL: You have inspected the workspace files, but `filesModified` is STILL EMPTY (zero files have been created or edited on disk!).
+                                Reading files is NOT completing the task. Do NOT summarize or stop now.
+                                Immediately call `replace_in_file`, `patch_file`, `file_write`, or `export_pdf` RIGHT NOW to implement the requested deliverable.
+                                """
+                            } else if nativeWorkWasPromised && !nativeWorkWasExecuted {
+                                followUpPrompt = """
+                                CRITICAL: You have not yet executed the build/test/run verification step (`shell`, `playground_run`, or `device_runtime`).
+                                Immediately execute the build, run, or test command RIGHT NOW to verify your changes before concluding.
                                 """
                             } else if stoppedWithoutVisibleResponse {
                                 followUpPrompt = """
@@ -3019,9 +3059,9 @@ class AgentService: ObservableObject {
                             } else if hasUnfinishedIntent {
                                 let snippet = String(streamedText.suffix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
                                 followUpPrompt = """
-                                You stated what you intend to do ("...\(snippet)..."), but you did not call any tools.
-                                In MicroCode Agent, you must EXECUTE actions using tools, not just describe them in text.
-                                Immediately call the appropriate tool (e.g. `file_read`, `file_write`, `patch_file`, `shell`, etc.) RIGHT NOW to perform the work. Do not stop until the objective is finished.
+                                You stated what you intend to do next ("...\(snippet)..."), but stopped without calling a tool!
+                                In MicroCode Agent, you must EXECUTE every remaining step with tools before ending your turn.
+                                Immediately call the next tool (`file_write`, `replace_in_file`, `shell`, `export_pdf`, `agent_desktop`, etc.) RIGHT NOW.
                                 """
                             } else {
                                 followUpPrompt = kernelResponse?.directive.suggestedPrompt ?? """
@@ -3620,21 +3660,40 @@ class AgentService: ObservableObject {
                 return iteration >= max(24, limit - 3)
             }()
 
+            let hasDonePDFExport = allToolResults.contains {
+                $0.success && normalizeToolName($0.toolName) == "export_pdf"
+            }
+            var pendingDeliverableItems: [String] = []
+            if requiresMutation && filesModified.isEmpty && (!requiresPDFExport || !hasDonePDFExport) {
+                pendingDeliverableItems.append("Create or modify target workspace file(s) using `file_write`, `replace_in_file`, or `patch_file`")
+            }
+            if requiresPDFExport && !hasDonePDFExport {
+                pendingDeliverableItems.append("Generate final PDF file on disk via `export_pdf`")
+            }
+            if requiresNativeExecution && !hasNativeExecution(in: allToolResults) {
+                pendingDeliverableItems.append("Run build/test/execution verification via `shell`, `playground_run`, or `device_runtime`")
+            }
+
             let dynamicInstruction: String
             if nearBudgetCeiling {
                 dynamicInstruction = "Approaching step budget ceiling (\(iteration) steps executed). Wrap up your current step, ensure modified files are in a clean state, and write a concise summary using clickable file links. NEVER paste or dump full file source code into the chat."
+                turnTrace.note("instruction.budget_ceiling")
             } else if !requiresMutation && iteration >= 24 {
                 dynamicInstruction = "You have completed \(iteration) inspection steps. Synthesize your verified findings and conclude with a concise, well-structured summary."
+                turnTrace.note("instruction.synthesize")
+            } else if !pendingDeliverableItems.isEmpty {
+                let checklist = pendingDeliverableItems.enumerated().map { "[\($0.offset + 1)] \($0.element)" }.joined(separator: "; ")
+                dynamicInstruction = "PENDING DELIVERABLES STILL REQUIRED BEFORE YOU MAY STOP: \(checklist). Reading or listing files is NOT completing the task — do NOT summarize or stop early, and NEVER dump unapplied code into chat. Immediately invoke the next required action tool now!"
+                turnTrace.note("instruction.pending_deliverables")
             } else if pendingVerificationAfterEdit {
                 dynamicInstruction = "Workspace source files have been modified. Continue creating or editing any remaining files required for the objective (NEVER dump file source code into chat), or run a build/diagnostic check (`shell` build/test or `get_diagnostics`) before concluding."
+                turnTrace.note("instruction.verify_edits")
             } else if !filesModified.isEmpty {
                 dynamicInstruction = "Latest source edits have been verified (\(verificationPassCount) check(s) passed). If additional implementation tasks or files remain for the user's objective, continue immediately with the next action; otherwise conclude your turn now with a concise, structured summary using clickable file links (NEVER dump source code in chat)."
-            } else if requiresMutation && iteration >= 16 {
-                dynamicInstruction = "You have performed \(iteration) inspection steps while `filesModified` is still empty. Converge on your implementation plan now and apply the required changes with `replace_in_file`, `patch_file`, or `file_write`, or explain clearly if no code modification is required."
-            } else if requiresMutation && iteration >= 10 {
-                dynamicInstruction = "You have gathered context across \(iteration) inspection steps (`filesModified` is currently empty). Once you have verified the exact target lines, proceed to apply the changes with `replace_in_file`, `patch_file`, or `file_write` rather than re-reading already-inspected files."
+                turnTrace.note("instruction.edits_verified")
             } else {
-                dynamicInstruction = "Continue executing the user's request. Batch independent read/search operations together when exploring, inspect exact target lines before editing, and verify after modifying code."
+                dynamicInstruction = "Continue executing the user's request. Batch independent read/search operations together when exploring, and verify all facts before concluding."
+                turnTrace.note("instruction.continue")
             }
             
             var directiveLines: [String] = []
@@ -3675,6 +3734,7 @@ class AgentService: ObservableObject {
                 break
             }
             if let stallReason = triggeredStallStop {
+                turnTrace.end("stall_guard")
                 terminationNotice = stallReason
                 logActivity(.error, stallReason)
                 currentToolExecution = nil
@@ -3701,6 +3761,7 @@ class AgentService: ObservableObject {
 
         if let limit = effectiveIterationLimit, iteration >= limit, terminationNotice == nil {
             let detail = "Reached maximum tool iteration safety limit (\(limit) steps). Pausing turn to protect API budget."
+            turnTrace.end("iteration_limit")
             terminationNotice = detail
             if !finalText.contains(detail) {
                 finalText += "\n\n⚠️ \(detail)"
@@ -3763,6 +3824,12 @@ class AgentService: ObservableObject {
             elapsedSeconds: Date().timeIntervalSince(turnStartedAt),
             records: turnRecordsSlice
         )
+        turnTrace.iterations = iteration
+        if isRunCancelled(forChatId: runChatId) || Task.isCancelled {
+            turnTrace.end("cancelled")
+        }
+        turnTrace.end(finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "empty" : "no_tool_answer")
+        logActivity(.info, "Turn trace: \(turnTrace.summary)")
         let assistantMessage = AgentMessageModel(
             id: UUID().uuidString,
             role: .assistant,
@@ -3770,7 +3837,8 @@ class AgentService: ObservableObject {
             toolResults: allToolResults,
             pendingChanges: allChanges,
             timestamp: Date(),
-            turnTelemetryLabel: telemetryLabel
+            turnTelemetryLabel: telemetryLabel,
+            harnessTrace: turnTrace
         )
         
         // Replace streaming placeholder with final on MainActor (strictly isolated to `runChatId` so switching
@@ -3904,33 +3972,37 @@ class AgentService: ObservableObject {
     }
 
     private func containsUnfinishedActionIntention(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed.contains("```") {
+        let strippedBlocks = text
+            .replacingOccurrences(of: #"```[\s\S]*?```"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if strippedBlocks.isEmpty {
             return false
         }
-        if containsCompletionIndication(trimmed) {
+        if containsCompletionIndication(strippedBlocks) {
             return false
         }
-        let lower = trimmed.lowercased()
-        let tail = String(lower.suffix(350))
+        let lower = strippedBlocks.lowercased()
+        let tail = String(lower.suffix(420))
         let actionPhrases = [
             "let me read", "let me check", "let me inspect", "let me get", "let me look",
             "let me find", "let me search", "let me write", "let me create", "let me update",
             "let me delete", "let me run", "let me build", "let me execute", "let me probe",
-            "let me compile", "let me test",
+            "let me compile", "let me test", "let me export",
             "i'll read", "i will read", "i'll check", "i will check", "i'll inspect",
             "i'll write", "i will write", "i'll create", "i will create", "i'll run", "i will run",
             "i'll execute", "i will execute", "i'll build", "i will build", "i'll test", "i will test",
-            "now i'll", "now i will",
+            "now i'll", "now i will", "i am going to", "let's now", "moving on to",
             "i need to read", "i need to check", "i need to inspect", "i need to write",
             "i need to get", "i need to find", "i need to run", "i need to build",
             "writing the", "reading the", "executing the", "inspecting the", "building the",
             "then write", "then build", "then remove", "next step", "next, i",
             "consolidating", "consolidate",
-            "จะเริ่ม", "กำลังอ่าน", "กำลังเขียน", "ขอดึง", "ต่อไปจะ", "จะทำการ", "จะรัน", "จะ build",
+            "จะเริ่ม", "กำลังอ่าน", "กำลังเขียน", "กำลังสร้าง", "กำลังจะ", "ขอดึง", "ขออ่าน", "ขอตรวจ", "ขอเช็ค", "ขอแก้",
+            "ต่อไปจะ", "ขั้นต่อไป", "ขั้นตอนต่อไป", "ลำดับถัดไป", "ต่อมาจะ", "เดี๋ยวจะ", "เดี๋ยวผมจะ",
+            "จะทำการ", "จะรัน", "จะ build", "จะสร้าง", "จะแก้ไข", "จะ export",
             "ขอลอง build", "ขอลองรัน", "มา build กัน", "ทำการ build"
         ]
-        if trimmed.count <= 280 {
+        if strippedBlocks.count <= 320 {
             return actionPhrases.contains { lower.contains($0) }
         } else {
             return actionPhrases.contains { tail.contains($0) }
@@ -3938,39 +4010,40 @@ class AgentService: ObservableObject {
     }
 
     /// Circuit breaker: detects if the model has entered an echo-chamber / repetition loop
+    /// without falsely aborting multi-step follow-through turns that share common polite phrases.
     private func isRepetitiveOutput(_ text: String, previousOutputs: [String]) -> Bool {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !clean.isEmpty else { return false }
-        
-        // 1. Direct exact or substring match with any previous response in current session
-        for prev in previousOutputs {
+        guard clean.count >= 40 else { return false }
+
+        // 1. Exact duplicate of a recent assistant response
+        for prev in previousOutputs.suffix(4) {
             let prevClean = prev.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if prevClean == clean {
                 return true
             }
-            if clean.count > 20 && prevClean.count > 20 {
+            // High-similarity containment only when both are substantial (>120 chars) and >=80% length ratio
+            let minLen = min(clean.count, prevClean.count)
+            let maxLen = max(clean.count, prevClean.count)
+            if minLen >= 120 && Double(minLen) / Double(max(1, maxLen)) >= 0.80 {
                 if prevClean.contains(clean) || clean.contains(prevClean) {
                     return true
                 }
             }
         }
-        
-        // 2. Sentence-level recurrence detection (if sentences repeat across multiple turns)
+
+        // 2. High-ratio sentence recurrence (>= 75% of sentences repeated across >= 3 sentences)
         let sentences = text.components(separatedBy: CharacterSet(charactersIn: "\n.。"))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { $0.count > 12 }
-        
+            .filter { $0.count > 24 }
+        guard sentences.count >= 3 else { return false }
+
         var repeatedCount = 0
         for sentence in sentences {
-            if previousOutputs.contains(where: { $0.lowercased().contains(sentence) }) {
+            if previousOutputs.suffix(3).contains(where: { $0.lowercased().contains(sentence) }) {
                 repeatedCount += 1
             }
         }
-        if repeatedCount >= 2 || (sentences.count == 1 && repeatedCount >= 1) {
-            return true
-        }
-        
-        return false
+        return Double(repeatedCount) / Double(sentences.count) >= 0.75
     }
     
     // MARK: - Streaming Message Update & 30ms Coalesced Throttle Buffer
@@ -4587,6 +4660,7 @@ class AgentService: ObservableObject {
     ) -> [(role: String, content: String)] {
         var remaining = maxHistoryChars
         var result: [(role: String, content: String)] = []
+        var recentAssistantTurnsWithEvidence = 0
         let targetId = chatId ?? AgentExecutionContext.chatId ?? activeChatId
         let targetScope = scope ?? (targetId.flatMap { runningScopesByChatId[$0] } ?? activeScope)
         let sourceMessages: [AgentMessageModel]
@@ -4623,6 +4697,17 @@ class AgentService: ObservableObject {
                         return "\(tr.toolName)(\(status))"
                     }.joined(separator: ", ")
                     rawContent = "[Executed MicroCode Tools: \(toolSummary)]\n" + rawContent
+                    // Keep what the last few turns actually printed, so "ไหน" / "run ผลลัพธ์มา" can point at real output.
+                    if recentAssistantTurnsWithEvidence < 3 {
+                        let runs = msg.toolResults
+                            .filter { AgentExecutionEvidence.executes(name: $0.toolName, arguments: $0.toolParams ?? [:]) }
+                            .filter { !AgentExecutionEvidence.mutates(name: $0.toolName, arguments: $0.toolParams ?? [:]) }
+                            .map { (name: $0.toolName, success: $0.success, output: $0.success ? $0.output : ($0.error ?? $0.output)) }
+                        if let digest = FollowUpIntent.evidenceDigest(runs) {
+                            rawContent += "\n\n" + digest
+                            recentAssistantTurnsWithEvidence += 1
+                        }
+                    }
                 }
                 let content = boundedHistoryText(rawContent, limit: limit)
                 guard !content.isEmpty else { continue }
@@ -5455,7 +5540,10 @@ class AgentService: ObservableObject {
         <tool_call>{"name":"list_directory_tree","arguments":{"path":"."}}</tool_call>
         <tool_call>{"name":"file_read","arguments":{"path":"README.md"}}</tool_call>
         <tool_call>{"name":"inspect_image","arguments":{"path":"mockup.png"}}</tool_call>
+        <tool_call>{"name":"openthai_ocr","arguments":{"path":"thai_document.pdf","mode":"markdown","page_start":1,"page_end":5}}</tool_call>
         <tool_call>{"name":"attachment_read","arguments":{"target":"spec.pdf","mode":"page","start":1,"end":5}}</tool_call>
+        <tool_call>{"name":"agent_desktop","arguments":{"command":"snapshot","app":"Finder"}}</tool_call>
+        <tool_call>{"name":"agent_desktop","arguments":{"command":"click","ref":"@s8f3k2p9:e8"}}</tool_call>
         <tool_call>{"name":"computer_use","arguments":{"action":"observe","app":"MicroCode"}}</tool_call>
         <tool_call>{"name":"computer_use","arguments":{"action":"click","mark_id":3}}</tool_call>
         <tool_call>{"name":"computer_use","arguments":{"action":"zoom","x":200,"y":140,"width":360,"height":240}}</tool_call>
@@ -5463,7 +5551,7 @@ class AgentService: ObservableObject {
         <tool_call>{"name":"replace_in_file","arguments":{"path":"src/app.swift","old_text":"let a = 1","new_text":"let a = 2"}}</tool_call>
         <tool_call>{"name":"export_pdf","arguments":{"path":"Official_Documentation.pdf","markdown":"# เอกสารทางการ\\n\\n## 1. ภาพรวมระบบ\\n...","title":"เอกสารคู่มือทางการ","subtitle":"Dotmini Software · Official Documentation"}}</tool_call>
         <tool_call>{"name":"shell","arguments":{"command":"clang++ -std=c++17 .microcode/playground/main.cpp -o /tmp/mc_out && /tmp/mc_out"}}</tool_call>
-        When asked to generate or export a PDF document (Thai or English), ALWAYS use the native `export_pdf` tool (either passing `"markdown"` directly or `"source_path"` after writing a `.md` file) instead of installing external Python/LaTeX packages. Read only necessary files (using `start_line`/`end_line` for large files) so you stay fast and concise. For `computer_use`, always inspect `spatial_map` and `[#mark_id]` coordinates from `observe` before `click`/`type`/`zoom`. Provide complete, runnable code and concise answers.
+        When asked to generate or export a PDF document (Thai or English), ALWAYS use the native `export_pdf` tool (either passing `"markdown"` directly or `"source_path"` after writing a `.md` file) instead of installing external Python/LaTeX packages. For Thai/English scanned documents, invoices, government tables, or images, use `openthai_ocr` (OpenThai 2.0 OCR). For controlling macOS desktop apps without screenshots, prefer `agent_desktop` (`skeleton` -> `drill` -> `click`/`type` on `@<snapshot_id>:e<N>` refs -> re-snapshot to verify), falling back to `computer_use` (`observe` + `mark_id`) for custom Canvas/Simulator views. Read only necessary files (using `start_line`/`end_line` for large files) so you stay fast and concise. Provide complete, runnable code and concise answers.
         """
     }
 
@@ -5684,38 +5772,66 @@ class AgentService: ObservableObject {
             if !calls.isEmpty { return calls }
         }
         
-        // Pattern 1: <tool_call> JSON </tool_call> or <function_call> JSON </function_call>
-        let xmlPattern = "<(?:tool_call|function_call)>\\s*([\\s\\S]*?)\\s*</(?:tool_call|function_call)>"
-        if let regex = try? NSRegularExpression(pattern: xmlPattern, options: []) {
-            let nsText = text as NSString
-            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-            for match in matches {
-                guard match.numberOfRanges > 1 else { continue }
-                let jsonStr = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if let data = jsonStr.data(using: .utf8),
-                   let parsed = try? JSONSerialization.jsonObject(with: data) {
-                    if let json = parsed as? [String: Any],
-                       let rawName = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) {
-                        let name = AgentToolBox.normalizeToolName(rawName)
-                        if isKnownTool(name) {
-                            let args = (json["arguments"] as? [String: Any])
-                                ?? (json["parameters"] as? [String: Any])
-                                ?? (json["args"] as? [String: Any])
-                                ?? (json["input"] as? [String: Any])
-                                ?? [:]
-                            calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+        // Pattern 1: <tool_call> JSON </tool_call>, unclosed trailing <tool_call>{...}, OR GLM-4/5 two-line `<tool_call>\ntool_name\n{...}`
+        let xmlPattern = "<(?:tool_call|function_call)>\\s*([\\s\\S]*?)(?:</(?:tool_call|function_call)>|$)"
+        if text.contains("<tool_call>") || text.contains("<function_call>") || text.contains("<|tool_call|>") {
+            let normalizedXMLText = text
+                .replacingOccurrences(of: "<|tool_call|>", with: "<tool_call>")
+                .replacingOccurrences(of: "</|tool_call|>", with: "</tool_call>")
+            if let regex = try? NSRegularExpression(pattern: xmlPattern, options: []) {
+                let nsText = normalizedXMLText as NSString
+                let matches = regex.matches(in: normalizedXMLText, range: NSRange(location: 0, length: nsText.length))
+                for match in matches {
+                    guard match.numberOfRanges > 1 else { continue }
+                    let innerRaw = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !innerRaw.isEmpty else { continue }
+
+                    // Case A: Standard JSON object or array inside `<tool_call>`
+                    var candidateJSON = innerRaw
+                    if let firstBrace = innerRaw.firstIndex(of: "{"),
+                       let lastBrace = innerRaw.lastIndex(of: "}"),
+                       firstBrace < lastBrace,
+                       !innerRaw.hasPrefix("{") && !innerRaw.hasPrefix("[") {
+                        // Case B: GLM-4 / GLM-5 / Qwen two-line format (`tool_name\n{"arg": "val"}`)
+                        let headerLine = String(innerRaw[..<firstBrace]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let headerName = AgentToolBox.normalizeToolName(headerLine)
+                        let argsSlice = String(innerRaw[firstBrace...lastBrace])
+                        if isKnownTool(headerName),
+                           let argData = argsSlice.data(using: .utf8),
+                           let argDict = try? JSONSerialization.jsonObject(with: argData) as? [String: Any] {
+                            calls.append(AIToolCall(id: UUID().uuidString, name: headerName, arguments: AgentToolBox.normalizeToolParams(argDict)))
+                            continue
                         }
-                    } else if let arr = parsed as? [[String: Any]] {
-                        for json in arr {
-                            if let rawName = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) {
-                                let name = AgentToolBox.normalizeToolName(rawName)
-                                if isKnownTool(name) {
-                                    let args = (json["arguments"] as? [String: Any])
-                                        ?? (json["parameters"] as? [String: Any])
-                                        ?? (json["args"] as? [String: Any])
-                                        ?? (json["input"] as? [String: Any])
-                                        ?? [:]
-                                    calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                        candidateJSON = argsSlice
+                    } else if innerRaw.hasPrefix("{"), let lastBrace = innerRaw.lastIndex(of: "}") {
+                        candidateJSON = String(innerRaw[...lastBrace])
+                    }
+
+                    if let data = candidateJSON.data(using: .utf8),
+                       let parsed = try? JSONSerialization.jsonObject(with: data) {
+                        if let json = parsed as? [String: Any],
+                           let rawName = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) {
+                            let name = AgentToolBox.normalizeToolName(rawName)
+                            if isKnownTool(name) {
+                                let args = (json["arguments"] as? [String: Any])
+                                    ?? (json["parameters"] as? [String: Any])
+                                    ?? (json["args"] as? [String: Any])
+                                    ?? (json["input"] as? [String: Any])
+                                    ?? [:]
+                                calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                            }
+                        } else if let arr = parsed as? [[String: Any]] {
+                            for json in arr {
+                                if let rawName = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) {
+                                    let name = AgentToolBox.normalizeToolName(rawName)
+                                    if isKnownTool(name) {
+                                        let args = (json["arguments"] as? [String: Any])
+                                            ?? (json["parameters"] as? [String: Any])
+                                            ?? (json["args"] as? [String: Any])
+                                            ?? (json["input"] as? [String: Any])
+                                            ?? [:]
+                                        calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                                    }
                                 }
                             }
                         }
@@ -5724,6 +5840,21 @@ class AgentService: ObservableObject {
             }
         }
         if !calls.isEmpty { return calls }
+
+        // Pattern 1.5: Bare standalone JSON tool call (`{"name":"file_write","arguments":{...}}`) emitted without tags
+        let trimmedWhole = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedWhole.hasPrefix("{") && trimmedWhole.hasSuffix("}"),
+           let wholeData = trimmedWhole.data(using: .utf8),
+           let wholeObj = try? JSONSerialization.jsonObject(with: wholeData) as? [String: Any],
+           let rawName = (wholeObj["name"] as? String) ?? (wholeObj["tool"] as? String) {
+            let name = AgentToolBox.normalizeToolName(rawName)
+            if isKnownTool(name) {
+                let args = (wholeObj["arguments"] as? [String: Any])
+                    ?? (wholeObj["parameters"] as? [String: Any])
+                    ?? [:]
+                return [AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args))]
+            }
+        }
 
         // Pattern 1B: DeepSeek DSML (`<｜DSML｜invoke name="...">`) & `<invoke name="...">` XML blocks
         if text.contains("invoke") || text.contains("DSML") {
@@ -6230,20 +6361,9 @@ class AgentService: ObservableObject {
                 }
             let lastCommit = runGit(["log", "-1", "--oneline"])
 
-            // Parse task.md checkboxes
-            var pendingItems: [String] = []
-            var completedCount = 0
-            for line in currentTaskMd.components(separatedBy: .newlines) {
-                let t = line.trimmingCharacters(in: .whitespaces)
-                if t.hasPrefix("- [x]") || t.hasPrefix("- [X]") {
-                    completedCount += 1
-                } else if t.hasPrefix("- [ ]") {
-                    let itemText = String(t.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                    if !itemText.isEmpty && !itemText.hasPrefix("**1.1** Inspect workspace files") {
-                        pendingItems.append(itemText)
-                    }
-                }
-            }
+            // Parse task.md checkboxes (the old generic template's steps are never offered as "next task")
+            let pendingItems = AgentTaskFile.pendingItems(in: currentTaskMd)
+            let completedCount = AgentTaskFile.completedCount(in: currentTaskMd)
 
             let nextStepPrompt: String = {
                 if let firstPending = pendingItems.first {
@@ -6604,7 +6724,10 @@ struct AgentMessageData: Codable, Identifiable {
     var toolResults: [PersistedToolResult]? = nil
     var attachmentHistoryContext: String? = nil
     var attachments: [SentAttachmentItem]? = nil
-    
+    // Optional and new (2026-11-21): older transcripts decode with nil.
+    var turnTelemetryLabel: String? = nil
+    var harnessTrace: AgentTurnTrace? = nil
+
     static func from(_ model: AgentMessageModel) -> AgentMessageData {
         let persistedTools = model.toolResults.isEmpty ? nil : model.toolResults.map { PersistedToolResult.from($0) }
         let persistedAttachments = model.attachments.isEmpty ? nil : model.attachments
@@ -6615,7 +6738,9 @@ struct AgentMessageData: Codable, Identifiable {
             timestamp: model.timestamp,
             toolResults: persistedTools,
             attachmentHistoryContext: model.attachmentHistoryContext,
-            attachments: persistedAttachments
+            attachments: persistedAttachments,
+            turnTelemetryLabel: model.turnTelemetryLabel,
+            harnessTrace: model.harnessTrace
         )
     }
     
@@ -6642,8 +6767,10 @@ struct AgentMessageData: Codable, Identifiable {
             toolResults: (toolResults ?? []).map { $0.toModel() },
             pendingChanges: [],
             timestamp: timestamp,
+            turnTelemetryLabel: turnTelemetryLabel,
             attachmentHistoryContext: attachmentHistoryContext,
-            attachments: finalAttachments
+            attachments: finalAttachments,
+            harnessTrace: harnessTrace
         )
     }
 }
@@ -6658,7 +6785,9 @@ struct AgentMessageModel: Identifiable {
     var turnTelemetryLabel: String?
     var attachmentHistoryContext: String?
     var attachments: [SentAttachmentItem]
-    
+    /// Provider/model and harness interventions of the turn that produced this assistant message.
+    var harnessTrace: AgentTurnTrace?
+
     init(
         id: String,
         role: MessageRole,
@@ -6668,8 +6797,10 @@ struct AgentMessageModel: Identifiable {
         timestamp: Date = Date(),
         turnTelemetryLabel: String? = nil,
         attachmentHistoryContext: String? = nil,
-        attachments: [SentAttachmentItem] = []
+        attachments: [SentAttachmentItem] = [],
+        harnessTrace: AgentTurnTrace? = nil
     ) {
+        self.harnessTrace = harnessTrace
         self.id = id
         self.role = role
         self.content = content

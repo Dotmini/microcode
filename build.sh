@@ -407,6 +407,30 @@ elif [ -f "Package.swift" ]; then
             echo -e "${RED}Error: bundled serve-sim runtime is missing.${NC}"
             exit 1
         fi
+        if [ -d "Vendor/agent-desktop/1.3.1" ]; then
+            AD_DEST="$APP_BUNDLE/Contents/Resources/agent-desktop"
+            mkdir -p "$AD_DEST/bin" "$AD_DEST/lib" "$APP_BUNDLE/Contents/Frameworks"
+            cp -f "Vendor/agent-desktop/1.3.1/cli/agent-desktop" "$AD_DEST/bin/agent-desktop" 2>/dev/null || true
+            cp -f "Vendor/agent-desktop/1.3.1/cli/agent-desktop-macos-helper" "$AD_DEST/bin/agent-desktop-macos-helper" 2>/dev/null || true
+            chmod +x "$AD_DEST/bin/agent-desktop" "$AD_DEST/bin/agent-desktop-macos-helper" 2>/dev/null || true
+            AD_FFI_DIR="Vendor/agent-desktop/1.3.1/ffi/agent-desktop-ffi-v1.3.1-aarch64-apple-darwin/lib"
+            if [ -f "$AD_FFI_DIR/libagent_desktop_ffi.dylib" ]; then
+                cp -f "$AD_FFI_DIR/libagent_desktop_ffi.dylib" "$AD_DEST/lib/libagent_desktop_ffi.dylib"
+                cp -f "$AD_FFI_DIR/libagent_desktop_ffi.dylib" "$APP_BUNDLE/Contents/Frameworks/libagent_desktop_ffi.dylib"
+                install_name_tool -id @rpath/libagent_desktop_ffi.dylib "$APP_BUNDLE/Contents/Frameworks/libagent_desktop_ffi.dylib" 2>/dev/null || true
+                if [ -f "$AD_FFI_DIR/agent-desktop-macos-helper" ]; then
+                    cp -f "$AD_FFI_DIR/agent-desktop-macos-helper" "$AD_DEST/lib/agent-desktop-macos-helper"
+                    cp -f "$AD_FFI_DIR/agent-desktop-macos-helper" "$APP_BUNDLE/Contents/Frameworks/agent-desktop-macos-helper"
+                    chmod +x "$AD_DEST/lib/agent-desktop-macos-helper" "$APP_BUNDLE/Contents/Frameworks/agent-desktop-macos-helper" 2>/dev/null || true
+                fi
+            fi
+        fi
+        if [ -d "Vendor/openthai-ocr/2.0" ]; then
+            OT_DEST="$APP_BUNDLE/Contents/Resources/openthai-ocr"
+            mkdir -p "$OT_DEST"
+            cp -R "Vendor/openthai-ocr/2.0/." "$OT_DEST/"
+            chmod +x "$OT_DEST/openthai_ocr_daemon.py" 2>/dev/null || true
+        fi
 
         # Strip local symbols after linking. The backend is an executable (not
         # an FFI library) and has been smoke-tested with /health after this

@@ -1032,33 +1032,7 @@ struct SentUserAttachmentsView: View {
     }
 }
 
-// MARK: - Continuous TimelineView 3-Dot Wave Indicator (Never freezes inside .equatable() rows)
-
-struct AIStreamingThreeDotsView: View {
-    var dotSize: CGFloat = 6
-    var spacing: CGFloat = 5
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: spacing) {
-                ForEach(0..<3, id: \.self) { index in
-                    let phase = t * 4.6 - Double(index) * 0.72
-                    let wave = (sin(phase) + 1.0) * 0.5 // 0.0 ... 1.0
-                    let scale = 0.72 + (0.36 * wave)
-                    let opacity = 0.25 + (0.75 * wave)
-                    let yOffset = -2.2 * max(0.0, sin(phase))
-                    Circle()
-                        .fill(Color.accentColor.opacity(opacity))
-                        .frame(width: dotSize, height: dotSize)
-                        .scaleEffect(scale)
-                        .offset(y: yOffset)
-                }
-            }
-            .frame(height: dotSize + 6)
-        }
-    }
-}
+// AIStreamingThreeDotsView lives in AIStreamingThreeDotsView.swift (Core Animation driven; must not tick SwiftUI per frame).
 
 // MARK: - Equatable AI Cell Content Host (Isolates Hover State from Markdown/Tool Tree)
 

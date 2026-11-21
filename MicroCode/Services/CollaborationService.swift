@@ -432,6 +432,17 @@ final class CollaborationService: ObservableObject {
     // MARK: - Published State
     
     @Published var currentSession: CollaborationSession?
+    /// Peer → host HTTP. Every request carries the room code, which the host now requires on all `/api/collab/*` routes.
+    private var peerHTTP: URLSession {
+        let code = currentSession?.shareCode.uppercased() ?? ""
+        if let cached = peerHTTPCache, cached.code == code { return cached.session }
+        let config = URLSessionConfiguration.default
+        config.httpAdditionalHeaders = ["X-Collab-Code": code]
+        let session = URLSession(configuration: config)
+        peerHTTPCache = (code, session)
+        return session
+    }
+    private var peerHTTPCache: (code: String, session: URLSession)?
     @Published var participants: [CollaborationSession.Participant] = []
     @Published var isConnected: Bool = false
     @Published var connectionStatus: ConnectionStatus = .disconnected
@@ -936,7 +947,7 @@ final class CollaborationService: ObservableObject {
         req.httpBody = try? JSONSerialization.data(withJSONObject: joinBody)
         
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await self.peerHTTP.data(for: req)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 connectionStatus = .error("Session not found or rejected")
@@ -1024,7 +1035,7 @@ final class CollaborationService: ObservableObject {
         if let bundleURL = URL(string: "\(baseEndpoint)/api/collab/workspace-bundle") {
             var req = URLRequest(url: bundleURL)
             req.timeoutInterval = 15
-            if let (bundleData, resp) = try? await URLSession.shared.data(for: req),
+            if let (bundleData, resp) = try? await self.peerHTTP.data(for: req),
                (resp as? HTTPURLResponse)?.statusCode == 200,
                let bundle = try? JSONSerialization.jsonObject(with: bundleData) as? [String: Any] {
                 hostActiveFile = (bundle["hostActiveFile"] as? String) ?? ""
@@ -1102,7 +1113,7 @@ final class CollaborationService: ObservableObject {
                     guard self.currentSession?.shareCode == shareCode,
                           let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                           let url = URL(string: "\(baseEndpoint)/api/collab/file?path=\(encoded)"),
-                          let (d, _) = try? await URLSession.shared.data(from: url),
+                          let (d, _) = try? await self.peerHTTP.data(from: url),
                           let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                           let remoteContent = j["content"] as? String else { continue }
                     let rev = (j["revision"] as? Int) ?? 1
@@ -1141,7 +1152,7 @@ final class CollaborationService: ObservableObject {
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 req.httpBody = try? JSONSerialization.data(withJSONObject: ["userId": localUserId])
-                _ = try? await URLSession.shared.data(for: req)
+                _ = try? await self.peerHTTP.data(for: req)
             }
         }
         peerSyncTimer?.invalidate()
@@ -1410,14 +1421,36 @@ final class CollaborationService: ObservableObject {
            upgradeVal.lowercased().contains("websocket"),
            let wsKey = Self.parseHeaderValue("Sec-WebSocket-Key", from: headerStr) {
             let queryCode = urlComps?.queryItems?.first(where: { $0.name == "code" })?.value?.uppercased() ?? ""
-            if let session = currentSession, !queryCode.isEmpty, queryCode != session.shareCode {
+            guard let session = currentSession, LocalServerTrust.constantTimeEquals(queryCode, session.shareCode.uppercased()) else {
                 sendHTTPResponse(connection: connection, status: "403 Forbidden", contentType: "text/plain", body: Data("Invalid code".utf8))
                 return
             }
             upgradeConnectionToWebSocket(connection: connection, secWebSocketKey: wsKey)
             return
         }
-        
+
+        // Every collaboration API call must present the room code (query `code`, header `X-Collab-Code` or the portal
+        // cookie). Previously only join/WebSocket checked it — and accepted an empty code — so anyone on the network
+        // could download the workspace bundle, read files or write edits. `join` checks the code in its JSON body.
+        if path.hasPrefix("/api/collab/"), path != "/api/collab/join" {
+            let presented: String = {
+                if let q = urlComps?.queryItems?.first(where: { $0.name == "code" })?.value, !q.isEmpty { return q }
+                if let h = Self.parseHeaderValue("X-Collab-Code", from: headerStr), !h.isEmpty { return h }
+                if let rawCookie = Self.parseHeaderValue("Cookie", from: headerStr) {
+                    for pair in rawCookie.components(separatedBy: ";") {
+                        let kv = pair.trimmingCharacters(in: .whitespaces).components(separatedBy: "=")
+                        if kv.count >= 2 && kv[0] == "mc_collab_code" { return kv[1] }
+                    }
+                }
+                return ""
+            }().trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard let session = currentSession, LocalServerTrust.constantTimeEquals(presented, session.shareCode.uppercased()) else {
+                let err = try? JSONSerialization.data(withJSONObject: ["error": "Invalid or missing room code"])
+                sendHTTPResponse(connection: connection, status: "403 Forbidden", contentType: "application/json", body: err ?? Data())
+                return
+            }
+        }
+
         switch (method, path) {
         case ("GET", "/"), ("GET", "/index.html"):
             let expectedCode = (currentSession?.shareCode ?? "").uppercased()
@@ -1461,7 +1494,7 @@ final class CollaborationService: ObservableObject {
         case ("POST", "/api/collab/join"):
             let body = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
             let reqCode = (body["code"] as? String)?.uppercased() ?? ""
-            if let session = currentSession, (!reqCode.isEmpty && reqCode != session.shareCode) {
+            if currentSession.map({ !LocalServerTrust.constantTimeEquals(reqCode, $0.shareCode.uppercased()) }) ?? true {
                 let err = try? JSONSerialization.data(withJSONObject: ["error": "Invalid room code"])
                 sendHTTPResponse(connection: connection, status: "403 Forbidden", contentType: "application/json", body: err ?? Data())
                 return
@@ -1602,8 +1635,7 @@ final class CollaborationService: ObservableObject {
         var header = "HTTP/1.1 \(status)\r\n"
         header += "Content-Type: \(contentType)\r\n"
         header += "Content-Length: \(body.count)\r\n"
-        header += "Access-Control-Allow-Origin: *\r\n"
-        header += "Access-Control-Allow-Headers: Content-Type\r\n"
+        // No CORS: the web portal is same-origin; a wildcard let any web page call the collaboration API.
         header += "Cache-Control: no-store\r\n"
         for (k, v) in extraHeaders {
             header += "\(k): \(v)\r\n"
@@ -2705,7 +2737,7 @@ final class CollaborationService: ObservableObject {
                             for rel in addedPaths {
                                 guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                                       let url = URL(string: "\(endpoint)/api/collab/file?path=\(encoded)"),
-                                      let (d, _) = try? await URLSession.shared.data(from: url),
+                                      let (d, _) = try? await self.peerHTTP.data(from: url),
                                       let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                                       let content = j["content"] as? String else { continue }
                                 let rev = (j["revision"] as? Int) ?? 1
@@ -3232,7 +3264,7 @@ final class CollaborationService: ObservableObject {
            !session.isHostingLocally,
            let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
            let url = URL(string: "\(session.remoteEndpoint)/api/collab/file?path=\(encoded)") {
-            if let (data, _) = try? await URLSession.shared.data(from: url),
+            if let (data, _) = try? await self.peerHTTP.data(from: url),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let remoteContent = json["content"] as? String {
                 content = remoteContent
@@ -3832,7 +3864,7 @@ final class CollaborationService: ObservableObject {
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-                    _ = try? await URLSession.shared.data(for: req)
+                    _ = try? await self.peerHTTP.data(for: req)
                 }
             }
         }
@@ -3900,7 +3932,7 @@ final class CollaborationService: ObservableObject {
                     "color": localColor
                 ]
                 req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-                if let (respData, _) = try? await URLSession.shared.data(for: req),
+                if let (respData, _) = try? await self.peerHTTP.data(for: req),
                    let respJSON = try? JSONSerialization.jsonObject(with: respData) as? [String: Any] {
                     if let newRev = respJSON["revision"] as? Int {
                         let authoritativeContent = (respJSON["content"] as? String) ?? content
@@ -3940,7 +3972,7 @@ final class CollaborationService: ObservableObject {
                 "teamTasksJSON": jsonStr
             ]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            _ = try? await URLSession.shared.data(for: req)
+            _ = try? await self.peerHTTP.data(for: req)
         }
     }
     
@@ -4059,7 +4091,7 @@ final class CollaborationService: ObservableObject {
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await self.peerHTTP.data(for: req)
             if let http = resp as? HTTPURLResponse, http.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if connectionStatus != .connected {
@@ -4140,7 +4172,7 @@ final class CollaborationService: ObservableObject {
                 "message": clean
             ]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            _ = try? await URLSession.shared.data(for: req)
+            _ = try? await self.peerHTTP.data(for: req)
             await performPeerSyncTick()
         }
     }
