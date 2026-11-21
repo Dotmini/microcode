@@ -49,7 +49,8 @@ namespace MicroCode
                 TaskFiles.HomeOverride = Path.Combine(Defaults.Dir, ".microcode");
             }
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
-            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); };
+            // stdio MCP servers woken by the agent are child processes: end them with the app (npx/uvx wrappers included)
+            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); McpManager.StopAll(); };
             app.DispatcherUnhandledException += (s, e) =>
             {
                 try { File.AppendAllText(Path.Combine(Defaults.Dir, "crash.log"), DateTime.Now + " " + e.Exception + "\n\n"); } catch { }

@@ -95,10 +95,10 @@ macOS มีแอปรุ่นที่สองชื่อ **MicroCode AI**
 
 | ส่วน | macOS | Windows |
 |---|---|---|
-| **MCP client:** อ่าน `.cursor/mcp.json`, `.mcp.json`, `~/.cursor/mcp.json`, `~/.microcode/mcp.json`, plugin ของ Gemini; transport stdio + Streamable HTTP | `ExternalMCPManager.swift` (1,303 บรรทัด) | ❌ |
-| OAuth 2.1 ของ MCP (RFC 9728 discovery, PKCE, เก็บ token ใน Keychain) | `MCPAuth.swift`, `MCPAuthCenter.swift` | ❌ |
+| **MCP client:** อ่าน `.cursor/mcp.json`, `.mcp.json`, `~/.cursor/mcp.json`, `~/.microcode/mcp.json`, plugin ของ Gemini; transport stdio + Streamable HTTP | `ExternalMCPManager.swift` (1,303 บรรทัด) | ✅ (21 พ.ย., `Mcp.cs`) — ยังไม่จัด server เข้า PNS tract ตามประเภท และยังไม่ restart อัตโนมัติเมื่อ server ล้ม |
+| OAuth 2.1 ของ MCP (RFC 9728 discovery, PKCE, เก็บ token ใน Keychain) | `MCPAuth.swift`, `MCPAuthCenter.swift` | ❌ (ใช้ bearer token ที่เข้ารหัส DPAPI แทนได้) |
 | สร้าง MCP server เป็น Python ให้อัตโนมัติ + hot-spawn | `ExternalMCPManager` (`.microcode/mcp/<name>.py`) | ❌ |
-| `mcp_orchestrator` (Agent ติดตั้งหรือลงทะเบียน server เอง) | ✅ | ❌ |
+| `mcp_orchestrator` (Agent ติดตั้งหรือลงทะเบียน server เอง) | ✅ | ✅ status / discover / connect / search_tools / restart (authenticate, synthesize ตอบว่ายังไม่มี) |
 | **MCP server ของ MicroCode** (ให้ client ภายนอกใช้เครื่องมือของ IDE: read/write/edit/search, playground, ide_browser, api_studio, database_studio, computer_use) | `MCPServer.swift` (1,799 บรรทัด) | ⚪ ปุ่ม Start ในหน้า Settings ขึ้นแค่ข้อความว่ายังไม่มี มีแต่สะพาน auth บน 127.0.0.1:18888 |
 | แท็บ MCP ใน PNS 24/7 | ✅ | ⚪ ว่าง เพราะไม่มี client |
 

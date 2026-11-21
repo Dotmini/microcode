@@ -199,19 +199,38 @@ namespace MicroCode.Views
         /// <summary>Runs one agent turn (with the tool loop when tools are enabled) and returns the final reply.</summary>
         public static async Task<AgentResult> Run(List<ChatMessage> history, string system, bool tools, bool readOnly, string sessionId, AgentCallbacks cb, CancellationToken ct)
         {
+            // external MCP servers (main agent only: sandboxed Consensus / PNS runs keep to workspace tools)
+            bool mcp = tools && !InIsolation;
+            if (mcp) McpManager.EnsureSynced(AppState.Shared != null ? AppState.Shared.WorkspaceFolder : null);
             var ep = await AIEndpoint.Resolve(false);
             var res = new AgentResult { Model = ep.Model };
             bool anthropic = ep.Format == "anthropic";
             bool xml = XmlBridge.Contains(ep.BaseUrl + "::" + ep.Model);
             var msgs = BuildMessages(history, anthropic, ep);
-            var schemas = tools ? ToolSchemas(readOnly) : null;
             var ext = Extension.Value;
-            if (schemas != null && ext != null) schemas.AddRange(ext.Schemas);
+            string objective = history.LastOrDefault(m => m.Role == "user") != null ? history.Last(m => m.Role == "user").Content : "";
+            int mcpVersion = -1;
+            Func<List<Dictionary<string, object>>> buildSchemas = () =>
+            {
+                var list = ToolSchemas(readOnly);
+                if (ext != null) list.AddRange(ext.Schemas);
+                if (mcp)
+                {
+                    // the tools array stays stable between iterations and is rebuilt only when MCP manifests or mounts change
+                    mcpVersion = McpManager.Version;
+                    list.Add(McpManager.OrchestratorSchema());
+                    var mcpTools = McpManager.SchemasFor(McpManager.EagerToolNames(objective, 12));
+                    list.AddRange(readOnly ? mcpTools.Where(s => McpManager.LooksReadOnlyTool((string)s["name"])) : mcpTools);
+                }
+                return list;
+            };
+            var schemas = tools ? buildSchemas() : null;
             int maxIter = (int)Defaults.Num("agentMaxIterations", 0); if (maxIter <= 0) maxIter = 500;
             bool refreshed = false, preFinishChecked = false;
             for (int iter = 0; iter < maxIter; iter++)
             {
                 ct.ThrowIfCancellationRequested();
+                if (mcp && schemas != null && McpManager.Version != mcpVersion) schemas = buildSchemas();
                 Say(cb.OnActivity, iter == 0 ? "Thinking…" : "Working…");
                 Turn turn = null;
                 AIException fail = null;
@@ -275,7 +294,8 @@ namespace MicroCode.Views
                     string extTarget = ext != null && ext.Target != null ? ext.Target(name, call.Args) : null;
                     var step = new ToolStep { Name = name, Target = extTarget ?? Target(name, call.Args), Path = Arg(call.Args, "path"), At = res.Text.Length };
                     string result;
-                    if (readOnly && (IsEdit(name) || name == "shell")) { result = "Error: Plan mode is read-only. Describe this change in the plan instead of making it."; step.Ok = false; step.Approval = "blocked"; }
+                    bool mutatesOutside = (name.StartsWith("mcp__") && !McpManager.LooksReadOnlyTool(name)) || (name == "mcp_orchestrator" && Regex.IsMatch(Arg(call.Args, "action"), "^(connect|configure|restart|synthesize|create)$", RegexOptions.IgnoreCase));
+                    if (readOnly && (IsEdit(name) || name == "shell" || mutatesOutside)) { result = "Error: Plan mode is read-only. Describe this change in the plan instead of making it."; step.Ok = false; step.Approval = "blocked"; }
                     else if (!await Approve(step, call.Args, cb, ct)) { result = "User denied this tool call."; step.Ok = false; }
                     else
                     {
@@ -360,7 +380,11 @@ namespace MicroCode.Views
                     return "dangerous";
                 case "file_write": case "replace_in_file": case "multi_replace_in_file": case "patch_file": case "apply_patch":
                 case "rename_file": case "create_directory": case "web_fetch": return "moderate";
-                default: return "safe";
+                case "mcp_orchestrator": return Regex.IsMatch(s.Target ?? "", "^(connect|configure|restart)", RegexOptions.IgnoreCase) ? "dangerous" : "safe";
+                default:
+                    // external MCP tools: read-looking names (get_ / list_ / read_ / search_ …) run in Smart mode, anything else asks
+                    if ((s.Name ?? "").StartsWith("mcp__")) return McpManager.LooksReadOnlyTool(s.Name) ? "safe" : "moderate";
+                    return "safe";
             }
         }
 
@@ -724,7 +748,12 @@ namespace MicroCode.Views
                 case "web_fetch": return Arg(a, "url");
                 case "rename_file": return Arg(a, "old_path") + " → " + Arg(a, "new_path");
                 case "apply_patch": { var files = PatchTargets(Arg(a, "patch")); return files.Count == 0 ? "patch" : string.Join(", ", files); }
-                default: { string p = Arg(a, "path"); return p.Length == 0 ? "." : p; }
+                case "mcp_orchestrator": return (Arg(a, "action") + " " + (Arg(a, "server_name").Length > 0 ? Arg(a, "server_name") : Arg(a, "query"))).Trim();
+                default:
+                {
+                    if (name.StartsWith("mcp__")) return name.Substring(5).Replace("__", " · ");
+                    string p = Arg(a, "path"); return p.Length == 0 ? "." : p;
+                }
             }
         }
 
@@ -752,7 +781,10 @@ namespace MicroCode.Views
                 case "grep_search": case "file_search": { string q = s.Target ?? "codebase"; return "Searched " + (q.Length > 44 ? q.Substring(0, 44) : q); }
                 case "list_directory_tree": return "Listed " + FileName(s);
                 case "read_skill": return "Loaded skill " + (s.Target ?? "");
-                default: return "Executed " + (s.Name ?? "tool").Replace('_', ' ');
+                case "mcp_orchestrator": return "MCP " + (s.Target ?? "status");
+                default:
+                    if ((s.Name ?? "").StartsWith("mcp__")) return "Called " + (s.Target ?? s.Name);
+                    return "Executed " + (s.Name ?? "tool").Replace('_', ' ');
             }
         }
 
@@ -1095,6 +1127,8 @@ namespace MicroCode.Views
                     return outp.Length > 100000 ? outp.Substring(0, 100000) + "\n... (results truncated)" : outp;
                 }
             }
+            if (name.StartsWith("mcp__")) return McpManager.Call(name, a);
+            if (name == "mcp_orchestrator") return McpManager.Orchestrate(a);
             return "Error: unknown tool " + name + ". Available: list_directory_tree, file_read, multi_file_read, grep_search, file_search, find_symbol, git_status, web_fetch, file_write, replace_in_file, multi_replace_in_file, patch_file, apply_patch, create_directory, rename_file, shell, read_skill.";
         }
 

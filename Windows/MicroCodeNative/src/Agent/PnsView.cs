@@ -174,10 +174,16 @@ namespace MicroCode.Views
             var t = Theme.Current;
             var g = new Grid();
             for (int i = 0; i < 4; i++) g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            // MCP numbers come from the live client (the daemon snapshot has no MCP connections of its own)
+            var mcpConns = McpManager.Connections;
+            s.TotalExternalMCPServers = mcpConns.Count;
+            s.TotalExternalMCPTools = McpManager.AllTools().Count;
+            lock (McpManager.Mounted) s.ActiveMountedSynapticTools = Math.Min(s.TotalExternalMCPTools, Math.Max(McpManager.Mounted.Count, Math.Min(12, s.TotalExternalMCPTools)));
+            s.HibernatedMCPServers = mcpConns.Count(c => !c.Connected && McpManager.EffectiveTools(c).Count > 0);
             var tiles = new[]
             {
                 Tile("Metabolic Index (M_t)", (s.MetabolicBudgetIndex * 100).ToString("0", CultureInfo.InvariantCulture) + "%", (s.EffectiveMode ?? "") + " • Power: " + s.ThermalStateLabel, Pns.ModeIcon(s.EffectiveMode), s.MetabolicBudgetIndex > 0.6 ? t.SysGreen : t.SysOrange),
-                Tile("MCP Ganglion Filter", s.TotalExternalMCPTools + " → " + s.ActiveMountedSynapticTools, "No MCP client in the Windows build yet", "network", t.SysBlue),
+                Tile("MCP Ganglion Filter", s.TotalExternalMCPTools + " → " + s.ActiveMountedSynapticTools, s.TotalExternalMCPServers + " servers • " + s.HibernatedMCPServers + " hibernated", "network", t.SysBlue),
                 Tile("Synaptic Plasticity", s.MyelinatedSynapsesCount + " Myelinated", s.ProceduralPlaybooksCount + " Playbooks • " + s.InhibitedSynapsesCount + " Inhibited", "shield", t.SysPurple),
                 Tile("Spinal Reflex & REM", s.SpinalReflexSavesCount + " Saves", "<50ms 0-LLM • " + s.RemConsolidationCycles + " REM Cycles", "waveform", t.SysTeal)
             };
@@ -314,7 +320,7 @@ namespace MicroCode.Views
                 V.Mono("Active:" + tr.ActiveCount + " • Idle:" + tr.HibernatedCount + " • Myelin:" + tr.MyelinatedEdgesCount, 9.5, FontWeights.Normal, t.Secondary));
             TextBlock body;
             if (tr.AttachedNodes == null || tr.AttachedNodes.Count == 0)
-                body = V.T(Pns.IsMcp(tr.Tract) ? "No MCP servers — the Windows build has no MCP client yet" : "No fibers attached yet", 10, FontWeights.Normal, t.S(0.75));
+                body = V.T(Pns.IsMcp(tr.Tract) ? "No MCP servers on this tract yet" : "No fibers attached yet", 10, FontWeights.Normal, t.S(0.75));
             else
             {
                 body = V.Wrap(V.Mono(string.Join("  •  ", tr.AttachedNodes), 10, FontWeights.Normal, t.Secondary), TextAlignment.Left);

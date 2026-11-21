@@ -707,7 +707,75 @@ namespace MicroCode.Views
                 V.T("Available Tools", 10, FontWeights.SemiBold, t.Secondary), V.Self(tools, Cross.Stretch),
                 V.T("Recent Activity", 10, FontWeights.SemiBold, t.Secondary), V.T("No requests yet", 11, FontWeights.Normal, t.S(0.7)));
             s.Align = Cross.Stretch;
-            return V.Self(V.Box(s, V.P(16), t.ControlBackground, 12, t.P(0.08), 1), Cross.Stretch);
+            var col = V.VLead(18, V.Self(V.Box(s, V.P(16), t.ControlBackground, 12, t.P(0.08), 1), Cross.Stretch), V.Self(ExternalMcpSection(), Cross.Stretch));
+            col.Align = Cross.Stretch;
+            return col;
+        }
+
+        /// <summary>AgentEcosystemConfigView.mcpServersSection: the external servers the agent can use, live.</summary>
+        UIElement ExternalMcpSection()
+        {
+            var t = Theme.Current;
+            var host = new Border();
+            Action render = null;
+            render = () =>
+            {
+                var col = V.VLead(10); col.Align = Cross.Stretch;
+                col.Children.Add(V.VLead(3, V.T("Model Context Protocol (MCP) Servers", 13, FontWeights.SemiBold, t.Primary),
+                    V.Wrap(V.T("Universal tools and resource bridges declared in `.cursor/mcp.json` or `.mcp.json` — plus ~/.microcode/mcp.json, Cursor, Windsurf, Codex, Antigravity and Claude configs. The agent calls them as mcp__<server>__<tool>.", 11, FontWeights.Normal, t.Secondary), TextAlignment.Left)));
+                var conns = McpManager.Connections;
+                if (conns.Count == 0)
+                    col.Children.Add(V.Self(V.Box(V.Vs(8, Sym.Icon("network", 30, t.P(0.3)), V.T("No external MCP servers detected", 13, FontWeights.Medium, t.Primary),
+                        V.Wrap(V.T("Declare tools in `.cursor/mcp.json` or `.mcp.json` to auto-bind external MCP tool servers into MicroCode.", 11, FontWeights.Normal, t.Secondary), TextAlignment.Center)), V.P(20, 30), t.ControlBackground, 8, t.P(0.08), 1), Cross.Stretch));
+                foreach (var c in conns)
+                {
+                    var conn = c;
+                    var tools = McpManager.EffectiveTools(c);
+                    Brush dot = c.Connected ? t.SysGreen : c.Starting ? t.SysOrange : !string.IsNullOrEmpty(c.Error) ? t.SysRed : tools.Count > 0 ? t.SysBlue : t.SysGray;
+                    string state = c.Connected ? "Online" : c.Starting ? "Starting…" : !string.IsNullOrEmpty(c.Error) ? "Error" : tools.Count > 0 ? "Ready (hibernated)" : "Discovered";
+                    Func<string, Action, UIElement> small = (label, a) => V.Button(V.Box(V.T(label, 10.5, FontWeights.Medium, t.Primary), V.P(9, 3), t.P(0.08), 5), a);
+                    var buttons = V.H(6);
+                    if (c.Connected) buttons.Children.Add(small("Stop", () => System.Threading.ThreadPool.QueueUserWorkItem(_ => conn.Stop())));
+                    else buttons.Children.Add(small("Start", () => System.Threading.ThreadPool.QueueUserWorkItem(_ => conn.Start(30000))));
+                    buttons.Children.Add(small("Restart", () => System.Threading.ThreadPool.QueueUserWorkItem(_ => { conn.Stop(); conn.Start(30000); })));
+                    if (c.Spec.Source.StartsWith("MicroCode Global")) buttons.Children.Add(small("Remove", () => { McpManager.RemoveGlobalServer(conn.Name); McpManager.Sync(_app.WorkspaceFolder, false); }));
+                    var card = V.VLead(7,
+                        V.H(8, V.Dot(7, dot), V.T(c.Name, 12, FontWeights.SemiBold, t.Primary), V.Box(V.T(state, 9.5, FontWeights.Medium, t.Secondary), V.P(5, 1.5), t.P(0.07), 3), V.Sp(), V.Mono(c.Spec.Source, 10, FontWeights.Normal, t.Secondary)),
+                        V.H(8, V.T(c.Spec.IsRemote ? "URL:" : "Command:", 10, FontWeights.Medium, t.Secondary), V.Shrink(V.Box(V.Mono(c.Spec.IsRemote ? c.Spec.Url : (c.Spec.Command + " " + string.Join(" ", c.Spec.Args)).Trim(), 10, FontWeights.Normal, t.Primary), V.P(6, 2), t.P(0.06), 4))));
+                    card.Align = Cross.Stretch;
+                    if (c.Spec.Env.Count > 0) card.Children.Add(V.T("Environment: " + string.Join(", ", c.Spec.Env.Keys), 10, FontWeights.Normal, t.Secondary));
+                    if (tools.Count > 0) card.Children.Add(V.Wrap(V.T(tools.Count + " tools: " + string.Join(", ", tools.Take(14).Select(x => x.Name)) + (tools.Count > 14 ? " …" : ""), 10, FontWeights.Normal, t.Secondary), TextAlignment.Left));
+                    if (!string.IsNullOrEmpty(c.Error) && !c.Connected) card.Children.Add(V.Wrap(V.T(c.Error, 10, FontWeights.Normal, t.SysRed), TextAlignment.Left));
+                    card.Children.Add(V.H(8, V.T("Calls " + c.CallCount + " · errors " + c.ErrorCount + " · avg " + c.AvgLatencyMs + " ms", 10, FontWeights.Normal, t.S(0.7)), V.Sp(), buttons));
+                    col.Children.Add(V.Self(V.Box(card, V.P(12), t.ControlBackground, 8, t.P(0.08), 1), Cross.Stretch));
+                }
+                // Add server (mcp_orchestrator connect): name + URL, or a command line
+                TextBox nameBox, targetBox;
+                var nameField = V.Size(V.Box(Styles.Field("Server name (e.g. github)", 11, t.Primary, t.Secondary, out nameBox), V.P(8, 0), t.TextBackground, 6, t.P(0.12), 1), 180, 28);
+                var targetField = V.Box(Styles.Field("https://…/mcp  or  npx -y @modelcontextprotocol/server-github", 11, t.Primary, t.Secondary, out targetBox), V.P(8, 0), t.TextBackground, 6, t.P(0.12), 1); targetField.Height = 28;
+                var status = V.T("", 10.5, FontWeights.Normal, t.Secondary);
+                var add = V.Button(V.Box(V.T("Add Server", 11.5, FontWeights.Medium, Brushes.White), V.P(12, 5), t.Accent, 6), () =>
+                {
+                    string n = nameBox.Text.Trim(), target = targetBox.Text.Trim();
+                    if (n.Length == 0 || target.Length == 0) { status.Text = "Enter a name and a URL or command."; return; }
+                    status.Text = "Connecting…";
+                    bool remote = target.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || target.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+                    var parts = remote ? new List<string>() : target.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+                    System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        string r = McpManager.Connect(n, remote ? target : null, remote ? null : parts[0], remote ? null : parts.Skip(1).ToList(), null);
+                        Dispatcher.BeginInvoke(new Action(() => { status.Text = r.Split('\n')[0]; render(); }));
+                    });
+                });
+                col.Children.Add(V.Self(V.Box(V.VLead(8, V.T("Add an MCP server (saved to ~/.microcode/mcp.json)", 10.5, FontWeights.SemiBold, t.Secondary), V.H(8, nameField, V.Flex(targetField), add), status), V.P(12), t.ControlBackground, 8, t.P(0.08), 1), Cross.Stretch));
+                host.Child = col;
+            };
+            McpManager.EnsureSynced(_app.WorkspaceFolder);
+            Action onChange = () => Dispatcher.BeginInvoke(new Action(() => render()), System.Windows.Threading.DispatcherPriority.Background);
+            McpManager.Changed += onChange;
+            host.Unloaded += delegate { McpManager.Changed -= onChange; };
+            render();
+            return host;
         }
 
         UIElement ToolsTab()

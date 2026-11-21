@@ -425,12 +425,9 @@ namespace MicroCode.Views
         {
             var outcome = new HookOutcome();
             if (string.IsNullOrEmpty(workspace)) return outcome;
-            var files = new List<string>();
-            var hooks = ScanHooks(workspace, files).Where(h => h.Stage == stage).ToList();
+            var hooks = ScanHooks(workspace, null).Where(h => h.Stage == stage).ToList();
             if (hooks.Count == 0) return outcome;
-            var all = ScanHooks(workspace, new List<string>());
-            if (!WorkspaceTrust.RequestTrust(workspace, "exec-config", all.Select(h => Tuple.Create("Hook " + h.Stage + " `" + h.Name + "` (" + h.SourceFile + ")", h.Command)).ToList(), WorkspaceTrust.Fingerprint(files, workspace)))
-                return outcome;
+            if (!ExecConfigTrusted(workspace)) return outcome;
             string relFile = null;
             if (filePath != null)
             {
@@ -454,6 +451,20 @@ namespace MicroCode.Views
             }
             outcome.Feedback = string.Join("\n\n", parts);
             return outcome;
+        }
+
+        /// <summary>One trust decision covers everything this workspace's config would execute — its hooks and its repo-declared
+        /// MCP servers — pinned to a hash of exactly the files that declare them (as the Mac's refresh does).</summary>
+        public static bool ExecConfigTrusted(string workspace)
+        {
+            if (string.IsNullOrEmpty(workspace)) return true;
+            var hookFiles = new List<string>();
+            var hooks = ScanHooks(workspace, hookFiles);
+            var repoFiles = new List<string>();
+            var servers = McpDiscovery.Scan(workspace, repoFiles).Where(s => s.IsWorkspaceScoped).ToList();
+            var items = servers.Select(s => Tuple.Create("MCP server `" + s.Name + "` (" + Path.GetFileName(s.WorkspaceConfigPath) + ")", s.Url ?? (s.Command + " " + string.Join(" ", s.Args)).Trim()))
+                .Concat(hooks.Select(h => Tuple.Create("Hook " + h.Stage + " `" + h.Name + "` (" + h.SourceFile + ")", h.Command))).ToList();
+            return WorkspaceTrust.RequestTrust(workspace, "exec-config", items, WorkspaceTrust.Fingerprint(hookFiles.Concat(repoFiles).ToList(), workspace));
         }
 
         /// <summary>runHookShellCommand on Windows: cmd.exe /c with MICROCODE_HOOK_STAGE / MICROCODE_WORKSPACE / MICROCODE_TOOL /
@@ -541,6 +552,8 @@ namespace MicroCode.Views
         {
             var d = Load(); d.Remove(StoreKey(workspace, kind));
             Defaults.Set(Key, new JavaScriptSerializer().Serialize(d));
+            // revoking starts over: an earlier "Keep Disabled" in this session no longer suppresses the question
+            lock (Gate) Declined.Clear();
         }
 
         /// <summary>True when the items may run. Asks at most once per fingerprint per session; headless runs (PNS daemon, snapshots,

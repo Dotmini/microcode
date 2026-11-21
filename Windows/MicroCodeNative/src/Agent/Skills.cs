@@ -113,6 +113,9 @@ namespace MicroCode.Views
                     sb.Append("\n- ").Append(s.Name).Append(": ").Append(d);
                 }
             }
+            // live external MCP servers (ExternalMCPManager.compactPromptSummary)
+            McpManager.EnsureSynced(ws);
+            sb.Append(McpManager.PromptSummary());
             return sb.ToString();
         }
 
