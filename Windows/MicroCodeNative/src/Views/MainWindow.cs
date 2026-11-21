@@ -303,6 +303,9 @@ namespace MicroCode.Views
             else _inspector.Rebuild();
         }
 
+        /// <summary>The code editor of the current file, if the editor surface is showing one.</summary>
+        public MicroCode.Editor.CodeEditorView ActiveEditor { get { return _editorArea != null ? _editorArea.ActiveEditor : null; } }
+
         public void GoToLine(int line)
         {
             Dispatcher.BeginInvoke(new Action(() => { if (_editorArea != null && _editorArea.ActiveEditor != null) _editorArea.ActiveEditor.GoToLine(line); }), DispatcherPriority.Loaded);
@@ -723,7 +726,7 @@ namespace MicroCode.Views
                 MenuItemSpec.Item("API Studio", "network", () => _app.SwitchToMode(EditorMode.ApiClient)),
                 MenuItemSpec.Item("Container Studio", "shippingbox.fill", () => ModeViews.ShowStudio("Container Studio")),
                 MenuItemSpec.Item("CI/CD Pipelines", "checklist", () => ModeViews.ShowStudio("CI/CD Pipelines")),
-                MenuItemSpec.Item("Realtime Collaboration", "person.2.fill", () => ModeViews.ShowStudio("Realtime Collaboration")),
+                MenuItemSpec.Item("Realtime Collaboration", "person.2.fill", () => CollabView.ShowWindow()),
                 MenuItemSpec.Header("Window & Panels"),
                 new MenuItemSpec { Title = "Auto-Hide Window Controls", Icon = "macwindow", Checked = _app.AutoHideTrafficLights, Action = () => { _app.AutoHideTrafficLights = !_app.AutoHideTrafficLights; Defaults.Set("autoHideWindowTrafficLights", _app.AutoHideTrafficLights); _app.Notify("lights"); } },
                 MenuItemSpec.Item(_app.AgenticContextVisible ? "Hide Context Inspector" : "Show Context Inspector (Ctrl+I)", "sidebar.right", _app.ToggleAgenticContext),

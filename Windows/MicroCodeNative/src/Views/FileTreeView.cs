@@ -212,7 +212,11 @@ namespace MicroCode.Views
             string name = Prompt.Ask("New File", "Name of the new file:", "untitled.txt");
             if (string.IsNullOrWhiteSpace(name)) return;
             string path = System.IO.Path.Combine(dir, name.Trim());
-            try { if (!File.Exists(path)) File.WriteAllText(path, ""); _expanded.Add(dir); _app.RefreshFileTree(); _app.LoadFile(path); }
+            try
+            {
+                if (!File.Exists(path)) { File.WriteAllText(path, ""); CollabHooks.FileEvent("write", path, null, ""); }
+                _expanded.Add(dir); _app.RefreshFileTree(); _app.LoadFile(path);
+            }
             catch (Exception ex) { MessageBox.Show(ex.Message, "MicroCode"); }
         }
 
@@ -224,6 +228,7 @@ namespace MicroCode.Views
             {
                 string target = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(node.Path), name.Trim());
                 if (node.IsDirectory) Directory.Move(node.Path, target); else File.Move(node.Path, target);
+                CollabHooks.FileEvent("rename", node.Path, target);
                 foreach (var f in _app.OpenFiles.Where(f => string.Equals(f.Path, node.Path, StringComparison.OrdinalIgnoreCase))) { f.Path = target; f.Name = System.IO.Path.GetFileName(target); }
                 _app.RefreshFileTree();
                 _app.Notify("files");
@@ -237,6 +242,7 @@ namespace MicroCode.Views
             {
                 if (node.IsDirectory) Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(node.Path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
                 else Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(node.Path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+                if (!File.Exists(node.Path) && !Directory.Exists(node.Path)) CollabHooks.FileEvent("delete", node.Path);
             }
             catch (Exception ex) { MessageBox.Show(ex.Message, "MicroCode"); }
             _app.RefreshFileTree();

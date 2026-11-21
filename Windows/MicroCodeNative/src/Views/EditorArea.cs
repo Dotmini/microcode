@@ -50,7 +50,19 @@ namespace MicroCode.Views
                 case "dirty": RenderTabs(); break;
                 case "console": RenderConsole(); break;
                 case "font": _editors.Clear(); Render(); break; // family / size / line-number prefs may have changed
+                case "content": SyncEditorsFromModel(); break; // a collaborator / the agent changed an open buffer
             }
+        }
+
+        /// <summary>Open editors whose buffer changed outside them (collaboration, agent edits) take the new text in place.</summary>
+        void SyncEditorsFromModel()
+        {
+            foreach (var f in _app.OpenFiles)
+            {
+                CodeEditorView ed;
+                if (f.Content != null && _editors.TryGetValue(f.Id, out ed) && ed.Text != f.Content) ed.ReplaceText(f.Content);
+            }
+            RenderTabs();
         }
 
         public void Render()
@@ -270,9 +282,14 @@ namespace MicroCode.Views
                     ed = new CodeEditorView(file.Content, file.Language, _app.FontSize);
                     if (file.ReadOnly) ed.Box.IsReadOnly = true; // placeholder text for files too large or unreadable
                     var f = file;
-                    ed.TextEdited += text => _app.UpdateContent(f, text);
+                    ed.TextEdited += text => { _app.UpdateContent(f, text); CollabHooks.LocalEdit(f, text); };
+                    var edRef = ed;
+                    bool typing = false;
+                    ed.TextEdited += _ => typing = true;
+                    ed.CaretMoved += () => { CollabHooks.Caret(f, edRef, typing); typing = false; };
                     _editors[file.Id] = ed;
                 }
+                else if (ed.Text != file.Content) ed.ReplaceText(file.Content); // cached editor, buffer changed meanwhile
                 if (ed.Parent is Panel) ((Panel)ed.Parent).Children.Remove(ed);
                 if (ed.Parent is Decorator) ((Decorator)ed.Parent).Child = null;
                 body = ed;

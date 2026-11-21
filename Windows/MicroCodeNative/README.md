@@ -39,7 +39,7 @@ out\MicroCode.exe --snapshot br.png --mode browser --browser-url http://127.0.0.
 out\MicroCode.exe --snapshot hello.png --first-launch      :: การ์ดต้อนรับครั้งแรก (ปกติโหมด snapshot จะไม่แสดง)
 ```
 
-ชุดทดสอบอัตโนมัติ (File Preview, ลิงก์ไฟล์, PDF, Markdown, LaTeX, กัน Save ทับไฟล์ binary + Consensus Engine / PNS 24/7: sandbox, git worktree จริง, daemon `pnsd` + Cell Mode + API Studio ยิง request จริงผ่าน loopback + การ์ดต้อนรับ) — สร้างไฟล์และ repo ทดสอบเองในโฟลเดอร์ชั่วคราว:
+ชุดทดสอบอัตโนมัติ (File Preview, ลิงก์ไฟล์, PDF, Markdown, LaTeX, กัน Save ทับไฟล์ binary + Consensus Engine / PNS 24/7: sandbox, git worktree จริง, daemon `pnsd` + Cell Mode + API Studio ยิง request จริงผ่าน loopback + การ์ดต้อนรับ + Team Collaboration: host กับ peer จริงบน loopback) — สร้างไฟล์และ repo ทดสอบเองในโฟลเดอร์ชั่วคราว:
 
 ```bat
 tests\run-tests.cmd
@@ -96,13 +96,15 @@ tests\run-tests.cmd
 | Task editor (Checklist / Spec / Walkthrough / Logs / Cost / Audit), Walkthrough, แผง Implementation Plan + การ์ดอนุมัติ, การ์ด diff (Revert/Restore) + Split Diff | `taskEditorView`, `PendingChangeCard` | ✅ |
 | Consensus Engine (Task → Consensus): Builder แก้โค้ดใน sandbox copy ของโปรเจกต์ → Auditor เขียนเทสต์ใน `.consensus/` และบอกคำสั่งรันทีละเทสต์ → MicroCode รันเองแล้วตัดสินจาก exit code (ไม่เชื่อคำตอบโมเดล) + สแกนแบบ Mac (secret / SQL injection / Swift force unwrap) → โหวต Strict / Non-strict → apply เข้าโปรเจกต์เฉพาะตอนผ่าน (Auto-apply หรือกด Apply / Override); ไม่ทับไฟล์ที่ผู้ใช้แก้ระหว่างรัน, เคารพ Scope Lock, Auditor แก้โค้ด Builder ไม่ได้ (ถูกคืนค่าก่อนรันเทสต์), คำสั่ง shell ขออนุมัติตามโหมด Safe/Smart/Full Auto | `ConsensusEngine.swift`, `ConsensusEngineView.swift` | ✅ (pipeline ทดสอบอัตโนมัติ + กด Run ในแอปจริงกับโมเดลที่ต่อไม่ติด; **ยังไม่ได้รันกับโมเดลจริง**) |
 | PNS 24/7 (Task → PNS 24/7, `/pns <งาน>`): mission → planner แตก subtask (ล้มเหลว → แผนสำรอง 3 fiber แบบ Mac) → motor fiber รันใน git worktree แยกบน branch `pns/auto-*` → verify command → commit บน branch หรือ 3-way merge เข้า working tree (`git merge-file --theirs` = กติกา Mac), owned-path lease, retry, Hebbian synapse, REM → playbook / inhibition, spinal reflex, homeostasis จากสถานะไฟ/แบต (Windows ไม่มี thermal state), daemon `pnsd` (`MicroCode.exe --pns-daemon`, 127.0.0.1 + token) ที่**รันต่อหลังปิดแอป**, เปิดตอน sign-in (HKCU Run แทน launchd) | `PNSOrchestrator.swift`, `PNSMotorWorktreePlexus.swift`, `PNSGanglionRouter.swift`, `PNSModels.swift`, `PNSNeuralDashboardView.swift` | ✅ (worktree / merge / daemon / mission ทดสอบจริง; **fiber ที่ทำงานสำเร็จกับโมเดลจริงยังไม่ได้ทดสอบ**; MCP tract ว่างเพราะยังไม่มี MCP client) |
+| Realtime Team Collaboration (More ▸ Realtime Collaboration, Settings ▸ Team Collaboration): Host แชร์ workspace บนพอร์ต 8490–8515 พร้อม Room Code 6 ตัว, Join ด้วย Invite Link / LAN Token (`IP:port#CODE`) / Room Code, peer ได้ workspace ที่ mirror ไว้ใต้ `CollabWorkspaces\<code>`, พิมพ์พร้อมกันแบบ realtime ผ่าน WebSocket (+ HTTP sync ทุก 1.2 วิ เป็นทางสำรอง), 3-way merge เมื่อแก้จาก revision เก่า, **CRUD realtime ทั้งสองทาง**: Save / New File / New Folder / Rename / Delete และไฟล์ที่ถูกลบหรือแก้นอก IDE บนเครื่อง host, cursor / selection / typing ของแต่ละคน, Follow / Jump, แชต + activity log, หน้าเว็บสำหรับคนที่ไม่มี MicroCode (portal เดียวกับ Mac), Online HTTPS ผ่าน Dotmini relay (สำรองด้วย cloudflared); wire protocol เดียวกับ Mac จึงอยู่ห้องเดียวกับ Mac ได้ | `CollaborationView`, `CollaborationService` | ✅ (host + peer ในโปรเซสเดียวกัน 92 ข้อ และแอปจริง 2 ตัวผ่าน IP LAN; **ยังไม่ได้ทดสอบข้ามสองเครื่อง, กับ Mac และกับ relay ของ Dotmini จริง**) |
 
 ## ยังไม่ได้พอร์ต
 
 Remote Explorer (SSH), Science, Embed & IoT Studio, Extension Studio, เครื่องมือ `ide_browser` ของ Agent,
 Agent: sub-agents, MCP server ของ MicroCode เอง + OAuth ของ remote MCP, ACP, `/arx` `/compare` `/squad`,
-บริการเบื้องหลังของแท็บ Settings: Phone Companion, Realtime Collaboration, Cloud GPU, MCP server, Web Subscription login ของ ChatGPT/Claude/Gemini (หน้าจอมีแล้ว แต่ระบบยังไม่ทำงานบน Windows),
-LSP / autocomplete, Collaboration, terminal แบบ ConPTY — โหมดที่ยังไม่พอร์ตจะแสดงหน้า "being ported"
+บริการเบื้องหลังของแท็บ Settings: Phone Companion, Cloud GPU, MCP server, Web Subscription login ของ ChatGPT/Claude/Gemini (หน้าจอมีแล้ว แต่ระบบยังไม่ทำงานบน Windows),
+Collaboration: Team Tasks, AI teammate / `@ai`, ค้นหาห้องใน LAN อัตโนมัติ (Bonjour), QR code, cursor ของเพื่อนในตัว editor,
+LSP / autocomplete, terminal แบบ ConPTY — โหมดที่ยังไม่พอร์ตจะแสดงหน้า "being ported"
 
 ## สิ่งที่ "เหมือน 100%" ไม่ได้ตามกฎหมาย และตัวที่ใช้แทน
 
@@ -131,7 +133,7 @@ src/Notebook  NbView.cs (Cell Mode: sidebar/toolbar/คิวรัน/ไฟล
 src/Agent     Agent.cs (หน้า Agent), AgentRunner.cs (tool loop + สตรีม), AgentPanels.cs (Plan/Task/Walkthrough), DiffViews.cs, Inspector.cs (แผงขวา + File Preview),
               AIConfig.cs (โหมด/คีย์/endpoint/error), Dotmini.cs (Dotmini ID, Platform key, Cloud models, สะพาน 18888), Skills.cs, RulesEngine.cs (rules หลายแพลตฟอร์ม + hooks + Workspace Trust), Mcp.cs (MCP client),
               Consensus.cs (Consensus Engine + sandbox / git / การอนุมัติของ run แยก), Pns.cs (PNS 24/7: worktree, mission, daemon pnsd), PnsView.cs
-tests         PreviewTests.cs + AgentPlatformTests.cs + NotebookTests.cs + StudioTests.cs + HarnessTests.cs + McpTests.cs + run-tests.cmd (คอมไพล์อ้างอิง out-dev\MicroCode.exe แล้วรันทุกชุด)
+tests         PreviewTests.cs + AgentPlatformTests.cs + NotebookTests.cs + StudioTests.cs + HarnessTests.cs + McpTests.cs + CollabTests.cs + run-tests.cmd (คอมไพล์อ้างอิง out-dev\MicroCode.exe แล้วรันทุกชุด)
 tools         extract_themes.py (ดึงสีธีมจาก Swift), icns_to_png.py + MakeIco.cs (ไอคอนแอป), GlyphAtlas.cs (ตารางไอคอน Segoe)
 ```
 

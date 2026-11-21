@@ -284,6 +284,32 @@ namespace MicroCode.Editor
             }
         }
 
+        /// <summary>Takes text that changed outside the editor (a collaborator, the agent) without raising TextEdited: only the
+        /// changed middle is replaced, so undo keeps working and a caret after the change moves with the text.</summary>
+        public void ReplaceText(string text)
+        {
+            text = text ?? "";
+            string old = Box.Text;
+            if (old == text) return;
+            int pre = 0, max = Math.Min(old.Length, text.Length);
+            while (pre < max && old[pre] == text[pre]) pre++;
+            int suf = 0;
+            while (suf < old.Length - pre && suf < text.Length - pre && old[old.Length - 1 - suf] == text[text.Length - 1 - suf]) suf++;
+            int caret = Box.CaretIndex, selLen = Box.SelectionLength;
+            int delta = text.Length - old.Length;
+            _suppress = true;
+            try
+            {
+                Box.Select(pre, old.Length - pre - suf);
+                Box.SelectedText = text.Substring(pre, text.Length - pre - suf);
+            }
+            finally { _suppress = false; }
+            int len = Box.Text.Length;
+            if (caret + selLen <= pre) Box.Select(caret, selLen);                                        // wholly before the change
+            else if (caret >= old.Length - suf) Box.Select(Math.Min(len, caret + delta), Math.Min(selLen, Math.Max(0, len - caret - delta))); // wholly after
+            else Box.Select(Math.Min(len, pre + (text.Length - pre - suf)), 0);                           // inside it: end of the new text
+        }
+
         public void Focus2() { Box.Focus(); Keyboard.Focus(Box); }
 
         public void GoToLine(int line)

@@ -629,15 +629,8 @@ namespace MicroCode.Views
                 Note("The phone companion server is not available in the Windows build yet. Pairing, QR code and the 6-digit PIN will appear here once it ships."));
         }
 
-        UIElement TeamTab()
-        {
-            var t = Theme.Current;
-            var s = V.VLead(10, V.H(8, V.Button(V.Box(V.H(6, Sym.Icon("plus", 11, Brushes.White, FontWeights.SemiBold), V.T("Start Session", 12, FontWeights.SemiBold, Brushes.White)), V.P(12, 6), t.Accent, 6), null),
-                V.Button(V.Box(V.H(6, Sym.Icon("link", 11, t.Primary), V.T("Join with Room Code", 12, FontWeights.Medium, t.Primary)), V.P(12, 6), t.P(0.1), 6), null)),
-                Note("Realtime CRDT collaboration (rooms, live cursors, AI teammate & follow mode) is not available in the Windows build yet."));
-            s.Align = Cross.Stretch;
-            return HeroCard("person.2", "Realtime Collaboration", "Share a room code, edit together with live cursors, and bring the MicroCode AI teammate into the session.", s);
-        }
+        // Port of the Mac's Team Collaboration tab: the same CollaborationView, embedded (no nested scroll view)
+        UIElement TeamTab() { return new CollabView(true); }
 
         UIElement CloudGPUTab()
         {

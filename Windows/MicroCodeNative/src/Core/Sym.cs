@@ -66,7 +66,7 @@ namespace MicroCode.UI
             {"at",0xE910},{"arrow.up",0xF0AD},{"arrow.down",0xF0AE},{"arrow.left",0xE72B},{"arrow.right",0xE72A},
             {"arrow.left.arrow.right",0xF1CB},{"checkmark",0xE73E},{"checkmark.circle.fill",0xEC61},{"checkmark.circle",0xE930},
             {"checkmark.seal.fill",0xEC61},{"info.circle",0xE946},{"questionmark.circle",0xE9CE},{"bolt.fill",0xE945},{"bolt",0xE945},
-            {"cloud",0xE753},{"icloud",0xE753},{"key",0xE8D7},{"eye",0xE7B3},{"pencil",0xE70F},{"square.and.pencil",0xE932},
+            {"cloud",0xE753},{"icloud",0xE753},{"key",0xE8D7},{"eye",0xE7B3},{"eye.fill",0xE7B3},{"doc.on.clipboard",0xE77F},{"arrow.up.forward.square",0xE8A7},{"pencil",0xE70F},{"square.and.pencil",0xE932},
             {"square.and.arrow.up",0xE72D},{"square.and.arrow.down",0xE74E},{"arrow.up.right.square",0xE8A7},{"house",0xE80F},
             {"bell",0xEA8F},{"star",0xE734},{"star.fill",0xE735},{"flag",0xE7C1},{"tag",0xE8EC},{"pin",0xE718},
             {"line.3.horizontal",0xE700},{"textformat",0xE8D2},{"paintbrush",0xE771},{"paintpalette",0xE790},

@@ -468,6 +468,7 @@ namespace MicroCode.Core
                 File.WriteAllText(f.Path, f.UsesCRLF ? f.Content.Replace("\n", "\r\n") : f.Content, new UTF8Encoding(false));
                 f.IsUnsaved = false;
                 Notify("dirty");
+                MicroCode.Views.CollabHooks.FileEvent("write", f.Path, null, f.Content); // Team Collaboration: saved
             }
             catch (Exception ex) { MessageBox.Show(ex.Message, "MicroCode"); }
         }
@@ -520,6 +521,7 @@ namespace MicroCode.Core
                 int n = 2;
                 while (Directory.Exists(target)) target = System.IO.Path.Combine(parent, name + " " + (n++));
                 Directory.CreateDirectory(target);
+                MicroCode.Views.CollabHooks.FileEvent("mkdir", target);
                 RefreshFileTree();
             }
             catch (Exception ex) { MessageBox.Show(ex.Message, "MicroCode"); }

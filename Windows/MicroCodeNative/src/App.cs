@@ -50,7 +50,7 @@ namespace MicroCode
             }
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
             // stdio MCP servers woken by the agent are child processes: end them with the app (npx/uvx wrappers included)
-            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); McpManager.StopAll(); };
+            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); McpManager.StopAll(); if (CollabService.HasShared && CollabService.Shared.Session != null) System.Threading.Tasks.Task.Run(() => CollabService.Shared.LeaveSession()).Wait(3000); };
             app.DispatcherUnhandledException += (s, e) =>
             {
                 try { File.AppendAllText(Path.Combine(Defaults.Dir, "crash.log"), DateTime.Now + " " + e.Exception + "\n\n"); } catch { }
@@ -200,6 +200,10 @@ namespace MicroCode
             if (snapshot != null && sd >= 0 && sd + 2 < args.Length)
                 return Snapshot(app, DiffViews.SplitWindow(Path.GetFileName(args[sd + 2]), File.ReadAllText(args[sd + 1]), File.ReadAllText(args[sd + 2])), snapshot, Arg(args, "--size") ?? "1100x720", false);
 
+            // --collab host|join: Team Collaboration between two real app instances (test hook, see CollabSnapshot)
+            string collab = Arg(args, "--collab");
+            if (snapshot != null && collab != null) return Snapshot(app, CollabSnapshot.Prepare(collab, args, win), snapshot, Arg(args, "--size") ?? "940x680", false);
+
             string settingsTab = Arg(args, "--settings-tab");
             if (snapshot != null && settingsTab != null) return Snapshot(app, new SettingsSheet(state, int.Parse(settingsTab)), snapshot, Arg(args, "--size") ?? "1000x700", false);
             if (snapshot != null) return Snapshot(app, win, snapshot, Arg(args, "--size") ?? "1440x900", args.Contains("--run"));
@@ -222,7 +226,7 @@ namespace MicroCode
             AgentStore.Notify();
         }
 
-        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd", "--notebook-file", "--nb-scroll", "--api-url", "--api-method", "--browser-url", "--browser-devtools", "--browser-pick", "--browser-eval" };
+        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd", "--notebook-file", "--nb-scroll", "--api-url", "--api-method", "--browser-url", "--browser-devtools", "--browser-pick", "--browser-eval", "--collab", "--collab-tab", "--collab-token-out", "--collab-join", "--collab-type", "--collab-chat" };
 
         /// <summary>Arguments that are neither flags nor a flag's value — e.g. a file or folder passed by Explorer's Open with.</summary>
         static IEnumerable<string> Positional(string[] args)
