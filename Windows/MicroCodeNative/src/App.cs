@@ -115,6 +115,15 @@ namespace MicroCode
                 ApiStudioView.AutoSend = args.Contains("--api-send");
                 state.SwitchToMode(EditorMode.ApiClient);
             }
+            else if (mode == "browser")
+            {
+                // snapshot/test hook: open a page, Developer Tools, alt-click picks through the page's picker, run a REPL line
+                IdeBrowserView.InitialUrl = Arg(args, "--browser-url");
+                IdeBrowserView.InitialDevTools = Arg(args, "--browser-devtools");
+                IdeBrowserView.InitialPicks = Args(args, "--browser-pick").ToList();
+                IdeBrowserView.InitialEval = Arg(args, "--browser-eval");
+                state.SwitchToMode(EditorMode.Browser);
+            }
             else if (mode == "notebook")
             {
                 if (args.Contains("--notebook-demo"))
@@ -212,7 +221,7 @@ namespace MicroCode
             AgentStore.Notify();
         }
 
-        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd", "--notebook-file", "--nb-scroll", "--api-url", "--api-method" };
+        static readonly HashSet<string> ValueFlags = new HashSet<string> { "--snapshot", "--size", "--folder", "--file", "--mode", "--theme", "--preview", "--inspector-tab", "--wait", "--set", "--set-key", "--agent-prompt", "--agent-bar", "--settings-tab", "--data-dir", "--split-diff", "--pns-port", "--consensus-run", "--pns-launch", "--web", "--web-viewport", "--web-eval", "--android-avd", "--notebook-file", "--nb-scroll", "--api-url", "--api-method", "--browser-url", "--browser-devtools", "--browser-pick", "--browser-eval" };
 
         /// <summary>Arguments that are neither flags nor a flag's value — e.g. a file or folder passed by Explorer's Open with.</summary>
         static IEnumerable<string> Positional(string[] args)
@@ -270,12 +279,19 @@ namespace MicroCode
                     waitTimer.Start();
                 }
             };
-            bool webCaptured = false;
-            byte[] webPng = null; Rect webRect = Rect.Empty;
+            bool webCaptured = false, browserCaptured = false;
+            byte[] webPng = null, browserPng = null; Rect webRect = Rect.Empty, browserRect = Rect.Empty;
             capture = delegate
             {
                 win.Dispatcher.BeginInvoke(new Action(() =>
                 {
+                    // the IDE Web Browser's page is a WebView2 child window too
+                    if (!browserCaptured && IdeBrowserView.Current != null && IdeBrowserView.Current.HasPage && IdeBrowserView.Current.IsVisible)
+                    {
+                        browserCaptured = true;
+                        IdeBrowserView.Current.SnapshotLayer((FrameworkElement)win.Content, (png, rect) => { browserPng = png; browserRect = rect; capture(); });
+                        return;
+                    }
                     // a WebView2 page is a child window RenderTargetBitmap cannot see: grab it first and paint it in place
                     if (!webCaptured && WebAppPreview.Created && WebAppPreview.Shared.HasPage)
                     {
@@ -305,6 +321,12 @@ namespace MicroCode
                                 var page = new BitmapImage();
                                 using (var ms = new MemoryStream(webPng)) { page.BeginInit(); page.CacheOption = BitmapCacheOption.OnLoad; page.StreamSource = ms; page.EndInit(); }
                                 dc.DrawImage(page, webRect);
+                            }
+                            if (browserPng != null && !browserRect.IsEmpty)
+                            {
+                                var page = new BitmapImage();
+                                using (var ms = new MemoryStream(browserPng)) { page.BeginInit(); page.CacheOption = BitmapCacheOption.OnLoad; page.StreamSource = ms; page.EndInit(); }
+                                dc.DrawImage(page, browserRect);
                             }
                         }
                         bmp.Render(dv);

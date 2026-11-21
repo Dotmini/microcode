@@ -24,7 +24,7 @@ static class StudioTests
         Directory.CreateDirectory(root);
         Defaults.UseDir(Path.Combine(root, "data"));
         TaskFiles.HomeOverride = Path.Combine(root, "data", ".microcode");
-        try { ApiTests(root); WelcomeTests(); }
+        try { ApiTests(root); WelcomeTests(); BrowserTests(); }
         catch (Exception ex) { Check(false, "unexpected exception: " + ex); }
         finally { try { Directory.Delete(root, true); } catch (Exception ex) { Console.WriteLine("cleanup: " + ex.Message); } }
         Console.WriteLine();
@@ -161,6 +161,50 @@ static class StudioTests
         svc2.EnsureLoaded();
         Check(svc2.History.Count == 2 && svc2.History[0].Status == 404 && svc2.Environments.Any(e => e.Name == "Project (.env)") && svc2.ActiveEnvironment.Name == "Project (.env)" && svc2.Collections.Any(c => c.Name.StartsWith("Scanned Project Routes")),
             "Persistence: history, the active environment and collections reload from disk");
+    }
+
+    static void BrowserTests()
+    {
+        Check(BrowserSession.Normalize("example.com") == "https://example.com" && BrowserSession.Normalize("https://a.b/c") == "https://a.b/c"
+            && BrowserSession.Normalize("localhost:5173/x") == "http://localhost:5173/x" && BrowserSession.Normalize("salt & pepper") == "https://www.google.com/search?q=salt%20%26%20pepper"
+            && BrowserSession.Normalize("   ") == null, "Browser: URL bar input → https host, localhost over http, otherwise a Google search");
+
+        var s = new BrowserSession();
+        string first = s.Tabs[0].Id;
+        var t2 = s.AddTab();
+        Check(s.Tabs.Count == 2 && s.Active == 1 && t2.Url == BrowserSession.HomeUrl && t2.Title == "New Tab", "Browser: + opens a Google tab and selects it");
+        Check(s.CloseTab(t2.Id) && s.Active == 0 && !s.CloseTab(first) && s.Tabs.Count == 1, "Browser: closing clamps the active tab; the last tab cannot be closed");
+        for (int i = 0; i < 205; i++) s.RecordVisit("https://h/" + i, "p" + i);
+        Check(s.History.Count == 200 && s.History[0].Url == "https://h/204", "Browser: history keeps the newest 200 visits");
+        Check(s.ToggleBookmark("https://x", "X") && s.IsBookmarked("https://x") && !s.ToggleBookmark("https://x", "X") && !s.IsBookmarked("https://x"), "Browser: the star adds and removes a bookmark");
+
+        Check(s.Handle("{\"_type\":\"console\",\"level\":\"warn\",\"message\":\"slow\"}") == "console" && s.Console[0].Level == "warn" && s.Console[0].Message == "slow", "Browser: console messages from the page are logged");
+        for (int i = 0; i < 310; i++) s.Handle("{\"_type\":\"network\",\"method\":\"POST\",\"url\":\"/api/" + i + "\",\"status\":201,\"durationMs\":12.6}");
+        Check(s.Network.Count == 300 && s.Network[299].Url == "/api/309" && s.Network[0].Url == "/api/10" && s.Network[299].DurationMs == 13 && s.Network[299].Status == 201, "Browser: network log keeps the newest 300 fetch/XHR entries");
+        Check(s.Handle("not json") == null && s.Handle("{\"_type\":\"other\"}") == null, "Browser: unknown or malformed page messages are ignored");
+        string pick = "{\"_type\":\"element_picked\",\"selector\":\"#buy\",\"tag\":\"button\",\"text\":\"Buy now\",\"outerHTML\":\"<button id=\\\"buy\\\">Buy now</button>\",\"styles\":\"display:block\",\"rect\":\"10,20 (100x30)\"}";
+        s.Handle(pick);
+        s.Picked[0].Note = "make it green";
+        s.Handle(pick.Replace("Buy now\",\"outerHTML", "Buy today\",\"outerHTML"));
+        Check(s.Picked.Count == 1 && s.Picked[0].Text == "Buy today" && s.Picked[0].Note == "make it green", "Browser: picking the same selector again updates it and keeps its note");
+        for (int i = 0; i < 25; i++) s.Handle(pick.Replace("#buy", "#b" + i));
+        Check(s.Picked.Count == 20 && s.Picked[19].Selector == "#b24", "Browser: at most 20 picked elements are kept");
+        s.Handle("{\"_type\":\"element_unpicked\",\"selector\":\"#b24\"}");
+        Check(s.Picked.Count == 19 && !s.Picked.Any(p => p.Selector == "#b24"), "Browser: clicking a picked element again removes it");
+
+        var one = new List<BrowserPicked> { new BrowserPicked { Selector = "#buy", Tag = "button", Text = "Buy", OuterHtml = "<button>Buy</button>", Styles = "display:block", Rect = "1,2 (3x4)", Note = "green" } };
+        string p1 = BrowserSession.AgentPrompt(one, "http://localhost:3000/", "bigger");
+        Check(p1 == "[Inspect Element Target]\n- Page URL: http://localhost:3000/\n- Selector: `#buy` (`<button>` at 1,2 (3x4))\n- Element / Selected Text: `Buy`\n- Computed Styles: `display:block`\n- HTML Snippet:\n```html\n<button>Buy</button>\n```\n\nInstruction: green — bigger",
+            "Agent prompt: one element in the Mac's [Inspect Element Target] format");
+        var two = new List<BrowserPicked> { new BrowserPicked { Selector = "h1", Tag = "h1", Rect = "0,0 (9x9)", Styles = "s", OuterHtml = "<h1></h1>" }, new BrowserPicked { Selector = "p", Tag = "p", Rect = "0,9 (9x9)", Styles = "s", OuterHtml = "<p></p>", Text = "hi" } };
+        string p2 = BrowserSession.AgentPrompt(two, "http://x/", "");
+        Check(p2.StartsWith("[Multi-Point Inspect Targets (2 Elements Selected)]\n- Page URL: http://x/\n\n### Target #1: `h1` (`<h1>` at 0,0 (9x9))\n- Computed Styles: `s`") && p2.Contains("### Target #2: `p` (`<p>` at 0,9 (9x9))\n- Text Content: `hi`")
+            && p2.EndsWith("### Overall Instruction for Selected Targets:\nปรับปรุงและแก้ไของค์ประกอบทั้ง 2 จุดที่เลือกให้สมบูรณ์และสอดคล้องกัน"), "Agent prompt: several elements with the default Thai instruction");
+
+        Check(BrowserSession.FormatEvalResult("{\"ok\":true,\"v\":\"hi\"}") == "hi" && BrowserSession.FormatEvalResult("{\"ok\":true,\"v\":3}") == "3" && BrowserSession.FormatEvalResult("{\"ok\":true}") == "null"
+            && BrowserSession.FormatEvalResult("{\"ok\":false}") == "Error evaluating JS" && BrowserSession.FormatEvalResult("{\"ok\":true,\"v\":{\"a\":[1]}}") == "{\n  \"a\": [\n    1\n  ]\n}",
+            "JS REPL: strings raw, numbers, undefined as null, errors, objects as pretty JSON");
+        Check(BrowserSession.EvalWrapper("1+'\"'").Contains("(0,eval)(\"1+\\u0027\\\"\\u0027\")"), "JS REPL: the script is passed to eval as an escaped JSON string");
     }
 
     static void WelcomeTests()
