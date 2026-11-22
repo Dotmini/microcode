@@ -38,6 +38,8 @@ namespace MicroCode.Views
     {
         public readonly Guid Id = Guid.NewGuid();
         public string UserId;
+        /// <summary>Said caps:["ot1"] in its hello: gets "op" messages instead of legacy "fileBuffer".</summary>
+        public volatile bool SupportsOT;
         internal NetworkStream Stream;
         internal TcpClient Tcp;
         readonly object _send = new object();
@@ -219,8 +221,9 @@ namespace MicroCode.Views
                 {
                     if (pair.Length == 0) continue;
                     int e = pair.IndexOf('=');
-                    string k = Uri.UnescapeDataString((e >= 0 ? pair.Substring(0, e) : pair).Replace('+', ' '));
-                    string v = e >= 0 ? Uri.UnescapeDataString(pair.Substring(e + 1).Replace('+', ' ')) : "";
+                    // like URLComponents: percent-decoding only, '+' stays '+' (Mac peers send file names like a+b.txt unescaped)
+                    string k = Uri.UnescapeDataString(e >= 0 ? pair.Substring(0, e) : pair);
+                    string v = e >= 0 ? Uri.UnescapeDataString(pair.Substring(e + 1)) : "";
                     if (!req.Query.ContainsKey(k)) req.Query[k] = v;
                 }
             int len = 0; string cl = req.Header("Content-Length");

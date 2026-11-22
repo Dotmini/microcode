@@ -6,7 +6,8 @@ rem   NotebookTests       Cell Mode: @param, DAG, .ipynb/.py/.mcnb/.mic (LZFSE),
 rem   McpTests            MCP client: config discovery + trust, stdio (Python) and Streamable HTTP servers, mcp_orchestrator, agent loop
 rem   HarnessTests        agent harness: multi-platform rules, hooks + workspace trust, patch / git / web_fetch / find_symbol tools
 rem   StudioTests         API Studio (cURL, environments, route scan, .env, real loopback requests) + first-launch onboarding
-rem   CollabTests         Team Collaboration: a real host + peer on loopback (join, merge, realtime CRUD, presence, chat, portal, relay)
+rem   CollabTests         Team Collaboration: a real host + peer on loopback (join, merge, realtime CRUD, presence, chat, portal, relay, ot1, invite links)
+rem   OTTests             ot1 operation algebra, client / host state machines, randomized 3-client convergence
 setlocal
 set FW=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319
 set WPF=%FW%\WPF
@@ -31,6 +32,8 @@ if errorlevel 1 set FAILED=1
 call :suite McpTests
 if errorlevel 1 set FAILED=1
 call :suite CollabTests
+if errorlevel 1 set FAILED=1
+call :suite OTTests
 if errorlevel 1 set FAILED=1
 exit /b %FAILED%
 

@@ -270,9 +270,10 @@ namespace MicroCode.Views
     }
     .gutter-line {
       height: var(--line-h);
+      line-height: var(--line-h);
       padding-right: 4px;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: flex-end;
       gap: 4px;
     }
@@ -319,6 +320,8 @@ namespace MicroCode.Views
       white-space: nowrap;
       box-shadow: 0 2px 6px rgba(0,0,0,0.45);
     }
+    #gutterInner, #editorCollabOverlay, pre#codeHighlight { will-change: transform; }
+    .hl-line { display: block; min-height: var(--line-h); }
     pre#codeHighlight {
       margin: 0;
       padding: 14px 16px;
@@ -525,8 +528,11 @@ namespace MicroCode.Views
   <div class=""layout"" id=""workspaceArea"">
     <div class=""sidebar-left"">
       <div class=""section-hdr"">
-        <span>WORKSPACE FOLDERS & FILES</span>
-        <span id=""fileCountLabel"">0</span>
+        <span style=""white-space:nowrap"">FILES · <span id=""fileCountLabel"">0</span></span>
+        <span style=""display:flex;align-items:center;gap:5px;white-space:nowrap"">
+          <button class=""btn"" style=""padding:1px 6px;font-size:10px;white-space:nowrap"" onclick=""promptNewFile()"" title=""New file"">+ File</button>
+          <button class=""btn"" style=""padding:1px 6px;font-size:10px;white-space:nowrap"" onclick=""promptNewFolder()"" title=""New folder"">+ Folder</button>
+        </span>
       </div>
       <div class=""file-list"" id=""fileList""></div>
       <div class=""section-hdr"" style=""border-top:1px solid var(--border)"">
@@ -543,17 +549,18 @@ namespace MicroCode.Views
         </div>
         <div style=""display:flex;align-items:center;gap:8px;flex-shrink:0"">
           <span id=""activeEditorsIndicator"" style=""font-size:10.5px""></span>
-          <button class=""btn btn-primary"" onclick=""pushEdit()"">Sync</button>
+          <span id=""syncStateLabel"" style=""font-size:10.5px;color:var(--muted)""></span>
+          <button class=""btn"" onclick=""reloadActiveFile()"" title=""Reload this file from the host"">Reload</button>
         </div>
       </div>
       <div class=""editor-workspace"">
-        <div class=""line-gutter"" id=""lineGutter"">1</div>
+        <div class=""line-gutter"" id=""lineGutter""><div id=""gutterInner""></div></div>
         <div class=""code-stack"">
           <div id=""codeBackdrop"">
             <div id=""editorCollabOverlay""></div>
             <pre id=""codeHighlight""><code id=""codeHighlightContent""></code></pre>
           </div>
-          <textarea id=""codeArea"" spellcheck=""false"" autocomplete=""off"" autocapitalize=""off"" placeholder=""Select a file from the left folder tree...""></textarea>
+          <textarea id=""codeArea"" wrap=""off"" spellcheck=""false"" autocomplete=""off"" autocorrect=""off"" autocapitalize=""off"" placeholder=""Select a file from the left folder tree...""></textarea>
         </div>
       </div>
     </div>
@@ -663,112 +670,357 @@ namespace MicroCode.Views
       return `<svg width=""15"" height=""15"" viewBox=""0 0 16 16"" fill=""none""><path d=""M5.5 5L2.5 8L5.5 11M10.5 5L13.5 8L10.5 11"" stroke=""#94A3B8"" stroke-width=""1.4"" stroke-linecap=""round"" stroke-linejoin=""round""/></svg>`;
     }
 
-    // Single-Pass Fast Syntax Color Highlighter (Zero HTML Corruption, Exact Textarea Alignment)
-    const SYNTAX_TOKEN_RE = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->)|(""(?:\\.|[^""\\])*""|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(<\/?[A-Z][A-Za-z0-9_.]*)|(<\/?[a-z][A-Za-z0-9_-]*|\/?>)|\b(import|export|from|default|const|let|var|function|return|async|await|if|else|for|while|do|switch|case|break|continue|try|catch|finally|throw|new|typeof|instanceof|in|of|interface|type|class|extends|implements|struct|enum|protocol|extension|func|def|pub|fn|impl|use|mod|match|where|guard|defer|init|self|super|this|true|false|null|undefined|nil|void)\b|\b(useState|useEffect|useMemo|useCallback|useRef|useContext|React|String|Int|Double|Float|Bool|Array|Dictionary|Set|Promise|Record|Partial|Optional|Any|Error|URL|Data|Date|View|State|Published|ObservedObject|StateObject)\b|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*=)|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*\()|\b(0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b|(=>|===|!==|==|!=|<=|>=|&&|\|\||\?\?)/g;
-
-    function highlightCode(rawCode) {
-      const text = String(rawCode || """");
-      if (!text) return """";
-      let out = """";
-      let lastIdx = 0;
-      SYNTAX_TOKEN_RE.lastIndex = 0;
-      let m;
-      while ((m = SYNTAX_TOKEN_RE.exec(text)) !== null) {
-        if (m.index > lastIdx) {
-          out += escapeHtml(text.slice(lastIdx, m.index));
+    // ---- ot1 operational transformation (wire-compatible with the MicroCode host and ot.js) ----
+    // An operation is an array: n > 0 retains n UTF-16 units, n < 0 deletes -n, a string inserts it.
+    const OT = {
+      baseLength(op) { let n = 0; for (const c of op) { if (typeof c === ""number"") n += Math.abs(c); } return n; },
+      isNoop(op) { return op.length === 0 || (op.length === 1 && typeof op[0] === ""number"" && op[0] > 0); },
+      push(op, c) {
+        if (typeof c === ""number"" && c === 0) return;
+        if (typeof c === ""string"" && c === """") return;
+        const last = op[op.length - 1];
+        if (typeof c === ""string"") {
+          if (typeof last === ""string"") { op[op.length - 1] = last + c; return; }
+          if (typeof last === ""number"" && last < 0) {
+            const prev = op[op.length - 2];
+            if (typeof prev === ""string"") op[op.length - 2] = prev + c; else op.splice(op.length - 1, 0, c);
+            return;
+          }
+          op.push(c); return;
         }
-        const tok = m[0];
-        let cls = """";
-        if (m[1] !== undefined) cls = ""tok-comment"";
-        else if (m[2] !== undefined) cls = ""tok-string"";
-        else if (m[3] !== undefined) cls = ""tok-comp"";
-        else if (m[4] !== undefined) cls = ""tok-tag"";
-        else if (m[5] !== undefined) cls = ""tok-kw"";
-        else if (m[6] !== undefined) cls = ""tok-type"";
-        else if (m[7] !== undefined) cls = ""tok-attr"";
-        else if (m[8] !== undefined) cls = ""tok-fn"";
-        else if (m[9] !== undefined) cls = ""tok-num"";
-        else if (m[10] !== undefined) cls = ""tok-op"";
-        out += cls ? `<span class=""${cls}"">${escapeHtml(tok)}</span>` : escapeHtml(tok);
-        lastIdx = SYNTAX_TOKEN_RE.lastIndex;
+        if (typeof last === ""number"" && (last > 0) === (c > 0)) { op[op.length - 1] = last + c; return; }
+        op.push(c);
+      },
+      apply(op, doc) {
+        let out = """", i = 0;
+        for (const c of op) {
+          if (typeof c === ""string"") out += c;
+          else if (c > 0) { out += doc.slice(i, i + c); i += c; }
+          else i -= c;
+        }
+        if (i !== doc.length) throw new Error(""ot: base length mismatch"");
+        return out;
+      },
+      compose(a, b) {
+        const r = []; let ia = 0, ib = 0; let x = a[ia++], y = b[ib++];
+        while (x !== undefined || y !== undefined) {
+          if (typeof x === ""number"" && x < 0) { OT.push(r, x); x = a[ia++]; continue; }
+          if (typeof y === ""string"") { OT.push(r, y); y = b[ib++]; continue; }
+          if (x === undefined || y === undefined) throw new Error(""ot: compose length"");
+          if (typeof x === ""number"" && x > 0 && typeof y === ""number"" && y > 0) {
+            const m = Math.min(x, y); OT.push(r, m);
+            if (x > y) { x -= y; y = b[ib++]; } else if (x === y) { x = a[ia++]; y = b[ib++]; } else { y -= x; x = a[ia++]; }
+          } else if (typeof x === ""number"" && x > 0 && typeof y === ""number"" && y < 0) {
+            const m = Math.min(x, -y); OT.push(r, -m);
+            if (x > -y) { x += y; y = b[ib++]; } else if (x === -y) { x = a[ia++]; y = b[ib++]; } else { y += x; x = a[ia++]; }
+          } else if (typeof x === ""string"" && typeof y === ""number"" && y > 0) {
+            if (x.length > y) { OT.push(r, x.slice(0, y)); x = x.slice(y); y = b[ib++]; }
+            else if (x.length === y) { OT.push(r, x); x = a[ia++]; y = b[ib++]; }
+            else { OT.push(r, x); y -= x.length; x = a[ia++]; }
+          } else if (typeof x === ""string"" && typeof y === ""number"" && y < 0) {
+            if (x.length > -y) { x = x.slice(-y); y = b[ib++]; }
+            else if (x.length === -y) { x = a[ia++]; y = b[ib++]; }
+            else { y += x.length; x = a[ia++]; }
+          } else throw new Error(""ot: compose"");
+        }
+        return r;
+      },
+      // transform(a, b) -> [a', b']; a's inserts win ties (client op first, host op second — same as the host).
+      transform(a, b) {
+        const a1 = [], b1 = []; let ia = 0, ib = 0; let x = a[ia++], y = b[ib++];
+        while (x !== undefined || y !== undefined) {
+          if (typeof x === ""string"") { OT.push(a1, x); OT.push(b1, x.length); x = a[ia++]; continue; }
+          if (typeof y === ""string"") { OT.push(a1, y.length); OT.push(b1, y); y = b[ib++]; continue; }
+          if (x === undefined || y === undefined) throw new Error(""ot: transform length"");
+          if (x > 0 && y > 0) {
+            const m = Math.min(x, y); OT.push(a1, m); OT.push(b1, m);
+            if (x > y) { x -= y; y = b[ib++]; } else if (x === y) { x = a[ia++]; y = b[ib++]; } else { y -= x; x = a[ia++]; }
+          } else if (x < 0 && y < 0) {
+            if (-x > -y) { x -= y; y = b[ib++]; } else if (x === y) { x = a[ia++]; y = b[ib++]; } else { y -= x; x = a[ia++]; }
+          } else if (x < 0 && y > 0) {
+            const m = Math.min(-x, y); OT.push(a1, -m);
+            if (-x > y) { x += y; y = b[ib++]; } else if (-x === y) { x = a[ia++]; y = b[ib++]; } else { y += x; x = a[ia++]; }
+          } else {
+            const m = Math.min(x, -y); OT.push(b1, -m);
+            if (x > -y) { x += y; y = b[ib++]; } else if (x === -y) { x = a[ia++]; y = b[ib++]; } else { y += x; x = a[ia++]; }
+          }
+        }
+        return [a1, b1];
+      },
+      // Single splice old -> new that never splits a surrogate pair.
+      fromDiff(oldText, newText) {
+        let p = 0; const maxP = Math.min(oldText.length, newText.length);
+        while (p < maxP && oldText.charCodeAt(p) === newText.charCodeAt(p)) p++;
+        if (p > 0) { const c = oldText.charCodeAt(p - 1); if (c >= 0xD800 && c <= 0xDBFF) p--; }
+        let q = 0; const maxQ = Math.min(oldText.length, newText.length) - p;
+        while (q < maxQ && oldText.charCodeAt(oldText.length - 1 - q) === newText.charCodeAt(newText.length - 1 - q)) q++;
+        if (q > 0) { const c = oldText.charCodeAt(oldText.length - q); if (c >= 0xDC00 && c <= 0xDFFF) q--; }
+        const op = [];
+        OT.push(op, p);
+        OT.push(op, newText.slice(p, newText.length - q));
+        OT.push(op, -(oldText.length - p - q));
+        OT.push(op, q);
+        return op;
+      },
+      // Caret mapping: text inserted exactly at the caret stays after it.
+      transformIndex(op, index) {
+        let pos = 0, out = index;
+        for (const c of op) {
+          if (pos > index) break;
+          if (typeof c === ""string"") { if (pos < index) out += c.length; }
+          else if (c > 0) pos += c;
+          else { if (pos < index) out -= Math.min(-c, index - pos); pos -= c; }
+        }
+        return Math.max(0, out);
       }
-      if (lastIdx < text.length) {
-        out += escapeHtml(text.slice(lastIdx));
+    };
+
+    // Per-file client state (ot.js Client): one op in flight, later edits composed into `buffer`.
+    const otFiles = {};
+    function newOpId() { return userId + ""-"" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+    function setSyncLabel() {
+      const el = document.getElementById(""syncStateLabel"");
+      if (!el) return;
+      const st = otFiles[activeFile];
+      if (!activeFile || !st) { el.textContent = """"; return; }
+      el.textContent = st.resyncing ? ""Reloading…"" : (st.outstanding ? ""Saving…"" : ""Saved ✓"");
+    }
+    function otState(path, content, revision) {
+      otFiles[path] = { revision, shadow: content, outstanding: null, outstandingId: null, buffer: null, resyncing: false, queue: [] };
+      return otFiles[path];
+    }
+    function sendOperation(path, st) {
+      const payload = { type: ""op"", path, baseRevision: st.revision, op: st.outstanding, opId: st.outstandingId, userId, displayName, color: myColor };
+      if (ws && ws.readyState === 1) { ws.send(JSON.stringify(payload)); return; }
+      fetch(apiUrl(""/api/collab/op""), { method: ""POST"", headers: { ""Content-Type"": ""application/json"" }, body: JSON.stringify(payload) })
+        .then(r => r.json()).then(handleOTReply).catch(() => {});
+    }
+    function submitLocalText(path, text) {
+      const st = otFiles[path];
+      if (!st || st.resyncing || text === st.shadow) return;
+      const op = OT.fromDiff(st.shadow, text);
+      st.shadow = text;
+      if (OT.isNoop(op)) return;
+      if (!st.outstanding) {
+        st.outstanding = op; st.outstandingId = newOpId(); sendOperation(path, st);
+      } else {
+        st.buffer = st.buffer ? OT.compose(st.buffer, op) : op;
       }
-      if (text.endsWith(""\n"")) out += "" "";
-      return out;
+      setSyncLabel();
+    }
+    function handleOTReply(reply) {
+      if (!reply) return;
+      if (reply.ok === false || reply.type === ""opError"") { handleOTError(reply); return; }
+      for (const c of (reply.commits || [])) handleCommit(c);
+    }
+    function handleOTError(msg) {
+      const st = otFiles[msg.path];
+      if (msg.content != null && msg.revision != null) applySnapshot(msg.path, msg.content, msg.revision);
+      else if (st) resyncFile(msg.path);
+    }
+    function handleCommit(msg) {
+      const path = msg.path;
+      const st = otFiles[path];
+      if (!st) { if (!cachedFiles.some(f => f.relativePath === path)) syncState(); return; }
+      if (st.resyncing) { st.queue.push(msg); return; }
+      if (msg.revision <= st.revision) return;
+      if (msg.revision !== st.revision + 1) { resyncFile(path); return; }
+      if (msg.opId && msg.opId === st.outstandingId) {
+        st.revision = msg.revision;
+        st.outstanding = st.buffer; st.buffer = null;
+        st.outstandingId = st.outstanding ? newOpId() : null;
+        if (st.outstanding) sendOperation(path, st);
+        setSyncLabel();
+        return;
+      }
+      try {
+        let remote = msg.op;
+        if (st.outstanding) { const t = OT.transform(st.outstanding, remote); st.outstanding = t[0]; remote = t[1]; }
+        if (st.buffer) { const t = OT.transform(st.buffer, remote); st.buffer = t[0]; remote = t[1]; }
+        const before = st.shadow;
+        st.shadow = OT.apply(remote, before);
+        st.revision = msg.revision;
+        if (!st.outstanding && msg.length != null && msg.length !== st.shadow.length) { resyncFile(path); return; }
+        if (path === activeFile) applyRemoteOperation(document.getElementById(""codeArea""), remote, before, st.shadow);
+      } catch (e) { resyncFile(path); }
+    }
+    function resyncFile(path) {
+      const st = otFiles[path];
+      if (st && st.resyncing) return;
+      if (st) { st.resyncing = true; st.queue = []; }
+      setSyncLabel();
+      fetch(apiUrl(""/api/collab/file?path="" + encodeURIComponent(path))).then(r => r.json())
+        .then(d => applySnapshot(path, d.content || """", d.revision || 1))
+        .catch(() => { if (otFiles[path]) otFiles[path].resyncing = false; setSyncLabel(); });
+    }
+    function applySnapshot(path, content, revision) {
+      const old = otFiles[path];
+      const queue = old ? old.queue : [];
+      const before = old ? old.shadow : null;
+      const st = otState(path, content, revision);
+      if (path === activeFile) {
+        const area = document.getElementById(""codeArea"");
+        if (before !== null && area.value === before) applyRemoteOperation(area, OT.fromDiff(before, content), before, content);
+        else { area.value = content; refreshEditorView(true); }
+      }
+      queue.sort((a, b) => a.revision - b.revision).forEach(handleCommit);
+      setSyncLabel();
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: ""opSync"", path, since: st.revision }));
+    }
+    function reloadActiveFile() { if (activeFile) resyncFile(activeFile); }
+    setInterval(() => {
+      // Without a WebSocket (cloud relay) commits are pulled for every file we track.
+      if (ws && ws.readyState === 1) return;
+      for (const path of Object.keys(otFiles)) {
+        const st = otFiles[path];
+        if (st.resyncing) continue;
+        fetch(apiUrl(""/api/collab/ops?path="" + encodeURIComponent(path) + ""&since="" + st.revision))
+          .then(r => r.json()).then(handleOTReply).catch(() => {});
+      }
+    }, 700);
+
+    // ---- Highlighter: one block per line so line N of the overlay, the gutter and the textarea always match.
+    const SYNTAX_TOKEN_RE = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->)|(""(?:\\.|[^""\\])*""|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(<\/?[A-Z][A-Za-z0-9_.]*)|(<\/?[a-z][A-Za-z0-9_-]*|\/?>)|\b(import|export|from|default|const|let|var|function|return|async|await|if|else|for|while|do|switch|case|break|continue|try|catch|finally|throw|new|typeof|instanceof|in|of|interface|type|class|extends|implements|struct|enum|protocol|extension|func|def|pub|fn|impl|use|mod|match|where|guard|defer|init|self|super|this|true|false|null|undefined|nil|void)\b|\b(useState|useEffect|useMemo|useCallback|useRef|useContext|React|String|Int|Double|Float|Bool|Array|Dictionary|Set|Promise|Record|Partial|Optional|Any|Error|URL|Data|Date|View|State|Published|ObservedObject|StateObject)\b|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*=)|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*\()|\b(0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b|(=>|===|!==|==|!=|<=|>=|&&|\|\||\?\?)/g;
+    const TOKEN_CLASSES = [null, ""tok-comment"", ""tok-string"", ""tok-comp"", ""tok-tag"", ""tok-kw"", ""tok-type"", ""tok-attr"", ""tok-fn"", ""tok-num"", ""tok-op""];
+    const HIGHLIGHT_LIMIT = 400000;
+
+    function highlightLines(rawCode) {
+      const text = String(rawCode || """");
+      const lines = [];
+      let current = """";
+      const emit = (segment, cls) => {
+        const parts = segment.split(""\n"");
+        for (let i = 0; i < parts.length; i++) {
+          if (i > 0) { lines.push(current); current = """"; }
+          if (parts[i]) current += cls ? `<span class=""${cls}"">${escapeHtml(parts[i])}</span>` : escapeHtml(parts[i]);
+        }
+      };
+      if (text.length > HIGHLIGHT_LIMIT) {
+        emit(text, null);
+      } else {
+        let lastIdx = 0, m;
+        SYNTAX_TOKEN_RE.lastIndex = 0;
+        while ((m = SYNTAX_TOKEN_RE.exec(text)) !== null) {
+          if (m[0] === """") { SYNTAX_TOKEN_RE.lastIndex++; continue; }
+          if (m.index > lastIdx) emit(text.slice(lastIdx, m.index), null);
+          let cls = null;
+          for (let g = 1; g < TOKEN_CLASSES.length; g++) { if (m[g] !== undefined) { cls = TOKEN_CLASSES[g]; break; } }
+          emit(m[0], cls);
+          lastIdx = SYNTAX_TOKEN_RE.lastIndex;
+        }
+        if (lastIdx < text.length) emit(text.slice(lastIdx), null);
+      }
+      lines.push(current);
+      return lines;
     }
 
-    function updateSyntaxAndGutter() {
+    let lastRenderedText = null;
+    let lineTops = [];      // px offset of each line inside the code area (index 0 = line 1)
+    let lineHeights = [];
+    const LINE_H = 20, TOP_PAD = 14;
+
+    function refreshEditorView(force) {
       const area = document.getElementById(""codeArea"");
       const hl = document.getElementById(""codeHighlightContent"");
-      const gutter = document.getElementById(""lineGutter"");
-      if (!area || !hl || !gutter) return;
+      if (!area || !hl) return;
       const val = area.value || """";
-      hl.innerHTML = highlightCode(val);
+      if (force || val !== lastRenderedText) {
+        lastRenderedText = val;
+        const lines = highlightLines(val);
+        hl.innerHTML = lines.map(l => `<span class=""hl-line"">${l || "" ""}</span>`).join("""");
+        measureLines(val, lines.length);
+      }
+      renderGutter();
+      renderInEditorCollaboratorBands();
+      syncEditorScroll();
+    }
+    // Fallback fonts (Thai, emoji, CJK) make some lines taller than the nominal 20px. The textarea and the
+    // per-line overlay grow the same way, so the gutter and peer bands follow the measured overlay lines.
+    function measureLines(val, count) {
+      lineTops = new Array(count); lineHeights = new Array(count);
+      const needsMeasure = count <= 20000 && /[^\u0000-ɏ -⁯]/.test(val);
+      if (!needsMeasure) {
+        for (let i = 0; i < count; i++) { lineTops[i] = i * LINE_H; lineHeights[i] = LINE_H; }
+        return;
+      }
+      const nodes = document.getElementById(""codeHighlightContent"").children;
+      const base = nodes.length ? nodes[0].offsetTop : 0;
+      for (let i = 0; i < count; i++) {
+        const n = nodes[i];
+        lineTops[i] = n ? n.offsetTop - base : i * LINE_H;
+        lineHeights[i] = n ? Math.max(LINE_H, n.offsetHeight) : LINE_H;
+      }
+    }
+    function lineTop(ln) { const i = Math.max(1, ln) - 1; return i < lineTops.length ? lineTops[i] : i * LINE_H; }
+    function lineSpan(startLn, endLn) {
+      const last = Math.min(Math.max(startLn, endLn), Math.max(1, lineTops.length));
+      return Math.max(LINE_H, lineTop(last) + (lineHeights[last - 1] || LINE_H) - lineTop(startLn));
+    }
 
-      const lineCount = Math.max(1, val.split(""\n"").length);
+    let lastGutterKey = """";
+    function renderGutter() {
+      const inner = document.getElementById(""gutterInner"");
+      if (!inner) return;
       const peerLines = {};
       for (const p of (cachedPeers || [])) {
-        if (p.cursor && p.cursor.filePath === activeFile && p.cursor.line) {
+        if ((p.userId || p.id) !== userId && p.cursor && p.cursor.filePath === activeFile && p.cursor.line) {
           peerLines[p.cursor.line] = p.color || ""#3b82f6"";
         }
       }
-      const gHtml = [];
-      for (let i = 1; i <= lineCount; i++) {
+      const count = Math.max(1, lineTops.length);
+      const key = count + ""|"" + lineHeights.join("","") + ""|"" + JSON.stringify(peerLines);
+      if (key === lastGutterKey) return;
+      lastGutterKey = key;
+      const out = [];
+      for (let i = 1; i <= count; i++) {
         const dotCol = peerLines[i];
-        const dot = dotCol ? `<span style=""width:5px;height:5px;border-radius:50%;background:${escapeHtml(dotCol)};display:inline-block""></span>` : """";
-        gHtml.push(`<div class=""gutter-line"">${dot}<span>${i}</span></div>`);
+        const dot = dotCol ? `<span style=""width:5px;height:5px;margin-top:7px;border-radius:50%;background:${escapeHtml(dotCol)};display:inline-block""></span>` : """";
+        const h = lineHeights[i - 1] || LINE_H;
+        out.push(`<div class=""gutter-line""${h !== LINE_H ? ` style=""height:${h}px""` : """"}>${dot}<span>${i}</span></div>`);
       }
-      gutter.innerHTML = gHtml.join("""");
-      renderInEditorCollaboratorBands();
+      inner.innerHTML = out.join("""");
     }
 
     function renderInEditorCollaboratorBands() {
       const overlay = document.getElementById(""editorCollabOverlay"");
       if (!overlay) return;
-      const lineH = 20;
-      const topPad = 14;
       const bands = [];
-
-      const allActive = (cachedPeers || []).filter(p => p.cursor && p.cursor.filePath === activeFile);
+      const allActive = (cachedPeers || []).filter(p => p.cursor && p.cursor.filePath === activeFile && (p.userId || p.id) !== userId);
       for (const p of allActive) {
         const pid = p.userId || p.id;
         const isAI = pid === AI_USER_ID || p.role === ""AI Agent"";
         const c = p.cursor;
         const startLn = Math.max(1, c.line || 1);
         const endLn = Math.max(startLn, c.endLine || startLn);
-        const topPx = topPad + (startLn - 1) * lineH;
-        const heightPx = Math.max(lineH, (endLn - startLn + 1) * lineH);
+        const topPx = TOP_PAD + lineTop(startLn);
+        const heightPx = lineSpan(startLn, endLn);
         const col = escapeHtml(p.color || ""#64748B"");
-        const bgAlpha = ""18"";
         const statusSuffix = isAI
           ? (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : (p.aiStatusText ? ` · ${p.aiStatusText}` : ` · Ln ${startLn}`))
-          : (pid === userId ? "" (You)"" : (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : ` · Ln ${startLn}`));
-        bands.push(`<div class=""collab-line-band"" style=""top:${topPx}px;height:${heightPx}px;background:${col}${bgAlpha};border-left-color:${col}"">
+          : (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : ` · Ln ${startLn}`);
+        bands.push(`<div class=""collab-line-band"" style=""top:${topPx}px;height:${heightPx}px;background:${col}18;border-left-color:${col}"">
           <div class=""collab-line-tag"" style=""background:rgba(18,20,24,0.94);border:1px solid rgba(255,255,255,0.14)"">● ${escapeHtml(p.displayName)}${escapeHtml(statusSuffix)}</div>
         </div>`);
       }
       overlay.innerHTML = bands.join("""");
     }
 
+    // Transforms instead of scrollTop on overflow:hidden layers: those clamp at their own (shorter) scroll
+    // range, which made the numbers and colours drift from the text near the end of long files.
     function syncEditorScroll() {
       const area = document.getElementById(""codeArea"");
-      const backdrop = document.getElementById(""codeBackdrop"");
-      const gutter = document.getElementById(""lineGutter"");
-      if (!area || !backdrop || !gutter) return;
-      backdrop.scrollTop = area.scrollTop;
-      backdrop.scrollLeft = area.scrollLeft;
-      gutter.scrollTop = area.scrollTop;
+      if (!area) return;
+      const x = area.scrollLeft, y = area.scrollTop;
+      document.getElementById(""codeHighlight"").style.transform = `translate(${-x}px, ${-y}px)`;
+      document.getElementById(""editorCollabOverlay"").style.transform = `translateY(${-y}px)`;
+      document.getElementById(""gutterInner"").style.transform = `translateY(${-y}px)`;
     }
 
     function scrollToLine(lineNum) {
       const area = document.getElementById(""codeArea"");
       if (!area) return;
-      const lineH = 20;
-      const targetY = Math.max(0, (Math.max(1, lineNum) - 1) * lineH - (area.clientHeight * 0.35));
+      const targetY = Math.max(0, lineTop(lineNum) - (area.clientHeight * 0.35));
       area.scrollTo({ top: targetY, behavior: ""smooth"" });
-      setTimeout(syncEditorScroll, 60);
     }
 
     function computeCursorPos() {
@@ -789,25 +1041,24 @@ namespace MicroCode.Views
       return { filePath: activeFile, line, column, endLine, endColumn, isTyping };
     }
 
-    function applyRemoteText(area, nextValue) {
-      if (area.value === nextValue) return;
-      const oldVal = area.value;
-      const selStart = area.selectionStart || 0;
-      const selEnd = area.selectionEnd || 0;
-      const scrollTop = area.scrollTop;
-      let prefixLen = 0;
-      const maxPrefix = Math.min(oldVal.length, nextValue.length, selStart);
-      while (prefixLen < maxPrefix && oldVal.charCodeAt(prefixLen) === nextValue.charCodeAt(prefixLen)) {
-        prefixLen++;
+    // Applies a collaborator's (already transformed) operation to the textarea: the caret and selection
+    // are mapped through it and the scroll position is kept.
+    function applyRemoteOperation(area, op, before, after) {
+      if (!area) return;
+      if (area.value !== before) {
+        // Unsent keystrokes: flush them first so nothing typed is lost, then rebase.
+        submitLocalText(activeFile, area.value);
+        const st = otFiles[activeFile];
+        if (st) { area.value = st.shadow; refreshEditorView(); }
+        return;
       }
-      const delta = nextValue.length - oldVal.length;
-      const newStart = selStart <= prefixLen ? selStart : Math.max(prefixLen, Math.min(nextValue.length, selStart + delta));
-      const newEnd = selEnd <= prefixLen ? selEnd : Math.max(newStart, Math.min(nextValue.length, selEnd + delta));
-      area.value = nextValue;
-      area.setSelectionRange(newStart, newEnd);
-      area.scrollTop = scrollTop;
-      updateSyntaxAndGutter();
-      syncEditorScroll();
+      const focused = document.activeElement === area;
+      const selStart = area.selectionStart || 0, selEnd = area.selectionEnd || 0, dir = area.selectionDirection;
+      const scrollTop = area.scrollTop, scrollLeft = area.scrollLeft;
+      area.value = after;
+      if (focused) area.setSelectionRange(OT.transformIndex(op, selStart), OT.transformIndex(op, selEnd), dir || ""none"");
+      area.scrollTop = scrollTop; area.scrollLeft = scrollLeft;
+      refreshEditorView();
     }
 
     function toggleFollowPeer(pid, ev) {
@@ -872,8 +1123,15 @@ namespace MicroCode.Views
             userId,
             displayName,
             color: myColor,
-            role: ""Web""
+            role: ""Web"",
+            caps: [""ot1""]
           }));
+          // Catch up on commits missed while disconnected, then resend anything still unacknowledged.
+          for (const path of Object.keys(otFiles)) {
+            const st = otFiles[path];
+            ws.send(JSON.stringify({ type: ""opSync"", path, since: st.revision }));
+            if (st.outstanding) sendOperation(path, st);
+          }
           sendPresenceWS();
         };
         ws.onmessage = (ev) => {
@@ -908,11 +1166,11 @@ namespace MicroCode.Views
               renderPeersAndCursors();
               renderFileTree();
               applyWebFollowIfNeeded(false);
+            } else if (msg.type === ""op"" && msg.path) {
+              handleCommit(msg);
+            } else if (msg.type === ""opError"" && msg.path) {
+              handleOTError(msg);
             } else if (msg.type === ""fileBuffer"" && msg.path) {
-              fileRevisions[msg.path] = msg.revision || 1;
-              if (msg.path === activeFile && (msg.authorId || msg.senderId) !== userId && !isTyping && msg.content != null) {
-                applyRemoteText(document.getElementById(""codeArea""), msg.content);
-              }
               if (!cachedFiles.some(f => f.relativePath === msg.path)) syncState();
             } else if (msg.type === ""chat"" && msg.message) {
               if (!cachedChats.some(c => c.id === msg.id)) {
@@ -927,9 +1185,8 @@ namespace MicroCode.Views
         ws.onclose = () => {
           wsFailCount += 1;
           document.getElementById(""wsStatusBadge"").textContent = BASE_PATH ? ""CLOUD RELAY LIVE"" : ""LIVE SYNC"";
-          if (wsFailCount < 3) {
-            setTimeout(connectWS, 3500);
-          }
+          // Keep retrying (backing off); HTTP polling carries edits meanwhile.
+          setTimeout(connectWS, Math.min(30000, 1500 * Math.pow(2, Math.min(wsFailCount, 5))));
         };
       } catch (e) {}
     }
@@ -1007,70 +1264,122 @@ namespace MicroCode.Views
     }
 
     async function openFile(path, jumpLine) {
+      const area = document.getElementById(""codeArea"");
+      if (activeFile && otFiles[activeFile] && area.value !== otFiles[activeFile].shadow) submitLocalText(activeFile, area.value);
       activeFile = path;
       const shortName = path.split(""/"").pop();
       document.getElementById(""activeFileIcon"").innerHTML = getFileIconSVG(shortName);
       document.getElementById(""activeFileName"").textContent = path;
       renderFileTree();
-      const res = await fetch(apiUrl(""/api/collab/file?path="" + encodeURIComponent(path)));
-      const d = await res.json();
-      fileRevisions[path] = d.revision || 1;
-      const area = document.getElementById(""codeArea"");
-      area.value = d.content || """";
-      updateSyntaxAndGutter();
-      syncEditorScroll();
-      if (jumpLine && jumpLine > 1) {
-        scrollToLine(jumpLine);
+      let st = otFiles[path];
+      if (!st) {
+        try {
+          const res = await fetch(apiUrl(""/api/collab/file?path="" + encodeURIComponent(path)));
+          const d = await res.json();
+          if (activeFile !== path) return;
+          st = otFiles[path] || otState(path, d.content || """", d.revision || 1);
+          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: ""opSync"", path, since: st.revision }));
+        } catch (e) { return; }
       }
+      area.value = st.shadow;
+      area.scrollTop = 0; area.scrollLeft = 0;
+      refreshEditorView(true);
+      setSyncLabel();
+      if (jumpLine && jumpLine > 1) scrollToLine(jumpLine);
       sendPresenceWS();
     }
 
-    async function pushEdit() {
-      if (!activeFile) return;
-      const targetFile = activeFile;
-      const area = document.getElementById(""codeArea"");
-      const content = area.value;
-      const baseRevision = fileRevisions[targetFile] || 1;
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({
-          type: ""edit"",
-          userId,
-          displayName,
-          path: targetFile,
-          content,
-          baseRevision
-        }));
-      }
-      const res = await fetch(apiUrl(""/api/collab/edit""), {
+    async function postFsEvent(op, path, content) {
+      await fetch(apiUrl(""/api/collab/fs-event""), {
         method: ""POST"",
-        headers: {""Content-Type"": ""application/json""},
-        body: JSON.stringify({ path: targetFile, content, baseRevision, userId, displayName })
+        headers: { ""Content-Type"": ""application/json"" },
+        body: JSON.stringify({ op, path, content, userId, displayName })
       });
-      try {
-        const resp = await res.json();
-        if (resp.revision) fileRevisions[targetFile] = resp.revision;
-        if (resp.merged && resp.content != null && activeFile === targetFile && !isTyping) {
-          applyRemoteText(area, resp.content);
-        }
-      } catch (e) {}
+    }
+    function cleanNewPath(raw) {
+      return String(raw || """").replace(/\\/g, ""/"").split(""/"").filter(p => p && p !== ""."" && p !== "".."").join(""/"");
+    }
+    function currentFolderPrefix() {
+      if (!activeFile || !activeFile.includes(""/"")) return """";
+      return activeFile.slice(0, activeFile.lastIndexOf(""/"") + 1);
+    }
+    async function promptNewFile() {
+      const path = cleanNewPath(prompt(""New file (path inside the workspace):"", currentFolderPrefix()));
+      if (!path) return;
+      if (cachedFiles.some(f => f.relativePath === path)) { openFile(path); return; }
+      await postFsEvent(""write"", path, """");
+      await syncState();
+      openFile(path);
+    }
+    async function promptNewFolder() {
+      const path = cleanNewPath(prompt(""New folder (path inside the workspace):"", currentFolderPrefix()));
+      if (!path) return;
+      await postFsEvent(""mkdir"", path);
+      await syncState();
     }
 
     const codeAreaEl = document.getElementById(""codeArea"");
-    codeAreaEl.addEventListener(""scroll"", syncEditorScroll);
-    codeAreaEl.addEventListener(""input"", () => {
+    let typingTimer = null;
+    function onLocalInput() {
+      if (!activeFile) return;
       isTyping = true;
-      updateSyntaxAndGutter();
-      syncEditorScroll();
+      submitLocalText(activeFile, codeAreaEl.value);
+      refreshEditorView();
       sendPresenceWS();
-      clearTimeout(window._editTimer);
-      window._editTimer = setTimeout(() => { isTyping = false; pushEdit(); sendPresenceWS(); }, 180);
+      clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => { isTyping = false; sendPresenceWS(); }, 900);
+    }
+    function insertAtSelection(text) {
+      // execCommand keeps the browser's undo stack; setRangeText is the fallback.
+      if (!(document.execCommand && document.execCommand(""insertText"", false, text))) {
+        codeAreaEl.setRangeText(text, codeAreaEl.selectionStart, codeAreaEl.selectionEnd, ""end"");
+        onLocalInput();
+      }
+    }
+    const INDENT = ""  "";
+    codeAreaEl.addEventListener(""keydown"", (e) => {
+      if (e.isComposing) return;
+      const v = codeAreaEl.value, s0 = codeAreaEl.selectionStart, s1 = codeAreaEl.selectionEnd;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === ""s"") { e.preventDefault(); setSyncLabel(); return; }
+      if (e.key === ""Tab"") {
+        e.preventDefault();
+        const lineStart = v.lastIndexOf(""\n"", s0 - 1) + 1;
+        if (!e.shiftKey && s0 === s1) { insertAtSelection(INDENT); return; }
+        const blockEnd = s1 > s0 && v[s1 - 1] === ""\n"" ? s1 - 1 : s1;
+        const lines = v.slice(lineStart, blockEnd).split(""\n"");
+        let removedFirst = 0, delta = 0;
+        const changed = lines.map((ln, i) => {
+          if (e.shiftKey) {
+            const cut = ln.startsWith(INDENT) ? INDENT.length : (ln.startsWith(""\t"") || ln.startsWith("" "") ? 1 : 0);
+            if (i === 0) removedFirst = cut;
+            delta -= cut;
+            return ln.slice(cut);
+          }
+          delta += INDENT.length;
+          return INDENT + ln;
+        }).join(""\n"");
+        codeAreaEl.setSelectionRange(lineStart, blockEnd);
+        insertAtSelection(changed);
+        const firstShift = e.shiftKey ? -Math.min(removedFirst, s0 - lineStart) : INDENT.length;
+        codeAreaEl.setSelectionRange(Math.max(lineStart, s0 + firstShift), Math.max(lineStart, s1 + delta));
+        return;
+      }
+      if (e.key === ""Enter"" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const lineStart = v.lastIndexOf(""\n"", s0 - 1) + 1;
+        const indent = (v.slice(lineStart, s0).match(/^[ \t]*/) || [""""])[0];
+        const prevChar = v.slice(lineStart, s0).trimEnd().slice(-1);
+        const extra = ""{[(:"".includes(prevChar) && prevChar !== """" ? INDENT : """";
+        e.preventDefault();
+        insertAtSelection(""\n"" + indent + extra);
+      }
     });
+    codeAreaEl.addEventListener(""scroll"", syncEditorScroll);
+    codeAreaEl.addEventListener(""input"", onLocalInput);
+    codeAreaEl.addEventListener(""compositionend"", onLocalInput);
     [""keyup"", ""mouseup"", ""click"", ""select""].forEach(evName => {
-      codeAreaEl.addEventListener(evName, () => {
-        sendPresenceWS();
-        renderInEditorCollaboratorBands();
-      });
+      codeAreaEl.addEventListener(evName, () => sendPresenceWS());
     });
+    window.addEventListener(""resize"", () => refreshEditorView(true));
 
     function toggleFolder(dir) {
       if (collapsedFolders.has(dir)) collapsedFolders.delete(dir);
@@ -1170,7 +1479,8 @@ namespace MicroCode.Views
         return `<span style=""color:var(--secondary);font-weight:500"">● ${escapeHtml(p.displayName)} (Ln ${p.cursor.line || 1})</span>`;
       }).join("" &nbsp; "");
 
-      updateSyntaxAndGutter();
+      renderGutter();
+      renderInEditorCollaboratorBands();
 
       const rect = document.getElementById(""workspaceArea"").getBoundingClientRect();
       const cursorsHtml = [];
@@ -1267,13 +1577,6 @@ namespace MicroCode.Views
 
         if (!activeFile && cachedFiles.length > 0) {
           openFile(cachedFiles[0].relativePath);
-        } else if (activeFile && !isTyping && s.openBuffers && s.openBuffers[activeFile] != null) {
-          const remoteRev = (s.fileRevisions && s.fileRevisions[activeFile]) || 1;
-          const localRev = fileRevisions[activeFile] || 0;
-          if (remoteRev >= localRev) {
-            applyRemoteText(document.getElementById(""codeArea""), s.openBuffers[activeFile]);
-            fileRevisions[activeFile] = remoteRev;
-          }
         }
 
         const tasks = JSON.parse(s.teamTasksJSON || ""[]"");
@@ -1291,6 +1594,59 @@ namespace MicroCode.Views
 
     joinRoom();
     setInterval(syncState, 1400);
+  </script>
+</body>
+</html>";
+
+        /// <summary>buildOpenInMicroCodeHTML (the /join invite page): {{CODE_JSON}}, {{NAME_JSON}}, {{DOWNLOAD_JSON}} (JSON
+        /// arrays from a serializer), {{BROWSER_ALLOWED}} (true / false).</summary>
+        public const string OpenInApp = @"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<meta name=""viewport"" content=""width=device-width, initial-scale=1"">
+<title>Join in MicroCode</title>
+<style>
+  :root { color-scheme: dark; --bg:#0d0f14; --card:#151922; --text:#e5e7eb; --muted:#9ca3af; --line:rgba(255,255,255,.09); --accent:#3b82f6; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg);
+         color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,""Segoe UI"",system-ui,sans-serif; padding:16px; }
+  .card { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:28px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p { margin:0 0 18px; color:var(--muted); }
+  .code { font:600 13px ui-monospace,Menlo,Consolas,monospace; letter-spacing:.08em; padding:3px 8px; border:1px solid var(--line); border-radius:6px; }
+  a.btn { display:block; text-align:center; text-decoration:none; padding:11px 14px; border-radius:9px; font-weight:600; margin-top:10px; }
+  .primary { background:var(--accent); color:#fff; }
+  .secondary { color:var(--text); border:1px solid var(--line); }
+  .small { margin-top:18px; font-size:12px; color:var(--muted); }
+  .small a { color:var(--text); }
+</style>
+</head>
+<body>
+  <div class=""card"">
+    <h1 id=""title"">Join live session</h1>
+    <p>Opening MicroCode… Room <span class=""code"" id=""room""></span></p>
+    <a class=""btn primary"" id=""open"" href=""#"">Open in MicroCode</a>
+    <a class=""btn secondary"" id=""browser"" href=""#"" style=""display:none"">Continue in browser</a>
+    <div class=""small"">MicroCode didn't open? <a id=""download"" href=""#"" rel=""noopener"">Install MicroCode</a>, then click “Open in MicroCode” again.</div>
+  </div>
+  <script>
+    const CODE = {{CODE_JSON}}[0];
+    const WORKSPACE = {{NAME_JSON}}[0];
+    const DOWNLOAD = {{DOWNLOAD_JSON}}[0];
+    const BROWSER_ALLOWED = {{BROWSER_ALLOWED}};
+    const base = location.origin + location.pathname.replace(/\/(join\/?|index\.html)?$/i, """");
+    const joinURL = base + ""/?code="" + encodeURIComponent(CODE);
+    const deepLink = ""microcode://collab?token="" + encodeURIComponent(joinURL);
+    document.getElementById(""title"").textContent = ""Join “"" + WORKSPACE + ""”"";
+    document.getElementById(""room"").textContent = CODE || ""—"";
+    document.getElementById(""open"").href = deepLink;
+    document.getElementById(""download"").href = DOWNLOAD;
+    if (BROWSER_ALLOWED) {
+      const b = document.getElementById(""browser"");
+      b.href = joinURL; b.style.display = ""block"";
+    }
+    if (CODE) setTimeout(() => { location.href = deepLink; }, 250);
   </script>
 </body>
 </html>";
