@@ -464,16 +464,6 @@ namespace MicroCode.Core
 
             var proc = new Process();
             proc.StartInfo = psi;
-            proc.EnableRaisingEvents = true;
-            proc.Exited += delegate
-            {
-                int code = 0;
-                try { code = proc.ExitCode; } catch { }
-                ExitCode = code;
-                _running = false;
-                RaiseExited(code);
-            };
-
             if (!proc.Start()) return false;
             lock (_gate)
             {
@@ -482,12 +472,26 @@ namespace MicroCode.Core
                 _running = true;
             }
 
-            StartStreamPump(proc.StandardOutput.BaseStream, "TerminalStdout");
-            StartStreamPump(proc.StandardError.BaseStream, "TerminalStderr");
+            var tOut = StartStreamPump(proc.StandardOutput.BaseStream, "TerminalStdout");
+            var tErr = StartStreamPump(proc.StandardError.BaseStream, "TerminalStderr");
+            var tWait = new Thread(delegate()
+            {
+                try { proc.WaitForExit(); } catch { }
+                try { tOut.Join(1500); } catch { }
+                try { tErr.Join(1500); } catch { }
+                int code = 0;
+                try { code = proc.ExitCode; } catch { }
+                ExitCode = code;
+                _running = false;
+                RaiseExited(code);
+            });
+            tWait.IsBackground = true;
+            tWait.Name = "TerminalFallbackWait";
+            tWait.Start();
             return true;
         }
 
-        void StartStreamPump(Stream stream, string threadName)
+        Thread StartStreamPump(Stream stream, string threadName)
         {
             var t = new Thread(delegate()
             {
@@ -509,6 +513,7 @@ namespace MicroCode.Core
             t.IsBackground = true;
             t.Name = threadName;
             t.Start();
+            return t;
         }
 
         static void SplitCommand(string commandLine, out string exe, out string args)
