@@ -89,9 +89,16 @@ enum AgentEvalRunner {
     private static func snapshot(_ root: URL) -> [String: String] {
         var result: [String: String] = [:]
         guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return result }
+        // /var/folders is a symlink to /private/var/folders: compare resolved paths so `rel` is really relative.
+        let rootPath = root.resolvingSymlinksInPath().path
+        // Caches the test runner writes by itself are not files the agent created.
+        let toolCaches = [".pytest_cache/", "__pycache__/", ".mypy_cache/", ".ruff_cache/", "node_modules/.cache/"]
         for case let url as URL in walker {
-            let rel = String(url.path.dropFirst(root.path.count + 1))
+            let path = url.resolvingSymlinksInPath().path
+            guard path.hasPrefix(rootPath + "/") else { continue }
+            let rel = String(path.dropFirst(rootPath.count + 1))
             if rel.hasPrefix(".microcode") || rel.hasPrefix(".git/") { continue }
+            if toolCaches.contains(where: { rel.hasPrefix($0) || rel.contains("/" + $0) }) { continue }
             guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
                   let data = FileManager.default.contents(atPath: url.path) else { continue }
             result[rel] = "\(data.count):\(data.hashValue)"
