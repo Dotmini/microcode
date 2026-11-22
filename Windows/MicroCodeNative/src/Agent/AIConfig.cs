@@ -43,7 +43,7 @@ namespace MicroCode.Views
             new ProviderInfo("perplexity", "Perplexity", "https://api.perplexity.ai", "sonar-pro", "sonar-pro", "sonar"),
             new ProviderInfo("custom", "Custom (OpenAI-compatible)", "http://localhost:8000/v1", "", "")
         };
-        public static readonly ProviderInfo Local = new ProviderInfo("local", "Local LLM", "http://localhost:11434/v1", "llama3.1", "llama3.1");
+        public static readonly ProviderInfo Local = new ProviderInfo("local", "Local LLM", "http://127.0.0.1:11434/v1", "llama3.1", "llama3.1");
         public static readonly ProviderInfo Cloud = new ProviderInfo("omni", "Dotmini Cloud", DotminiCloud.DefaultProxy, "", "");
 
         /// <summary>aiKeyMode: cloud | subscription | direct | enterprise | local. Like the macOS app, Dotmini Cloud is the default.</summary>
@@ -92,7 +92,35 @@ namespace MicroCode.Views
         public static void SetModelFor(string id, string model) { Defaults.Set("ai_model_" + id, model); }
         public static string Model { get { return ModelFor(Provider); } set { SetModelFor(Provider, value); } }
 
-        public static string BaseUrlFor(string id) { if (id == "omni") return DotminiCloud.ProxyURL; return Defaults.Str("ai_base_" + id, Info(id).Endpoint); }
+        /// <summary>Normalizes Local LLM endpoints on Windows: maps localhost to 127.0.0.1 (avoids IPv6 ::1 refusal on Ollama/LM Studio) and appends /v1 when omitted.</summary>
+        public static string NormalizeLocalBaseUrl(string raw)
+        {
+            string s = (raw ?? "").Trim();
+            if (s.Length == 0) return Local.Endpoint;
+            if (!s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                s = "http://" + s;
+            s = s.TrimEnd('/');
+            Uri u;
+            if (Uri.TryCreate(s, UriKind.Absolute, out u))
+            {
+                if (string.Equals(u.Host, "localhost", StringComparison.OrdinalIgnoreCase))
+                {
+                    var ub = new UriBuilder(u) { Host = "127.0.0.1" };
+                    s = ub.Uri.ToString().TrimEnd('/');
+                    u = ub.Uri;
+                }
+                string path = (u.AbsolutePath ?? "").Trim('/');
+                if (path.Length == 0) s = s + "/v1";
+            }
+            return s;
+        }
+
+        public static string BaseUrlFor(string id)
+        {
+            if (id == "omni") return DotminiCloud.ProxyURL;
+            string raw = Defaults.Str("ai_base_" + id, Info(id).Endpoint);
+            return id == "local" ? NormalizeLocalBaseUrl(raw) : raw;
+        }
         public static void SetBaseUrlFor(string id, string url) { if (string.IsNullOrWhiteSpace(url)) Defaults.Remove("ai_base_" + id); else Defaults.Set("ai_base_" + id, url.Trim()); }
         public static string BaseUrl { get { return BaseUrlFor(Provider); } set { SetBaseUrlFor(Provider, value); } }
         public static bool HasCustomUrl(string id) { var v = Defaults.Str("ai_base_" + id, null); return v != null && v.TrimEnd('/') != Info(id).Endpoint.TrimEnd('/'); }

@@ -42,11 +42,12 @@ namespace MicroCode.Views
             Title = DotminiNet.StandaloneAI ? "MicroCode AI" : "MicroCode";
             var wa = SystemParameters.WorkArea;
             Width = Math.Min(1440, wa.Width * 0.92); Height = Math.Min(900, wa.Height * 0.92);
-            MinWidth = Math.Min(1200, wa.Width); MinHeight = Math.Min(800, wa.Height);
+            MinWidth = Math.Min(860, wa.Width); MinHeight = Math.Min(560, wa.Height);
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             UseLayoutRounding = true;
             SnapsToDevicePixels = true;
-            TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
+            TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
+            RenderOptions.SetClearTypeHint(this, ClearTypeHint.Enabled);
             FontFamily = UIFonts.UI;
             WindowChrome.SetWindowChrome(this, new WindowChrome
             {
@@ -494,10 +495,7 @@ namespace MicroCode.Views
 
         double LeadingWidth(double revealed)
         {
-            double collapsedLeading = _win.WindowState == WindowState.Maximized ? 12 : 78;
-            bool own = !_sidebarShown;
-            double d = own ? collapsedLeading : Math.Max(10, collapsedLeading - revealed);
-            return Math.Round(d * 2) / 2;
+            return 10;
         }
 
         public void Render()
@@ -554,8 +552,14 @@ namespace MicroCode.Views
                 MoreModeTab(moreActive, compact, ultra));
             row.Children.Add(V.Box(seg, V.P(2), t.P(0.04), 6));
 
-            // trailing: [...] layout menu, [◨] inspector, [⚙] settings
+            // trailing: [📱] mobile connect, [...] layout menu, [◨] inspector, [⚙] settings
             var trailing = V.H(compact ? 4 : 6);
+            bool phoneOn = PhoneCompanionService.Shared.IsEnabled;
+            var phoneContent = V.H(3, Sym.Icon("iphone.radiowaves.left.and.right", 11.5, phoneOn ? t.SysGreen : t.Secondary));
+            if (phoneOn) phoneContent.Children.Add(V.Dot(5, t.SysGreen));
+            var phoneBtn = V.Button(V.Size(V.Box(phoneContent, V.P(4, 0), phoneOn ? t.Op(t.SysGreen, 0.12) : Brushes.Transparent, 5, phoneOn ? t.Op(t.SysGreen, 0.28) : Brushes.Transparent, 0.8), phoneOn ? 34 : 26, 26), () => SettingsWindow.Show(_app, 11));
+            phoneBtn.ToolTip = phoneOn ? "Mobile Connect 2.0 (Active) — Click to view QR & devices" : "Connect with Phone (Mobile Connect 2.0)";
+            trailing.Children.Add(phoneBtn);
             var dots = V.Button(V.Size(new Grid { Children = { Sym.Icon("ellipsis", 12, t.Secondary, FontWeights.Medium) } }, 26, 26), null);
             dots.ToolTip = "Tools & Layout";
             dots.MenuAlignRight = true;
@@ -565,14 +569,12 @@ namespace MicroCode.Views
             var insp = V.Button(V.Size(V.Box(Sym.Icon("sidebar.right", 12, rightOpen ? t.Primary : t.Secondary), V.P(0), rightOpen ? t.P(0.11) : Brushes.Transparent, 5, rightOpen ? t.P(0.16) : Brushes.Transparent, 0.8), 28, 26), _app.ToggleAgenticContext);
             insp.ToolTip = "Toggle Preview & Context Inspector (Ctrl+I)";
             trailing.Children.Add(insp);
-            if (!_app.SidebarVisible || own)
-            {
-                var gear = V.Button(V.Size(new Grid { Children = { Sym.Icon("gearshape", 12, t.Secondary) } }, 28, 26), () => SettingsWindow.Show(_app));
-                gear.ToolTip = "Settings (Ctrl+,)";
-                trailing.Children.Add(gear);
-            }
+            var gear = V.Button(V.Size(new Grid { Children = { Sym.Icon("gearshape", 12, t.Secondary) } }, 28, 26), () => SettingsWindow.Show(_app));
+            gear.ToolTip = "Settings (Ctrl+,)";
+            trailing.Children.Add(gear);
             row.Children.Add(trailing);
-            outer.Children.Add(V.Flex(V.Box(row, V.P(0, 0, 10, 0), null, 0)));
+            // Leave 144px on the right for the native Windows 11 caption buttons (— □ ✕)
+            outer.Children.Add(V.Flex(V.Box(row, V.P(0, 0, 144, 0), null, 0)));
             Child = outer;
         }
 
@@ -777,71 +779,95 @@ namespace MicroCode.Views
         }
     }
 
-    // MARK: - Window controls (macOS traffic lights, auto-hidden until the pointer reaches the top-left 82×36 sensor)
-    public class TrafficLights : Canvas
+    // MARK: - Native Windows 11 top-right window caption buttons (Minimize / Maximize-Restore / Close)
+    public class TrafficLights : Grid
     {
         readonly Window _win;
-        readonly AppState _app;
-        readonly Grid[] _btns = new Grid[3];
-        bool _hoverGroup, _revealed, _welcome;
-        readonly DispatcherTimer _dwell = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
+        readonly Border[] _btns = new Border[3];
+        readonly System.Windows.Shapes.Path[] _glyphs = new System.Windows.Shapes.Path[3];
 
         public TrafficLights(Window win, AppState app)
         {
-            _win = win; _app = app;
-            HorizontalAlignment = HorizontalAlignment.Left; VerticalAlignment = VerticalAlignment.Top;
-            Width = 82; Height = 36;
+            _win = win;
+            HorizontalAlignment = HorizontalAlignment.Right;
+            VerticalAlignment = VerticalAlignment.Top;
+            Width = 138;
+            Height = 36;
             Background = Brushes.Transparent;
             WindowChrome.SetIsHitTestVisibleInChrome(this, true);
-            var colors = new[] { Theme.Rgb(255, 95, 87), Theme.Rgb(254, 188, 46), Theme.Rgb(40, 200, 64) };
-            var rims = new[] { Theme.Rgb(224, 68, 62), Theme.Rgb(222, 161, 35), Theme.Rgb(26, 171, 41) };
-            var glyphs = new[] { "M3.5,3.5 L8.5,8.5 M8.5,3.5 L3.5,8.5", "M3,6 L9,6", "M3.6,3.6 L7.4,3.6 L3.6,7.4 Z M8.4,8.4 L4.6,8.4 L8.4,4.6 Z" };
+
+            for (int i = 0; i < 3; i++) ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
+            var tips = new[] { "Minimize", "Maximize", "Close" };
             for (int i = 0; i < 3; i++)
             {
                 int idx = i;
-                var g = new Grid { Width = 12, Height = 12, Cursor = Cursors.Arrow };
-                g.Children.Add(new Ellipse { Fill = Theme.B(colors[i]), Stroke = Theme.B(Theme.WithAlpha(rims[i], 0.9)), StrokeThickness = 0.5 });
-                var glyph = new System.Windows.Shapes.Path { Data = Geometry.Parse(glyphs[i]), Stroke = Theme.B(Theme.Rgba(0, 0, 0, 0.55)), StrokeThickness = 1.1, Fill = i == 2 ? Theme.B(Theme.Rgba(0, 0, 0, 0.55)) : null, Opacity = 0, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round };
-                g.Children.Add(glyph);
-                SetLeft(g, 8 + i * 20); SetTop(g, 12);
-                g.MouseLeftButtonUp += delegate
+                var glyph = new System.Windows.Shapes.Path
                 {
-                    if (idx == 0) _win.Close();
-                    else if (idx == 1) _win.WindowState = WindowState.Minimized;
-                    else _win.WindowState = _win.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+                    StrokeThickness = 1.0,
+                    Width = 10, Height = 10,
+                    Stretch = Stretch.None,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    SnapsToDevicePixels = true
                 };
-                g.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; };
-                _btns[i] = g;
-                Children.Add(g);
+                var b = new Border
+                {
+                    Background = Brushes.Transparent,
+                    Child = glyph,
+                    ToolTip = tips[i],
+                    Cursor = Cursors.Arrow
+                };
+                Grid.SetColumn(b, i);
+                b.MouseEnter += delegate { ApplyHover(idx, true); };
+                b.MouseLeave += delegate { ApplyHover(idx, false); };
+                b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; };
+                b.MouseLeftButtonUp += delegate
+                {
+                    if (idx == 0) _win.WindowState = WindowState.Minimized;
+                    else if (idx == 1) _win.WindowState = _win.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+                    else _win.Close();
+                };
+                _btns[i] = b;
+                _glyphs[i] = glyph;
+                Children.Add(b);
             }
-            MouseEnter += delegate { _hoverGroup = true; ShowGlyphs(true); _dwell.Stop(); _dwell.Start(); };
-            MouseLeave += delegate { _hoverGroup = false; ShowGlyphs(false); _dwell.Stop(); Update(); };
-            _dwell.Tick += delegate { _dwell.Stop(); if (_hoverGroup) { _revealed = true; Update(); } };
+            _win.StateChanged += delegate { Update(); };
             _win.Activated += delegate { Update(); };
             _win.Deactivated += delegate { Update(); };
-            app.Changed += w => { if (w == "lights") Update(); };
+            app.Changed += w => { if (w == "theme" || w == "lights") Update(); };
             Update();
         }
 
-        public void SetLeadingContextWelcome(bool welcome) { _welcome = welcome; Update(); }
+        public void SetLeadingContextWelcome(bool welcome) { Update(); }
 
-        void ShowGlyphs(bool on) { foreach (var b in _btns) b.Children[1].Opacity = on ? 1 : 0; }
+        void ApplyHover(int idx, bool hover)
+        {
+            var t = Theme.Current;
+            if (idx == 2)
+            {
+                _btns[idx].Background = hover ? Theme.B(Theme.Rgb(196, 43, 28)) : Brushes.Transparent;
+                _glyphs[idx].Stroke = hover ? Brushes.White : (_win.IsActive ? t.Primary : t.Secondary);
+            }
+            else
+            {
+                _btns[idx].Background = hover ? t.P(0.10) : Brushes.Transparent;
+                _glyphs[idx].Stroke = hover ? t.Primary : (_win.IsActive ? t.Primary : t.Secondary);
+            }
+        }
 
         void Update()
         {
-            if (!_hoverGroup) _revealed = false;
-            bool visible = !_app.AutoHideTrafficLights || _revealed;
-            double target = visible ? 1 : 0;
-            foreach (var b in _btns)
+            var t = Theme.Current;
+            bool max = _win.WindowState == WindowState.Maximized;
+            _glyphs[0].Data = Geometry.Parse("M 0,5 L 10,5");
+            _glyphs[1].Data = Geometry.Parse(max ? "M 2,0 L 10,0 L 10,8 L 8,8 M 0,2 L 8,2 L 8,10 L 0,10 Z" : "M 0.5,0.5 L 9.5,0.5 L 9.5,9.5 L 0.5,9.5 Z");
+            _glyphs[2].Data = Geometry.Parse("M 0.5,0.5 L 9.5,9.5 M 9.5,0.5 L 0.5,9.5");
+            _btns[1].ToolTip = max ? "Restore Down" : "Maximize";
+            var stroke = _win.IsActive ? t.Primary : t.Secondary;
+            for (int i = 0; i < 3; i++)
             {
-                b.BeginAnimation(OpacityProperty, new DoubleAnimation(target, TimeSpan.FromMilliseconds(140)));
-                var e = (Ellipse)b.Children[0];
-                if (!_win.IsActive && visible && !_hoverGroup) { e.Fill = Theme.B(Theme.Rgba(128, 128, 128, 0.45)); e.Stroke = null; }
-            }
-            if (_win.IsActive || _hoverGroup)
-            {
-                var colors = new[] { Theme.Rgb(255, 95, 87), Theme.Rgb(254, 188, 46), Theme.Rgb(40, 200, 64) };
-                for (int i = 0; i < 3; i++) ((Ellipse)_btns[i].Children[0]).Fill = Theme.B(colors[i]);
+                _btns[i].Background = Brushes.Transparent;
+                _glyphs[i].Stroke = stroke;
             }
         }
     }

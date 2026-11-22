@@ -485,34 +485,40 @@ namespace MicroCode.UI
         public static void Install(Application app)
         {
             var t = Core.Theme.Current;
+            string tipBg = t.IsDark ? "#F5242429" : "#F5FFFFFF";
+            string tipBorder = t.IsDark ? "#2EFFFFFF" : "#26000000";
+            string tipFg = t.IsDark ? "#F0FFFFFF" : "#E6000000";
+            string thumbBg = t.IsDark ? "#40FFFFFF" : "#38000000";
+            string thumbHover = t.IsDark ? "#78FFFFFF" : "#66000000";
+            string caret = t.IsDark ? "#FFFFFFFF" : "#FF111111";
             string xaml = @"<ResourceDictionary xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
   <Style TargetType='ToolTip'>
     <Setter Property='OverridesDefaultStyle' Value='True'/>
     <Setter Property='HasDropShadow' Value='True'/>
     <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ToolTip'>
-      <Border Background='#F2303033' BorderBrush='#33FFFFFF' BorderThickness='1' CornerRadius='5' Padding='7,3,7,4' Margin='0,0,6,6'>
-        <Border.Effect><DropShadowEffect BlurRadius='8' ShadowDepth='2' Opacity='0.4'/></Border.Effect>
-        <ContentPresenter TextElement.Foreground='#E6FFFFFF' TextElement.FontSize='11.5' TextElement.FontFamily='Segoe UI'/>
+      <Border Background='" + tipBg + @"' BorderBrush='" + tipBorder + @"' BorderThickness='1' CornerRadius='6' Padding='8,4,8,5' Margin='0,0,6,6'>
+        <Border.Effect><DropShadowEffect BlurRadius='10' ShadowDepth='2' Opacity='0.35'/></Border.Effect>
+        <ContentPresenter TextElement.Foreground='" + tipFg + @"' TextElement.FontSize='11.5' TextElement.FontFamily='Segoe UI Variable, Segoe UI'/>
       </Border></ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key='MacScrollThumb' TargetType='Thumb'>
     <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='Thumb'>
-      <Border x:Name='b' CornerRadius='3.5' Background='#47FFFFFF' Margin='2'/>
-      <ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='b' Property='Background' Value='#80FFFFFF'/></Trigger></ControlTemplate.Triggers>
+      <Border x:Name='b' CornerRadius='3.5' Background='" + thumbBg + @"' Margin='2'/>
+      <ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='b' Property='Background' Value='" + thumbHover + @"'/></Trigger></ControlTemplate.Triggers>
     </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style TargetType='ScrollBar'>
     <Setter Property='Background' Value='Transparent'/>
     <Style.Triggers>
       <Trigger Property='Orientation' Value='Vertical'>
-        <Setter Property='Width' Value='11'/>
+        <Setter Property='Width' Value='10'/>
         <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'>
           <Track x:Name='PART_Track' IsDirectionReversed='True'>
             <Track.Thumb><Thumb Style='{StaticResource MacScrollThumb}'/></Track.Thumb>
           </Track></ControlTemplate></Setter.Value></Setter>
       </Trigger>
       <Trigger Property='Orientation' Value='Horizontal'>
-        <Setter Property='Height' Value='11'/>
+        <Setter Property='Height' Value='10'/>
         <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'>
           <Track x:Name='PART_Track'>
             <Track.Thumb><Thumb Style='{StaticResource MacScrollThumb}'/></Track.Thumb>
@@ -524,7 +530,7 @@ namespace MicroCode.UI
     <Setter Property='Background' Value='Transparent'/>
     <Setter Property='BorderThickness' Value='0'/>
     <Setter Property='Padding' Value='0'/>
-    <Setter Property='CaretBrush' Value='#FFFFFFFF'/>
+    <Setter Property='CaretBrush' Value='" + caret + @"'/>
     <Setter Property='SelectionBrush' Value='#0A84FF'/>
     <Setter Property='SelectionOpacity' Value='0.45'/>
     <Setter Property='FocusVisualStyle' Value='{x:Null}'/>

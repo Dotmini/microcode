@@ -353,7 +353,7 @@ namespace MicroCode.Views
             if (string.IsNullOrWhiteSpace(uri) || !uri.StartsWith("microcode://", StringComparison.OrdinalIgnoreCase)) return false;
             try
             {
-                using (var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(1500) })
+                using (var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(6000) })
                 {
                     var resp = client.PostAsync("http://127.0.0.1:" + LocalBridge.Port + "/v1/auth/deeplink",
                         DJ.Body(new Dictionary<string, object> { { "url", uri } })).Result;
@@ -371,6 +371,11 @@ namespace MicroCode.Views
             if (string.IsNullOrWhiteSpace(rawUri) || !Uri.TryCreate(rawUri.Trim(), UriKind.Absolute, out u)) return false;
             if (!string.Equals(u.Scheme, "microcode", StringComparison.OrdinalIgnoreCase)) return false;
             var qp = ParseQueryString(u.Query);
+            if (!string.IsNullOrEmpty(u.Fragment))
+            {
+                var fp = ParseQueryString(u.Fragment.TrimStart('#'));
+                foreach (var kv in fp) if (!qp.ContainsKey(kv.Key) || string.IsNullOrEmpty(qp[kv.Key])) qp[kv.Key] = kv.Value;
+            }
             string host = (u.Host ?? "").ToLowerInvariant();
             string path = (u.AbsolutePath ?? "").Trim('/').ToLowerInvariant();
             if (host == "collab" || path == "collab")
@@ -378,7 +383,7 @@ namespace MicroCode.Views
                 if (CollabDeepLinkReceived != null)
                 {
                     string raw = rawUri.Trim();
-                    DotminiNet.Raise(() => CollabDeepLinkReceived(raw));
+                    DotminiNet.Raise(() => { LocalBridge.BringToFront(); CollabDeepLinkReceived(raw); });
                     return true;
                 }
                 return false;
@@ -391,7 +396,7 @@ namespace MicroCode.Views
                 if (!string.IsNullOrEmpty(ep)) Defaults.Set("colabEndpoint", ep);
                 if (!string.IsNullOrEmpty(tk)) Defaults.Set("colabToken", Dpapi.Protect(tk));
                 Defaults.Flush();
-                DotminiNet.Raise(Changed);
+                DotminiNet.Raise(() => { LocalBridge.BringToFront(); if (Changed != null) Changed(); });
                 return !string.IsNullOrEmpty(ep);
             }
             if (host == "platform-connect" || path == "platform-connect")
@@ -399,11 +404,12 @@ namespace MicroCode.Views
                 string code;
                 if (qp.TryGetValue("code", out code) && !string.IsNullOrEmpty(code))
                 {
+                    DotminiNet.Raise(LocalBridge.BringToFront);
                     return await DotminiPlatformKey.RedeemConnectCode(code);
                 }
                 return false;
             }
-            if (host == "auth" || path == "auth" || path == "auth/callback")
+            if (host == "auth" || host == "auth-callback" || path == "auth" || path == "auth/callback")
             {
                 string token; qp.TryGetValue("token", out token);
                 if (string.IsNullOrEmpty(token)) qp.TryGetValue("access_token", out token);
@@ -413,7 +419,11 @@ namespace MicroCode.Views
                     string expStr; qp.TryGetValue("expires_at", out expStr);
                     double exp = 0; double.TryParse(expStr ?? "", NumberStyles.Float, CultureInfo.InvariantCulture, out exp);
                     string nm; qp.TryGetValue("name", out nm);
-                    return await IngestWebSession(token, rt, exp, nm);
+                    if (string.IsNullOrEmpty(nm)) qp.TryGetValue("display_name", out nm);
+                    DotminiNet.Raise(LocalBridge.BringToFront);
+                    bool ok = await IngestWebSession(token, rt, exp, nm);
+                    if (ok) DotminiNet.Raise(LocalBridge.BringToFront);
+                    return ok;
                 }
             }
             return false;
@@ -423,11 +433,12 @@ namespace MicroCode.Views
         {
             var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (string.IsNullOrEmpty(q)) return d;
-            foreach (var part in q.TrimStart('?').Split('&'))
+            foreach (var part in q.TrimStart('?', '#').Split('&'))
             {
                 int eq = part.IndexOf('=');
                 if (eq <= 0) continue;
-                d[Uri.UnescapeDataString(part.Substring(0, eq))] = Uri.UnescapeDataString(part.Substring(eq + 1).Replace('+', ' '));
+                try { d[Uri.UnescapeDataString(part.Substring(0, eq))] = Uri.UnescapeDataString(part.Substring(eq + 1).Replace('+', ' ')); }
+                catch { }
             }
             return d;
         }
@@ -436,6 +447,7 @@ namespace MicroCode.Views
         public static bool StartBrowserSignIn(string provider)
         {
             DotminiNet.EnableTls();
+            RegisterUriScheme();
             bool bridge = LocalBridge.Start();
             string url = Portal + "/auth.html?source=macapp" + (string.IsNullOrEmpty(provider) ? "" : "&provider=" + Uri.EscapeDataString(provider));
             DotminiNet.OpenExternalUrl(url);
@@ -1340,7 +1352,11 @@ namespace MicroCode.Views
                     else if (method == "OPTIONS")
                     {
                         status = "200 OK"; json = "";
-                        extra = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Dotmini-Bridge\r\nAccess-Control-Max-Age: 600\r\n";
+                        string reqHdrs;
+                        string allowHdrs = (h.TryGetValue("Access-Control-Request-Headers", out reqHdrs) && !string.IsNullOrWhiteSpace(reqHdrs))
+                            ? reqHdrs
+                            : "Content-Type, Authorization, X-Dotmini-Bridge, Accept, X-Requested-With";
+                        extra = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: " + allowHdrs + "\r\nAccess-Control-Max-Age: 600\r\n";
                         if (origin == null) extra += "Access-Control-Allow-Private-Network: true\r\n";
                     }
                     else if (method == "POST" && path.StartsWith("/v1/auth/sync"))
@@ -1367,10 +1383,21 @@ namespace MicroCode.Views
                     else if (method == "POST" && path.StartsWith("/v1/auth/deeplink"))
                     {
                         var o = DJ.Obj(bodyText) ?? new Dictionary<string, object>();
-                        bool ok = await DotminiAuth.HandleDeepLink(DJ.Str(o, "url"));
-                        json = DJ.Ser(new Dictionary<string, object> { { "success", ok }, { "error", DotminiAuth.LastError ?? "" } });
-                        status = ok ? "200 OK" : "400 Bad Request";
-                        if (ok) DotminiNet.Raise(BringToFront);
+                        string dlUrl = (DJ.Str(o, "url") ?? "").Trim();
+                        if (dlUrl.StartsWith("microcode://", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Acknowledge immediately so the short-lived protocol-handler instance exits cleanly
+                            // without timing out while network verification runs in the main window.
+                            DotminiNet.Raise(BringToFront);
+                            var __ = Task.Run(() => DotminiAuth.HandleDeepLink(dlUrl));
+                            json = "{\"success\": true, \"queued\": true}";
+                            status = "200 OK";
+                        }
+                        else
+                        {
+                            json = "{\"success\": false, \"error\": \"Invalid deep link\"}";
+                            status = "400 Bad Request";
+                        }
                     }
                     else if (method == "POST" && (path == "/mcp" || path == "/v1/mcp"))
                     {
@@ -1403,12 +1430,11 @@ namespace MicroCode.Views
             }
         }
 
-        static void BringToFront()
+        public static void BringToFront()
         {
             var w = Application.Current != null ? Application.Current.MainWindow : null;
             if (w == null) return;
-            if (w.WindowState == WindowState.Minimized) w.WindowState = WindowState.Normal;
-            w.Activate();
+            Native.BringToFront(w);
         }
 
         static int Find(byte[] b, int len)

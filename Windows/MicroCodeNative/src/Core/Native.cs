@@ -10,6 +10,44 @@ namespace MicroCode.Core
     {
         // ---- DWM (Windows 11 rounded corners, dark frame) ----
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+
+        public static void BringToFront(Window w)
+        {
+            if (w == null) return;
+            try
+            {
+                if (w.WindowState == WindowState.Minimized) w.WindowState = WindowState.Normal;
+                var hwnd = new WindowInteropHelper(w).Handle;
+                if (hwnd != IntPtr.Zero)
+                {
+                    if (IsIconic(hwnd)) ShowWindow(hwnd, 9); // SW_RESTORE
+                    // Temporarily toggle TOPMOST to reliably break Windows foreground lock after browser OAuth
+                    const uint flags = 0x0001 | 0x0002 | 0x0040; // SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+                    SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0, flags); // HWND_TOPMOST
+                    SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, flags); // HWND_NOTOPMOST
+                    SetForegroundWindow(hwnd);
+                }
+                w.Activate();
+                foreach (Window owned in w.OwnedWindows)
+                {
+                    if (owned != null && owned.IsVisible)
+                    {
+                        if (owned.WindowState == WindowState.Minimized) owned.WindowState = WindowState.Normal;
+                        var oh = new WindowInteropHelper(owned).Handle;
+                        if (oh != IntPtr.Zero) SetForegroundWindow(oh);
+                        owned.Activate();
+                    }
+                }
+            }
+            catch
+            {
+                try { w.Activate(); } catch { }
+            }
+        }
 
         public static void StyleWindow(Window w, bool dark)
         {

@@ -865,8 +865,16 @@ namespace MicroCode.Views
         {
             var disp = Application.Current.Dispatcher;
             // the configured endpoint first, then Ollama 11434, LM Studio 1234 (1235 when 1234 is taken),
-            // llama.cpp / LocalAI 8080, vLLM 8000 and Jan 1337 — probed in parallel, first hit in this order wins
-            var candidates = new[] { AIConfig.BaseUrlFor("local"), "http://localhost:11434/v1", "http://localhost:1234/v1", "http://localhost:1235/v1", "http://localhost:8080/v1", "http://localhost:8000/v1", "http://localhost:1337/v1" }.Distinct().ToList();
+            // llama.cpp / LocalAI 8080, vLLM 8000 and Jan 1337 — use 127.0.0.1 to avoid Windows IPv6 ::1 refusal
+            var candidates = new[] {
+                AIConfig.BaseUrlFor("local"),
+                "http://127.0.0.1:11434/v1",
+                "http://127.0.0.1:1234/v1",
+                "http://127.0.0.1:1235/v1",
+                "http://127.0.0.1:8080/v1",
+                "http://127.0.0.1:8000/v1",
+                "http://127.0.0.1:1337/v1"
+            }.Select(AIConfig.NormalizeLocalBaseUrl).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             Task.Run(async () =>
             {
                 var probes = candidates.Select(async ep =>
@@ -874,11 +882,27 @@ namespace MicroCode.Views
                     var ids = new List<string>();
                     try
                     {
-                        using (var c = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(2) })
+                        using (var c = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(3) })
                         {
-                            var o = DJ.Obj(await c.GetStringAsync(ep.TrimEnd('/') + "/models"));
-                            var arr = DJ.Arr(o, "data");
-                            if (arr != null) foreach (var item in arr) { string id = DJ.Str(item as Dictionary<string, object>, "id"); if (id != null && !ids.Contains(id)) ids.Add(id); }
+                            try
+                            {
+                                var o = DJ.Obj(await c.GetStringAsync(ep.TrimEnd('/') + "/models"));
+                                var arr = DJ.Arr(o, "data") ?? DJ.Arr(o, "models");
+                                if (arr != null) foreach (var item in arr) { var d = item as Dictionary<string, object>; string id = DJ.Str(d, "id") ?? DJ.Str(d, "name"); if (!string.IsNullOrEmpty(id) && !ids.Contains(id)) ids.Add(id); }
+                            }
+                            catch { }
+                            // Fallback for native Ollama /api/tags
+                            if (ids.Count == 0 && ep.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+                            {
+                                try
+                                {
+                                    string origin = ep.Substring(0, ep.Length - 3);
+                                    var o = DJ.Obj(await c.GetStringAsync(origin + "/api/tags"));
+                                    var arr = DJ.Arr(o, "models");
+                                    if (arr != null) foreach (var item in arr) { var d = item as Dictionary<string, object>; string id = DJ.Str(d, "name") ?? DJ.Str(d, "model"); if (!string.IsNullOrEmpty(id) && !ids.Contains(id)) ids.Add(id); }
+                                }
+                                catch { }
+                            }
                         }
                     }
                     catch (Exception ex) { System.Diagnostics.Debug.WriteLine("local scan " + ep + ": " + ex.Message); }
@@ -893,6 +917,14 @@ namespace MicroCode.Views
                 if (tk.IsFaulted) return;
                 if (tk.Result.Key != null && tk.Result.Key != AIConfig.BaseUrlFor("local")) AIConfig.SetBaseUrlFor("local", tk.Result.Key);
                 LiveModels["local"] = tk.Result.Value;
+                if (tk.Result.Value.Count > 0)
+                {
+                    string cur = AIConfig.ModelFor("local");
+                    if (string.IsNullOrWhiteSpace(cur) || !tk.Result.Value.Contains(cur))
+                        AIConfig.SetModelFor("local", tk.Result.Value[0]);
+                    Defaults.Flush();
+                    AppState.Shared.Notify("agentBar");
+                }
             })));
         }
 

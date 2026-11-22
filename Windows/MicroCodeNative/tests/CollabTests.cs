@@ -511,7 +511,7 @@ static class CollabTests
         host.Tasks.Select(t1.Id);
         string ctx = host.Tasks.ContextForSelectedTask();
         Check(ctx != null && ctx.StartsWith("## Shared Team Task Contract\nTask: Ship collaboration\nStatus: In progress\nOwner: Pim (peer)") && ctx.Contains("Recent decisions:\n- note 26") && ctx.EndsWith("Report blockers and validation evidence clearly."),
-            "tasks: the agent context is the Mac's contract block with the last 4 decisions (" + (host.Tasks.LastError ?? "ok") + ")");
+            "tasks: the agent context is the Mac's contract block with the last 4 decisions (" + (host.Tasks.LastError ?? "ok") + "; ctx=" + (ctx ?? "null").Replace("\n", "|") + ")");
         host.Integrations.SetAgentContextEnabled(false);
         Check(host.Tasks.ContextForSelectedTask() == null, "tasks: no contract reaches the agent when 'Let the Agent use the selected task' is off");
         host.Integrations.SetAgentContextEnabled(true);

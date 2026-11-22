@@ -309,8 +309,11 @@ namespace MicroCode.Views
                 {
                     // expired Dotmini session: refresh the token once and retry the same step
                     if ((fail.Status == 401 || fail.Status == 403) && ep.IsCloud && !refreshed) { refreshed = true; ep = await AIEndpoint.Resolve(true); iter--; continue; }
-                    // model without function calling: retry over the XML tool bridge
-                    bool toolsRejected = fail.Status == 400 && schemas != null && !xml && Regex.IsMatch(fail.Detail ?? fail.Message, "tool|function", RegexOptions.IgnoreCase);
+                    // model without function calling (common on Local LLM / Ollama / LM Studio): retry over the XML tool bridge
+                    bool isLocal = string.Equals(ep.Provider, "local", StringComparison.OrdinalIgnoreCase);
+                    bool toolsRejected = schemas != null && !xml && (
+                        (fail.Status == 400 && Regex.IsMatch(fail.Detail ?? fail.Message, "tool|function", RegexOptions.IgnoreCase)) ||
+                        (isLocal && (fail.Status == 400 || fail.Status == 422 || fail.Status == 500) && Regex.IsMatch(fail.Detail ?? fail.Message, "tool|function|template|jinja|grammar|unsupported|schema", RegexOptions.IgnoreCase)));
                     if (toolsRejected) { xml = true; XmlBridge.Add(ep.BaseUrl + "::" + ep.Model); iter--; continue; }
                     throw fail;
                 }
