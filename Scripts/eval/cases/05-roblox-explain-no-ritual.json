@@ -1,0 +1,21 @@
+{
+  "id": "05-roblox-explain-no-ritual",
+  "note": "20 Nov Roblox chat: a read-only question became a diagnostics/privacy checklist with print-only checks.",
+  "fixture": "fixtures/roblox-relic",
+  "history": [],
+  "prompt": "อธิบายหน่อยว่าระบบขโมย relic ในโปรเจกต์นี้ทำงานยังไง",
+  "checks": {
+    "mustNotCreateFiles": true,
+    "mustNotModifyFiles": true,
+    "answerContainsAny": [
+      "StealRelic",
+      "StealSystem",
+      "locked"
+    ],
+    "forbiddenInToolArgs": [
+      "print(\"",
+      "COMPLETED"
+    ],
+    "maxInterventions": 2
+  }
+}

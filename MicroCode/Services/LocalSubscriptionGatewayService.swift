@@ -193,6 +193,15 @@ public final class LocalSubscriptionGatewayService: ObservableObject {
     // MARK: - Route Dispatcher
 
     private func dispatchHTTPRequest(_ req: ParsedHTTPRequest, on connection: NWConnection) async {
+        // The listener is loopback-only, so every peer is on this Mac — but that includes web pages in the user's
+        // browser. This gateway spends the user's subscriptions: serve local processes (CLI agents, MicroCode itself)
+        // and refuse browser origins and DNS-rebinding hosts. There is deliberately no CORS (no preflight succeeds).
+        guard LocalServerTrust.isTrustedLocalRequest(remoteIP: "127.0.0.1", headers: req.headers) else {
+            sendJSONResponse(on: connection, status: "403 Forbidden", payload: [
+                "error": ["message": "MicroCode subscription gateway accepts local tools only (browser origins are refused).", "type": "forbidden"]
+            ])
+            return
+        }
         if req.method == "OPTIONS" {
             sendRawHTTP(
                 on: connection,
@@ -650,9 +659,6 @@ public final class LocalSubscriptionGatewayService: ObservableObject {
             "HTTP/1.1 \(status)",
             "Content-Type: \(contentType)",
             "Content-Length: \(body.count)",
-            "Access-Control-Allow-Origin: *",
-            "Access-Control-Allow-Headers: Authorization, Content-Type, x-api-key, anthropic-version",
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS",
             "Connection: close",
             "",
             ""

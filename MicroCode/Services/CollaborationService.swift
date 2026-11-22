@@ -18,6 +18,16 @@ import Network
 import CryptoKit
 import CoreImage.CIFilterBuiltins
 
+/// The text view showing a shared file. Lets the collaboration engine read unsent keystrokes before a remote edit
+/// lands and apply remote operations in place (caret, scroll and undo-free incremental patch) instead of replacing
+/// the whole buffer.
+@MainActor
+protocol CollabLiveEditorBuffer: AnyObject {
+    var collabLiveText: String { get }
+    /// Applies `op`, whose base is exactly `collabLiveText`. Returns false when the buffer could not take it.
+    func collabApplyRemoteOperation(_ op: CollabTextOperation) -> Bool
+}
+
 // MARK: - Collaborator Color Helpers
 
 enum CollaborationColorHelper {
@@ -432,6 +442,17 @@ final class CollaborationService: ObservableObject {
     // MARK: - Published State
     
     @Published var currentSession: CollaborationSession?
+    /// Peer → host HTTP. Every request carries the room code, which the host now requires on all `/api/collab/*` routes.
+    private var peerHTTP: URLSession {
+        let code = currentSession?.shareCode.uppercased() ?? ""
+        if let cached = peerHTTPCache, cached.code == code { return cached.session }
+        let config = URLSessionConfiguration.default
+        config.httpAdditionalHeaders = ["X-Collab-Code": code]
+        let session = URLSession(configuration: config)
+        peerHTTPCache = (code, session)
+        return session
+    }
+    private var peerHTTPCache: (code: String, session: URLSession)?
     @Published var participants: [CollaborationSession.Participant] = []
     @Published var isConnected: Bool = false
     @Published var connectionStatus: ConnectionStatus = .disconnected
@@ -514,6 +535,12 @@ final class CollaborationService: ObservableObject {
     @Published var lanAddresses: [String] = []
     @Published var selectedLANAddress: String = "127.0.0.1"
     @Published var transportMode: TransportMode = .lan
+    /// Invite links open MicroCode (`microcode://collab`). Hosts can additionally let invitees edit in a web browser.
+    @Published var allowBrowserGuests: Bool = UserDefaults.standard.bool(forKey: "collabAllowBrowserGuests") {
+        didSet { UserDefaults.standard.set(allowBrowserGuests, forKey: "collabAllowBrowserGuests") }
+    }
+    /// Where the invite landing page sends people who do not have MicroCode yet.
+    static let downloadPageURL = "https://github.com/Dotmini/microcode/releases/latest"
     @Published var tunnelStatus: TunnelStatus = .idle
     @Published var publicTunnelURL: String? = nil
     @Published var isOfficialDotminiRelayActive: Bool = false
@@ -575,6 +602,31 @@ final class CollaborationService: ObservableObject {
     
     let crdtEngine = CRDTEngine.shared
     private var crdtDocuments: [String: CRDTDocument] = [:]
+
+    // ot1 real-time co-editing (see CollabTextOperation.swift)
+    static let otCapability = "ot1"
+    private final class LiveEditorBox {
+        weak var buffer: CollabLiveEditorBuffer?
+        init(_ buffer: CollabLiveEditorBuffer) { self.buffer = buffer }
+    }
+    private struct PeerOTFileState {
+        var client: CollabOTClient
+        var shadow: String
+        var outstandingOpId: String?
+    }
+    /// Host: authoritative document + operation log per shared file.
+    private var otDocs: [String: CollabOTServerDocument] = [:]
+    /// Peer: client state machine + local text (including unacknowledged edits) per shared file.
+    private var peerOT: [String: PeerOTFileState] = [:]
+    /// Peer: commits that arrived while a file was being reloaded from the host.
+    private var peerResyncQueue: [String: [[String: Any]]] = [:]
+    /// Peer: the host advertised ot1 (older hosts only understand full-text "edit"/"fileBuffer").
+    private var hostSupportsOT = false
+    /// Absolute path -> text view currently showing it.
+    private var liveEditors: [String: LiveEditorBox] = [:]
+    private var lastEditActivityAt: [String: Date] = [:]
+    /// Keystroke-rate commits are written to disk at most every 250 ms per file.
+    private var pendingSharedFileWrites: [String: Task<Void, Never>] = [:]
     
     private var listener: NWListener?
     private var netService: NetService?
@@ -609,6 +661,8 @@ final class CollaborationService: ObservableObject {
         let id: UUID
         let connection: NWConnection
         var userId: String? = nil
+        /// Client speaks ot1 (receives "op" commits instead of full-text "fileBuffer").
+        var supportsOT = false
         init(id: UUID = UUID(), connection: NWConnection) {
             self.id = id
             self.connection = connection
@@ -887,6 +941,12 @@ final class CollaborationService: ObservableObject {
         var baseEndpoint = ""
         var code = ""
         
+        if let deepLink = URLComponents(string: trimmed),
+           ["microcode", "codetuner"].contains(deepLink.scheme?.lowercased() ?? ""),
+           let inner = deepLink.queryItems?.first(where: { ["token", "code", "url"].contains($0.name.lowercased()) })?.value,
+           !inner.isEmpty, inner != trimmed {
+            return try await joinSession(shareCode: inner, mountWorkspace: mountWorkspace)
+        }
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
             if let comps = URLComponents(string: trimmed) {
                 let scheme = comps.scheme ?? "http"
@@ -894,6 +954,7 @@ final class CollaborationService: ObservableObject {
                 let portPart = comps.port.map { ":\($0)" } ?? ""
                 let cleanPath = comps.path
                     .replacingOccurrences(of: #"/index\.html$"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"/join/?$"#, with: "", options: .regularExpression)
                     .replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression)
                 baseEndpoint = "\(scheme)://\(host)\(portPart)\(cleanPath)"
                 code = comps.queryItems?.first(where: { $0.name == "code" })?.value?.uppercased() ?? ""
@@ -936,7 +997,7 @@ final class CollaborationService: ObservableObject {
         req.httpBody = try? JSONSerialization.data(withJSONObject: joinBody)
         
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await self.peerHTTP.data(for: req)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 connectionStatus = .error("Session not found or rejected")
@@ -1024,7 +1085,7 @@ final class CollaborationService: ObservableObject {
         if let bundleURL = URL(string: "\(baseEndpoint)/api/collab/workspace-bundle") {
             var req = URLRequest(url: bundleURL)
             req.timeoutInterval = 15
-            if let (bundleData, resp) = try? await URLSession.shared.data(for: req),
+            if let (bundleData, resp) = try? await self.peerHTTP.data(for: req),
                (resp as? HTTPURLResponse)?.statusCode == 200,
                let bundle = try? JSONSerialization.jsonObject(with: bundleData) as? [String: Any] {
                 hostActiveFile = (bundle["hostActiveFile"] as? String) ?? ""
@@ -1102,7 +1163,7 @@ final class CollaborationService: ObservableObject {
                     guard self.currentSession?.shareCode == shareCode,
                           let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                           let url = URL(string: "\(baseEndpoint)/api/collab/file?path=\(encoded)"),
-                          let (d, _) = try? await URLSession.shared.data(from: url),
+                          let (d, _) = try? await self.peerHTTP.data(from: url),
                           let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                           let remoteContent = j["content"] as? String else { continue }
                     let rev = (j["revision"] as? Int) ?? 1
@@ -1124,6 +1185,7 @@ final class CollaborationService: ObservableObject {
     }
     
     func leaveSession() async {
+        flushPendingSharedFileWrites()
         peerWSReconnectTask?.cancel()
         peerWSReconnectTask = nil
         peerWebSocketTask?.cancel(with: .goingAway, reason: nil)
@@ -1141,7 +1203,7 @@ final class CollaborationService: ObservableObject {
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 req.httpBody = try? JSONSerialization.data(withJSONObject: ["userId": localUserId])
-                _ = try? await URLSession.shared.data(for: req)
+                _ = try? await self.peerHTTP.data(for: req)
             }
         }
         peerSyncTimer?.invalidate()
@@ -1168,6 +1230,11 @@ final class CollaborationService: ObservableObject {
         fileRevisionSnapshots.removeAll()
         peerBaseRevisions.removeAll()
         lastSyncedLocalFileHashes.removeAll()
+        otDocs.removeAll()
+        peerOT.removeAll()
+        peerResyncQueue.removeAll()
+        hostSupportsOT = false
+        lastEditActivityAt.removeAll()
         currentSession = nil
         participants = []
         sharedFiles = []
@@ -1410,15 +1477,51 @@ final class CollaborationService: ObservableObject {
            upgradeVal.lowercased().contains("websocket"),
            let wsKey = Self.parseHeaderValue("Sec-WebSocket-Key", from: headerStr) {
             let queryCode = urlComps?.queryItems?.first(where: { $0.name == "code" })?.value?.uppercased() ?? ""
-            if let session = currentSession, !queryCode.isEmpty, queryCode != session.shareCode {
+            guard let session = currentSession, LocalServerTrust.constantTimeEquals(queryCode, session.shareCode.uppercased()) else {
                 sendHTTPResponse(connection: connection, status: "403 Forbidden", contentType: "text/plain", body: Data("Invalid code".utf8))
                 return
             }
             upgradeConnectionToWebSocket(connection: connection, secWebSocketKey: wsKey)
             return
         }
-        
+
+        // Every collaboration API call must present the room code (query `code`, header `X-Collab-Code` or the portal
+        // cookie). Previously only join/WebSocket checked it — and accepted an empty code — so anyone on the network
+        // could download the workspace bundle, read files or write edits. `join` checks the code in its JSON body.
+        if path.hasPrefix("/api/collab/"), path != "/api/collab/join" {
+            let presented: String = {
+                if let q = urlComps?.queryItems?.first(where: { $0.name == "code" })?.value, !q.isEmpty { return q }
+                if let h = Self.parseHeaderValue("X-Collab-Code", from: headerStr), !h.isEmpty { return h }
+                if let rawCookie = Self.parseHeaderValue("Cookie", from: headerStr) {
+                    for pair in rawCookie.components(separatedBy: ";") {
+                        let kv = pair.trimmingCharacters(in: .whitespaces).components(separatedBy: "=")
+                        if kv.count >= 2 && kv[0] == "mc_collab_code" { return kv[1] }
+                    }
+                }
+                return ""
+            }().trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard let session = currentSession, LocalServerTrust.constantTimeEquals(presented, session.shareCode.uppercased()) else {
+                let err = try? JSONSerialization.data(withJSONObject: ["error": "Invalid or missing room code"])
+                sendHTTPResponse(connection: connection, status: "403 Forbidden", contentType: "application/json", body: err ?? Data())
+                return
+            }
+        }
+
         switch (method, path) {
+        case ("GET", "/join"), ("GET", "/join/"):
+            let html = buildOpenInMicroCodeHTML(
+                code: urlComps?.queryItems?.first(where: { $0.name == "code" })?.value ?? "",
+                workspaceName: currentSession?.workspaceName ?? "Workspace"
+            )
+            sendHTTPResponse(connection: connection, status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(html.utf8))
+
+        case ("GET", "/") where !allowBrowserGuests, ("GET", "/index.html") where !allowBrowserGuests:
+            let html = buildOpenInMicroCodeHTML(
+                code: urlComps?.queryItems?.first(where: { $0.name == "code" })?.value ?? "",
+                workspaceName: currentSession?.workspaceName ?? "Workspace"
+            )
+            sendHTTPResponse(connection: connection, status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(html.utf8))
+
         case ("GET", "/"), ("GET", "/index.html"):
             let expectedCode = (currentSession?.shareCode ?? "").uppercased()
             let queryCode = urlComps?.queryItems?.first(where: { $0.name == "code" })?.value?
@@ -1461,7 +1564,7 @@ final class CollaborationService: ObservableObject {
         case ("POST", "/api/collab/join"):
             let body = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
             let reqCode = (body["code"] as? String)?.uppercased() ?? ""
-            if let session = currentSession, (!reqCode.isEmpty && reqCode != session.shareCode) {
+            if currentSession.map({ !LocalServerTrust.constantTimeEquals(reqCode, $0.shareCode.uppercased()) }) ?? true {
                 let err = try? JSONSerialization.data(withJSONObject: ["error": "Invalid room code"])
                 sendHTTPResponse(connection: connection, status: "403 Forbidden", contentType: "application/json", body: err ?? Data())
                 return
@@ -1522,18 +1625,49 @@ final class CollaborationService: ObservableObject {
                 if outcome.didAutoMerge {
                     responseObj["content"] = outcome.content
                 }
-                let cleanRel = normalizeRelativePath(relPath)
-                broadcastHostWSMessage([
-                    "type": "fileBuffer",
-                    "path": cleanRel,
-                    "content": outcome.content,
-                    "revision": outcome.revision,
-                    "authorId": uid,
-                    "authorName": name,
-                    "authorColor": color
-                ], excludingUserId: outcome.didAutoMerge ? nil : uid)
             }
             let data = (try? JSONSerialization.data(withJSONObject: responseObj)) ?? Data()
+            sendHTTPResponse(connection: connection, status: "200 OK", contentType: "application/json; charset=utf-8", body: data)
+
+        case ("POST", "/api/collab/op"):
+            // ot1 over plain HTTP (cloud relay / browsers without WebSocket). The reply carries every commit after the
+            // client's base revision — including its own — so the client processes them in order exactly as over WS.
+            let body = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
+            let rel = normalizeRelativePath((body["path"] as? String) ?? "")
+            let uid = (body["userId"] as? String) ?? ""
+            let opId = body["opId"] as? String
+            var reply: [String: Any]
+            if !rel.isEmpty, !uid.isEmpty,
+               let baseRevision = body["baseRevision"] as? Int,
+               let op = try? CollabTextOperation(json: body["op"]) {
+                let name = (body["displayName"] as? String) ?? "Collaborator"
+                let color = participants.first(where: { $0.userId == uid })?.color ?? (body["color"] as? String) ?? "#3B82F6"
+                switch hostReceiveOperation(rel, op: op, baseRevision: baseRevision, authorId: uid, authorName: name, authorColor: color, opId: opId) {
+                case .committed, .duplicate:
+                    let commits = hostOTDocument(rel).operations(since: baseRevision) ?? []
+                    reply = ["ok": true, "path": rel, "commits": commits.map { hostOTCommitPayload(rel, commit: $0) }]
+                case .rejected(let reason):
+                    reply = hostOTErrorPayload(rel, opId: opId, reason: reason)
+                }
+            } else {
+                reply = hostOTErrorPayload(rel, opId: opId, reason: "invalid")
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: reply)) ?? Data()
+            sendHTTPResponse(connection: connection, status: "200 OK", contentType: "application/json; charset=utf-8", body: data)
+
+        case ("GET", "/api/collab/ops"):
+            let rel = normalizeRelativePath(urlComps?.queryItems?.first(where: { $0.name == "path" })?.value ?? "")
+            let since = Int(urlComps?.queryItems?.first(where: { $0.name == "since" })?.value ?? "") ?? 0
+            var reply: [String: Any] = hostOTErrorPayload(rel, opId: nil, reason: "invalid")
+            if !rel.isEmpty {
+                let doc = hostOTDocument(rel)
+                if let commits = doc.operations(since: since) {
+                    reply = ["ok": true, "path": rel, "revision": doc.revision, "commits": commits.map { hostOTCommitPayload(rel, commit: $0) }]
+                } else {
+                    reply = hostOTErrorPayload(rel, opId: nil, reason: "stale")
+                }
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: reply)) ?? Data()
             sendHTTPResponse(connection: connection, status: "200 OK", contentType: "application/json; charset=utf-8", body: data)
 
         case ("POST", "/api/collab/fs-event"):
@@ -1602,8 +1736,7 @@ final class CollaborationService: ObservableObject {
         var header = "HTTP/1.1 \(status)\r\n"
         header += "Content-Type: \(contentType)\r\n"
         header += "Content-Length: \(body.count)\r\n"
-        header += "Access-Control-Allow-Origin: *\r\n"
-        header += "Access-Control-Allow-Headers: Content-Type\r\n"
+        // No CORS: the web portal is same-origin; a wildcard let any web page call the collaboration API.
         header += "Cache-Control: no-store\r\n"
         for (k, v) in extraHeaders {
             header += "\(k): \(v)\r\n"
@@ -1817,13 +1950,17 @@ final class CollaborationService: ObservableObject {
             let name = (msg["displayName"] as? String) ?? "Collaborator"
             let role = (msg["role"] as? String) ?? "Editor"
             let assigned = assignDistinctColor(preferred: msg["color"] as? String, forUserId: uid)
+            if let caps = msg["caps"] as? [String], caps.contains(Self.otCapability) {
+                hostWSClients[clientId]?.supportsOT = true
+            }
             if !uid.isEmpty {
                 upsertParticipant(userId: uid, displayName: name, role: role, color: assigned, cursor: nil)
                 if let client = hostWSClients[clientId] {
                     sendHostWSMessage(to: client, object: [
                         "type": "assignedIdentity",
                         "userId": uid,
-                        "color": assigned
+                        "color": assigned,
+                        "caps": [Self.otCapability]
                     ])
                 }
                 broadcastHostParticipantsOverWS()
@@ -1925,15 +2062,41 @@ final class CollaborationService: ObservableObject {
                 }
                 sendHostWSMessage(to: client, object: ack)
             }
-            broadcastHostWSMessage([
-                "type": "fileBuffer",
-                "path": cleanRel,
-                "content": outcome.content,
-                "revision": outcome.revision,
-                "authorId": uid,
-                "authorName": name,
-                "authorColor": color
-            ], excludingUserId: outcome.didAutoMerge ? nil : uid)
+
+        case "op":
+            guard let client = hostWSClients[clientId] else { return }
+            let rel = normalizeRelativePath((msg["path"] as? String) ?? "")
+            let opId = msg["opId"] as? String
+            guard !rel.isEmpty, !uid.isEmpty,
+                  let baseRevision = msg["baseRevision"] as? Int,
+                  let op = try? CollabTextOperation(json: msg["op"]) else {
+                sendHostWSMessage(to: client, object: hostOTErrorPayload(rel, opId: opId, reason: "invalid"))
+                return
+            }
+            let name = (msg["displayName"] as? String) ?? participants.first(where: { $0.userId == uid })?.displayName ?? "Collaborator"
+            let color = participants.first(where: { $0.userId == uid })?.color ?? (msg["color"] as? String) ?? "#3B82F6"
+            switch hostReceiveOperation(rel, op: op, baseRevision: baseRevision, authorId: uid, authorName: name, authorColor: color, opId: opId) {
+            case .committed:
+                break
+            case .duplicate(let commit):
+                sendHostWSMessage(to: client, object: hostOTCommitPayload(rel, commit: commit, authorName: name, authorColor: color))
+            case .rejected(let reason):
+                sendHostWSMessage(to: client, object: hostOTErrorPayload(rel, opId: opId, reason: reason))
+            }
+
+        case "opSync":
+            guard let client = hostWSClients[clientId] else { return }
+            let rel = normalizeRelativePath((msg["path"] as? String) ?? "")
+            guard !rel.isEmpty else { return }
+            let since = (msg["since"] as? Int) ?? 0
+            let doc = hostOTDocument(rel)
+            if let commits = doc.operations(since: since) {
+                for commit in commits {
+                    sendHostWSMessage(to: client, object: hostOTCommitPayload(rel, commit: commit))
+                }
+            } else {
+                sendHostWSMessage(to: client, object: hostOTErrorPayload(rel, opId: nil, reason: "stale"))
+            }
 
         case "fsEvent":
             applyIncomingFileSystemEvent(msg, broadcastToOtherPeers: true, senderUserId: uid)
@@ -1990,7 +2153,8 @@ final class CollaborationService: ObservableObject {
             "userId": localUserId,
             "displayName": localDisplayName,
             "role": localRole,
-            "color": localColor
+            "color": localColor,
+            "caps": [Self.otCapability]
         ])
         listenPeerWebSocket(task: task, baseEndpoint: baseEndpoint, shareCode: shareCode)
     }
@@ -2060,6 +2224,16 @@ final class CollaborationService: ObservableObject {
                 self.localColor = assigned
                 updateSelfInParticipants()
             }
+            if let caps = msg["caps"] as? [String], caps.contains(Self.otCapability) {
+                hostSupportsOT = true
+                peerCatchUpAfterConnect()
+            }
+
+        case "op":
+            peerHandleCommit(msg)
+
+        case "opError":
+            peerHandleOTError(msg)
 
         case "mouse":
             guard let uid = msg["userId"] as? String, uid != localUserId else { return }
@@ -2123,6 +2297,7 @@ final class CollaborationService: ObservableObject {
         case "fileBuffer":
             guard let rawPath = msg["path"] as? String,
                   let remoteContent = msg["content"] as? String else { return }
+            if peerUsesOT { return } // ot1 hosts send "op"; a stray full-text buffer must not clobber the op stream
             let authorId = (msg["authorId"] as? String) ?? ""
             if authorId == localUserId && (msg["merged"] as? Bool) != true {
                 return
@@ -2448,7 +2623,7 @@ final class CollaborationService: ObservableObject {
                 if let path = edit["path"] as? String,
                    let content = edit["content"] as? String {
                     let baseRev = edit["baseRevision"] as? Int
-                    let outcome = applyIncomingFileContent(
+                    applyIncomingFileContent(
                         relativePath: path,
                         content: content,
                         baseRevision: baseRev,
@@ -2456,16 +2631,6 @@ final class CollaborationService: ObservableObject {
                         authorName: name,
                         authorColor: color
                     )
-                    let cleanRel = normalizeRelativePath(path)
-                    broadcastHostWSMessage([
-                        "type": "fileBuffer",
-                        "path": cleanRel,
-                        "content": outcome.content,
-                        "revision": outcome.revision,
-                        "authorId": uid,
-                        "authorName": name,
-                        "authorColor": color
-                    ], excludingUserId: outcome.didAutoMerge ? nil : uid)
                 }
             }
         }
@@ -2571,6 +2736,12 @@ final class CollaborationService: ObservableObject {
             for open in state.openFiles.prefix(24) {
                 let rel = normalizeRelativePath(open.path)
                 guard !rel.isEmpty, open.content.utf8.count <= 262_144 else { continue }
+                if let doc = otDocs[rel] {
+                    // ot1 document: the log is authoritative, the tab model may lag by a debounce.
+                    openBuffers[rel] = doc.content
+                    openBufferRevisions[rel] = doc.revision
+                    continue
+                }
                 openBuffers[rel] = open.content
                 let rev = fileRevisions[rel] ?? 1
                 openBufferRevisions[rel] = rev
@@ -2634,6 +2805,7 @@ final class CollaborationService: ObservableObject {
             "sharedFiles": filesArr,
             "openBuffers": openBuffers,
             "fileRevisions": openBufferRevisions,
+            "caps": [Self.otCapability],
             "chatMessages": chatArr,
             "activityLog": activityArr,
             "teamTasksJSON": tasksJSONString
@@ -2705,7 +2877,7 @@ final class CollaborationService: ObservableObject {
                             for rel in addedPaths {
                                 guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                                       let url = URL(string: "\(endpoint)/api/collab/file?path=\(encoded)"),
-                                      let (d, _) = try? await URLSession.shared.data(from: url),
+                                      let (d, _) = try? await self.peerHTTP.data(from: url),
                                       let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                                       let content = j["content"] as? String else { continue }
                                 let rev = (j["revision"] as? Int) ?? 1
@@ -2722,8 +2894,11 @@ final class CollaborationService: ObservableObject {
             }
         }
         
+        if let caps = json["caps"] as? [String], caps.contains(Self.otCapability), currentSession?.isHostingLocally == false {
+            hostSupportsOT = true
+        }
         let incomingRevisions = (json["fileRevisions"] as? [String: Int]) ?? [:]
-        if let buffers = json["openBuffers"] as? [String: String] {
+        if !peerUsesOT, let buffers = json["openBuffers"] as? [String: String] {
             for (rawRelPath, remoteContent) in buffers {
                 let relPath = sanitizeRelativePath(rawRelPath)
                 guard !relPath.isEmpty else { continue }
@@ -2832,6 +3007,25 @@ final class CollaborationService: ObservableObject {
             let rel = normalizeRelativePath(openFile.path)
             guard !rel.isEmpty else { continue }
             openRelativeSet.insert(rel)
+            if currentSession?.isHostingLocally == true {
+                // A partially loaded (truncated) tab is not the file's text — never commit it.
+                if openFile.isTruncated { continue }
+                // Hosting: every open tab is an ot1 document. The visible editor is authoritative — its tab model lags
+                // behind by a debounce and would otherwise revert edits that just arrived from collaborators.
+                if otDocs[rel] == nil {
+                    // Start the log from what collaborators were last sent (if anything), then commit the difference.
+                    let baseline = fileContents[rel] ?? openFile.content
+                    let revision = fileRevisions[rel] ?? 1
+                    otDocs[rel] = CollabOTServerDocument(content: baseline, revision: revision)
+                    fileContents[rel] = baseline
+                    fileRevisions[rel] = revision
+                    recordRevisionSnapshot(relativePath: rel, revision: revision, content: baseline)
+                }
+                let latest = liveEditor(for: rel)?.collabLiveText ?? openFile.content
+                hostCommitContent(rel, content: latest, authorId: localUserId, authorName: localDisplayName,
+                                  authorColor: localColor, writeToDisk: false, updateEditor: false)
+                continue
+            }
             let previousContent = fileContents[rel]
             fileContents[rel] = openFile.content
             if let existingRev = fileRevisions[rel] {
@@ -2928,19 +3122,8 @@ final class CollaborationService: ObservableObject {
                                !data.prefix(4096).contains(0),
                                let updatedText = String(data: data, encoding: .utf8),
                                fileContents[rel] != updatedText {
-                                let nextRev = (fileRevisions[rel] ?? 1) + 1
-                                fileContents[rel] = updatedText
-                                fileRevisions[rel] = nextRev
-                                recordRevisionSnapshot(relativePath: rel, revision: nextRev, content: updatedText)
-                                broadcastHostWSMessage([
-                                    "type": "fileBuffer",
-                                    "path": rel,
-                                    "content": updatedText,
-                                    "revision": nextRev,
-                                    "authorId": localUserId,
-                                    "authorName": localDisplayName,
-                                    "authorColor": localColor
-                                ])
+                                hostCommitContent(rel, content: updatedText, authorId: localUserId, authorName: localDisplayName,
+                                                  authorColor: localColor, writeToDisk: false, updateEditor: false)
                             }
                         }
                         hostDiskModDates[rel] = modDate
@@ -3064,6 +3247,9 @@ final class CollaborationService: ObservableObject {
         return ""
     }
     
+    /// Legacy full-text edit (MicroCode builds without ot1 and the HTTP `fileEdits` sync path). The text is reduced
+    /// to one ot1 commit so ot1 clients stay in lock-step. A stale base whose later commits are all by the same author
+    /// means the author's text already contains them (the old duplicate-line bug came from merging those again).
     @discardableResult
     private func applyIncomingFileContent(
         relativePath: String,
@@ -3077,50 +3263,506 @@ final class CollaborationService: ObservableObject {
         guard !rel.isEmpty else {
             return (content: content, revision: 1, didAutoMerge: false)
         }
-
-        let currentContent = resolveFileContent(relativePath: rel)
-        let currentRev = fileRevisions[rel] ?? 1
+        hostFlushLiveEditor(rel)
+        let doc = hostOTDocument(rel)
+        let currentContent = doc.content
+        let currentRev = doc.revision
         if currentContent == content {
             return (content: currentContent, revision: currentRev, didAutoMerge: false)
         }
 
         var mergedContent = content
         var didAutoMerge = false
-
-        if let baseRev = baseRevision,
-           baseRev < currentRev,
-           let baseSnapshot = fileRevisionSnapshots[rel]?[baseRev] {
-            let mergeOutcome = CollaborativeThreeWayMerger.merge(
-                base: baseSnapshot,
-                current: currentContent,
-                incoming: content
-            )
-            mergedContent = mergeOutcome.merged
-            didAutoMerge = mergeOutcome.didAutoMerge
+        if let baseRev = baseRevision, baseRev < currentRev {
+            let later = doc.operations(since: baseRev)
+            let onlyOwnLaterCommits = later.map { !$0.isEmpty && $0.allSatisfy { $0.authorId == authorId } } ?? false
+            if !onlyOwnLaterCommits, let baseSnapshot = fileRevisionSnapshots[rel]?[baseRev] {
+                let mergeOutcome = CollaborativeThreeWayMerger.merge(
+                    base: baseSnapshot,
+                    current: currentContent,
+                    incoming: content
+                )
+                mergedContent = mergeOutcome.merged
+                didAutoMerge = mergeOutcome.didAutoMerge
+            }
         }
 
-        guard mergedContent != currentContent else {
+        guard let commit = hostCommitContent(
+            rel,
+            content: mergedContent,
+            authorId: authorId,
+            authorName: authorName,
+            authorColor: authorColor,
+            writeToDisk: true,
+            updateEditor: true,
+            legacyEchoToAuthor: didAutoMerge
+        ) else {
             return (content: currentContent, revision: currentRev, didAutoMerge: didAutoMerge)
         }
+        return (content: mergedContent, revision: commit.revision, didAutoMerge: didAutoMerge)
+    }
 
-        let doc = crdtEngine.createDocument(content: mergedContent, filePath: rel, id: rel)
-        crdtDocuments[rel] = doc
-        fileContents[rel] = mergedContent
-        let nextRev = currentRev + 1
-        fileRevisions[rel] = nextRev
-        recordRevisionSnapshot(relativePath: rel, revision: nextRev, content: mergedContent)
-        
-        writeRelativeFileToSharedRootIfPossible(relativePath: rel, content: mergedContent)
-        syncBufferToOpenEditorTabIfNeeded(relativePath: rel, content: mergedContent)
+    // MARK: - Real-time co-editing (ot1)
 
-        if !sharedFiles.contains(where: { $0.relativePath == rel }) {
-            indexLocalWorkspaceFiles(forceDiskScan: true)
-            Task { @MainActor in await AppState.shared?.refreshFileTree() }
+    enum HostOperationOutcome {
+        case committed(CollabOTServerDocument.Commit)
+        case duplicate(CollabOTServerDocument.Commit)
+        case rejected(String)
+    }
+
+    /// Called by the editor that shows `path` so remote edits patch it in place.
+    func registerLiveEditor(path: String?, buffer: CollabLiveEditorBuffer) {
+        guard let path, !path.isEmpty else { return }
+        let key = URL(fileURLWithPath: path).standardizedFileURL.path
+        liveEditors = liveEditors.filter { $0.value.buffer != nil && $0.value.buffer !== buffer }
+        liveEditors[key] = LiveEditorBox(buffer)
+    }
+
+    func unregisterLiveEditor(_ buffer: CollabLiveEditorBuffer) {
+        liveEditors = liveEditors.filter { $0.value.buffer != nil && $0.value.buffer !== buffer }
+    }
+
+    private func liveEditor(for rel: String) -> CollabLiveEditorBuffer? {
+        for (path, box) in liveEditors {
+            if let buffer = box.buffer, normalizeRelativePath(path) == rel { return buffer }
         }
-        
-        let actionLabel = didAutoMerge ? "merged edit" : "edited"
-        recordActivity(actorName: authorName, actorColor: authorColor, action: actionLabel, target: rel)
-        return (content: mergedContent, revision: nextRev, didAutoMerge: didAutoMerge)
+        return nil
+    }
+
+    private func scheduleSharedFileWrite(_ rel: String) {
+        pendingSharedFileWrites[rel]?.cancel()
+        pendingSharedFileWrites[rel] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.pendingSharedFileWrites[rel] = nil
+            if let content = self.fileContents[rel] {
+                self.writeRelativeFileToSharedRootIfPossible(relativePath: rel, content: content)
+            }
+        }
+    }
+
+    private func flushPendingSharedFileWrites() {
+        for (rel, task) in pendingSharedFileWrites {
+            task.cancel()
+            if let content = fileContents[rel] {
+                writeRelativeFileToSharedRootIfPossible(relativePath: rel, content: content)
+            }
+        }
+        pendingSharedFileWrites.removeAll()
+    }
+
+    private func newOperationId() -> String {
+        "\(localUserId)-\(UUID().uuidString.prefix(12).lowercased())"
+    }
+
+    /// Patches the visible editor with `op` (base = `previous`) or, failing that, replaces the tab's text.
+    private func applyCommittedOperationToLocalEditor(_ rel: String, op: CollabTextOperation, previous: String, resulting: String) {
+        if let live = liveEditor(for: rel), live.collabLiveText == previous {
+            isApplyingRemoteEdit = true
+            _ = live.collabApplyRemoteOperation(op)
+            isApplyingRemoteEdit = false
+        } else if let live = liveEditor(for: rel), live.collabLiveText != resulting {
+            // Out of step (should not happen after a flush): converge on the authoritative text.
+            isApplyingRemoteEdit = true
+            _ = live.collabApplyRemoteOperation(CollabTextOperation.fromDiff(old: live.collabLiveText, new: resulting))
+            isApplyingRemoteEdit = false
+        }
+        syncBufferToOpenEditorTabIfNeeded(relativePath: rel, content: resulting)
+        lastSyncedLocalFileHashes[rel] = resulting.hashValue
+    }
+
+    // MARK: Host
+
+    private func hostOTDocument(_ rel: String) -> CollabOTServerDocument {
+        if let doc = otDocs[rel] { return doc }
+        let content = resolveFileContent(relativePath: rel)
+        let doc = CollabOTServerDocument(content: content, revision: fileRevisions[rel] ?? 1)
+        otDocs[rel] = doc
+        return doc
+    }
+
+    /// Host: commits keystrokes the host typed but the debounced notify has not sent yet, so a remote operation never
+    /// lands on (and overwrites) unsent local text.
+    private func hostFlushLiveEditor(_ rel: String) {
+        guard currentSession?.isHostingLocally == true, let live = liveEditor(for: rel) else { return }
+        let text = live.collabLiveText
+        let current = otDocs[rel]?.content ?? resolveFileContent(relativePath: rel)
+        guard text != current else { return }
+        hostCommitContent(rel, content: text, authorId: localUserId, authorName: localDisplayName, authorColor: localColor,
+                          writeToDisk: true, updateEditor: false)
+    }
+
+    /// Host: records a full-text change (host editor, disk, AI teammate, legacy client) as one ot1 commit.
+    @discardableResult
+    private func hostCommitContent(
+        _ rel: String,
+        content: String,
+        authorId: String,
+        authorName: String,
+        authorColor: String,
+        writeToDisk: Bool,
+        updateEditor: Bool,
+        legacyEchoToAuthor: Bool = false
+    ) -> CollabOTServerDocument.Commit? {
+        var doc = hostOTDocument(rel)
+        let previous = doc.content
+        guard let commit = doc.replaceContent(content, authorId: authorId) else { return nil }
+        otDocs[rel] = doc
+        hostPublishCommit(rel, commit: commit, previous: previous, authorName: authorName, authorColor: authorColor,
+                          writeToDisk: writeToDisk, updateEditor: updateEditor, legacyEchoToAuthor: legacyEchoToAuthor)
+        return commit
+    }
+
+    /// Host: commits an ot1 operation from a client.
+    private func hostReceiveOperation(
+        _ rel: String,
+        op: CollabTextOperation,
+        baseRevision: Int,
+        authorId: String,
+        authorName: String,
+        authorColor: String,
+        opId: String?
+    ) -> HostOperationOutcome {
+        guard op.targetLength <= 8_000_000 else { return .rejected("too_large") }
+        hostFlushLiveEditor(rel)
+        var doc = hostOTDocument(rel)
+        let previous = doc.content
+        let previousRevision = doc.revision
+        let commit: CollabOTServerDocument.Commit
+        do {
+            commit = try doc.receive(op, baseRevision: baseRevision, authorId: authorId, opId: opId)
+        } catch CollabOTServerDocument.ReceiveError.staleBase {
+            return .rejected("stale")
+        } catch {
+            return .rejected("invalid")
+        }
+        if commit.revision <= previousRevision {
+            return .duplicate(commit)
+        }
+        otDocs[rel] = doc
+        hostPublishCommit(rel, commit: commit, previous: previous, authorName: authorName, authorColor: authorColor,
+                          writeToDisk: true, updateEditor: true, legacyEchoToAuthor: false)
+        return .committed(commit)
+    }
+
+    private func hostPublishCommit(
+        _ rel: String,
+        commit: CollabOTServerDocument.Commit,
+        previous: String,
+        authorName: String,
+        authorColor: String,
+        writeToDisk: Bool,
+        updateEditor: Bool,
+        legacyEchoToAuthor: Bool
+    ) {
+        guard let doc = otDocs[rel] else { return }
+        let content = doc.content
+        fileContents[rel] = content
+        fileRevisions[rel] = commit.revision
+        recordRevisionSnapshot(relativePath: rel, revision: commit.revision, content: content)
+        if writeToDisk {
+            scheduleSharedFileWrite(rel)
+        }
+        if updateEditor {
+            applyCommittedOperationToLocalEditor(rel, op: commit.operation, previous: previous, resulting: content)
+        } else {
+            lastSyncedLocalFileHashes[rel] = content.hashValue
+        }
+
+        let opMessage = hostOTCommitPayload(rel, commit: commit, authorName: authorName, authorColor: authorColor)
+        let legacyMessage: [String: Any] = [
+            "type": "fileBuffer",
+            "path": rel,
+            "content": content,
+            "revision": commit.revision,
+            "authorId": commit.authorId,
+            "authorName": authorName,
+            "authorColor": authorColor
+        ]
+        let opFrame = (try? JSONSerialization.data(withJSONObject: opMessage)).map { Self.encodeWebSocketFrame(opcode: 0x1, payload: $0) }
+        let legacyFrame = (try? JSONSerialization.data(withJSONObject: legacyMessage)).map { Self.encodeWebSocketFrame(opcode: 0x1, payload: $0) }
+        for (_, client) in hostWSClients {
+            if client.supportsOT {
+                // The author receives its own commit too: that is its acknowledgement.
+                if let frame = opFrame { client.connection.send(content: frame, completion: .contentProcessed { _ in }) }
+            } else if legacyEchoToAuthor || client.userId != commit.authorId {
+                if let frame = legacyFrame { client.connection.send(content: frame, completion: .contentProcessed { _ in }) }
+            }
+        }
+
+        let activityKey = "\(commit.authorId)|\(rel)"
+        if commit.authorId != localUserId,
+           Date().timeIntervalSince(lastEditActivityAt[activityKey] ?? .distantPast) > 20 {
+            lastEditActivityAt[activityKey] = Date()
+            recordActivity(actorName: authorName, actorColor: authorColor, action: "edited", target: rel)
+        }
+        if !sharedFiles.contains(where: { $0.relativePath == rel }) {
+            Task { @MainActor [weak self] in
+                self?.indexLocalWorkspaceFiles(forceDiskScan: true)
+                await AppState.shared?.refreshFileTree()
+            }
+        }
+    }
+
+    private func hostOTCommitPayload(_ rel: String, commit: CollabOTServerDocument.Commit, authorName: String? = nil, authorColor: String? = nil) -> [String: Any] {
+        let participant = participants.first(where: { $0.userId == commit.authorId })
+        var payload: [String: Any] = [
+            "type": "op",
+            "path": rel,
+            "revision": commit.revision,
+            "op": commit.operation.json,
+            "authorId": commit.authorId,
+            "authorName": authorName ?? participant?.displayName ?? (commit.authorId == localUserId ? localDisplayName : "Collaborator"),
+            "authorColor": authorColor ?? participant?.color ?? (commit.authorId == localUserId ? localColor : "#3B82F6")
+        ]
+        if let opId = commit.opId { payload["opId"] = opId }
+        if commit.revision == otDocs[rel]?.revision, let length = otDocs[rel]?.content.utf16.count {
+            payload["length"] = length
+        }
+        return payload
+    }
+
+    /// Error reply that doubles as a snapshot, so the client can reload the file without another round trip.
+    private func hostOTErrorPayload(_ rel: String, opId: String?, reason: String) -> [String: Any] {
+        var payload: [String: Any] = ["type": "opError", "ok": false, "path": rel, "reason": reason]
+        if let opId { payload["opId"] = opId }
+        if !rel.isEmpty {
+            let doc = hostOTDocument(rel)
+            payload["revision"] = doc.revision
+            payload["content"] = doc.content
+            payload["resync"] = true
+        }
+        return payload
+    }
+
+    // MARK: Peer
+
+    private var peerUsesOT: Bool {
+        hostSupportsOT && currentSession?.isHostingLocally == false
+    }
+
+    private func peerOTState(_ rel: String) -> PeerOTFileState {
+        if let state = peerOT[rel] { return state }
+        let state = PeerOTFileState(
+            client: CollabOTClient(revision: fileRevisions[rel] ?? 1),
+            shadow: fileContents[rel] ?? "",
+            outstandingOpId: nil
+        )
+        peerOT[rel] = state
+        return state
+    }
+
+    /// Peer: turns the latest local text into an ot1 operation (sent now, or composed while one is in flight).
+    private func peerSubmitLocalContent(_ rel: String, content: String) {
+        guard peerResyncQueue[rel] == nil else {
+            // Reloading from the host: keep the text; the reload will rebase onto the host copy.
+            fileContents[rel] = content
+            return
+        }
+        var state = peerOTState(rel)
+        guard content != state.shadow else { return }
+        let op = CollabTextOperation.fromDiff(old: state.shadow, new: content)
+        state.shadow = content
+        do {
+            if let outgoing = try state.client.applyLocal(op) {
+                let opId = newOperationId()
+                state.outstandingOpId = opId
+                peerOT[rel] = state
+                peerSendOperation(rel, op: outgoing, baseRevision: state.client.revision, opId: opId)
+            } else {
+                peerOT[rel] = state
+            }
+        } catch {
+            peerOT[rel] = state
+            peerResync(rel)
+        }
+        fileContents[rel] = content
+        scheduleSharedFileWrite(rel)
+    }
+
+    private func peerFlushLiveEditor(_ rel: String) {
+        guard let live = liveEditor(for: rel) else { return }
+        let text = live.collabLiveText
+        let known = peerOT[rel]?.shadow ?? fileContents[rel]
+        if let known, text != known {
+            peerSubmitLocalContent(rel, content: text)
+        }
+    }
+
+    private func peerSendOperation(_ rel: String, op: CollabTextOperation, baseRevision: Int, opId: String) {
+        let payload: [String: Any] = [
+            "type": "op",
+            "path": rel,
+            "baseRevision": baseRevision,
+            "op": op.json,
+            "opId": opId,
+            "userId": localUserId,
+            "displayName": localDisplayName,
+            "color": localColor
+        ]
+        if isWebSocketRealtimeActive, peerWebSocketTask != nil {
+            sendPeerWSMessage(payload)
+            return
+        }
+        guard let endpoint = currentSession?.remoteEndpoint,
+              let url = URL(string: "\(endpoint)/api/collab/op") else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 8
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+            guard let (data, _) = try? await self.peerHTTP.data(for: req),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            self.peerHandleOTReply(json)
+        }
+    }
+
+    /// Peer: an HTTP reply (`commits` list) or an `opError` snapshot.
+    private func peerHandleOTReply(_ json: [String: Any]) {
+        if (json["ok"] as? Bool) == false || json["type"] as? String == "opError" {
+            peerHandleOTError(json)
+            return
+        }
+        for commit in (json["commits"] as? [[String: Any]]) ?? [] {
+            peerHandleCommit(commit)
+        }
+    }
+
+    /// Peer: one committed operation from the host (WS broadcast, HTTP reply or catch-up).
+    private func peerHandleCommit(_ msg: [String: Any]) {
+        let rel = normalizeRelativePath((msg["path"] as? String) ?? "")
+        guard !rel.isEmpty, let revision = msg["revision"] as? Int else { return }
+        if peerResyncQueue[rel] != nil {
+            peerResyncQueue[rel]?.append(msg)
+            return
+        }
+        guard let op = try? CollabTextOperation(json: msg["op"]) else { peerResync(rel); return }
+        if peerOT[rel] == nil {
+            let known = fileRevisions[rel] ?? 0
+            if revision <= known { return }
+            guard revision == known + 1, fileContents[rel] != nil || op.baseLength == 0 else {
+                peerResync(rel)
+                return
+            }
+        }
+        peerFlushLiveEditor(rel)
+        if peerResyncQueue[rel] != nil {
+            peerResyncQueue[rel]?.append(msg)
+            return
+        }
+        var state = peerOTState(rel)
+        if revision <= state.client.revision { return }
+        guard revision == state.client.revision + 1 else { peerResync(rel); return }
+
+        if let opId = msg["opId"] as? String, opId == state.outstandingOpId {
+            if let next = state.client.acknowledge(revision: revision) {
+                let nextId = newOperationId()
+                state.outstandingOpId = nextId
+                peerOT[rel] = state
+                peerSendOperation(rel, op: next, baseRevision: revision, opId: nextId)
+            } else {
+                state.outstandingOpId = nil
+                peerOT[rel] = state
+            }
+            fileRevisions[rel] = revision
+            peerBaseRevisions[rel] = revision
+            return
+        }
+
+        do {
+            let local = try state.client.applyRemote(op, revision: revision)
+            let previous = state.shadow
+            state.shadow = try local.apply(to: previous)
+            peerOT[rel] = state
+            fileRevisions[rel] = revision
+            peerBaseRevisions[rel] = revision
+            fileContents[rel] = state.shadow
+            if state.client.isSynchronized, let length = msg["length"] as? Int, length != state.shadow.utf16.count {
+                peerResync(rel)
+                return
+            }
+            scheduleSharedFileWrite(rel)
+            applyCommittedOperationToLocalEditor(rel, op: local, previous: previous, resulting: state.shadow)
+            if !sharedFiles.contains(where: { $0.relativePath == rel }) {
+                Task { @MainActor in await AppState.shared?.refreshFileTree() }
+            }
+        } catch {
+            peerResync(rel)
+        }
+    }
+
+    private func peerHandleOTError(_ msg: [String: Any]) {
+        let rel = normalizeRelativePath((msg["path"] as? String) ?? "")
+        guard !rel.isEmpty else { return }
+        if let content = msg["content"] as? String, let revision = msg["revision"] as? Int {
+            peerApplySnapshot(rel, content: content, revision: revision)
+        } else {
+            peerResync(rel)
+        }
+    }
+
+    /// Peer: reloads a file from the host after a gap or rejection. Commits arriving meanwhile are queued and replayed.
+    private func peerResync(_ rel: String) {
+        guard peerResyncQueue[rel] == nil,
+              let endpoint = currentSession?.remoteEndpoint,
+              let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "\(endpoint)/api/collab/file?path=\(encoded)") else { return }
+        peerResyncQueue[rel] = []
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = try? await self.peerHTTP.data(from: url)
+            let json = result.flatMap { try? JSONSerialization.jsonObject(with: $0.0) as? [String: Any] }
+            guard let json, let content = json["content"] as? String else {
+                let queued = self.peerResyncQueue.removeValue(forKey: rel) ?? []
+                self.peerOT.removeValue(forKey: rel)
+                _ = queued
+                return
+            }
+            self.peerApplySnapshot(rel, content: content, revision: (json["revision"] as? Int) ?? 1)
+        }
+    }
+
+    private func peerApplySnapshot(_ rel: String, content: String, revision: Int) {
+        let queued = peerResyncQueue.removeValue(forKey: rel) ?? []
+        if let lost = peerOT[rel], !lost.client.isSynchronized {
+            ReportLogManager.shared.log("Collaboration: reloaded \(rel) from host; unsent local edits were replaced", type: .warning)
+        }
+        peerOT[rel] = PeerOTFileState(client: CollabOTClient(revision: revision), shadow: content, outstandingOpId: nil)
+        let previous = liveEditor(for: rel)?.collabLiveText ?? fileContents[rel] ?? ""
+        fileContents[rel] = content
+        fileRevisions[rel] = revision
+        peerBaseRevisions[rel] = revision
+        recordRevisionSnapshot(relativePath: rel, revision: revision, content: content)
+        writeRelativeFileToSharedRootIfPossible(relativePath: rel, content: content)
+        applyCommittedOperationToLocalEditor(rel, op: CollabTextOperation.fromDiff(old: previous, new: content), previous: previous, resulting: content)
+        for msg in queued.sorted(by: { ($0["revision"] as? Int ?? 0) < ($1["revision"] as? Int ?? 0) }) {
+            peerHandleCommit(msg)
+        }
+    }
+
+    /// Peer: after (re)connecting over WebSocket, fetch commits missed while offline and resend the in-flight op.
+    private func peerCatchUpAfterConnect() {
+        guard peerUsesOT else { return }
+        for (rel, state) in peerOT {
+            sendPeerWSMessage(["type": "opSync", "path": rel, "since": state.client.revision])
+            if let outstanding = state.client.outstanding, let opId = state.outstandingOpId {
+                peerSendOperation(rel, op: outstanding, baseRevision: state.client.revision, opId: opId)
+            }
+        }
+    }
+
+    /// Peer without WebSocket (cloud relay): poll commits for the files we track.
+    private func peerPollOperationsIfNeeded() async {
+        guard peerUsesOT, !isWebSocketRealtimeActive, let endpoint = currentSession?.remoteEndpoint else { return }
+        for (rel, state) in peerOT where peerResyncQueue[rel] == nil {
+            guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let url = URL(string: "\(endpoint)/api/collab/ops?path=\(encoded)&since=\(state.client.revision)"),
+                  let (data, _) = try? await peerHTTP.data(from: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            peerHandleOTReply(json)
+        }
     }
 
     private func applyIncomingFileSystemEvent(_ event: [String: Any], broadcastToOtherPeers: Bool, senderUserId: String? = nil) {
@@ -3143,12 +3785,33 @@ final class CollaborationService: ObservableObject {
             }
         case "write":
             let content = (event["content"] as? String) ?? ""
+            let isHost = currentSession?.isHostingLocally == true
+            let fileExists = FileManager.default.fileExists(atPath: targetURL.path)
+            if isHost, otDocs[rel] != nil || fileExists {
+                // Existing file: the write is just another edit, committed through ot1 so every client stays in step.
+                hostCommitContent(
+                    rel,
+                    content: content,
+                    authorId: senderUserId ?? (event["userId"] as? String) ?? "peer",
+                    authorName: (event["displayName"] as? String) ?? "Collaborator",
+                    authorColor: participants.first(where: { $0.userId == senderUserId })?.color ?? "#3B82F6",
+                    writeToDisk: true,
+                    updateEditor: true
+                )
+                indexLocalWorkspaceFiles(forceDiskScan: true)
+                Task { @MainActor in await AppState.shared?.refreshFileTree() }
+                return
+            }
             try? FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? content.write(to: targetURL, atomically: true, encoding: .utf8)
-            let nextRev = (fileRevisions[rel] ?? 0) + 1
+            let nextRev = (event["revision"] as? Int) ?? ((fileRevisions[rel] ?? 0) + 1)
             fileContents[rel] = content
             fileRevisions[rel] = nextRev
             peerBaseRevisions[rel] = nextRev
+            peerOT.removeValue(forKey: rel)
+            if isHost {
+                otDocs[rel] = CollabOTServerDocument(content: content, revision: nextRev)
+            }
             recordRevisionSnapshot(relativePath: rel, revision: nextRev, content: content)
             syncBufferToOpenEditorTabIfNeeded(relativePath: rel, content: content)
         case "rename":
@@ -3164,12 +3827,16 @@ final class CollaborationService: ObservableObject {
                     if let oldRev = fileRevisions.removeValue(forKey: rel) {
                         fileRevisions[newRel] = oldRev
                     }
+                    if let doc = otDocs.removeValue(forKey: rel) { otDocs[newRel] = doc }
+                    if let state = peerOT.removeValue(forKey: rel) { peerOT[newRel] = state }
                 }
             }
         case "delete":
             try? FileManager.default.removeItem(at: targetURL)
             fileContents.removeValue(forKey: rel)
             fileRevisions.removeValue(forKey: rel)
+            for key in Array(otDocs.keys) where key == rel || key.hasPrefix(rel + "/") { otDocs.removeValue(forKey: key) }
+            for key in Array(peerOT.keys) where key == rel || key.hasPrefix(rel + "/") { peerOT.removeValue(forKey: key) }
             sharedDirectories.removeAll { $0 == rel || $0.hasPrefix(rel + "/") }
             sharedFiles.removeAll { $0.relativePath == rel || $0.relativePath.hasPrefix(rel + "/") }
         default:
@@ -3182,6 +3849,7 @@ final class CollaborationService: ObservableObject {
                 var relay = event
                 relay["type"] = "fsEvent"
                 relay["path"] = rel
+                if op == "write" { relay["revision"] = fileRevisions[rel] ?? 1 }
                 broadcastHostWSMessage(relay, excludingUserId: senderUserId)
             }
         }
@@ -3232,7 +3900,7 @@ final class CollaborationService: ObservableObject {
            !session.isHostingLocally,
            let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
            let url = URL(string: "\(session.remoteEndpoint)/api/collab/file?path=\(encoded)") {
-            if let (data, _) = try? await URLSession.shared.data(from: url),
+            if let (data, _) = try? await self.peerHTTP.data(from: url),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let remoteContent = json["content"] as? String {
                 content = remoteContent
@@ -3550,12 +4218,6 @@ final class CollaborationService: ObservableObject {
         }
         
         if let updatedContent, !targetRel.isEmpty {
-            let nextRev = (fileRevisions[targetRel] ?? 1) + 1
-            fileContents[targetRel] = updatedContent
-            fileRevisions[targetRel] = nextRev
-            lastSyncedLocalFileHashes[targetRel] = updatedContent.hashValue
-            recordRevisionSnapshot(relativePath: targetRel, revision: nextRev, content: updatedContent)
-            syncBufferToOpenEditorTabIfNeeded(relativePath: targetRel, content: updatedContent)
             recordActivity(
                 actorName: Self.aiTeammateDisplayName,
                 actorColor: Self.aiTeammateColor,
@@ -3563,25 +4225,32 @@ final class CollaborationService: ObservableObject {
                 target: "\(targetRel):\(safeLine)"
             )
             if session.isHostingLocally {
-                broadcastHostWSMessage([
-                    "type": "fileBuffer",
-                    "path": targetRel,
-                    "content": updatedContent,
-                    "revision": nextRev,
-                    "authorId": Self.aiTeammateUserId,
-                    "authorName": Self.aiTeammateDisplayName,
-                    "authorColor": Self.aiTeammateColor
-                ])
-            } else if isWebSocketRealtimeActive {
-                sendPeerWSMessage([
-                    "type": "edit",
-                    "path": targetRel,
-                    "content": updatedContent,
-                    "baseRevision": max(1, nextRev - 1),
-                    "userId": Self.aiTeammateUserId,
-                    "displayName": Self.aiTeammateDisplayName,
-                    "color": Self.aiTeammateColor
-                ])
+                hostCommitContent(targetRel, content: updatedContent, authorId: Self.aiTeammateUserId,
+                                  authorName: Self.aiTeammateDisplayName, authorColor: Self.aiTeammateColor,
+                                  writeToDisk: false, updateEditor: true)
+            } else if peerUsesOT {
+                let shown = liveEditor(for: targetRel)?.collabLiveText ?? fileContents[targetRel] ?? ""
+                peerSubmitLocalContent(targetRel, content: updatedContent)
+                applyCommittedOperationToLocalEditor(targetRel, op: CollabTextOperation.fromDiff(old: shown, new: updatedContent),
+                                                     previous: shown, resulting: updatedContent)
+            } else {
+                let nextRev = (fileRevisions[targetRel] ?? 1) + 1
+                fileContents[targetRel] = updatedContent
+                fileRevisions[targetRel] = nextRev
+                lastSyncedLocalFileHashes[targetRel] = updatedContent.hashValue
+                recordRevisionSnapshot(relativePath: targetRel, revision: nextRev, content: updatedContent)
+                syncBufferToOpenEditorTabIfNeeded(relativePath: targetRel, content: updatedContent)
+                if isWebSocketRealtimeActive {
+                    sendPeerWSMessage([
+                        "type": "edit",
+                        "path": targetRel,
+                        "content": updatedContent,
+                        "baseRevision": max(1, nextRev - 1),
+                        "userId": Self.aiTeammateUserId,
+                        "displayName": Self.aiTeammateDisplayName,
+                        "color": Self.aiTeammateColor
+                    ])
+                }
             }
         }
         
@@ -3821,9 +4490,32 @@ final class CollaborationService: ObservableObject {
         }
 
         if session.isHostingLocally {
+            if op == "write", let content {
+                // Saving a file everyone already has is an edit, not a new file: send it as an ot1 commit.
+                let known = otDocs[rel] != nil || fileContents[rel] != nil
+                let commit = hostCommitContent(rel, content: content, authorId: localUserId, authorName: localDisplayName,
+                                               authorColor: localColor, writeToDisk: false, updateEditor: false)
+                if known || commit != nil {
+                    indexLocalWorkspaceFiles(forceDiskScan: true)
+                    return
+                }
+                payload["revision"] = hostOTDocument(rel).revision
+            }
+            if op == "rename", let newPath {
+                let newRel = normalizeRelativePath(newPath)
+                if let doc = otDocs.removeValue(forKey: rel) { otDocs[newRel] = doc }
+                if let value = fileContents.removeValue(forKey: rel) { fileContents[newRel] = value }
+                if let value = fileRevisions.removeValue(forKey: rel) { fileRevisions[newRel] = value }
+            } else if op == "delete" {
+                for key in Array(otDocs.keys) where key == rel || key.hasPrefix(rel + "/") { otDocs.removeValue(forKey: key) }
+            }
             indexLocalWorkspaceFiles(forceDiskScan: true)
             broadcastHostWSMessage(payload, excludingUserId: localUserId)
         } else {
+            if op == "write", let content, peerUsesOT, peerOT[rel] != nil || fileContents[rel] != nil {
+                peerSubmitLocalContent(rel, content: content)
+                return
+            }
             if isWebSocketRealtimeActive {
                 sendPeerWSMessage(payload)
             } else if let url = URL(string: "\(session.remoteEndpoint)/api/collab/fs-event") {
@@ -3832,7 +4524,7 @@ final class CollaborationService: ObservableObject {
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-                    _ = try? await URLSession.shared.data(for: req)
+                    _ = try? await self.peerHTTP.data(for: req)
                 }
             }
         }
@@ -3847,25 +4539,13 @@ final class CollaborationService: ObservableObject {
         lastSyncedLocalFileHashes[rel] = hash
         
         if session.isHostingLocally {
-            if let prev = fileContents[rel], fileRevisionSnapshots[rel] == nil {
-                let initialRev = fileRevisions[rel] ?? 1
-                fileRevisions[rel] = initialRev
-                recordRevisionSnapshot(relativePath: rel, revision: initialRev, content: prev)
-            }
-            let nextRev = (fileRevisions[rel] ?? 1) + 1
-            fileContents[rel] = content
-            fileRevisions[rel] = nextRev
-            recordRevisionSnapshot(relativePath: rel, revision: nextRev, content: content)
-            writeRelativeFileToSharedRootIfPossible(relativePath: rel, content: content)
-            broadcastHostWSMessage([
-                "type": "fileBuffer",
-                "path": rel,
-                "content": content,
-                "revision": nextRev,
-                "authorId": localUserId,
-                "authorName": localDisplayName,
-                "authorColor": localColor
-            ], excludingUserId: localUserId)
+            hostCommitContent(rel, content: content, authorId: localUserId, authorName: localDisplayName,
+                              authorColor: localColor, writeToDisk: true, updateEditor: false)
+            return
+        }
+
+        if peerUsesOT {
+            peerSubmitLocalContent(rel, content: content)
             return
         }
 
@@ -3900,7 +4580,7 @@ final class CollaborationService: ObservableObject {
                     "color": localColor
                 ]
                 req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-                if let (respData, _) = try? await URLSession.shared.data(for: req),
+                if let (respData, _) = try? await self.peerHTTP.data(for: req),
                    let respJSON = try? JSONSerialization.jsonObject(with: respData) as? [String: Any] {
                     if let newRev = respJSON["revision"] as? Int {
                         let authoritativeContent = (respJSON["content"] as? String) ?? content
@@ -3940,7 +4620,7 @@ final class CollaborationService: ObservableObject {
                 "teamTasksJSON": jsonStr
             ]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            _ = try? await URLSession.shared.data(for: req)
+            _ = try? await self.peerHTTP.data(for: req)
         }
     }
     
@@ -4059,7 +4739,7 @@ final class CollaborationService: ObservableObject {
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await self.peerHTTP.data(for: req)
             if let http = resp as? HTTPURLResponse, http.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if connectionStatus != .connected {
@@ -4067,6 +4747,7 @@ final class CollaborationService: ObservableObject {
                     isConnected = true
                 }
                 applySyncPayload(json)
+                await peerPollOperationsIfNeeded()
             }
         } catch {
             if !isWebSocketRealtimeActive {
@@ -4140,7 +4821,7 @@ final class CollaborationService: ObservableObject {
                 "message": clean
             ]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            _ = try? await URLSession.shared.data(for: req)
+            _ = try? await self.peerHTTP.data(for: req)
             await performPeerSyncTick()
         }
     }
@@ -4588,20 +5269,22 @@ final class CollaborationService: ObservableObject {
 
     func getShareLink() -> String? {
         guard let session = currentSession else { return nil }
+        // Invite links land on `/join`, which opens MicroCode via `microcode://collab` (and offers the browser
+        // editor only when the host allows browser guests).
         if transportMode == .online {
             if let pub = publicTunnelURL, !pub.isEmpty {
                 let cleanPub = pub.hasSuffix("/") ? String(pub.dropLast()) : pub
-                return "\(cleanPub)/?code=\(session.shareCode)"
+                return "\(cleanPub)/join?code=\(session.shareCode)"
             }
             if session.isHostingLocally {
-                return "http://\(selectedLANAddress):\(listeningPort)/?code=\(session.shareCode)"
+                return "http://\(selectedLANAddress):\(listeningPort)/join?code=\(session.shareCode)"
             }
         }
         if session.isHostingLocally {
-            return "http://\(selectedLANAddress):\(listeningPort)/?code=\(session.shareCode)"
+            return "http://\(selectedLANAddress):\(listeningPort)/join?code=\(session.shareCode)"
         }
         let cleanEndpoint = session.remoteEndpoint.hasSuffix("/") ? String(session.remoteEndpoint.dropLast()) : session.remoteEndpoint
-        return "\(cleanEndpoint)/?code=\(session.shareCode)"
+        return "\(cleanEndpoint)/join?code=\(session.shareCode)"
     }
 
     func getJoinToken() -> String {
@@ -4723,6 +5406,68 @@ final class CollaborationService: ObservableObject {
     }
     
     // MARK: - Zero-Install Web Collaboration Portal HTML
+
+    /// Invite landing page: hands the session to MicroCode through `microcode://collab?token=<host>/?code=<code>`.
+    /// The base URL is computed in the page from its own location, so LAN, tunnel and relay links all work.
+    private func buildOpenInMicroCodeHTML(code rawCode: String, workspaceName: String) -> String {
+        let code = String(rawCode.uppercased().filter { $0.isLetter || $0.isNumber }.prefix(16))
+        let codeJSON = (try? String(data: JSONSerialization.data(withJSONObject: [code]), encoding: .utf8)) ?? "[\"\"]"
+        let nameJSON = (try? String(data: JSONSerialization.data(withJSONObject: [workspaceName]), encoding: .utf8)) ?? "[\"Workspace\"]"
+        let downloadJSON = (try? String(data: JSONSerialization.data(withJSONObject: [Self.downloadPageURL]), encoding: .utf8)) ?? "[\"\"]"
+        let browserAllowed = allowBrowserGuests ? "true" : "false"
+        return #"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Join in MicroCode</title>
+        <style>
+          :root { color-scheme: dark; --bg:#0d0f14; --card:#151922; --text:#e5e7eb; --muted:#9ca3af; --line:rgba(255,255,255,.09); --accent:#3b82f6; }
+          * { box-sizing: border-box; }
+          body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg);
+                 color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; padding:16px; }
+          .card { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:28px; }
+          h1 { font-size:18px; margin:0 0 4px; }
+          p { margin:0 0 18px; color:var(--muted); }
+          .code { font:600 13px ui-monospace,Menlo,Consolas,monospace; letter-spacing:.08em; padding:3px 8px; border:1px solid var(--line); border-radius:6px; }
+          a.btn { display:block; text-align:center; text-decoration:none; padding:11px 14px; border-radius:9px; font-weight:600; margin-top:10px; }
+          .primary { background:var(--accent); color:#fff; }
+          .secondary { color:var(--text); border:1px solid var(--line); }
+          .small { margin-top:18px; font-size:12px; color:var(--muted); }
+          .small a { color:var(--text); }
+        </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1 id="title">Join live session</h1>
+            <p>Opening MicroCode… Room <span class="code" id="room"></span></p>
+            <a class="btn primary" id="open" href="#">Open in MicroCode</a>
+            <a class="btn secondary" id="browser" href="#" style="display:none">Continue in browser</a>
+            <div class="small">MicroCode didn't open? <a id="download" href="#" rel="noopener">Install MicroCode</a>, then click “Open in MicroCode” again.</div>
+          </div>
+          <script>
+            const CODE = \#(codeJSON)[0];
+            const WORKSPACE = \#(nameJSON)[0];
+            const DOWNLOAD = \#(downloadJSON)[0];
+            const BROWSER_ALLOWED = \#(browserAllowed);
+            const base = location.origin + location.pathname.replace(/\/(join\/?|index\.html)?$/i, "");
+            const joinURL = base + "/?code=" + encodeURIComponent(CODE);
+            const deepLink = "microcode://collab?token=" + encodeURIComponent(joinURL);
+            document.getElementById("title").textContent = "Join “" + WORKSPACE + "”";
+            document.getElementById("room").textContent = CODE || "—";
+            document.getElementById("open").href = deepLink;
+            document.getElementById("download").href = DOWNLOAD;
+            if (BROWSER_ALLOWED) {
+              const b = document.getElementById("browser");
+              b.href = joinURL; b.style.display = "block";
+            }
+            if (CODE) setTimeout(() => { location.href = deepLink; }, 250);
+          </script>
+        </body>
+        </html>
+        """#
+    }
 
     private func buildRoomCodeEntryGateHTML(workspaceName: String, invalidAttempt: Bool) -> String {
         let escapedWS = workspaceName
@@ -5004,9 +5749,10 @@ final class CollaborationService: ObservableObject {
             }
             .gutter-line {
               height: var(--line-h);
+              line-height: var(--line-h);
               padding-right: 4px;
               display: flex;
-              align-items: center;
+              align-items: flex-start;
               justify-content: flex-end;
               gap: 4px;
             }
@@ -5053,6 +5799,8 @@ final class CollaborationService: ObservableObject {
               white-space: nowrap;
               box-shadow: 0 2px 6px rgba(0,0,0,0.45);
             }
+            #gutterInner, #editorCollabOverlay, pre#codeHighlight { will-change: transform; }
+            .hl-line { display: block; min-height: var(--line-h); }
             pre#codeHighlight {
               margin: 0;
               padding: 14px 16px;
@@ -5259,8 +6007,11 @@ final class CollaborationService: ObservableObject {
           <div class="layout" id="workspaceArea">
             <div class="sidebar-left">
               <div class="section-hdr">
-                <span>WORKSPACE FOLDERS & FILES</span>
-                <span id="fileCountLabel">0</span>
+                <span style="white-space:nowrap">FILES · <span id="fileCountLabel">0</span></span>
+                <span style="display:flex;align-items:center;gap:5px;white-space:nowrap">
+                  <button class="btn" style="padding:1px 6px;font-size:10px;white-space:nowrap" onclick="promptNewFile()" title="New file">+ File</button>
+                  <button class="btn" style="padding:1px 6px;font-size:10px;white-space:nowrap" onclick="promptNewFolder()" title="New folder">+ Folder</button>
+                </span>
               </div>
               <div class="file-list" id="fileList"></div>
               <div class="section-hdr" style="border-top:1px solid var(--border)">
@@ -5277,17 +6028,18 @@ final class CollaborationService: ObservableObject {
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
                   <span id="activeEditorsIndicator" style="font-size:10.5px"></span>
-                  <button class="btn btn-primary" onclick="pushEdit()">Sync</button>
+                  <span id="syncStateLabel" style="font-size:10.5px;color:var(--muted)"></span>
+                  <button class="btn" onclick="reloadActiveFile()" title="Reload this file from the host">Reload</button>
                 </div>
               </div>
               <div class="editor-workspace">
-                <div class="line-gutter" id="lineGutter">1</div>
+                <div class="line-gutter" id="lineGutter"><div id="gutterInner"></div></div>
                 <div class="code-stack">
                   <div id="codeBackdrop">
                     <div id="editorCollabOverlay"></div>
                     <pre id="codeHighlight"><code id="codeHighlightContent"></code></pre>
                   </div>
-                  <textarea id="codeArea" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Select a file from the left folder tree..."></textarea>
+                  <textarea id="codeArea" wrap="off" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="Select a file from the left folder tree..."></textarea>
                 </div>
               </div>
             </div>
@@ -5397,112 +6149,357 @@ final class CollaborationService: ObservableObject {
               return `<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M5.5 5L2.5 8L5.5 11M10.5 5L13.5 8L10.5 11" stroke="#94A3B8" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
             }
 
-            // Single-Pass Fast Syntax Color Highlighter (Zero HTML Corruption, Exact Textarea Alignment)
-            const SYNTAX_TOKEN_RE = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(<\/?[A-Z][A-Za-z0-9_.]*)|(<\/?[a-z][A-Za-z0-9_-]*|\/?>)|\b(import|export|from|default|const|let|var|function|return|async|await|if|else|for|while|do|switch|case|break|continue|try|catch|finally|throw|new|typeof|instanceof|in|of|interface|type|class|extends|implements|struct|enum|protocol|extension|func|def|pub|fn|impl|use|mod|match|where|guard|defer|init|self|super|this|true|false|null|undefined|nil|void)\b|\b(useState|useEffect|useMemo|useCallback|useRef|useContext|React|String|Int|Double|Float|Bool|Array|Dictionary|Set|Promise|Record|Partial|Optional|Any|Error|URL|Data|Date|View|State|Published|ObservedObject|StateObject)\b|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*=)|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*\()|\b(0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b|(=>|===|!==|==|!=|<=|>=|&&|\|\||\?\?)/g;
-
-            function highlightCode(rawCode) {
-              const text = String(rawCode || "");
-              if (!text) return "";
-              let out = "";
-              let lastIdx = 0;
-              SYNTAX_TOKEN_RE.lastIndex = 0;
-              let m;
-              while ((m = SYNTAX_TOKEN_RE.exec(text)) !== null) {
-                if (m.index > lastIdx) {
-                  out += escapeHtml(text.slice(lastIdx, m.index));
+            // ---- ot1 operational transformation (wire-compatible with the MicroCode host and ot.js) ----
+            // An operation is an array: n > 0 retains n UTF-16 units, n < 0 deletes -n, a string inserts it.
+            const OT = {
+              baseLength(op) { let n = 0; for (const c of op) { if (typeof c === "number") n += Math.abs(c); } return n; },
+              isNoop(op) { return op.length === 0 || (op.length === 1 && typeof op[0] === "number" && op[0] > 0); },
+              push(op, c) {
+                if (typeof c === "number" && c === 0) return;
+                if (typeof c === "string" && c === "") return;
+                const last = op[op.length - 1];
+                if (typeof c === "string") {
+                  if (typeof last === "string") { op[op.length - 1] = last + c; return; }
+                  if (typeof last === "number" && last < 0) {
+                    const prev = op[op.length - 2];
+                    if (typeof prev === "string") op[op.length - 2] = prev + c; else op.splice(op.length - 1, 0, c);
+                    return;
+                  }
+                  op.push(c); return;
                 }
-                const tok = m[0];
-                let cls = "";
-                if (m[1] !== undefined) cls = "tok-comment";
-                else if (m[2] !== undefined) cls = "tok-string";
-                else if (m[3] !== undefined) cls = "tok-comp";
-                else if (m[4] !== undefined) cls = "tok-tag";
-                else if (m[5] !== undefined) cls = "tok-kw";
-                else if (m[6] !== undefined) cls = "tok-type";
-                else if (m[7] !== undefined) cls = "tok-attr";
-                else if (m[8] !== undefined) cls = "tok-fn";
-                else if (m[9] !== undefined) cls = "tok-num";
-                else if (m[10] !== undefined) cls = "tok-op";
-                out += cls ? `<span class="${cls}">${escapeHtml(tok)}</span>` : escapeHtml(tok);
-                lastIdx = SYNTAX_TOKEN_RE.lastIndex;
+                if (typeof last === "number" && (last > 0) === (c > 0)) { op[op.length - 1] = last + c; return; }
+                op.push(c);
+              },
+              apply(op, doc) {
+                let out = "", i = 0;
+                for (const c of op) {
+                  if (typeof c === "string") out += c;
+                  else if (c > 0) { out += doc.slice(i, i + c); i += c; }
+                  else i -= c;
+                }
+                if (i !== doc.length) throw new Error("ot: base length mismatch");
+                return out;
+              },
+              compose(a, b) {
+                const r = []; let ia = 0, ib = 0; let x = a[ia++], y = b[ib++];
+                while (x !== undefined || y !== undefined) {
+                  if (typeof x === "number" && x < 0) { OT.push(r, x); x = a[ia++]; continue; }
+                  if (typeof y === "string") { OT.push(r, y); y = b[ib++]; continue; }
+                  if (x === undefined || y === undefined) throw new Error("ot: compose length");
+                  if (typeof x === "number" && x > 0 && typeof y === "number" && y > 0) {
+                    const m = Math.min(x, y); OT.push(r, m);
+                    if (x > y) { x -= y; y = b[ib++]; } else if (x === y) { x = a[ia++]; y = b[ib++]; } else { y -= x; x = a[ia++]; }
+                  } else if (typeof x === "number" && x > 0 && typeof y === "number" && y < 0) {
+                    const m = Math.min(x, -y); OT.push(r, -m);
+                    if (x > -y) { x += y; y = b[ib++]; } else if (x === -y) { x = a[ia++]; y = b[ib++]; } else { y += x; x = a[ia++]; }
+                  } else if (typeof x === "string" && typeof y === "number" && y > 0) {
+                    if (x.length > y) { OT.push(r, x.slice(0, y)); x = x.slice(y); y = b[ib++]; }
+                    else if (x.length === y) { OT.push(r, x); x = a[ia++]; y = b[ib++]; }
+                    else { OT.push(r, x); y -= x.length; x = a[ia++]; }
+                  } else if (typeof x === "string" && typeof y === "number" && y < 0) {
+                    if (x.length > -y) { x = x.slice(-y); y = b[ib++]; }
+                    else if (x.length === -y) { x = a[ia++]; y = b[ib++]; }
+                    else { y += x.length; x = a[ia++]; }
+                  } else throw new Error("ot: compose");
+                }
+                return r;
+              },
+              // transform(a, b) -> [a', b']; a's inserts win ties (client op first, host op second — same as the host).
+              transform(a, b) {
+                const a1 = [], b1 = []; let ia = 0, ib = 0; let x = a[ia++], y = b[ib++];
+                while (x !== undefined || y !== undefined) {
+                  if (typeof x === "string") { OT.push(a1, x); OT.push(b1, x.length); x = a[ia++]; continue; }
+                  if (typeof y === "string") { OT.push(a1, y.length); OT.push(b1, y); y = b[ib++]; continue; }
+                  if (x === undefined || y === undefined) throw new Error("ot: transform length");
+                  if (x > 0 && y > 0) {
+                    const m = Math.min(x, y); OT.push(a1, m); OT.push(b1, m);
+                    if (x > y) { x -= y; y = b[ib++]; } else if (x === y) { x = a[ia++]; y = b[ib++]; } else { y -= x; x = a[ia++]; }
+                  } else if (x < 0 && y < 0) {
+                    if (-x > -y) { x -= y; y = b[ib++]; } else if (x === y) { x = a[ia++]; y = b[ib++]; } else { y -= x; x = a[ia++]; }
+                  } else if (x < 0 && y > 0) {
+                    const m = Math.min(-x, y); OT.push(a1, -m);
+                    if (-x > y) { x += y; y = b[ib++]; } else if (-x === y) { x = a[ia++]; y = b[ib++]; } else { y += x; x = a[ia++]; }
+                  } else {
+                    const m = Math.min(x, -y); OT.push(b1, -m);
+                    if (x > -y) { x += y; y = b[ib++]; } else if (x === -y) { x = a[ia++]; y = b[ib++]; } else { y += x; x = a[ia++]; }
+                  }
+                }
+                return [a1, b1];
+              },
+              // Single splice old -> new that never splits a surrogate pair.
+              fromDiff(oldText, newText) {
+                let p = 0; const maxP = Math.min(oldText.length, newText.length);
+                while (p < maxP && oldText.charCodeAt(p) === newText.charCodeAt(p)) p++;
+                if (p > 0) { const c = oldText.charCodeAt(p - 1); if (c >= 0xD800 && c <= 0xDBFF) p--; }
+                let q = 0; const maxQ = Math.min(oldText.length, newText.length) - p;
+                while (q < maxQ && oldText.charCodeAt(oldText.length - 1 - q) === newText.charCodeAt(newText.length - 1 - q)) q++;
+                if (q > 0) { const c = oldText.charCodeAt(oldText.length - q); if (c >= 0xDC00 && c <= 0xDFFF) q--; }
+                const op = [];
+                OT.push(op, p);
+                OT.push(op, newText.slice(p, newText.length - q));
+                OT.push(op, -(oldText.length - p - q));
+                OT.push(op, q);
+                return op;
+              },
+              // Caret mapping: text inserted exactly at the caret stays after it.
+              transformIndex(op, index) {
+                let pos = 0, out = index;
+                for (const c of op) {
+                  if (pos > index) break;
+                  if (typeof c === "string") { if (pos < index) out += c.length; }
+                  else if (c > 0) pos += c;
+                  else { if (pos < index) out -= Math.min(-c, index - pos); pos -= c; }
+                }
+                return Math.max(0, out);
               }
-              if (lastIdx < text.length) {
-                out += escapeHtml(text.slice(lastIdx));
+            };
+
+            // Per-file client state (ot.js Client): one op in flight, later edits composed into `buffer`.
+            const otFiles = {};
+            function newOpId() { return userId + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+            function setSyncLabel() {
+              const el = document.getElementById("syncStateLabel");
+              if (!el) return;
+              const st = otFiles[activeFile];
+              if (!activeFile || !st) { el.textContent = ""; return; }
+              el.textContent = st.resyncing ? "Reloading…" : (st.outstanding ? "Saving…" : "Saved ✓");
+            }
+            function otState(path, content, revision) {
+              otFiles[path] = { revision, shadow: content, outstanding: null, outstandingId: null, buffer: null, resyncing: false, queue: [] };
+              return otFiles[path];
+            }
+            function sendOperation(path, st) {
+              const payload = { type: "op", path, baseRevision: st.revision, op: st.outstanding, opId: st.outstandingId, userId, displayName, color: myColor };
+              if (ws && ws.readyState === 1) { ws.send(JSON.stringify(payload)); return; }
+              fetch(apiUrl("/api/collab/op"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+                .then(r => r.json()).then(handleOTReply).catch(() => {});
+            }
+            function submitLocalText(path, text) {
+              const st = otFiles[path];
+              if (!st || st.resyncing || text === st.shadow) return;
+              const op = OT.fromDiff(st.shadow, text);
+              st.shadow = text;
+              if (OT.isNoop(op)) return;
+              if (!st.outstanding) {
+                st.outstanding = op; st.outstandingId = newOpId(); sendOperation(path, st);
+              } else {
+                st.buffer = st.buffer ? OT.compose(st.buffer, op) : op;
               }
-              if (text.endsWith("\n")) out += " ";
-              return out;
+              setSyncLabel();
+            }
+            function handleOTReply(reply) {
+              if (!reply) return;
+              if (reply.ok === false || reply.type === "opError") { handleOTError(reply); return; }
+              for (const c of (reply.commits || [])) handleCommit(c);
+            }
+            function handleOTError(msg) {
+              const st = otFiles[msg.path];
+              if (msg.content != null && msg.revision != null) applySnapshot(msg.path, msg.content, msg.revision);
+              else if (st) resyncFile(msg.path);
+            }
+            function handleCommit(msg) {
+              const path = msg.path;
+              const st = otFiles[path];
+              if (!st) { if (!cachedFiles.some(f => f.relativePath === path)) syncState(); return; }
+              if (st.resyncing) { st.queue.push(msg); return; }
+              if (msg.revision <= st.revision) return;
+              if (msg.revision !== st.revision + 1) { resyncFile(path); return; }
+              if (msg.opId && msg.opId === st.outstandingId) {
+                st.revision = msg.revision;
+                st.outstanding = st.buffer; st.buffer = null;
+                st.outstandingId = st.outstanding ? newOpId() : null;
+                if (st.outstanding) sendOperation(path, st);
+                setSyncLabel();
+                return;
+              }
+              try {
+                let remote = msg.op;
+                if (st.outstanding) { const t = OT.transform(st.outstanding, remote); st.outstanding = t[0]; remote = t[1]; }
+                if (st.buffer) { const t = OT.transform(st.buffer, remote); st.buffer = t[0]; remote = t[1]; }
+                const before = st.shadow;
+                st.shadow = OT.apply(remote, before);
+                st.revision = msg.revision;
+                if (!st.outstanding && msg.length != null && msg.length !== st.shadow.length) { resyncFile(path); return; }
+                if (path === activeFile) applyRemoteOperation(document.getElementById("codeArea"), remote, before, st.shadow);
+              } catch (e) { resyncFile(path); }
+            }
+            function resyncFile(path) {
+              const st = otFiles[path];
+              if (st && st.resyncing) return;
+              if (st) { st.resyncing = true; st.queue = []; }
+              setSyncLabel();
+              fetch(apiUrl("/api/collab/file?path=" + encodeURIComponent(path))).then(r => r.json())
+                .then(d => applySnapshot(path, d.content || "", d.revision || 1))
+                .catch(() => { if (otFiles[path]) otFiles[path].resyncing = false; setSyncLabel(); });
+            }
+            function applySnapshot(path, content, revision) {
+              const old = otFiles[path];
+              const queue = old ? old.queue : [];
+              const before = old ? old.shadow : null;
+              const st = otState(path, content, revision);
+              if (path === activeFile) {
+                const area = document.getElementById("codeArea");
+                if (before !== null && area.value === before) applyRemoteOperation(area, OT.fromDiff(before, content), before, content);
+                else { area.value = content; refreshEditorView(true); }
+              }
+              queue.sort((a, b) => a.revision - b.revision).forEach(handleCommit);
+              setSyncLabel();
+              if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "opSync", path, since: st.revision }));
+            }
+            function reloadActiveFile() { if (activeFile) resyncFile(activeFile); }
+            setInterval(() => {
+              // Without a WebSocket (cloud relay) commits are pulled for every file we track.
+              if (ws && ws.readyState === 1) return;
+              for (const path of Object.keys(otFiles)) {
+                const st = otFiles[path];
+                if (st.resyncing) continue;
+                fetch(apiUrl("/api/collab/ops?path=" + encodeURIComponent(path) + "&since=" + st.revision))
+                  .then(r => r.json()).then(handleOTReply).catch(() => {});
+              }
+            }, 700);
+
+            // ---- Highlighter: one block per line so line N of the overlay, the gutter and the textarea always match.
+            const SYNTAX_TOKEN_RE = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(<\/?[A-Z][A-Za-z0-9_.]*)|(<\/?[a-z][A-Za-z0-9_-]*|\/?>)|\b(import|export|from|default|const|let|var|function|return|async|await|if|else|for|while|do|switch|case|break|continue|try|catch|finally|throw|new|typeof|instanceof|in|of|interface|type|class|extends|implements|struct|enum|protocol|extension|func|def|pub|fn|impl|use|mod|match|where|guard|defer|init|self|super|this|true|false|null|undefined|nil|void)\b|\b(useState|useEffect|useMemo|useCallback|useRef|useContext|React|String|Int|Double|Float|Bool|Array|Dictionary|Set|Promise|Record|Partial|Optional|Any|Error|URL|Data|Date|View|State|Published|ObservedObject|StateObject)\b|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*=)|\b([a-zA-Z_$][a-zA-Z0-9_$]*)(?=\s*\()|\b(0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b|(=>|===|!==|==|!=|<=|>=|&&|\|\||\?\?)/g;
+            const TOKEN_CLASSES = [null, "tok-comment", "tok-string", "tok-comp", "tok-tag", "tok-kw", "tok-type", "tok-attr", "tok-fn", "tok-num", "tok-op"];
+            const HIGHLIGHT_LIMIT = 400000;
+
+            function highlightLines(rawCode) {
+              const text = String(rawCode || "");
+              const lines = [];
+              let current = "";
+              const emit = (segment, cls) => {
+                const parts = segment.split("\n");
+                for (let i = 0; i < parts.length; i++) {
+                  if (i > 0) { lines.push(current); current = ""; }
+                  if (parts[i]) current += cls ? `<span class="${cls}">${escapeHtml(parts[i])}</span>` : escapeHtml(parts[i]);
+                }
+              };
+              if (text.length > HIGHLIGHT_LIMIT) {
+                emit(text, null);
+              } else {
+                let lastIdx = 0, m;
+                SYNTAX_TOKEN_RE.lastIndex = 0;
+                while ((m = SYNTAX_TOKEN_RE.exec(text)) !== null) {
+                  if (m[0] === "") { SYNTAX_TOKEN_RE.lastIndex++; continue; }
+                  if (m.index > lastIdx) emit(text.slice(lastIdx, m.index), null);
+                  let cls = null;
+                  for (let g = 1; g < TOKEN_CLASSES.length; g++) { if (m[g] !== undefined) { cls = TOKEN_CLASSES[g]; break; } }
+                  emit(m[0], cls);
+                  lastIdx = SYNTAX_TOKEN_RE.lastIndex;
+                }
+                if (lastIdx < text.length) emit(text.slice(lastIdx), null);
+              }
+              lines.push(current);
+              return lines;
             }
 
-            function updateSyntaxAndGutter() {
+            let lastRenderedText = null;
+            let lineTops = [];      // px offset of each line inside the code area (index 0 = line 1)
+            let lineHeights = [];
+            const LINE_H = 20, TOP_PAD = 14;
+
+            function refreshEditorView(force) {
               const area = document.getElementById("codeArea");
               const hl = document.getElementById("codeHighlightContent");
-              const gutter = document.getElementById("lineGutter");
-              if (!area || !hl || !gutter) return;
+              if (!area || !hl) return;
               const val = area.value || "";
-              hl.innerHTML = highlightCode(val);
+              if (force || val !== lastRenderedText) {
+                lastRenderedText = val;
+                const lines = highlightLines(val);
+                hl.innerHTML = lines.map(l => `<span class="hl-line">${l || " "}</span>`).join("");
+                measureLines(val, lines.length);
+              }
+              renderGutter();
+              renderInEditorCollaboratorBands();
+              syncEditorScroll();
+            }
+            // Fallback fonts (Thai, emoji, CJK) make some lines taller than the nominal 20px. The textarea and the
+            // per-line overlay grow the same way, so the gutter and peer bands follow the measured overlay lines.
+            function measureLines(val, count) {
+              lineTops = new Array(count); lineHeights = new Array(count);
+              const needsMeasure = count <= 20000 && /[^\u0000-ɏ -⁯]/.test(val);
+              if (!needsMeasure) {
+                for (let i = 0; i < count; i++) { lineTops[i] = i * LINE_H; lineHeights[i] = LINE_H; }
+                return;
+              }
+              const nodes = document.getElementById("codeHighlightContent").children;
+              const base = nodes.length ? nodes[0].offsetTop : 0;
+              for (let i = 0; i < count; i++) {
+                const n = nodes[i];
+                lineTops[i] = n ? n.offsetTop - base : i * LINE_H;
+                lineHeights[i] = n ? Math.max(LINE_H, n.offsetHeight) : LINE_H;
+              }
+            }
+            function lineTop(ln) { const i = Math.max(1, ln) - 1; return i < lineTops.length ? lineTops[i] : i * LINE_H; }
+            function lineSpan(startLn, endLn) {
+              const last = Math.min(Math.max(startLn, endLn), Math.max(1, lineTops.length));
+              return Math.max(LINE_H, lineTop(last) + (lineHeights[last - 1] || LINE_H) - lineTop(startLn));
+            }
 
-              const lineCount = Math.max(1, val.split("\n").length);
+            let lastGutterKey = "";
+            function renderGutter() {
+              const inner = document.getElementById("gutterInner");
+              if (!inner) return;
               const peerLines = {};
               for (const p of (cachedPeers || [])) {
-                if (p.cursor && p.cursor.filePath === activeFile && p.cursor.line) {
+                if ((p.userId || p.id) !== userId && p.cursor && p.cursor.filePath === activeFile && p.cursor.line) {
                   peerLines[p.cursor.line] = p.color || "#3b82f6";
                 }
               }
-              const gHtml = [];
-              for (let i = 1; i <= lineCount; i++) {
+              const count = Math.max(1, lineTops.length);
+              const key = count + "|" + lineHeights.join(",") + "|" + JSON.stringify(peerLines);
+              if (key === lastGutterKey) return;
+              lastGutterKey = key;
+              const out = [];
+              for (let i = 1; i <= count; i++) {
                 const dotCol = peerLines[i];
-                const dot = dotCol ? `<span style="width:5px;height:5px;border-radius:50%;background:${escapeHtml(dotCol)};display:inline-block"></span>` : "";
-                gHtml.push(`<div class="gutter-line">${dot}<span>${i}</span></div>`);
+                const dot = dotCol ? `<span style="width:5px;height:5px;margin-top:7px;border-radius:50%;background:${escapeHtml(dotCol)};display:inline-block"></span>` : "";
+                const h = lineHeights[i - 1] || LINE_H;
+                out.push(`<div class="gutter-line"${h !== LINE_H ? ` style="height:${h}px"` : ""}>${dot}<span>${i}</span></div>`);
               }
-              gutter.innerHTML = gHtml.join("");
-              renderInEditorCollaboratorBands();
+              inner.innerHTML = out.join("");
             }
 
             function renderInEditorCollaboratorBands() {
               const overlay = document.getElementById("editorCollabOverlay");
               if (!overlay) return;
-              const lineH = 20;
-              const topPad = 14;
               const bands = [];
-
-              const allActive = (cachedPeers || []).filter(p => p.cursor && p.cursor.filePath === activeFile);
+              const allActive = (cachedPeers || []).filter(p => p.cursor && p.cursor.filePath === activeFile && (p.userId || p.id) !== userId);
               for (const p of allActive) {
                 const pid = p.userId || p.id;
                 const isAI = pid === AI_USER_ID || p.role === "AI Agent";
                 const c = p.cursor;
                 const startLn = Math.max(1, c.line || 1);
                 const endLn = Math.max(startLn, c.endLine || startLn);
-                const topPx = topPad + (startLn - 1) * lineH;
-                const heightPx = Math.max(lineH, (endLn - startLn + 1) * lineH);
+                const topPx = TOP_PAD + lineTop(startLn);
+                const heightPx = lineSpan(startLn, endLn);
                 const col = escapeHtml(p.color || "#64748B");
-                const bgAlpha = "18";
                 const statusSuffix = isAI
                   ? (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : (p.aiStatusText ? ` · ${p.aiStatusText}` : ` · Ln ${startLn}`))
-                  : (pid === userId ? " (You)" : (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : ` · Ln ${startLn}`));
-                bands.push(`<div class="collab-line-band" style="top:${topPx}px;height:${heightPx}px;background:${col}${bgAlpha};border-left-color:${col}">
+                  : (c.isTyping ? ` · กำลังแก้ Ln ${startLn}` : ` · Ln ${startLn}`);
+                bands.push(`<div class="collab-line-band" style="top:${topPx}px;height:${heightPx}px;background:${col}18;border-left-color:${col}">
                   <div class="collab-line-tag" style="background:rgba(18,20,24,0.94);border:1px solid rgba(255,255,255,0.14)">● ${escapeHtml(p.displayName)}${escapeHtml(statusSuffix)}</div>
                 </div>`);
               }
               overlay.innerHTML = bands.join("");
             }
 
+            // Transforms instead of scrollTop on overflow:hidden layers: those clamp at their own (shorter) scroll
+            // range, which made the numbers and colours drift from the text near the end of long files.
             function syncEditorScroll() {
               const area = document.getElementById("codeArea");
-              const backdrop = document.getElementById("codeBackdrop");
-              const gutter = document.getElementById("lineGutter");
-              if (!area || !backdrop || !gutter) return;
-              backdrop.scrollTop = area.scrollTop;
-              backdrop.scrollLeft = area.scrollLeft;
-              gutter.scrollTop = area.scrollTop;
+              if (!area) return;
+              const x = area.scrollLeft, y = area.scrollTop;
+              document.getElementById("codeHighlight").style.transform = `translate(${-x}px, ${-y}px)`;
+              document.getElementById("editorCollabOverlay").style.transform = `translateY(${-y}px)`;
+              document.getElementById("gutterInner").style.transform = `translateY(${-y}px)`;
             }
 
             function scrollToLine(lineNum) {
               const area = document.getElementById("codeArea");
               if (!area) return;
-              const lineH = 20;
-              const targetY = Math.max(0, (Math.max(1, lineNum) - 1) * lineH - (area.clientHeight * 0.35));
+              const targetY = Math.max(0, lineTop(lineNum) - (area.clientHeight * 0.35));
               area.scrollTo({ top: targetY, behavior: "smooth" });
-              setTimeout(syncEditorScroll, 60);
             }
 
             function computeCursorPos() {
@@ -5523,25 +6520,24 @@ final class CollaborationService: ObservableObject {
               return { filePath: activeFile, line, column, endLine, endColumn, isTyping };
             }
 
-            function applyRemoteText(area, nextValue) {
-              if (area.value === nextValue) return;
-              const oldVal = area.value;
-              const selStart = area.selectionStart || 0;
-              const selEnd = area.selectionEnd || 0;
-              const scrollTop = area.scrollTop;
-              let prefixLen = 0;
-              const maxPrefix = Math.min(oldVal.length, nextValue.length, selStart);
-              while (prefixLen < maxPrefix && oldVal.charCodeAt(prefixLen) === nextValue.charCodeAt(prefixLen)) {
-                prefixLen++;
+            // Applies a collaborator's (already transformed) operation to the textarea: the caret and selection
+            // are mapped through it and the scroll position is kept.
+            function applyRemoteOperation(area, op, before, after) {
+              if (!area) return;
+              if (area.value !== before) {
+                // Unsent keystrokes: flush them first so nothing typed is lost, then rebase.
+                submitLocalText(activeFile, area.value);
+                const st = otFiles[activeFile];
+                if (st) { area.value = st.shadow; refreshEditorView(); }
+                return;
               }
-              const delta = nextValue.length - oldVal.length;
-              const newStart = selStart <= prefixLen ? selStart : Math.max(prefixLen, Math.min(nextValue.length, selStart + delta));
-              const newEnd = selEnd <= prefixLen ? selEnd : Math.max(newStart, Math.min(nextValue.length, selEnd + delta));
-              area.value = nextValue;
-              area.setSelectionRange(newStart, newEnd);
-              area.scrollTop = scrollTop;
-              updateSyntaxAndGutter();
-              syncEditorScroll();
+              const focused = document.activeElement === area;
+              const selStart = area.selectionStart || 0, selEnd = area.selectionEnd || 0, dir = area.selectionDirection;
+              const scrollTop = area.scrollTop, scrollLeft = area.scrollLeft;
+              area.value = after;
+              if (focused) area.setSelectionRange(OT.transformIndex(op, selStart), OT.transformIndex(op, selEnd), dir || "none");
+              area.scrollTop = scrollTop; area.scrollLeft = scrollLeft;
+              refreshEditorView();
             }
 
             function toggleFollowPeer(pid, ev) {
@@ -5606,8 +6602,15 @@ final class CollaborationService: ObservableObject {
                     userId,
                     displayName,
                     color: myColor,
-                    role: "Web"
+                    role: "Web",
+                    caps: ["ot1"]
                   }));
+                  // Catch up on commits missed while disconnected, then resend anything still unacknowledged.
+                  for (const path of Object.keys(otFiles)) {
+                    const st = otFiles[path];
+                    ws.send(JSON.stringify({ type: "opSync", path, since: st.revision }));
+                    if (st.outstanding) sendOperation(path, st);
+                  }
                   sendPresenceWS();
                 };
                 ws.onmessage = (ev) => {
@@ -5642,11 +6645,11 @@ final class CollaborationService: ObservableObject {
                       renderPeersAndCursors();
                       renderFileTree();
                       applyWebFollowIfNeeded(false);
+                    } else if (msg.type === "op" && msg.path) {
+                      handleCommit(msg);
+                    } else if (msg.type === "opError" && msg.path) {
+                      handleOTError(msg);
                     } else if (msg.type === "fileBuffer" && msg.path) {
-                      fileRevisions[msg.path] = msg.revision || 1;
-                      if (msg.path === activeFile && (msg.authorId || msg.senderId) !== userId && !isTyping && msg.content != null) {
-                        applyRemoteText(document.getElementById("codeArea"), msg.content);
-                      }
                       if (!cachedFiles.some(f => f.relativePath === msg.path)) syncState();
                     } else if (msg.type === "chat" && msg.message) {
                       if (!cachedChats.some(c => c.id === msg.id)) {
@@ -5661,9 +6664,8 @@ final class CollaborationService: ObservableObject {
                 ws.onclose = () => {
                   wsFailCount += 1;
                   document.getElementById("wsStatusBadge").textContent = BASE_PATH ? "CLOUD RELAY LIVE" : "LIVE SYNC";
-                  if (wsFailCount < 3) {
-                    setTimeout(connectWS, 3500);
-                  }
+                  // Keep retrying (backing off); HTTP polling carries edits meanwhile.
+                  setTimeout(connectWS, Math.min(30000, 1500 * Math.pow(2, Math.min(wsFailCount, 5))));
                 };
               } catch (e) {}
             }
@@ -5741,70 +6743,122 @@ final class CollaborationService: ObservableObject {
             }
 
             async function openFile(path, jumpLine) {
+              const area = document.getElementById("codeArea");
+              if (activeFile && otFiles[activeFile] && area.value !== otFiles[activeFile].shadow) submitLocalText(activeFile, area.value);
               activeFile = path;
               const shortName = path.split("/").pop();
               document.getElementById("activeFileIcon").innerHTML = getFileIconSVG(shortName);
               document.getElementById("activeFileName").textContent = path;
               renderFileTree();
-              const res = await fetch(apiUrl("/api/collab/file?path=" + encodeURIComponent(path)));
-              const d = await res.json();
-              fileRevisions[path] = d.revision || 1;
-              const area = document.getElementById("codeArea");
-              area.value = d.content || "";
-              updateSyntaxAndGutter();
-              syncEditorScroll();
-              if (jumpLine && jumpLine > 1) {
-                scrollToLine(jumpLine);
+              let st = otFiles[path];
+              if (!st) {
+                try {
+                  const res = await fetch(apiUrl("/api/collab/file?path=" + encodeURIComponent(path)));
+                  const d = await res.json();
+                  if (activeFile !== path) return;
+                  st = otFiles[path] || otState(path, d.content || "", d.revision || 1);
+                  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "opSync", path, since: st.revision }));
+                } catch (e) { return; }
               }
+              area.value = st.shadow;
+              area.scrollTop = 0; area.scrollLeft = 0;
+              refreshEditorView(true);
+              setSyncLabel();
+              if (jumpLine && jumpLine > 1) scrollToLine(jumpLine);
               sendPresenceWS();
             }
 
-            async function pushEdit() {
-              if (!activeFile) return;
-              const targetFile = activeFile;
-              const area = document.getElementById("codeArea");
-              const content = area.value;
-              const baseRevision = fileRevisions[targetFile] || 1;
-              if (ws && ws.readyState === 1) {
-                ws.send(JSON.stringify({
-                  type: "edit",
-                  userId,
-                  displayName,
-                  path: targetFile,
-                  content,
-                  baseRevision
-                }));
-              }
-              const res = await fetch(apiUrl("/api/collab/edit"), {
+            async function postFsEvent(op, path, content) {
+              await fetch(apiUrl("/api/collab/fs-event"), {
                 method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ path: targetFile, content, baseRevision, userId, displayName })
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ op, path, content, userId, displayName })
               });
-              try {
-                const resp = await res.json();
-                if (resp.revision) fileRevisions[targetFile] = resp.revision;
-                if (resp.merged && resp.content != null && activeFile === targetFile && !isTyping) {
-                  applyRemoteText(area, resp.content);
-                }
-              } catch (e) {}
+            }
+            function cleanNewPath(raw) {
+              return String(raw || "").replace(/\\/g, "/").split("/").filter(p => p && p !== "." && p !== "..").join("/");
+            }
+            function currentFolderPrefix() {
+              if (!activeFile || !activeFile.includes("/")) return "";
+              return activeFile.slice(0, activeFile.lastIndexOf("/") + 1);
+            }
+            async function promptNewFile() {
+              const path = cleanNewPath(prompt("New file (path inside the workspace):", currentFolderPrefix()));
+              if (!path) return;
+              if (cachedFiles.some(f => f.relativePath === path)) { openFile(path); return; }
+              await postFsEvent("write", path, "");
+              await syncState();
+              openFile(path);
+            }
+            async function promptNewFolder() {
+              const path = cleanNewPath(prompt("New folder (path inside the workspace):", currentFolderPrefix()));
+              if (!path) return;
+              await postFsEvent("mkdir", path);
+              await syncState();
             }
 
             const codeAreaEl = document.getElementById("codeArea");
-            codeAreaEl.addEventListener("scroll", syncEditorScroll);
-            codeAreaEl.addEventListener("input", () => {
+            let typingTimer = null;
+            function onLocalInput() {
+              if (!activeFile) return;
               isTyping = true;
-              updateSyntaxAndGutter();
-              syncEditorScroll();
+              submitLocalText(activeFile, codeAreaEl.value);
+              refreshEditorView();
               sendPresenceWS();
-              clearTimeout(window._editTimer);
-              window._editTimer = setTimeout(() => { isTyping = false; pushEdit(); sendPresenceWS(); }, 180);
+              clearTimeout(typingTimer);
+              typingTimer = setTimeout(() => { isTyping = false; sendPresenceWS(); }, 900);
+            }
+            function insertAtSelection(text) {
+              // execCommand keeps the browser's undo stack; setRangeText is the fallback.
+              if (!(document.execCommand && document.execCommand("insertText", false, text))) {
+                codeAreaEl.setRangeText(text, codeAreaEl.selectionStart, codeAreaEl.selectionEnd, "end");
+                onLocalInput();
+              }
+            }
+            const INDENT = "  ";
+            codeAreaEl.addEventListener("keydown", (e) => {
+              if (e.isComposing) return;
+              const v = codeAreaEl.value, s0 = codeAreaEl.selectionStart, s1 = codeAreaEl.selectionEnd;
+              if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); setSyncLabel(); return; }
+              if (e.key === "Tab") {
+                e.preventDefault();
+                const lineStart = v.lastIndexOf("\n", s0 - 1) + 1;
+                if (!e.shiftKey && s0 === s1) { insertAtSelection(INDENT); return; }
+                const blockEnd = s1 > s0 && v[s1 - 1] === "\n" ? s1 - 1 : s1;
+                const lines = v.slice(lineStart, blockEnd).split("\n");
+                let removedFirst = 0, delta = 0;
+                const changed = lines.map((ln, i) => {
+                  if (e.shiftKey) {
+                    const cut = ln.startsWith(INDENT) ? INDENT.length : (ln.startsWith("\t") || ln.startsWith(" ") ? 1 : 0);
+                    if (i === 0) removedFirst = cut;
+                    delta -= cut;
+                    return ln.slice(cut);
+                  }
+                  delta += INDENT.length;
+                  return INDENT + ln;
+                }).join("\n");
+                codeAreaEl.setSelectionRange(lineStart, blockEnd);
+                insertAtSelection(changed);
+                const firstShift = e.shiftKey ? -Math.min(removedFirst, s0 - lineStart) : INDENT.length;
+                codeAreaEl.setSelectionRange(Math.max(lineStart, s0 + firstShift), Math.max(lineStart, s1 + delta));
+                return;
+              }
+              if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+                const lineStart = v.lastIndexOf("\n", s0 - 1) + 1;
+                const indent = (v.slice(lineStart, s0).match(/^[ \t]*/) || [""])[0];
+                const prevChar = v.slice(lineStart, s0).trimEnd().slice(-1);
+                const extra = "{[(:".includes(prevChar) && prevChar !== "" ? INDENT : "";
+                e.preventDefault();
+                insertAtSelection("\n" + indent + extra);
+              }
             });
+            codeAreaEl.addEventListener("scroll", syncEditorScroll);
+            codeAreaEl.addEventListener("input", onLocalInput);
+            codeAreaEl.addEventListener("compositionend", onLocalInput);
             ["keyup", "mouseup", "click", "select"].forEach(evName => {
-              codeAreaEl.addEventListener(evName, () => {
-                sendPresenceWS();
-                renderInEditorCollaboratorBands();
-              });
+              codeAreaEl.addEventListener(evName, () => sendPresenceWS());
             });
+            window.addEventListener("resize", () => refreshEditorView(true));
 
             function toggleFolder(dir) {
               if (collapsedFolders.has(dir)) collapsedFolders.delete(dir);
@@ -5904,7 +6958,8 @@ final class CollaborationService: ObservableObject {
                 return `<span style="color:var(--secondary);font-weight:500">● ${escapeHtml(p.displayName)} (Ln ${p.cursor.line || 1})</span>`;
               }).join(" &nbsp; ");
 
-              updateSyntaxAndGutter();
+              renderGutter();
+              renderInEditorCollaboratorBands();
 
               const rect = document.getElementById("workspaceArea").getBoundingClientRect();
               const cursorsHtml = [];
@@ -6001,13 +7056,6 @@ final class CollaborationService: ObservableObject {
 
                 if (!activeFile && cachedFiles.length > 0) {
                   openFile(cachedFiles[0].relativePath);
-                } else if (activeFile && !isTyping && s.openBuffers && s.openBuffers[activeFile] != null) {
-                  const remoteRev = (s.fileRevisions && s.fileRevisions[activeFile]) || 1;
-                  const localRev = fileRevisions[activeFile] || 0;
-                  if (remoteRev >= localRev) {
-                    applyRemoteText(document.getElementById("codeArea"), s.openBuffers[activeFile]);
-                    fileRevisions[activeFile] = remoteRev;
-                  }
                 }
 
                 const tasks = JSON.parse(s.teamTasksJSON || "[]");

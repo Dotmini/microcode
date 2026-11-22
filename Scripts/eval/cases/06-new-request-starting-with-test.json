@@ -1,0 +1,24 @@
+{
+  "id": "06-new-request-starting-with-test",
+  "note": "'ทดสอบ เขียน …' starts with a nudge word but is a new request.",
+  "fixture": "fixtures/empty",
+  "history": [
+    {
+      "role": "user",
+      "content": "เขียน Arc อีก หลายๆ Use Case"
+    },
+    {
+      "role": "assistant",
+      "content": "เพิ่ม use_cases.ar แล้ว"
+    }
+  ],
+  "prompt": "ทดสอบ เขียน hello.py ที่พิมพ์ Hello MicroCode แล้วรันให้ดู",
+  "checks": {
+    "mustRunCommand": true,
+    "answerMustShowOutput": true,
+    "answerContainsAny": [
+      "Hello MicroCode"
+    ],
+    "maxInterventions": 4
+  }
+}

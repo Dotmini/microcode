@@ -6542,7 +6542,33 @@ final class AIClient: ObservableObject {
         return list
     }
 
-    private static func buildAiPassToolSystemInstruction(_ tools: [[String: Any]]) -> String {
+    /// A history/prompt entry for a text-only backend: structured tool turns (`_mc_structured_turn` JSON) become
+    /// readable `<tool_call>` / `<tool_response>` text instead of raw JSON.
+    static func textBridgeTurn(role: String, content: String, hasTools: Bool) -> (role: String, text: String) {
+        guard let structured = AIStructuredTurnCodec.decode(content) else {
+            let mappedRole = (role == "assistant" || role == "model") ? "assistant" : "user"
+            return (role: mappedRole, text: content)
+        }
+        switch structured {
+        case .assistantToolCalls(let text, let toolCalls):
+            let calls = toolCalls.map { tc -> (name: String, argumentsJSON: String) in
+                // isValidJSONObject first: JSONSerialization raises an ObjC exception (a crash) on invalid input.
+                let data = JSONSerialization.isValidJSONObject(tc.arguments)
+                    ? try? JSONSerialization.data(withJSONObject: tc.arguments, options: [.sortedKeys])
+                    : nil
+                return (name: tc.name, argumentsJSON: data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}")
+            }
+            return (role: "assistant", text: TextBridgeTranscript.toolCalls(text: text, calls: calls))
+        case .toolResults(let results, let directive):
+            var text = TextBridgeTranscript.toolResults(results.map { (name: $0.name, success: $0.success, output: $0.output) }, directive: directive)
+            if hasTools {
+                text += "\n\nNote: If another client-side IDE tool is needed, output `<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>` (no markdown code fences) and stop immediately after `</tool_call>`. Otherwise, write your final response based on the `<tool_response>` above."
+            }
+            return (role: "user", text: text)
+        }
+    }
+
+    private static func buildAiPassToolSystemInstruction(_ tools: [[String: Any]], maxDescriptionChars: Int = 180) -> String {
         var lines: [String] = [
             "## ⚡ MICROCODE MACOS IDE — CLIENT-SIDE XML TOOL BRIDGE (`<tool_call>`)",
             "IMPORTANT ARCHITECTURE NOTE:",
@@ -6566,7 +6592,7 @@ final class AIClient: ObservableObject {
             let fn = (tool["function"] as? [String: Any]) ?? tool
             guard let name = fn["name"] as? String else { continue }
             let rawDesc = (fn["description"] as? String) ?? ""
-            let shortDesc = rawDesc.count > 180 ? String(rawDesc.prefix(177)) + "..." : rawDesc
+            let shortDesc = rawDesc.count > maxDescriptionChars ? String(rawDesc.prefix(maxDescriptionChars - 3)) + "..." : rawDesc
             var paramSigParts: [String] = []
             if let params = fn["parameters"] as? [String: Any],
                let props = params["properties"] as? [String: [String: Any]] {
@@ -7493,53 +7519,21 @@ final class AIClient: ObservableObject {
         onToolCall: ((AIToolCall) -> Void)?
     ) async throws {
         let hasTools = tools != nil && !(tools?.isEmpty ?? true)
-        var systemParts: [String] = [
-            """
+        let intro = """
             You are MicroCode AI Assistant inside MicroCode macOS IDE, powered by Thai AI Gemini Enterprise (AiPASS.TH · Google Cloud Vertex AI Search).
             Respond accurately, concisely, and directly in the user's language (Thai or English).
             """
-        ]
-        if let sys = systemPrompt, !sys.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            systemParts.append(sys)
-        }
-        if let tools = tools, !tools.isEmpty {
-            systemParts.append(Self.buildAiPassToolSystemInstruction(tools))
-        }
-        let combinedSystem = systemParts.joined(separator: "\n\n")
+        // Vertex AI Search returns a canned refusal above ~14K of envelope: fit by priority (tools and workspace
+        // context first) instead of cutting the end off, which used to drop the whole tool list.
+        let combinedSystem = TextBridgeContextBudget.compose(
+            intro: intro,
+            systemPrompt: systemPrompt,
+            toolCatalog: (tools?.isEmpty ?? true) ? nil : Self.buildAiPassToolSystemInstruction(tools ?? [], maxDescriptionChars: 90),
+            limit: 14_000
+        )
 
         func decodeTurnContent(role: String, content: String) -> (role: String, text: String) {
-            if let structured = AIStructuredTurnCodec.decode(content) {
-                switch structured {
-                case .assistantToolCalls(let text, let toolCalls):
-                    var serialized = text
-                    for tc in toolCalls {
-                        let callObj: [String: Any] = ["name": tc.name, "arguments": tc.arguments]
-                        if let d = try? JSONSerialization.data(withJSONObject: callObj),
-                           let s = String(data: d, encoding: .utf8) {
-                            serialized += "\n<tool_call>\(s)</tool_call>"
-                        }
-                    }
-                    return (role: "assistant", text: serialized.trimmingCharacters(in: .whitespacesAndNewlines))
-                case .toolResults(let results, let directive):
-                    var resLines: [String] = []
-                    for r in results {
-                        let truncatedOutput = r.output.count > 24_000
-                            ? String(r.output.prefix(24_000)) + "\n...(truncated)"
-                            : r.output
-                        resLines.append("<tool_response name=\"\(r.name)\" status=\"\(r.success ? "ok" : "error")\">\n\(truncatedOutput)\n</tool_response>")
-                    }
-                    if !directive.isEmpty {
-                        resLines.append(directive)
-                    }
-                    if hasTools {
-                        resLines.append("Note: If another client-side IDE tool is needed, output `<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>` (no markdown code fences) and stop immediately after `</tool_call>`. Otherwise, write your final response based on the `<tool_response>` above.")
-                    }
-                    return (role: "user", text: resLines.joined(separator: "\n\n"))
-                }
-            } else {
-                let mappedRole = (role == "assistant" || role == "model") ? "assistant" : "user"
-                return (role: mappedRole, text: content)
-            }
+            Self.textBridgeTurn(role: role, content: content, hasTools: hasTools)
         }
 
         var rawTurns: [(role: String, text: String)] = []
@@ -7587,8 +7581,7 @@ final class AIClient: ObservableObject {
         var envelopeSections: [String] = []
         if !combinedSystem.isEmpty {
             // Keep Vertex AI Search query envelope within safe server limits so it never triggers canned refusal!
-            let safeSystem = combinedSystem.count > 14_000 ? String(combinedSystem.prefix(14_000)) : combinedSystem
-            envelopeSections.append("<microcode_ide_context>\n\(safeSystem)\n</microcode_ide_context>")
+            envelopeSections.append("<microcode_ide_context>\n\(combinedSystem)\n</microcode_ide_context>")
         }
         if !rawTurns.isEmpty {
             let historyTranscript = rawTurns.map { turn in
@@ -8283,10 +8276,15 @@ final class AIClient: ObservableObject {
         }
         if !conversationHistory.isEmpty {
             let recent = conversationHistory.suffix(12)
-            let formatted = recent.map { "[\($0.role.uppercased())]: \($0.content)" }.joined(separator: "\n\n")
+            let hasBridgeTools = !(tools?.isEmpty ?? true) && onToolCall != nil
+            let formatted = recent.map { entry -> String in
+                let turn = Self.textBridgeTurn(role: entry.role, content: entry.content, hasTools: hasBridgeTools)
+                return "[\(turn.role.uppercased())]: \(turn.text)"
+            }.joined(separator: "\n\n")
             blocks.append("<conversation_history>\n\(formatted)\n</conversation_history>")
         }
-        blocks.append(prompt)
+        // From the second tool iteration on, the prompt itself is a structured tool-results turn.
+        blocks.append(Self.textBridgeTurn(role: "user", content: prompt, hasTools: !(tools?.isEmpty ?? true) && onToolCall != nil).text)
         let fullPrompt = blocks.joined(separator: "\n\n")
 
         // The CLI is used here as a model backend (MicroCode executes tools itself, with its own approvals).

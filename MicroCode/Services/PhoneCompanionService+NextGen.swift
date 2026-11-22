@@ -1349,8 +1349,25 @@ extension PhoneCompanionService {
 
     func buildPWAServiceWorkerJS() -> Data {
         let js = """
+        const MC_SHELL_CACHE = 'mc-shell-v2';
         self.addEventListener('install', (e) => { self.skipWaiting(); });
         self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
+        self.addEventListener('fetch', (event) => {
+          const req = event.request;
+          if (req.method !== 'GET') return;
+          const u = new URL(req.url);
+          if (u.pathname === '/' || u.pathname === '/manifest.json' || u.pathname === '/apple-touch-icon.png' || u.pathname === '/api/icon/provider') {
+            event.respondWith(
+              fetch(req).then((resp) => {
+                if (resp && resp.status === 200) {
+                  const copy = resp.clone();
+                  caches.open(MC_SHELL_CACHE).then((c) => c.put(req, copy)).catch(() => {});
+                }
+                return resp;
+              }).catch(() => caches.match(req))
+            );
+          }
+        });
         self.addEventListener('notificationclick', (event) => {
           event.notification.close();
           event.waitUntil(

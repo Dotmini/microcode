@@ -52,7 +52,8 @@ Every contribution directly funds engineering time, Apple Developer infrastructu
   <a href="#operational-modes"><strong>Operational Modes</strong></a> ·
   <a href="#core-engineering-specifications"><strong>Features</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
-  <a href="#getting-started"><strong>Getting Started</strong></a>
+  <a href="#getting-started"><strong>Getting Started</strong></a> ·
+  <a href="docs/windows-port/README.md"><strong>Windows Port Spec</strong></a>
 </p>
 
 ---

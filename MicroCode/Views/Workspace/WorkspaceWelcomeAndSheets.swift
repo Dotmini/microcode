@@ -975,22 +975,24 @@ struct CommitSheet: View {
     }
 }
 
-// MARK: - New File Sheet
+// MARK: - New File Sheet (Theme & Workspace-Aware Monochrome IDE Surface)
 
 enum LanguageCategory: String, CaseIterable {
+    case recommended = "For Workspace"
     case popular = "Popular"
     case web = "Web"
     case systems = "Systems"
-    case data = "Data"
+    case data = "Data & Script"
     case other = "Other"
-    
-    var icon: String {
+
+    var shortLabel: String {
         switch self {
-        case .popular: return "star.fill"
-        case .web: return "globe"
-        case .systems: return "cpu"
-        case .data: return "chart.bar.doc.horizontal"
-        case .other: return "ellipsis.circle"
+        case .recommended: return "Workspace"
+        case .popular: return "Popular"
+        case .web: return "Web"
+        case .systems: return "Systems"
+        case .data: return "Script"
+        case .other: return "More"
         }
     }
 }
@@ -1002,411 +1004,791 @@ struct LanguageInfo: Identifiable {
     let ext: String
     let category: LanguageCategory
     let color: Color
+    var subtitle: String? = nil
 }
 
 struct NewFileSheet: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
-    
+
     @State private var filename: String = ""
     @State private var selectedLanguage: String = "swift"
     @State private var selectedCategory: LanguageCategory = .popular
+    @State private var searchQuery: String = ""
     @State private var saveLocation: SaveLocation = .workspaceRoot
-    
+    @State private var customDirectoryURL: URL? = nil
+    @State private var selectedSubfolderPath: String = ""
+
+    @State private var detectedWorkspaceLabel: String? = nil
+    @State private var recommendedLanguageIds: [String] = []
+    @State private var quickFolders: [String] = []
+
     enum SaveLocation: String, CaseIterable {
         case workspaceRoot = "Workspace Root"
         case currentFolder = "Current Folder"
         case custom = "Choose Location..."
-        
+
         var icon: String {
             switch self {
-            case .workspaceRoot: return "folder.badge.gearshape"
-            case .currentFolder: return "folder"
-            case .custom: return "folder.badge.questionmark"
+            case .workspaceRoot: return "folder"
+            case .currentFolder: return "folder.fill"
+            case .custom: return "folder.badge.plus"
             }
         }
     }
-    
+
     @State private var customLanguageName: String = ""
     @State private var customLanguageExt: String = ""
     @State private var showCustomInput: Bool = false
-    
+
     private let languages: [LanguageInfo] = [
-        // Popular
-        LanguageInfo(id: "swift", name: "Swift", icon: "swift", ext: "swift", category: .popular, color: .orange),
-        LanguageInfo(id: "python", name: "Python", icon: "text.word.spacing", ext: "py", category: .popular, color: Color(red: 0.2, green: 0.6, blue: 0.9)),
-        LanguageInfo(id: "javascript", name: "JavaScript", icon: "j.square.fill", ext: "js", category: .popular, color: .yellow),
-        LanguageInfo(id: "typescript", name: "TypeScript", icon: "t.square.fill", ext: "ts", category: .popular, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
-        LanguageInfo(id: "rust", name: "Rust", icon: "gearshape.2.fill", ext: "rs", category: .popular, color: Color(red: 0.85, green: 0.4, blue: 0.2)),
-        LanguageInfo(id: "go", name: "Go", icon: "g.square.fill", ext: "go", category: .popular, color: .cyan),
-        LanguageInfo(id: "java", name: "Java", icon: "cup.and.saucer.fill", ext: "java", category: .popular, color: Color(red: 0.9, green: 0.4, blue: 0.2)),
-        LanguageInfo(id: "kotlin", name: "Kotlin", icon: "k.square.fill", ext: "kt", category: .popular, color: Color(red: 0.5, green: 0.3, blue: 0.9)),
-        LanguageInfo(id: "csharp", name: "C#", icon: "number.square.fill", ext: "cs", category: .popular, color: Color(red: 0.4, green: 0.2, blue: 0.7)),
-        LanguageInfo(id: "dart", name: "Dart", icon: "d.square.fill", ext: "dart", category: .popular, color: Color(red: 0.0, green: 0.7, blue: 0.8)),
-        LanguageInfo(id: "ardium", name: "Ardium", icon: "a.square.fill", ext: "ar", category: .popular, color: Color(red: 0.9, green: 0.2, blue: 0.4)),
-        
+        // Game / Roblox Luau & Popular
+        LanguageInfo(id: "roblox-server", name: "Luau Server Script", icon: "chevron.left.forwardslash.chevron.right", ext: "server.luau", category: .popular, color: .secondary, subtitle: "Roblox Server"),
+        LanguageInfo(id: "roblox-local", name: "Luau LocalScript", icon: "chevron.left.forwardslash.chevron.right", ext: "client.luau", category: .popular, color: .secondary, subtitle: "Roblox Client"),
+        LanguageInfo(id: "roblox-module", name: "Luau ModuleScript", icon: "chevron.left.forwardslash.chevron.right", ext: "luau", category: .popular, color: .secondary, subtitle: "Roblox Module"),
+        LanguageInfo(id: "swift", name: "Swift", icon: "swift", ext: "swift", category: .popular, color: .secondary),
+        LanguageInfo(id: "python", name: "Python", icon: "text.word.spacing", ext: "py", category: .popular, color: .secondary),
+        LanguageInfo(id: "javascript", name: "JavaScript", icon: "j.square.fill", ext: "js", category: .popular, color: .secondary),
+        LanguageInfo(id: "typescript", name: "TypeScript", icon: "t.square.fill", ext: "ts", category: .popular, color: .secondary),
+        LanguageInfo(id: "rust", name: "Rust", icon: "gearshape.2.fill", ext: "rs", category: .popular, color: .secondary),
+        LanguageInfo(id: "go", name: "Go", icon: "g.square.fill", ext: "go", category: .popular, color: .secondary),
+        LanguageInfo(id: "java", name: "Java", icon: "cup.and.saucer.fill", ext: "java", category: .popular, color: .secondary),
+        LanguageInfo(id: "kotlin", name: "Kotlin", icon: "k.square.fill", ext: "kt", category: .popular, color: .secondary),
+        LanguageInfo(id: "csharp", name: "C#", icon: "number.square.fill", ext: "cs", category: .popular, color: .secondary),
+        LanguageInfo(id: "dart", name: "Dart", icon: "d.square.fill", ext: "dart", category: .popular, color: .secondary),
+        LanguageInfo(id: "ardium", name: "Ardium", icon: "a.square.fill", ext: "ar", category: .popular, color: .secondary),
+
         // Web
-        LanguageInfo(id: "html", name: "HTML", icon: "chevron.left.forwardslash.chevron.right", ext: "html", category: .web, color: .orange),
-        LanguageInfo(id: "css", name: "CSS", icon: "paintbrush.fill", ext: "css", category: .web, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
-        LanguageInfo(id: "jsx", name: "React JSX", icon: "atom", ext: "jsx", category: .web, color: .cyan),
-        LanguageInfo(id: "tsx", name: "React TSX", icon: "atom", ext: "tsx", category: .web, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
-        LanguageInfo(id: "vue", name: "Vue", icon: "v.square.fill", ext: "vue", category: .web, color: .green),
-        LanguageInfo(id: "svelte", name: "Svelte", icon: "s.square.fill", ext: "svelte", category: .web, color: Color(red: 1.0, green: 0.25, blue: 0.0)),
-        LanguageInfo(id: "php", name: "PHP", icon: "p.square.fill", ext: "php", category: .web, color: Color(red: 0.5, green: 0.4, blue: 0.7)),
-        LanguageInfo(id: "sass", name: "SASS/SCSS", icon: "paintbrush.pointed.fill", ext: "scss", category: .web, color: Color(red: 0.8, green: 0.3, blue: 0.5)),
-        LanguageInfo(id: "solidity", name: "Solidity", icon: "cube.fill", ext: "sol", category: .web, color: .gray),
-        
+        LanguageInfo(id: "html", name: "HTML", icon: "chevron.left.forwardslash.chevron.right", ext: "html", category: .web, color: .secondary),
+        LanguageInfo(id: "css", name: "CSS", icon: "paintbrush.fill", ext: "css", category: .web, color: .secondary),
+        LanguageInfo(id: "jsx", name: "React JSX", icon: "atom", ext: "jsx", category: .web, color: .secondary),
+        LanguageInfo(id: "tsx", name: "React TSX", icon: "atom", ext: "tsx", category: .web, color: .secondary),
+        LanguageInfo(id: "vue", name: "Vue", icon: "v.square.fill", ext: "vue", category: .web, color: .secondary),
+        LanguageInfo(id: "svelte", name: "Svelte", icon: "s.square.fill", ext: "svelte", category: .web, color: .secondary),
+        LanguageInfo(id: "php", name: "PHP", icon: "p.square.fill", ext: "php", category: .web, color: .secondary),
+        LanguageInfo(id: "sass", name: "SASS / SCSS", icon: "paintbrush.pointed.fill", ext: "scss", category: .web, color: .secondary),
+        LanguageInfo(id: "solidity", name: "Solidity", icon: "cube.fill", ext: "sol", category: .web, color: .secondary),
+
         // Systems
-        LanguageInfo(id: "c", name: "C", icon: "c.square.fill", ext: "c", category: .systems, color: .gray),
-        LanguageInfo(id: "cpp", name: "C++", icon: "plus.square.fill", ext: "cpp", category: .systems, color: Color(red: 0.2, green: 0.5, blue: 0.8)),
-        LanguageInfo(id: "objective-c", name: "Objective-C", icon: "m.square.fill", ext: "m", category: .systems, color: .blue),
-        LanguageInfo(id: "zig", name: "Zig", icon: "z.square.fill", ext: "zig", category: .systems, color: Color(red: 0.95, green: 0.7, blue: 0.0)),
-        LanguageInfo(id: "assembly", name: "Assembly", icon: "memorychip.fill", ext: "s", category: .systems, color: .gray),
-        LanguageInfo(id: "metal", name: "Metal", icon: "cube.transparent.fill", ext: "metal", category: .systems, color: .purple),
-        LanguageInfo(id: "vala", name: "Vala", icon: "v.circle.fill", ext: "vala", category: .systems, color: .purple),
-        LanguageInfo(id: "nim", name: "Nim", icon: "n.square.fill", ext: "nim", category: .systems, color: .yellow),
-        LanguageInfo(id: "haskell", name: "Haskell", icon: "h.square.fill", ext: "hs", category: .systems, color: Color(red: 0.4, green: 0.3, blue: 0.6)),
-        
+        LanguageInfo(id: "c", name: "C", icon: "c.square.fill", ext: "c", category: .systems, color: .secondary),
+        LanguageInfo(id: "cpp", name: "C++", icon: "plus.square.fill", ext: "cpp", category: .systems, color: .secondary),
+        LanguageInfo(id: "objective-c", name: "Objective-C", icon: "m.square.fill", ext: "m", category: .systems, color: .secondary),
+        LanguageInfo(id: "zig", name: "Zig", icon: "z.square.fill", ext: "zig", category: .systems, color: .secondary),
+        LanguageInfo(id: "assembly", name: "Assembly", icon: "memorychip.fill", ext: "s", category: .systems, color: .secondary),
+        LanguageInfo(id: "metal", name: "Metal", icon: "cube.transparent.fill", ext: "metal", category: .systems, color: .secondary),
+        LanguageInfo(id: "nim", name: "Nim", icon: "n.square.fill", ext: "nim", category: .systems, color: .secondary),
+        LanguageInfo(id: "haskell", name: "Haskell", icon: "h.square.fill", ext: "hs", category: .systems, color: .secondary),
+
         // Data & Scripting
-        LanguageInfo(id: "r", name: "R", icon: "r.square.fill", ext: "r", category: .data, color: Color(red: 0.2, green: 0.5, blue: 0.8)),
-        LanguageInfo(id: "julia", name: "Julia", icon: "j.circle.fill", ext: "jl", category: .data, color: Color(red: 0.6, green: 0.2, blue: 0.8)),
-        LanguageInfo(id: "lua", name: "Lua", icon: "moon.fill", ext: "lua", category: .data, color: Color(red: 0.0, green: 0.0, blue: 0.6)),
-        LanguageInfo(id: "ruby", name: "Ruby", icon: "diamond.fill", ext: "rb", category: .data, color: .red),
-        LanguageInfo(id: "perl", name: "Perl", icon: "p.circle.fill", ext: "pl", category: .data, color: Color(red: 0.2, green: 0.3, blue: 0.6)),
-        LanguageInfo(id: "elixir", name: "Elixir", icon: "drop.fill", ext: "ex", category: .data, color: Color(red: 0.4, green: 0.2, blue: 0.6)),
-        LanguageInfo(id: "sql", name: "SQL", icon: "cylinder.fill", ext: "sql", category: .data, color: Color(red: 0.2, green: 0.5, blue: 0.8)),
-        LanguageInfo(id: "json", name: "JSON", icon: "curlybraces", ext: "json", category: .data, color: .gray),
-        LanguageInfo(id: "yaml", name: "YAML", icon: "list.bullet.indent", ext: "yaml", category: .data, color: Color(red: 0.8, green: 0.2, blue: 0.2)),
-        LanguageInfo(id: "xml", name: "XML", icon: "chevron.left.forwardslash.chevron.right", ext: "xml", category: .data, color: .green),
-        LanguageInfo(id: "toml", name: "TOML", icon: "doc.plaintext.fill", ext: "toml", category: .data, color: .gray),
-        LanguageInfo(id: "graphql", name: "GraphQL", icon: "point.3.connected.trianglepath.dotted", ext: "graphql", category: .data, color: .pink),
-        LanguageInfo(id: "matlab", name: "MATLAB", icon: "function", ext: "m", category: .data, color: .orange),
-        LanguageInfo(id: "prolog", name: "Prolog", icon: "questionmark.square.fill", ext: "pl", category: .data, color: .orange),
-        
+        LanguageInfo(id: "luau", name: "Luau", icon: "moon.fill", ext: "luau", category: .data, color: .secondary),
+        LanguageInfo(id: "lua", name: "Lua", icon: "moon.fill", ext: "lua", category: .data, color: .secondary),
+        LanguageInfo(id: "r", name: "R", icon: "r.square.fill", ext: "r", category: .data, color: .secondary),
+        LanguageInfo(id: "julia", name: "Julia", icon: "j.circle.fill", ext: "jl", category: .data, color: .secondary),
+        LanguageInfo(id: "ruby", name: "Ruby", icon: "diamond.fill", ext: "rb", category: .data, color: .secondary),
+        LanguageInfo(id: "elixir", name: "Elixir", icon: "drop.fill", ext: "ex", category: .data, color: .secondary),
+        LanguageInfo(id: "sql", name: "SQL", icon: "cylinder.fill", ext: "sql", category: .data, color: .secondary),
+        LanguageInfo(id: "json", name: "JSON", icon: "curlybraces", ext: "json", category: .data, color: .secondary),
+        LanguageInfo(id: "yaml", name: "YAML", icon: "list.bullet.indent", ext: "yaml", category: .data, color: .secondary),
+        LanguageInfo(id: "xml", name: "XML", icon: "chevron.left.forwardslash.chevron.right", ext: "xml", category: .data, color: .secondary),
+        LanguageInfo(id: "toml", name: "TOML", icon: "doc.plaintext.fill", ext: "toml", category: .data, color: .secondary),
+        LanguageInfo(id: "graphql", name: "GraphQL", icon: "point.3.connected.trianglepath.dotted", ext: "graphql", category: .data, color: .secondary),
+
         // Other
-        LanguageInfo(id: "scala", name: "Scala", icon: "s.circle.fill", ext: "scala", category: .other, color: .red),
-        LanguageInfo(id: "fsharp", name: "F#", icon: "f.square.fill", ext: "fs", category: .other, color: .cyan),
-        LanguageInfo(id: "ocaml", name: "OCaml", icon: "o.square.fill", ext: "ml", category: .other, color: .orange),
-        LanguageInfo(id: "erlang", name: "Erlang", icon: "e.square.fill", ext: "erl", category: .other, color: Color(red: 0.6, green: 0.1, blue: 0.2)),
-        LanguageInfo(id: "clojure", name: "Clojure", icon: "circle.grid.cross.fill", ext: "clj", category: .other, color: .green),
-        LanguageInfo(id: "markdown", name: "Markdown", icon: "doc.richtext.fill", ext: "md", category: .other, color: .gray),
-        LanguageInfo(id: "text", name: "Plain Text", icon: "doc.text.fill", ext: "txt", category: .other, color: .gray),
-        LanguageInfo(id: "shell", name: "Shell Script", icon: "terminal.fill", ext: "sh", category: .other, color: .green),
-        LanguageInfo(id: "dockerfile", name: "Dockerfile", icon: "shippingbox.fill", ext: "dockerfile", category: .other, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
-        LanguageInfo(id: "latex", name: "LaTeX", icon: "textformat", ext: "tex", category: .other, color: Color(red: 0.0, green: 0.4, blue: 0.3)),
-        LanguageInfo(id: "makefile", name: "Makefile", icon: "wrench.and.screwdriver.fill", ext: "makefile", category: .other, color: .gray),
+        LanguageInfo(id: "scala", name: "Scala", icon: "s.circle.fill", ext: "scala", category: .other, color: .secondary),
+        LanguageInfo(id: "fsharp", name: "F#", icon: "f.square.fill", ext: "fs", category: .other, color: .secondary),
+        LanguageInfo(id: "markdown", name: "Markdown", icon: "doc.richtext.fill", ext: "md", category: .other, color: .secondary),
+        LanguageInfo(id: "text", name: "Plain Text", icon: "doc.text.fill", ext: "txt", category: .other, color: .secondary),
+        LanguageInfo(id: "shell", name: "Shell Script", icon: "terminal.fill", ext: "sh", category: .other, color: .secondary),
+        LanguageInfo(id: "dockerfile", name: "Dockerfile", icon: "shippingbox.fill", ext: "dockerfile", category: .other, color: .secondary),
+        LanguageInfo(id: "latex", name: "LaTeX", icon: "textformat", ext: "tex", category: .other, color: .secondary),
+        LanguageInfo(id: "makefile", name: "Makefile", icon: "wrench.and.screwdriver.fill", ext: "makefile", category: .other, color: .secondary)
     ]
-    
-    private var filteredLanguages: [LanguageInfo] {
-        languages.filter { $0.category == selectedCategory }
+
+    private var theme: AppTheme { appState.appTheme }
+    private var isDark: Bool { theme.isDark }
+
+    private var bgColor: Color { Color(nsColor: theme.workspaceBackground) }
+    private var panelColor: Color { Color(nsColor: theme.panelBackground) }
+    private var elevatedColor: Color { Color(nsColor: theme.elevatedBackground) }
+    private var editorBgColor: Color { Color(nsColor: theme.editorBackground) }
+    private var editorTextColor: Color { Color(nsColor: theme.editorText) }
+    private var subtleBorder: Color { isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.09) }
+    private var strongBorder: Color { isDark ? Color.white.opacity(0.24) : Color.black.opacity(0.24) }
+
+    private var visibleCategories: [LanguageCategory] {
+        if recommendedLanguageIds.isEmpty {
+            return LanguageCategory.allCases.filter { $0 != .recommended }
+        }
+        return LanguageCategory.allCases
     }
-    
+
+    private var filteredLanguages: [LanguageInfo] {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let base: [LanguageInfo] = {
+            if !q.isEmpty {
+                return languages.filter {
+                    $0.name.lowercased().contains(q)
+                    || $0.ext.lowercased().contains(q)
+                    || $0.id.lowercased().contains(q)
+                    || ($0.subtitle?.lowercased().contains(q) ?? false)
+                }
+            }
+            if selectedCategory == .recommended {
+                let order = Dictionary(uniqueKeysWithValues: recommendedLanguageIds.enumerated().map { ($0.element, $0.offset) })
+                return languages
+                    .filter { order[$0.id] != nil }
+                    .sorted { (order[$0.id] ?? 999) < (order[$1.id] ?? 999) }
+            }
+            return languages.filter { $0.category == selectedCategory }
+        }()
+        return base
+    }
+
     private var selectedLangInfo: LanguageInfo? {
         languages.first { $0.id == selectedLanguage }
     }
-    
+
     private var fileExtension: String {
         if selectedLanguage.hasPrefix("custom_") {
-            return customLanguageExt.isEmpty ? "txt" : customLanguageExt
+            return customLanguageExt.isEmpty ? "txt" : customLanguageExt.trimmingCharacters(in: CharacterSet(charactersIn: "."))
         }
         return selectedLangInfo?.ext ?? "txt"
     }
-    
+
+    private var resolvedDirectoryURL: URL? {
+        if !selectedSubfolderPath.isEmpty, let ws = appState.workspaceFolder {
+            return ws.appendingPathComponent(selectedSubfolderPath)
+        }
+        switch saveLocation {
+        case .workspaceRoot:
+            return appState.workspaceFolder
+        case .currentFolder:
+            if let curPath = appState.currentFile?.path, !curPath.isEmpty {
+                return URL(fileURLWithPath: curPath).deletingLastPathComponent()
+            }
+            return appState.workspaceFolder
+        case .custom:
+            return customDirectoryURL ?? appState.workspaceFolder
+        }
+    }
+
     private var previewFilename: String {
-        let name = filename.isEmpty ? "Untitled" : filename
-        if name.contains(".") { return name }
+        let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "Untitled" : trimmed
+        if name.lowercased().hasSuffix(".\(fileExtension.lowercased())") { return name }
+        if name.contains(".") && !selectedLanguage.hasPrefix("roblox-") { return name }
         return "\(name).\(fileExtension)"
     }
-    
+
+    private var previewPathDisplay: String {
+        if let dir = resolvedDirectoryURL {
+            if let ws = appState.workspaceFolder, dir.path.hasPrefix(ws.path) {
+                let rel = String(dir.path.dropFirst(ws.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                let wsName = ws.lastPathComponent
+                return rel.isEmpty ? "\(wsName)/\(previewFilename)" : "\(wsName)/\(rel)/\(previewFilename)"
+            }
+            return "\(dir.lastPathComponent)/\(previewFilename)"
+        }
+        return previewFilename
+    }
+
     var body: some View {
-        ToolWindowWrapper(
-            title: "New File",
-            subtitle: "Create a new source file",
-            icon: "doc.badge.plus",
-            iconColor: .blue
-        ) {
+        VStack(spacing: 0) {
+            headerBar
+
+            Rectangle().fill(subtleBorder).frame(height: 1)
+
             HStack(spacing: 0) {
-                // Left: Language Selection
-                VStack(alignment: .leading, spacing: 0) {
-                    // Category Tabs
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 4) {
-                            ForEach(LanguageCategory.allCases, id: \.self) { category in
-                                CategoryTab(
-                                    category: category,
-                                    isSelected: selectedCategory == category
-                                ) {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        selectedCategory = category
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
+                leftSidebarPane
+                    .frame(width: 382)
+                    .background(panelColor)
+
+                Rectangle().fill(subtleBorder).frame(width: 1)
+
+                rightDetailsPane
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(bgColor)
+            }
+
+            Rectangle().fill(subtleBorder).frame(height: 1)
+
+            footerBar
+        }
+        .frame(width: 820, height: 560)
+        .background(bgColor)
+        .preferredColorScheme(theme.colorScheme)
+        .onAppear {
+            configureForActiveWorkspace()
+        }
+    }
+
+    // MARK: - Header
+
+    private var headerBar: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(elevatedColor)
+                    .frame(width: 32, height: 32)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(subtleBorder, lineWidth: 1)
+                    )
+                Image(systemName: "doc.badge.plus")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.primary)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text("New File")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+
+                    if let detected = detectedWorkspaceLabel {
+                        Text(detected)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(elevatedColor)
+                            .cornerRadius(4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(subtleBorder, lineWidth: 1)
+                            )
                     }
-                    
-                    Divider()
-                    
-                    // Language Grid
-                    ScrollView {
-                        LazyVGrid(columns: [
-                            GridItem(.flexible()),
-                            GridItem(.flexible())
-                        ], spacing: 8) {
-                            ForEach(filteredLanguages) { lang in
-                                NewFileLanguageCard(
-                                    language: lang,
-                                    isSelected: selectedLanguage == lang.id
-                                ) {
-                                    withAnimation(.easeInOut(duration: 0.15)) {
-                                        selectedLanguage = lang.id
-                                        showCustomInput = false
-                                    }
-                                }
+                }
+                Text(appState.workspaceFolder.map { "Workspace · \($0.lastPathComponent)" } ?? "Create a new source file")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(elevatedColor)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(subtleBorder, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 13)
+        .background(panelColor)
+    }
+
+    // MARK: - Left Sidebar (Search + Non-Clipped Tabs + Icon Grid)
+
+    private var leftSidebarPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Search Box
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                TextField("Filter language or extension…", text: $searchQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.primary)
+                if !searchQuery.isEmpty {
+                    Button {
+                        searchQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(elevatedColor)
+            .cornerRadius(7)
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(subtleBorder, lineWidth: 1))
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
+            // Non-clipped compact Category Tabs
+            if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(visibleCategories, id: \.self) { category in
+                        CategoryTab(
+                            label: category.shortLabel,
+                            isSelected: selectedCategory == category,
+                            isDark: isDark,
+                            elevatedColor: elevatedColor,
+                            borderColor: strongBorder
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.14)) {
+                                selectedCategory = category
                             }
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 10)
-                        
-                        // Custom Language
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            }
+
+            Rectangle().fill(subtleBorder).frame(height: 1)
+
+            // Language Cards Grid
+            ScrollView {
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8)
+                ], spacing: 8) {
+                    ForEach(filteredLanguages) { lang in
+                        NewFileLanguageCard(
+                            language: lang,
+                            isSelected: selectedLanguage == lang.id,
+                            isDark: isDark,
+                            elevatedColor: elevatedColor,
+                            subtleBorder: subtleBorder,
+                            strongBorder: strongBorder
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.12)) {
+                                selectedLanguage = lang.id
+                                showCustomInput = false
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+
+                // Custom Language Trigger / Form
+                VStack(spacing: 8) {
+                    Rectangle().fill(subtleBorder).frame(height: 1).padding(.horizontal, 4)
+
+                    if showCustomInput {
                         VStack(spacing: 8) {
-                            Divider()
-                                .padding(.horizontal, 4)
-                            
-                            if showCustomInput {
-                                VStack(spacing: 8) {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "plus.square.fill")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(.secondary)
-                                        Text("Custom Language")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .foregroundColor(.secondary)
-                                        Spacer()
-                                    }
-                                    
-                                    HStack(spacing: 6) {
-                                        TextField("Name", text: $customLanguageName)
-                                            .textFieldStyle(.plain)
-                                            .font(.system(size: 11))
-                                            .padding(6)
-                                            .background(Color(white: 0.1))
-                                            .cornerRadius(5)
-                                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.1), lineWidth: 1))
-                                        
-                                        TextField("ext", text: $customLanguageExt)
-                                            .textFieldStyle(.plain)
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .padding(6)
-                                            .background(Color(white: 0.1))
-                                            .cornerRadius(5)
-                                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.1), lineWidth: 1))
-                                            .frame(width: 60)
-                                    }
-                                    
-                                    if !customLanguageName.isEmpty && !customLanguageExt.isEmpty {
-                                        Button {
-                                            selectedLanguage = "custom_\(customLanguageName.lowercased())"
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "checkmark")
-                                                    .font(.system(size: 9, weight: .bold))
-                                                Text("Use \(customLanguageName)")
-                                                    .font(.system(size: 10, weight: .medium))
-                                            }
-                                            .foregroundColor(.white)
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 5)
-                                            .background(Color(white: 0.2))
-                                            .cornerRadius(5)
-                                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.12), lineWidth: 1))
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                                .padding(10)
-                                .background(Color(white: 0.08))
-                                .cornerRadius(8)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06), lineWidth: 1))
-                            } else {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        showCustomInput = true
-                                    }
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "plus.circle.fill")
-                                            .font(.system(size: 12))
-                                        Text("Custom Language...")
-                                            .font(.system(size: 11))
-                                    }
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.square")
+                                    .font(.system(size: 11))
                                     .foregroundColor(.secondary)
+                                Text("Custom Extension")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Button {
+                                    showCustomInput = false
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            HStack(spacing: 6) {
+                                TextField("Name", text: $customLanguageName)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 11))
+                                    .padding(6)
+                                    .background(bgColor)
+                                    .cornerRadius(5)
+                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(subtleBorder, lineWidth: 1))
+
+                                TextField("ext", text: $customLanguageExt)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .padding(6)
+                                    .background(bgColor)
+                                    .cornerRadius(5)
+                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(subtleBorder, lineWidth: 1))
+                                    .frame(width: 68)
+                            }
+
+                            if !customLanguageName.isEmpty && !customLanguageExt.isEmpty {
+                                Button {
+                                    selectedLanguage = "custom_\(customLanguageName.lowercased())"
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 9, weight: .bold))
+                                        Text("Use \(customLanguageName) (.\(customLanguageExt))")
+                                            .font(.system(size: 10.5, weight: .medium))
+                                    }
+                                    .foregroundColor(isDark ? .black : .white)
                                     .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
+                                    .padding(.vertical, 5)
+                                    .background(isDark ? Color.white : Color.black)
+                                    .cornerRadius(5)
                                 }
                                 .buttonStyle(.plain)
                             }
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 12)
-                    }
-                }
-                .frame(width: 340)
-                .background(Color(white: 0.06))
-                
-                Divider()
-                
-                // Right: File Details & Preview
-                VStack(alignment: .leading, spacing: 20) {
-                    // Filename Input
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Filename", systemImage: "doc")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.secondary)
-                        
-                        HStack {
-                            TextField("Untitled", text: $filename)
-                                .textFieldStyle(.roundedBorder)
-                            
-                            Text(".\(fileExtension)")
-                                .font(.system(size: 13, weight: .medium, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(Color(nsColor: .controlBackgroundColor))
-                                .cornerRadius(6)
-                        }
-                        
-                        Text(previewFilename)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.accentColor)
-                    }
-                    
-                    Divider()
-                    
-                    // Save Location
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Location", systemImage: "folder")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.secondary)
-                        
-                        Picker("", selection: $saveLocation) {
-                            ForEach(SaveLocation.allCases, id: \.self) { loc in
-                                Label(loc.rawValue, systemImage: loc.icon).tag(loc)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                        
-                        if let workspace = appState.workspaceFolder {
-                            Text(workspace.lastPathComponent)
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        } else {
-                            Text("No workspace open")
-                                .font(.system(size: 11))
-                                .foregroundColor(.orange)
-                        }
-                    }
-                    
-                    Divider()
-                    
-                    // Template Preview
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Label("Template Preview", systemImage: "doc.text")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.secondary)
-                            
-                            Spacer()
-                            
-                            if let lang = selectedLangInfo {
-                                HStack(spacing: 4) {
-                                    Image(systemName: lang.icon)
-                                        .font(.system(size: 10))
-                                    Text(lang.name)
-                                        .font(.system(size: 10, weight: .medium))
-                                }
-                                .foregroundColor(lang.color)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(lang.color.opacity(0.1))
-                                .cornerRadius(4)
-                            }
-                        }
-                        
-                        ScrollView {
-                            Text(templatePreview)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.primary.opacity(0.8))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(12)
-                        }
-                        .frame(maxHeight: .infinity)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .padding(10)
+                        .background(elevatedColor)
                         .cornerRadius(8)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                        )
-                    }
-                    
-                    Spacer(minLength: 0)
-                }
-                .padding(20)
-                .frame(maxWidth: .infinity)
-            }
-        } footer: {
-            HStack {
-                if let lang = selectedLangInfo {
-                    HStack(spacing: 6) {
-                        Image(systemName: lang.icon)
-                            .foregroundColor(lang.color)
-                        Text("\(lang.name) file")
-                            .font(.system(size: 11))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(subtleBorder, lineWidth: 1))
+                    } else {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                showCustomInput = true
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.circle")
+                                    .font(.system(size: 11.5))
+                                Text("Custom Language…")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
                             .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                
-                Spacer()
-                
-                Button("Create File") {
-                    appState.createNewFileWithLanguage(name: filename, language: selectedLanguage)
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
             }
         }
     }
-    
+
+    // MARK: - Right Details & Live Theme Template Preview
+
+    private var rightDetailsPane: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Filename Input
+            VStack(alignment: .leading, spacing: 7) {
+                Text("FILENAME")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 8) {
+                    TextField("Untitled", text: $filename)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(panelColor)
+                        .cornerRadius(7)
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(strongBorder, lineWidth: 1))
+
+                    Text(".\(fileExtension)")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(elevatedColor)
+                        .cornerRadius(7)
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(subtleBorder, lineWidth: 1))
+                }
+
+                Text(previewPathDisplay)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Rectangle().fill(subtleBorder).frame(height: 1)
+
+            // Save Location & Quick Subfolders
+            VStack(alignment: .leading, spacing: 7) {
+                Text("LOCATION")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 8) {
+                    Picker("", selection: $saveLocation) {
+                        ForEach(SaveLocation.allCases, id: \.self) { loc in
+                            Label(loc.rawValue, systemImage: loc.icon).tag(loc)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .onChange(of: saveLocation) { newVal in
+                        selectedSubfolderPath = ""
+                        if newVal == .custom {
+                            pickCustomDirectory()
+                        }
+                    }
+
+                    if saveLocation == .custom {
+                        Button("Browse…") {
+                            pickCustomDirectory()
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(elevatedColor)
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(subtleBorder, lineWidth: 1))
+                    }
+                }
+
+                if !quickFolders.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(quickFolders, id: \.self) { folder in
+                                let active = (selectedSubfolderPath == folder)
+                                Button {
+                                    selectedSubfolderPath = active ? "" : folder
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "folder")
+                                            .font(.system(size: 9.5))
+                                        Text(folder)
+                                            .font(.system(size: 10.5, weight: active ? .semibold : .regular, design: .monospaced))
+                                    }
+                                    .foregroundColor(active ? (isDark ? .black : .white) : .secondary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(active ? (isDark ? Color.white : Color.black) : elevatedColor)
+                                    .cornerRadius(5)
+                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(subtleBorder, lineWidth: 1))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+            }
+
+            Rectangle().fill(subtleBorder).frame(height: 1)
+
+            // Template Preview (Rendered in exact current Editor Theme!)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("TEMPLATE PREVIEW")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.secondary)
+
+                    Spacer()
+
+                    if let lang = selectedLangInfo {
+                        HStack(spacing: 5) {
+                            ProgrammingLanguageIconView(fileName: "file.\(lang.ext)", size: 13)
+                            Text(lang.name)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundColor(.primary)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(elevatedColor)
+                        .cornerRadius(5)
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(subtleBorder, lineWidth: 1))
+                    }
+                }
+
+                ScrollView {
+                    Text(templatePreview)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundColor(editorTextColor.opacity(0.9))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                }
+                .frame(maxHeight: .infinity)
+                .background(editorBgColor)
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(subtleBorder, lineWidth: 1)
+                )
+            }
+        }
+        .padding(18)
+    }
+
+    // MARK: - Footer
+
+    private var footerBar: some View {
+        HStack {
+            if let lang = selectedLangInfo {
+                HStack(spacing: 7) {
+                    ProgrammingLanguageIconView(fileName: "file.\(lang.ext)", size: 15)
+                    Text("\(lang.name) · .\(fileExtension)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Button("Cancel") {
+                dismiss()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+
+            Button {
+                appState.createNewFileWithLanguage(
+                    name: filename,
+                    language: selectedLanguage,
+                    directory: resolvedDirectoryURL,
+                    customExtension: selectedLanguage.hasPrefix("custom_") ? fileExtension : nil,
+                    templateOverride: templatePreview
+                )
+                dismiss()
+            } label: {
+                Text("Create File")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(isDark ? .black : .white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
+                    .background(isDark ? Color.white : Color.black)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(panelColor)
+    }
+
+    // MARK: - Workspace Context Detection
+
+    private func configureForActiveWorkspace() {
+        guard let wsURL = appState.workspaceFolder else { return }
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: wsURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let names = Set(items.map { $0.lastPathComponent })
+        let lowerNames = Set(items.map { $0.lastPathComponent.lowercased() })
+
+        let isRobloxWorkspace = lowerNames.contains(where: { $0.hasSuffix(".rbxlx") || $0.hasSuffix(".rbxl") || $0.hasSuffix(".luau") })
+            || names.contains("ServerScriptService")
+            || names.contains("ReplicatedStorage")
+            || names.contains("StarterPlayer")
+            || names.contains("default.project.json")
+
+        if isRobloxWorkspace {
+            detectedWorkspaceLabel = "Roblox · Luau"
+            recommendedLanguageIds = ["roblox-server", "roblox-local", "roblox-module", "lua", "json", "markdown"]
+            selectedCategory = .recommended
+            quickFolders = ["ServerScriptService", "ReplicatedStorage", "StarterPlayer"].filter { names.contains($0) }
+
+            let curPath = (appState.currentFile?.path ?? "").lowercased()
+            if curPath.contains("starterplayer") || curPath.contains(".client.") {
+                selectedLanguage = "roblox-local"
+                if names.contains("StarterPlayer") && selectedSubfolderPath.isEmpty { selectedSubfolderPath = "StarterPlayer" }
+            } else if curPath.contains("replicatedstorage") {
+                selectedLanguage = "roblox-module"
+                if names.contains("ReplicatedStorage") && selectedSubfolderPath.isEmpty { selectedSubfolderPath = "ReplicatedStorage" }
+            } else {
+                selectedLanguage = "roblox-server"
+                if names.contains("ServerScriptService") && selectedSubfolderPath.isEmpty { selectedSubfolderPath = "ServerScriptService" }
+            }
+            return
+        }
+
+        if names.contains("Package.swift") || lowerNames.contains(where: { $0.hasSuffix(".xcodeproj") || $0.hasSuffix(".swift") }) {
+            detectedWorkspaceLabel = "Swift"
+            recommendedLanguageIds = ["swift", "c", "cpp", "objective-c", "metal", "json", "markdown"]
+            selectedCategory = .recommended
+            selectedLanguage = "swift"
+            quickFolders = ["Sources", "Tests"].filter { names.contains($0) }
+        } else if names.contains("Cargo.toml") {
+            detectedWorkspaceLabel = "Rust"
+            recommendedLanguageIds = ["rust", "toml", "shell", "markdown"]
+            selectedCategory = .recommended
+            selectedLanguage = "rust"
+            quickFolders = ["src", "tests"].filter { names.contains($0) }
+        } else if names.contains("go.mod") {
+            detectedWorkspaceLabel = "Go"
+            recommendedLanguageIds = ["go", "sql", "yaml", "shell", "markdown"]
+            selectedCategory = .recommended
+            selectedLanguage = "go"
+        } else if names.contains("pubspec.yaml") {
+            detectedWorkspaceLabel = "Flutter · Dart"
+            recommendedLanguageIds = ["dart", "yaml", "json", "markdown"]
+            selectedCategory = .recommended
+            selectedLanguage = "dart"
+            quickFolders = ["lib", "test"].filter { names.contains($0) }
+        } else if names.contains("package.json") {
+            let isTS = names.contains("tsconfig.json")
+            detectedWorkspaceLabel = isTS ? "TypeScript" : "JavaScript"
+            recommendedLanguageIds = isTS ? ["tsx", "typescript", "css", "json", "html"] : ["jsx", "javascript", "css", "json", "html"]
+            selectedCategory = .recommended
+            selectedLanguage = isTS ? "tsx" : "javascript"
+            quickFolders = ["src", "app", "components"].filter { names.contains($0) }
+        } else if names.contains("pyproject.toml") || names.contains("requirements.txt") || lowerNames.contains(where: { $0.hasSuffix(".py") }) {
+            detectedWorkspaceLabel = "Python"
+            recommendedLanguageIds = ["python", "sql", "yaml", "json", "shell", "markdown"]
+            selectedCategory = .recommended
+            selectedLanguage = "python"
+        } else if lowerNames.contains(where: { $0.hasSuffix(".ar") }) {
+            detectedWorkspaceLabel = "Ardium"
+            recommendedLanguageIds = ["ardium", "c", "markdown"]
+            selectedCategory = .recommended
+            selectedLanguage = "ardium"
+        }
+    }
+
+    private func pickCustomDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = customDirectoryURL ?? appState.workspaceFolder
+        panel.prompt = "Select Folder"
+        if panel.runModal() == .OK, let url = panel.url {
+            customDirectoryURL = url
+        }
+    }
+
     private var templatePreview: String {
         switch selectedLanguage {
+        case "roblox-server":
+            return "--!strict\nlocal ReplicatedStorage = game:GetService(\"ReplicatedStorage\")\nlocal Players = game:GetService(\"Players\")\n\nPlayers.PlayerAdded:Connect(function(player: Player)\n\tprint(player.Name .. \" joined\")\nend)"
+        case "roblox-local":
+            return "--!strict\nlocal Players = game:GetService(\"Players\")\nlocal ReplicatedStorage = game:GetService(\"ReplicatedStorage\")\n\nlocal localPlayer = Players.LocalPlayer\nprint(\"Client initialized for \" .. localPlayer.Name)"
+        case "roblox-module", "luau":
+            return "--!strict\nlocal Module = {}\n\nfunction Module.init()\n\tprint(\"Module initialized\")\nend\n\nreturn Module"
+        case "lua":
+            return "local function main()\n    print(\"Hello, World!\")\nend\n\nmain()"
         case "swift":
             return "import Foundation\n\n// MARK: - Main\n\nfunc main() {\n    print(\"Hello, World!\")\n}\n\nmain()"
         case "python":
             return "#!/usr/bin/env python3\n\"\"\"Module description.\"\"\"\n\ndef main():\n    \"\"\"Main entry point.\"\"\"\n    print(\"Hello, World!\")\n\nif __name__ == \"__main__\":\n    main()"
         case "javascript":
-            return "// @ts-check\n\"use strict\";\n\n/**\n * Main function\n */\nfunction main() {\n    console.log(\"Hello, World!\");\n}\n\nmain();"
+            return "// @ts-check\n\"use strict\";\n\nfunction main() {\n    console.log(\"Hello, World!\");\n}\n\nmain();"
         case "typescript":
-            return "/**\n * Main function\n */\nfunction main(): void {\n    console.log(\"Hello, World!\");\n}\n\nmain();"
+            return "function main(): void {\n    console.log(\"Hello, World!\");\n}\n\nmain();"
+        case "tsx", "jsx":
+            return "import React from \"react\";\n\nexport function Component() {\n    return <div>Hello, World!</div>;\n}"
         case "rust":
-            return "//! Module documentation\n\nfn main() {\n    println!(\"Hello, World!\");\n}"
+            return "fn main() {\n    println!(\"Hello, World!\");\n}"
         case "go":
             return "package main\n\nimport \"fmt\"\n\nfunc main() {\n    fmt.Println(\"Hello, World!\")\n}"
+        case "dart":
+            return "void main() {\n  print('Hello, World!');\n}"
+        case "csharp":
+            return "using System;\n\nclass Program\n{\n    static void Main()\n    {\n        Console.WriteLine(\"Hello, World!\");\n    }\n}"
+        case "ardium":
+            return "fn main() {\n    println(\"Hello, World!\")\n}"
         case "html":
             return "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n    <meta charset=\"UTF-8\">\n    <title>Document</title>\n</head>\n<body>\n    <h1>Hello, World!</h1>\n</body>\n</html>"
         case "css":
-            return "/* Styles */\n\n:root {\n    --primary: #007AFF;\n}\n\nbody {\n    font-family: system-ui;\n    margin: 0;\n    padding: 0;\n}"
+            return "body {\n    font-family: system-ui, sans-serif;\n    margin: 0;\n    padding: 0;\n}"
         case "json":
             return "{\n    \"name\": \"project\",\n    \"version\": \"1.0.0\"\n}"
         case "markdown":
-            return "# Title\n\nDescription of the document.\n\n## Section\n\nContent here."
+            return "# Title\n\nDescription of the document."
         case "shell":
-            return "#!/bin/bash\n\n# Script description\n\necho \"Hello, World!\""
+            return "#!/usr/bin/env bash\nset -euo pipefail\n\necho \"Hello, World!\""
         case "c":
-            return "#include <stdio.h>\n\nint main() {\n    printf(\"Hello, World!\\n\");\n    return 0;\n}"
+            return "#include <stdio.h>\n\nint main(void) {\n    printf(\"Hello, World!\\n\");\n    return 0;\n}"
         case "cpp":
             return "#include <iostream>\n\nint main() {\n    std::cout << \"Hello, World!\" << std::endl;\n    return 0;\n}"
         case "java":
@@ -1414,11 +1796,13 @@ struct NewFileSheet: View {
         case "kotlin":
             return "fun main() {\n    println(\"Hello, World!\")\n}"
         case "sql":
-            return "-- SQL Query\n\nSELECT * FROM table_name\nWHERE condition = true;"
+            return "SELECT * FROM table_name;"
         case "yaml":
-            return "# Configuration\n\nname: project\nversion: 1.0.0\n\nsettings:\n  debug: true"
+            return "name: project\nversion: 1.0.0"
+        case "toml":
+            return "[package]\nname = \"project\"\nversion = \"0.1.0\""
         default:
-            return "// New file"
+            return "// New \(selectedLangInfo?.name ?? "source") file"
         }
     }
 }
@@ -1426,95 +1810,92 @@ struct NewFileSheet: View {
 // MARK: - Category Tab
 
 struct CategoryTab: View {
-    let category: LanguageCategory
+    let label: String
     let isSelected: Bool
+    let isDark: Bool
+    let elevatedColor: Color
+    let borderColor: Color
     let action: () -> Void
-    
+
     @State private var isHovering = false
-    
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: category.icon)
-                    .font(.system(size: 10))
-                Text(category.rawValue)
-                    .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
-            }
-            .foregroundColor(isSelected ? .white : .secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isSelected ? Color(white: 0.2) : (isHovering ? Color(white: 0.12) : Color.clear))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(isSelected ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1)
-            )
+            Text(label)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .foregroundColor(isSelected ? (isDark ? .black : .white) : (isHovering ? .primary : .secondary))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isSelected ? (isDark ? Color.white : Color.black) : (isHovering ? elevatedColor : Color.clear))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(isSelected ? Color.clear : (isHovering ? borderColor.opacity(0.4) : Color.clear), lineWidth: 1)
+                )
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
     }
 }
 
-// MARK: - Language Card
+// MARK: - Language Card (Monochrome Surface + Authentic File Icon)
 
 struct NewFileLanguageCard: View {
     let language: LanguageInfo
     let isSelected: Bool
+    let isDark: Bool
+    let elevatedColor: Color
+    let subtleBorder: Color
+    let strongBorder: Color
     let action: () -> Void
-    
+
     @State private var isHovering = false
-    
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
-                // Icon
+            HStack(spacing: 9) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(isSelected ? language.color.opacity(0.2) : Color(white: 0.12))
-                        .frame(width: 34, height: 34)
-                    
-                    Image(systemName: language.icon)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(isSelected ? language.color : language.color.opacity(0.8))
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
+                        .frame(width: 30, height: 30)
+
+                    ProgrammingLanguageIconView(fileName: "file.\(language.ext)", size: 20)
                 }
-                
-                // Info
+
                 VStack(alignment: .leading, spacing: 1) {
                     Text(language.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
                         .foregroundColor(.primary)
                         .lineLimit(1)
                     Text(".\(language.ext)")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
-                
-                Spacer()
-                
+
+                Spacer(minLength: 4)
+
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(language.color)
-                        .transition(.scale.combined(with: .opacity))
+                        .font(.system(size: 13))
+                        .foregroundColor(.primary)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isSelected ? language.color.opacity(0.08) : (isHovering ? Color(white: 0.14) : Color(white: 0.09)))
+                    .fill(isSelected ? elevatedColor : (isHovering ? elevatedColor.opacity(0.65) : Color.clear))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isSelected ? language.color.opacity(0.5) : (isHovering ? Color.white.opacity(0.08) : Color.white.opacity(0.04)), lineWidth: 1)
+                    .stroke(isSelected ? strongBorder : (isHovering ? subtleBorder : subtleBorder.opacity(0.75)), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .animation(.easeInOut(duration: 0.15), value: isSelected)
-        .animation(.easeInOut(duration: 0.1), value: isHovering)
     }
 }
 

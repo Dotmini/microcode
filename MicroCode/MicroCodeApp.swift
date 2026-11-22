@@ -135,6 +135,9 @@ struct MicroCodeApp: App {
             }
         }
         
+        // Replay eval of the real agent loop: `MICROCODE_AGENT_EVAL_CASES` + `MICROCODE_AGENT_EVAL_OUT` (Scripts/eval/run-agent-eval.sh).
+        AgentEvalRunner.runIfRequested()
+
         // Launch ACP 1.0 JSON-RPC stdio server when invoked with `--acp-server`
         let args = CommandLine.arguments
         if args.contains("--acp-server") {
@@ -384,18 +387,45 @@ struct MicroCodeApp: App {
                 return n == "token" || n == "code" || n == "url"
             })?.value ?? ""
             Task { @MainActor in
+                let collab = CollaborationService.shared
+                // Any web page can open a microcode:// URL, so sharing or joining always needs a click in the app.
                 if action == "host" {
-                    if mode == "lan" {
-                        CollaborationService.shared.setTransportMode(.lan)
-                    } else if mode == "tunnel" || mode == "online" {
-                        CollaborationService.shared.setTransportMode(.online)
-                    }
+                    let online = mode == "tunnel" || mode == "online"
                     let wsName = AppState.shared?.workspaceFolder?.lastPathComponent ?? "Workspace"
-                    _ = try? await CollaborationService.shared.createSession(projectId: wsName)
+                    guard CollabDeepLinkConfirmation.ask(
+                        title: "Share “\(wsName)” for live collaboration?",
+                        detail: online
+                            ? "A link opened MicroCode asking to share this workspace over the internet. Anyone with the invite link and room code can read and edit its files."
+                            : "A link opened MicroCode asking to share this workspace on your local network. Anyone on the network with the room code can read and edit its files.",
+                        confirm: "Share Workspace"
+                    ) else { return }
+                    collab.setTransportMode(online ? .online : .lan)
+                    _ = try? await collab.createSession(projectId: wsName)
+                    AppState.shared?.showingCollaborationView = true
                 } else if action == "leave" || action == "stop" {
-                    await CollaborationService.shared.leaveSession()
+                    await collab.leaveSession()
                 } else if !token.isEmpty {
-                    try? await CollaborationService.shared.joinSession(shareCode: token, mountWorkspace: true)
+                    let target = CollabDeepLinkConfirmation.describe(token: token)
+                    if let current = collab.currentSession, target.code.isEmpty == false,
+                       current.shareCode.uppercased() == target.code {
+                        AppState.shared?.showingCollaborationView = true
+                        return
+                    }
+                    let leaving = collab.currentSession != nil
+                        ? "\n\nYou will leave your current session first."
+                        : ""
+                    guard CollabDeepLinkConfirmation.ask(
+                        title: "Join live session \(target.code.isEmpty ? "" : target.code)?",
+                        detail: "Host: \(target.host)\nMicroCode will open the shared workspace and sync your edits with everyone in the session in real time.\(leaving)",
+                        confirm: "Join Session"
+                    ) else { return }
+                    if collab.currentSession != nil { await collab.leaveSession() }
+                    AppState.shared?.showingCollaborationView = true
+                    do {
+                        _ = try await collab.joinSession(shareCode: token, mountWorkspace: true)
+                    } catch {
+                        ReportLogManager.shared.log("Collaboration deep link join failed: \(error.localizedDescription)", type: .error)
+                    }
                 } else {
                     AppState.shared?.showingCollaborationView = true
                 }
@@ -1406,5 +1436,33 @@ final class WindowTrafficLightsController: ObservableObject {
                 btn.alphaValue = 0
             }
         }
+    }
+}
+
+
+/// Confirmation for `microcode://collab` links (they can come from any web page or chat message).
+@MainActor
+enum CollabDeepLinkConfirmation {
+    static func ask(title: String, detail: String, confirm: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: confirm)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Host and room code shown in the prompt, parsed from `http(s)://host[:port][/path]/?code=XXXX` or `host:port#CODE`.
+    static func describe(token: String) -> (host: String, code: String) {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let comps = URLComponents(string: trimmed), let host = comps.host {
+            let port = comps.port.map { ":\($0)" } ?? ""
+            let code = comps.queryItems?.first(where: { $0.name == "code" })?.value?.uppercased() ?? ""
+            return (host + port, code)
+        }
+        let parts = trimmed.components(separatedBy: "#")
+        return (parts.first ?? trimmed, parts.count > 1 ? parts[1].uppercased() : "")
     }
 }

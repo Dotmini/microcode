@@ -185,6 +185,11 @@ final class PhoneCompanionService: ObservableObject {
     private var relayWebSocketSession: URLSession?
     private var relayConnectTask: Task<Void, Never>?
     private var relayPingTimer: Timer?
+    private var lastSyncedCloudOpSeq: Int64 = 0
+    private var lastShadowFingerprint: String = ""
+    private var lastFullShadowPushAt: Date = .distantPast
+    private var shadowPushWorkItem: DispatchWorkItem?
+    private var appliedCloudMessageIDs: Set<String> = []
     private let relayNoRedirectDelegate = RelayLoopbackNoRedirectDelegate()
     private lazy var relayLoopbackSession: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -817,6 +822,9 @@ final class PhoneCompanionService: ObservableObject {
                         provider: host
                     )
                     self.startRelayKeepaliveTimer(for: wsTask)
+                    Task { @MainActor [weak self] in
+                        await self?.pushShadowSnapshotToRelay(force: true)
+                    }
                     await self.receiveDotminiRelayLoop(wsTask: wsTask, localPort: port)
                     return
                 } catch {
@@ -840,11 +848,17 @@ final class PhoneCompanionService: ObservableObject {
 
     private func startRelayKeepaliveTimer(for wsTask: URLSessionWebSocketTask) {
         relayPingTimer?.invalidate()
-        relayPingTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+        var tickCount = 0
+        relayPingTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
+            tickCount &+= 1
+            let shouldPing = (tickCount % 6 == 0)
             Task { @MainActor [weak self] in
                 guard let self = self, self.relayWebSocketTask === wsTask else { return }
-                wsTask.sendPing { _ in }
-                wsTask.send(.string("{\"type\":\"ping\"}")) { _ in }
+                if shouldPing {
+                    wsTask.sendPing { _ in }
+                    wsTask.send(.string("{\"type\":\"ping\"}")) { _ in }
+                }
+                await self.pushShadowSnapshotToRelay(force: false)
             }
         }
     }
@@ -871,6 +885,12 @@ final class PhoneCompanionService: ObservableObject {
                             wsTask: wsTask
                         )
                     }
+                } else if msgType == "cloud_delta" {
+                    await self.handleRelayCloudDelta(json: json, wsTask: wsTask)
+                } else if msgType == "sync_shadow_ack" {
+                    if let seq = (json["cloud_op_seq"] as? NSNumber)?.int64Value, seq > self.lastSyncedCloudOpSeq {
+                        self.lastSyncedCloudOpSeq = seq
+                    }
                 }
             } catch {
                 break
@@ -887,6 +907,197 @@ final class PhoneCompanionService: ObservableObject {
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         guard !Task.isCancelled, self.isEnabled, self.connectionMode == .online else { return }
         self.startOnlineTunnel()
+    }
+
+    // MARK: - Cloud Standby Shadow Sync & Wake Reconciliation
+
+    private func sha256HexString(_ input: String) -> String {
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    func scheduleCloudShadowPush(immediate: Bool = false) {
+        guard relayWebSocketTask != nil else { return }
+        shadowPushWorkItem?.cancel()
+        let delay: DispatchTimeInterval = immediate ? .milliseconds(80) : .milliseconds(550)
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.pushShadowSnapshotToRelay(force: false)
+            }
+        }
+        shadowPushWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    func pushShadowSnapshotToRelay(force: Bool = false) async {
+        guard let wsTask = relayWebSocketTask else { return }
+        let stateData = buildCompanionStateJSON()
+        let currentFP = cachedStateFingerprint
+        let now = Date()
+        let needsHeavyAssets = force || (now.timeIntervalSince(lastFullShadowPushAt) > 120)
+        if !force && !needsHeavyAssets && currentFP == lastShadowFingerprint {
+            return
+        }
+
+        var stateObj = (try? JSONSerialization.jsonObject(with: stateData) as? [String: Any]) ?? [:]
+        stateObj["workspacePath"] = currentCompanionWorkspacePath()
+
+        let activeState = appState ?? AppState.shared
+        let activeModelId = activeState?.aiModel ?? UserDefaults.standard.string(forKey: "aiModel") ?? ""
+        let activeProviderId = activeState?.aiProvider ?? UserDefaults.standard.string(forKey: "aiProvider") ?? ""
+        let activeKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "subscription"
+
+        var payload: [String: Any] = [
+            "type": "sync_shadow",
+            "pairing_token_hash": sha256HexString(pairingToken),
+            "pin_hash": sha256HexString("mc-pin:" + sixDigitPairingPIN),
+            "mac_name": cachedMacName,
+            "active_model_id": activeModelId,
+            "active_provider_id": activeProviderId,
+            "active_key_mode": activeKeyMode,
+            "mac_op_seq": lastSyncedCloudOpSeq,
+            "state": stateObj
+        ]
+
+        if needsHeavyAssets {
+            lastFullShadowPushAt = now
+            payload["models"] = buildAvailableModelsPayload()
+            let files = searchWorkspaceFiles(query: "", limit: 120)
+            payload["files_manifest"] = files
+            var fileCache: [String: String] = [:]
+            for f in files.prefix(8) {
+                if let p = f["path"] as? String {
+                    let readRes = readWorkspaceFileSafe(relativePath: p)
+                    if (readRes["ok"] as? Bool) == true, let content = readRes["content"] as? String, content.utf8.count <= 24_000 {
+                        fileCache[p] = content
+                    }
+                }
+            }
+            payload["file_cache"] = fileCache
+            payload["git_status"] = await handleGitStatus()
+            payload["pwa_html_template"] = buildMobileCompanionHTML(token: "__MC_TOKEN_PLACEHOLDER__", localLLMGatewayInfo: nil)
+        }
+
+        guard let encoded = try? JSONSerialization.data(withJSONObject: payload),
+              let jsonStr = String(data: encoded, encoding: .utf8) else { return }
+        lastShadowFingerprint = currentFP
+        wsTask.send(.string(jsonStr)) { _ in }
+    }
+
+    private func handleRelayCloudDelta(json: [String: Any], wsTask: URLSessionWebSocketTask) async {
+        let cloudSeq = (json["cloud_op_seq"] as? NSNumber)?.int64Value ?? 0
+        if let selModel = json["selected_model"] as? [String: Any],
+           let modelId = selModel["modelId"] as? String, !modelId.isEmpty {
+            let mode = (selModel["mode"] as? String) ?? "cloud"
+            let provider = (selModel["provider"] as? String) ?? "omni"
+            selectRemoteModel(mode: mode, provider: provider, modelId: modelId)
+        }
+
+        var appliedOpIDs: [String] = []
+        if let ops = json["pending_mac_ops"] as? [[String: Any]] {
+            for op in ops {
+                let opID = (op["id"] as? String) ?? ""
+                let kind = (op["kind"] as? String) ?? ""
+                let opPayload = (op["payload"] as? [String: Any]) ?? [:]
+                switch kind {
+                case "model_select":
+                    if let modelId = opPayload["modelId"] as? String, !modelId.isEmpty {
+                        selectRemoteModel(
+                            mode: (opPayload["mode"] as? String) ?? "cloud",
+                            provider: (opPayload["provider"] as? String) ?? "omni",
+                            modelId: modelId
+                        )
+                    }
+                case "workspace_switch":
+                    let path = (opPayload["path"] as? String) ?? ""
+                    let sessionId = opPayload["sessionId"] as? String
+                    switchRemoteWorkspace(path: path, sessionId: sessionId)
+                case "session_switch":
+                    if let sid = opPayload["sessionId"] as? String, !sid.isEmpty {
+                        switchRemoteSession(sessionId: sid)
+                    }
+                case "session_new":
+                    let projectPath = opPayload["projectPath"] as? String
+                    createRemoteSession(projectPath: projectPath)
+                case "terminal":
+                    if let cmd = opPayload["command"] as? String, !cmd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        _ = await executeMobileTerminalCommand(cmd)
+                    }
+                case "git":
+                    if let action = opPayload["action"] as? String, !action.isEmpty {
+                        _ = await handleGitAction(action: action, body: opPayload)
+                    }
+                case "run":
+                    let wsPath = currentCompanionWorkspacePath()
+                    _ = await DeviceRuntimeService.shared.companionStartRun(
+                        deviceID: opPayload["deviceId"] as? String,
+                        workspacePath: (wsPath.isEmpty || wsPath == "__general__") ? nil : wsPath
+                    )
+                default:
+                    break
+                }
+                if !opID.isEmpty {
+                    appliedOpIDs.append(opID)
+                }
+            }
+        }
+
+        let agent = AgentService.shared
+        var mergedAnyMessage = false
+        if let cloudMsgs = json["messages"] as? [[String: Any]] {
+            for m in cloudMsgs {
+                guard let mid = m["id"] as? String, !mid.isEmpty else { continue }
+                if appliedCloudMessageIDs.contains(mid) || agent.messages.contains(where: { $0.id == mid }) {
+                    continue
+                }
+                appliedCloudMessageIDs.insert(mid)
+                if let sid = m["sessionId"] as? String, !sid.isEmpty,
+                   agent.activeChatId != sid,
+                   agent.chatSessions.contains(where: { $0.id == sid }) {
+                    agent.switchChat(to: sid)
+                }
+                let roleStr = (m["role"] as? String) ?? "assistant"
+                let role: AgentMessageModel.MessageRole = (roleStr == "user") ? .user : .assistant
+                let content = (m["content"] as? String) ?? ""
+                let thought = (m["thought"] as? String) ?? ""
+                let fullContent: String = thought.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? content
+                    : "<thought>\(thought)</thought>\n\n\(content)"
+                let tsMs = (m["timestampMs"] as? NSNumber)?.doubleValue ?? Date().timeIntervalSince1970 * 1000.0
+                let modelLabel = m["modelLabel"] as? String
+                agent.messages.append(
+                    AgentMessageModel(
+                        id: mid,
+                        role: role,
+                        content: fullContent,
+                        toolResults: [],
+                        pendingChanges: [],
+                        timestamp: Date(timeIntervalSince1970: tsMs / 1000.0),
+                        turnTelemetryLabel: modelLabel
+                    )
+                )
+                mergedAnyMessage = true
+            }
+        }
+        if mergedAnyMessage {
+            agent.saveChats()
+        }
+
+        if cloudSeq > lastSyncedCloudOpSeq {
+            lastSyncedCloudOpSeq = cloudSeq
+        }
+
+        let ackPayload: [String: Any] = [
+            "type": "sync_reconciled",
+            "acked_op_seq": lastSyncedCloudOpSeq,
+            "applied_mac_op_ids": appliedOpIDs
+        ]
+        if let ackData = try? JSONSerialization.data(withJSONObject: ackPayload),
+           let ackStr = String(data: ackData, encoding: .utf8) {
+            wsTask.send(.string(ackStr)) { _ in }
+        }
+        broadcastSSEStateNow()
+        await pushShadowSnapshotToRelay(force: true)
     }
 
     nonisolated private static func forwardRelayHTTPRequestToLocalServer(
@@ -1146,10 +1357,11 @@ final class PhoneCompanionService: ObservableObject {
         let suppliedToken = queryToken ?? headerToken ?? bearerToken ?? cookieToken ?? ""
         let matchedOneTimePair = (queryPairCode != nil) && Self.constantTimeEquals(queryPairCode ?? "", oneTimePairingCode)
         let matchedSessionToken = Self.constantTimeEquals(suppliedToken, pairingToken) || Self.constantTimeEquals(suppliedToken, LocalLLMGatewayService.shared.apiToken)
-        let isForwardedTunnel = (headers["cf-connecting-ip"] != nil || headers["x-forwarded-for"] != nil)
         // SECURITY: only the Mac itself is trusted without the pairing token/code. Every other peer, including devices on the same
         // Wi-Fi / office LAN, must present either the one-time QR pairing code (`?pair=`) or the `mc_token` session token.
-        let isLocalMac = !isForwardedTunnel && (remoteIP == "127.0.0.1" || remoteIP == "::1")
+        // Loopback alone is not "the Mac": relay frames and tunnels arrive on 127.0.0.1, and so do requests from any web page
+        // in the user's browser (incl. DNS rebinding) — LocalServerTrust rejects those.
+        let isLocalMac = LocalServerTrust.isTrustedLocalRequest(remoteIP: remoteIP, headers: headers)
 
         // Public static brand icon asset route (contains zero user/workspace data; ensures <img> tags always render crisply)
         if method == "GET" && path == "/api/icon/provider" {
@@ -1625,7 +1837,7 @@ final class PhoneCompanionService: ObservableObject {
             "Cache-Control: no-cache, no-transform",
             "Connection: keep-alive",
             "X-Accel-Buffering: no",
-            "Access-Control-Allow-Origin: *",
+            // No CORS: the companion web app is same-origin; a wildcard let any web page read the stream.
             "",
             "data: \(initialJSON)\n\n"
         ].joined(separator: "\r\n")
@@ -1653,6 +1865,7 @@ final class PhoneCompanionService: ObservableObject {
     
     func broadcastSSEStateNow() {
         cachedStateFingerprint = ""
+        scheduleCloudShadowPush(immediate: false)
         guard !sseConnections.isEmpty else { return }
         tickSSEBroadcast(force: true)
     }
@@ -1670,6 +1883,7 @@ final class PhoneCompanionService: ObservableObject {
         let payload = buildCompanionStateJSON()
         if force || cachedStateFingerprint != lastBroadcastFingerprint {
             lastBroadcastFingerprint = cachedStateFingerprint
+            scheduleCloudShadowPush(immediate: false)
             let jsonString = String(data: payload, encoding: .utf8) ?? "{}"
             let frameData = Data("data: \(jsonString)\n\n".utf8)
             for (id, conn) in sseConnections {
@@ -1942,6 +2156,7 @@ final class PhoneCompanionService: ObservableObject {
                 attachments: attachments
             )
         }
+        scheduleCloudShadowPush(immediate: true)
     }
     
     // MARK: - Rich Real-Time Companion State Builder
@@ -2838,7 +3053,7 @@ final class PhoneCompanionService: ObservableObject {
         header += "Content-Type: \(contentType)\r\n"
         header += "Content-Length: \(body.count)\r\n"
         header += "Cache-Control: no-store, no-cache, must-revalidate\r\n"
-        header += "Access-Control-Allow-Origin: *\r\n"
+        // No CORS: the companion web app is same-origin. A wildcard let any web page read responses.
         header += "Connection: close\r\n"
         for (k, v) in extraHeaders {
             header += "\(k): \(v)\r\n"
@@ -4306,6 +4521,44 @@ final class PhoneCompanionService: ObservableObject {
           let pollTimer = null;
           let sseConnected = false;
           let evtSource = null;
+          let consecutiveConnFailures = 0;
+          let lastStateSnapshot = null;
+          const OUTBOX_STORAGE_KEY = "mc_outbox_queue_v1";
+          const STATE_CACHE_KEY = "mc_cached_state_v1";
+
+          function loadDeviceOutbox() {
+            try { return JSON.parse(localStorage.getItem(OUTBOX_STORAGE_KEY) || "[]") || []; } catch (_) { return []; }
+          }
+          function saveDeviceOutbox(items) {
+            try { localStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(items || [])); } catch (_) {}
+          }
+          async function flushDeviceOutbox() {
+            const queue = loadDeviceOutbox();
+            if (!queue.length) return;
+            const remaining = [];
+            let flushedAny = false;
+            for (let i = 0; i < queue.length; i++) {
+              const item = queue[i];
+              try {
+                const res = await api("/api/send", { prompt: item.prompt, enqueue: !!item.enqueue, attachments: item.attachments || [] });
+                if (res && res.ok) {
+                  flushedAny = true;
+                } else {
+                  remaining.push(item);
+                }
+              } catch (_) {
+                for (let j = i; j < queue.length; j++) remaining.push(queue[j]);
+                break;
+              }
+            }
+            saveDeviceOutbox(remaining);
+            if (flushedAny) {
+              lastRenderKey = "";
+              pollState();
+            } else if (lastStateSnapshot) {
+              applyStatePayload(lastStateSnapshot);
+            }
+          }
 
           function schedulePoll(delayMs) {
             if (pollTimer) clearTimeout(pollTimer);
@@ -4319,13 +4572,16 @@ final class PhoneCompanionService: ObservableObject {
               evtSource = new EventSource("/api/stream?token=" + encodeURIComponent(TOKEN));
               evtSource.onopen = () => {
                 sseConnected = true;
+                consecutiveConnFailures = 0;
                 document.getElementById("connDot").style.background = "#22c55e";
+                flushDeviceOutbox();
               };
               evtSource.onmessage = (ev) => {
                 if (!ev || !ev.data) return;
                 try {
                   const s = JSON.parse(ev.data);
                   sseConnected = true;
+                  consecutiveConnFailures = 0;
                   applyStatePayload(s);
                 } catch (_) {}
               };
@@ -4333,7 +4589,7 @@ final class PhoneCompanionService: ObservableObject {
                 sseConnected = false;
                 try { evtSource.close(); } catch (_) {}
                 evtSource = null;
-                setTimeout(connectSSEStream, 2500);
+                setTimeout(connectSSEStream, 1100);
               };
             } catch (_) {
               sseConnected = false;
@@ -4344,16 +4600,19 @@ final class PhoneCompanionService: ObservableObject {
             if (!document.hidden && !sseConnected) {
               await pollState();
             }
-            schedulePoll(sseConnected ? 5000 : (isAgentLoading ? 380 : 1500));
+            schedulePoll(sseConnected ? 5000 : (isAgentLoading ? 380 : 1400));
           }
 
           async function pollState() {
             try {
               const s = await api("/api/state");
+              consecutiveConnFailures = 0;
               applyStatePayload(s);
+              if (loadDeviceOutbox().length > 0) flushDeviceOutbox();
             } catch (e) {
-              if (!sseConnected) {
-                document.getElementById("connDot").style.background = "#ef4444";
+              consecutiveConnFailures += 1;
+              if (!sseConnected && consecutiveConnFailures >= 3) {
+                document.getElementById("connDot").style.background = navigator.onLine ? "#f59e0b" : "#71717a";
               }
             }
           }
@@ -4367,6 +4626,9 @@ final class PhoneCompanionService: ObservableObject {
 
           function applyStatePayload(s) {
             try {
+              lastStateSnapshot = s;
+              try { localStorage.setItem(STATE_CACHE_KEY, JSON.stringify(s)); } catch (_) {}
+              consecutiveConnFailures = 0;
               document.getElementById("connDot").style.background = "#22c55e";
               const wsLabelEl = document.getElementById("wsNameLabel");
               const chatLabelEl = document.getElementById("chatNameLabel");
@@ -4510,10 +4772,15 @@ final class PhoneCompanionService: ObservableObject {
               if (bannersEl.innerHTML !== bannersHTML) bannersEl.innerHTML = bannersHTML;
 
               // Chat Messages
-              const msgKey = JSON.stringify(s.messages || []) + "|" + isAgentLoading + "|" + (s.currentTool || "") + "|" + (s.workspacePath || "") + "|" + activeBrandId + "|" + cleanModelLabel;
+              const deviceOutbox = loadDeviceOutbox();
+              const msgKey = JSON.stringify(s.messages || []) + "|" + JSON.stringify(deviceOutbox) + "|" + isAgentLoading + "|" + (s.currentTool || "") + "|" + (s.workspacePath || "") + "|" + activeBrandId + "|" + cleanModelLabel;
               if (msgKey !== lastRenderKey) {
                 lastRenderKey = msgKey;
-                const msgs = s.messages || [];
+                const msgs = (s.messages || []).slice();
+                for (let oi = 0; oi < deviceOutbox.length; oi++) {
+                  const qo = deviceOutbox[oi];
+                  msgs.push({ id: qo.id || ("outbox-" + oi), role: "user", content: qo.prompt || "", attachments: qo.attachments || [], _localQueued: true });
+                }
                 const brandIconSrc = providerIconURL(activeBrandId);
                 if (msgs.length === 0) {
                   chatEl.innerHTML = `<div style="text-align:center;color:var(--secondary);margin-top:26vh;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:8px">
@@ -4532,9 +4799,12 @@ final class PhoneCompanionService: ObservableObject {
                       const atts = (m.attachments && m.attachments.length)
                         ? `<div class="user-att-row">` + m.attachments.map(a => `<span class="user-att-pill">${CLIP_INLINE_SVG} ${esc(a.name)}</span>`).join("") + `</div>`
                         : "";
-                      return `<div class="turn-user">${atts}${esc(m.content)}</div>`;
+                      const qBadge = m._localQueued ? `<div style="font-size:10px;color:var(--secondary);margin-top:4px">Waiting for signal · queued on device</div>` : "";
+                      return `<div class="turn-user">${atts}${esc(m.content)}${qBadge}</div>`;
                     }
-                    const brandHdr = `<div class="assistant-brand-hdr"><img src="${brandIconSrc}" width="14" height="14" alt=""><span>${esc(cleanModelLabel)}</span></div>`;
+                    const turnModel = m.modelLabel ? String(m.modelLabel) : cleanModelLabel;
+                    const turnBrand = m.providerId ? providerIconURL(m.providerId) : brandIconSrc;
+                    const brandHdr = `<div class="assistant-brand-hdr"><img src="${turnBrand}" width="14" height="14" alt=""><span>${esc(turnModel)}</span></div>`;
                     const tId = `thought-${m.id || mIdx}`;
                     const thoughtOpen = (m.thoughtStreaming || openDrawerIds.has(tId)) ? "open" : "";
                     const thoughtLabel = m.thoughtStreaming ? "Thinking…" : "Thought process";
@@ -4574,8 +4844,17 @@ final class PhoneCompanionService: ObservableObject {
             hideAtPopup();
             updateComposerButtons();
             autoScroll = true;
-            await api("/api/send", { prompt: text, enqueue: !!enqueueOnly, attachments: attsToSend });
-            pollState();
+            try {
+              const res = await api("/api/send", { prompt: text, enqueue: !!enqueueOnly, attachments: attsToSend });
+              if (!res || !res.ok) throw new Error("send rejected");
+              pollState();
+            } catch (_) {
+              const q = loadDeviceOutbox();
+              q.push({ id: "local-" + Date.now(), prompt: text, enqueue: !!enqueueOnly, attachments: attsToSend });
+              saveDeviceOutbox(q);
+              lastRenderKey = "";
+              if (lastStateSnapshot) applyStatePayload(lastStateSnapshot);
+            }
           }
 
           async function stopAgent() {
@@ -5475,8 +5754,21 @@ final class PhoneCompanionService: ObservableObject {
             if (!document.hidden) {
               if (!sseConnected) connectSSEStream();
               pollState();
+              flushDeviceOutbox();
             }
           });
+          window.addEventListener("online", () => {
+            flushDeviceOutbox();
+            if (!sseConnected) connectSSEStream();
+            pollState();
+          });
+          try {
+            const cachedRaw = localStorage.getItem(STATE_CACHE_KEY);
+            if (cachedRaw) {
+              const cachedObj = JSON.parse(cachedRaw);
+              if (cachedObj) applyStatePayload(cachedObj);
+            }
+          } catch (_) {}
 
           connectSSEStream();
           pollLoop();

@@ -66,6 +66,74 @@ enum AISystemPromptLayout {
     }
 }
 
+/// Fits the system prompt and the text tool catalog into a provider's hard size limit by priority, instead of
+/// cutting the end off. The Thai Gemini Enterprise (Vertex AI Search) bridge used `prefix(14_000)` on
+/// persona + dynamic context + tool list; the persona alone is ~14K, so the model never saw a tool or the
+/// workspace path and could only guess (2026-11-21 research, docs/research/2026-11-21-agent-intelligence.md).
+enum TextBridgeContextBudget {
+    static let trimNote = "\n…[trimmed to fit this provider's context limit]"
+
+    /// Priority: intro, the tool catalog, per-message context (workspace, editor, rules — after
+    /// `AISystemPromptLayout.dynamicBoundary`), then the stable persona. Result is at most `limit` characters.
+    static func compose(intro: String, systemPrompt: String?, toolCatalog: String?, limit: Int) -> String {
+        var stable = systemPrompt ?? ""
+        var dynamic = ""
+        if let boundary = stable.range(of: AISystemPromptLayout.dynamicBoundary) {
+            dynamic = String(stable[boundary.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            stable = String(stable[..<boundary.lowerBound])
+        }
+        stable = stable.trimmingCharacters(in: .whitespacesAndNewlines)
+        let separator = "\n\n"
+        let introPart = fitLines(intro.trimmingCharacters(in: .whitespacesAndNewlines), limit: limit)
+        var remaining = limit - introPart.count
+        // The catalog may take up to 70% of what is left: without it the model cannot act at all.
+        let catalog = fitLines(toolCatalog?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+                               limit: max(0, Int(Double(remaining - separator.count) * 0.7)))
+        if !catalog.isEmpty { remaining -= catalog.count + separator.count }
+        // Context first (it names the workspace), then the persona; unused share goes to the other.
+        let contextBudget = max(0, remaining - (stable.isEmpty ? 0 : separator.count)) - (dynamic.isEmpty ? 0 : separator.count)
+        let dynamicShare = stable.isEmpty ? contextBudget : max(contextBudget * 6 / 10, contextBudget - stable.count)
+        let dynamicPart = fitLines(dynamic, limit: max(0, dynamicShare))
+        let stablePart = fitLines(stable, limit: max(0, contextBudget - dynamicPart.count))
+        return [introPart, stablePart, dynamicPart, catalog].filter { !$0.isEmpty }.joined(separator: separator)
+    }
+
+    /// Keeps whole lines from the top; adds `trimNote` when something was dropped. Never longer than `limit`.
+    static func fitLines(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let room = limit - trimNote.count
+        guard room > 0 else { return "" }
+        var kept = ""
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let addition = kept.isEmpty ? String(line) : "\n" + line
+            if kept.count + addition.count > room { break }
+            kept += addition
+        }
+        if kept.isEmpty { kept = String(text.prefix(room)) }
+        return kept + trimNote
+    }
+}
+
+/// Renders a structured tool turn as plain text for backends without native tool calling (text bridges, CLIs).
+enum TextBridgeTranscript {
+    static func toolCalls(text: String, calls: [(name: String, argumentsJSON: String)]) -> String {
+        var out = text
+        for call in calls {
+            out += "\n<tool_call>{\"name\": \"\(call.name)\", \"arguments\": \(call.argumentsJSON)}</tool_call>"
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func toolResults(_ results: [(name: String, success: Bool, output: String)], directive: String, maxOutputChars: Int = 24_000) -> String {
+        var lines = results.map { r -> String in
+            let output = r.output.count > maxOutputChars ? String(r.output.prefix(maxOutputChars)) + "\n...(truncated)" : r.output
+            return "<tool_response name=\"\(r.name)\" status=\"\(r.success ? "ok" : "error")\">\n\(output)\n</tool_response>"
+        }
+        if !directive.isEmpty { lines.append(directive) }
+        return lines.joined(separator: "\n\n")
+    }
+}
+
 /// Assembles OpenAI-style streamed `tool_calls` deltas into whole calls.
 ///
 /// Providers differ: OpenAI sends `index` on every delta and `id` only on the first; some gateways omit `index`

@@ -1028,7 +1028,7 @@ struct CollaborationView: View {
                 }
                 .popover(isPresented: $showQRPopover) {
                     VStack(spacing: 10) {
-                        Text("SCAN TO JOIN IN BROWSER")
+                        Text("SCAN TO JOIN IN MICROCODE")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .foregroundColor(.secondary)
                         if let qr = collab.qrCodeImage {
@@ -1062,6 +1062,16 @@ struct CollaborationView: View {
                     .padding(14)
                     .frame(width: 248)
                 }
+            }
+
+            if collab.currentSession?.isHostingLocally == true {
+                Toggle(isOn: $collab.allowBrowserGuests) {
+                    Text("Also allow editing in a web browser")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .toggleStyle(.checkbox)
+                .help("Invite links open MicroCode. Turn this on to also offer the browser editor on the invite page.")
             }
         }
         .padding(.horizontal, 11)

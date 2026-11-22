@@ -1043,12 +1043,18 @@ final class TelemetryService: ObservableObject {
     private nonisolated static func runProcessOutput(executable: String, arguments: [String]) -> Data? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = arguments
+        // curl: bearer tokens and JWT bodies go via stdin (`--config -`), never argv (visible to every local user).
+        let split = executable.hasSuffix("/curl") ? CurlSecretArguments.split(arguments) : (argv: arguments, config: "")
+        proc.arguments = split.argv
         let outPipe = Pipe()
+        let inPipe = Pipe()
+        proc.standardInput = inPipe
         proc.standardOutput = outPipe
         proc.standardError = Pipe()
         do {
             try proc.run()
+            inPipe.fileHandleForWriting.write(Data(split.config.utf8))
+            try? inPipe.fileHandleForWriting.close()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
             return proc.terminationStatus == 0 && !data.isEmpty ? data : nil

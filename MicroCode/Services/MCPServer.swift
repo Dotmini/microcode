@@ -738,6 +738,42 @@ class MCPServer: ObservableObject {
                     ],
                     "required": ["action"]
                 ]
+            ],
+            [
+                "name": "agent_desktop",
+                "description": "Semantic OS Accessibility Computer-Use Engine (`vercel-labs/agent-desktop` v1.3.1 In-Process FFI + OpenThai 2.0 OCR Hybrid Fallback). Operates macOS desktop apps headlessly via `@<snapshot_id>:e<N>` refs without screenshots or moving the mouse.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "command": ["type": "string", "description": "Command: 'snapshot', 'skeleton', 'drill', 'find', 'click', 'double-click', 'right-click', 'type', 'set-value', 'clear', 'focus', 'select', 'toggle', 'check', 'uncheck', 'expand', 'collapse', 'scroll', 'scroll-to', 'press', 'get', 'is', 'list-windows', 'list-apps', 'list-surfaces', 'open-system-surface', 'launch', 'close-app', 'cursor-overlay', 'list-notifications', 'dismiss-notification', 'wait', 'status', 'trace-export'"],
+                        "app": ["type": "string", "description": "Target application name or bundle ID (e.g. 'Finder', 'Notes', 'Safari', 'Simulator', 'MicroCode')"],
+                        "ref": ["type": "string", "description": "Snapshot-qualified element ref `@<snapshot_id>:e<N>` (e.g. '@s8f3k2p9:e8')"],
+                        "root": ["type": "string", "description": "Parent `@<snapshot_id>:e<N>` ref to drill into"],
+                        "surface": ["type": "string", "description": "Surface scope: 'window', 'focused', 'menubar', 'menu', 'menu-bar-extras', 'dock', 'sheet', 'popover', 'alert'"],
+                        "text": ["type": "string", "description": "Text payload for 'type', 'set-value', 'select', or 'wait'"],
+                        "role": ["type": "string", "description": "Role filter for 'find'"],
+                        "name": ["type": "string", "description": "Element name filter for 'find'"],
+                        "combo": ["type": "string", "description": "Key chord for 'press' (e.g. 'cmd+s')"],
+                        "headed": ["type": "boolean", "description": "Allow physical cursor/focus when true; default false (100% headless)"],
+                        "session": ["type": "string", "description": "Optional isolated session namespace"]
+                    ],
+                    "required": ["command"]
+                ]
+            ],
+            [
+                "name": "openthai_ocr",
+                "description": "OpenThai 2.0 OCR Engine (`https://openthai.ai/openthai2p0-ocr`) for high-precision Thai + English document, table (`rowspan`/`colspan`), scanned PDF, and screenshot OCR.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Path to image (.png/.jpg/.webp/.tiff/.bmp) or PDF (.pdf) file"],
+                        "mode": ["type": "string", "description": "'auto' (default), 'text' (4.2MB local ONNX CPU), or 'markdown' (structured tables & layout)"],
+                        "page_start": ["type": "integer", "description": "Start page for PDF (1-based, default 1)"],
+                        "page_end": ["type": "integer", "description": "End page for PDF (default 10)"],
+                        "include_boxes": ["type": "boolean", "description": "Include 2D bounding boxes for each line"]
+                    ],
+                    "required": ["path"]
+                ]
             ]
         ]
         
@@ -816,7 +852,7 @@ class MCPServer: ObservableObject {
             let res = executeSyncAccount(args)
             return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "\(res)"]]])
         }
-        if ["ide_browser", "preview_control", "editor_control", "lsp_intelligence", "api_studio", "database_studio", "grep_search", "list_directory_tree", "find_symbol", "multi_file_read", "replace_in_file", "patch_file"].contains(name) {
+        if ["agent_desktop", "openthai_ocr", "ide_browser", "preview_control", "editor_control", "lsp_intelligence", "api_studio", "database_studio", "grep_search", "list_directory_tree", "find_symbol", "multi_file_read", "replace_in_file", "patch_file"].contains(name) {
             do {
                 let res = try await AgentToolBox.shared.execute(name, params: args)
                 log("Tool: \(name)", method: "tools/call", status: .success)

@@ -842,13 +842,18 @@ final class SupabaseAuthService: ObservableObject {
         let marker = "\n__MC_HTTP_STATUS__:"
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        proc.arguments = ["-4", "-sS", "--connect-timeout", "4", "--max-time", "12", "-w", "\(marker)%{http_code}"] + arguments
+        // Tokens/bodies go to curl via stdin (`--config -`), never argv (visible to every local user in `ps`).
+        let split = CurlSecretArguments.split(arguments)
+        proc.arguments = ["-4", "-sS", "--connect-timeout", "4", "--max-time", "12", "-w", "\(marker)%{http_code}"] + split.argv
         let out = Pipe()
-        proc.standardInput = FileHandle.nullDevice
+        let input = Pipe()
+        proc.standardInput = input
         proc.standardOutput = out
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
+            input.fileHandleForWriting.write(Data(split.config.utf8))
+            try? input.fileHandleForWriting.close()
             let rawData = out.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
             guard proc.terminationStatus == 0,
@@ -869,13 +874,17 @@ final class SupabaseAuthService: ObservableObject {
     private nonisolated static func curlIPv4JSON(arguments: [String]) -> Data? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        proc.arguments = ["-4", "-sS", "--connect-timeout", "4", "--max-time", "12"] + arguments
+        let split = CurlSecretArguments.split(arguments)
+        proc.arguments = ["-4", "-sS", "--connect-timeout", "4", "--max-time", "12"] + split.argv
         let out = Pipe()
-        proc.standardInput = FileHandle.nullDevice
+        let input = Pipe()
+        proc.standardInput = input
         proc.standardOutput = out
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
+            input.fileHandleForWriting.write(Data(split.config.utf8))
+            try? input.fileHandleForWriting.close()
             let data = out.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
             return proc.terminationStatus == 0 && !data.isEmpty ? data : nil
