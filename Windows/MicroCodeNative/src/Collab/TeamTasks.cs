@@ -322,8 +322,8 @@ namespace MicroCode.Views
                 var w = new FileSystemWatcher(dir, Path.GetFileName(file)) { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size };
                 FileSystemEventHandler h = (s, e) =>
                 {
-                    // our own save echoes back here; the Mac ignores events for 0.15 s after persisting
-                    if ((DateTime.UtcNow - _persistedAt).TotalMilliseconds < 400) return;
+                    // our own save echoes back here; allow 1200ms margin on loaded CI NTFS runners
+                    if ((DateTime.UtcNow - _persistedAt).TotalMilliseconds < 1200) return;
                     ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(80); Reload(); });
                 };
                 w.Changed += h; w.Created += h; w.Renamed += (s, e) => h(s, e);

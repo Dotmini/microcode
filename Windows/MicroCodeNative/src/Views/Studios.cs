@@ -140,8 +140,23 @@ namespace MicroCode.Views
 
         public static StudioExecResult RunShell(string command, string workDir, int timeoutMs, Action<string> onLine)
         {
-            if (IsWindows) return Run("cmd.exe", "/c " + (command ?? ""), workDir, timeoutMs, onLine);
-            return Run("/bin/sh", "-c " + QuoteArg(command ?? ""), workDir, timeoutMs, onLine);
+            string cmd = command ?? "";
+            if (IsWindows)
+            {
+                if (cmd.IndexOf('\n') >= 0 || cmd.IndexOf('\r') >= 0)
+                {
+                    string tmpCmd = Path.Combine(Path.GetTempPath(), "mc-step-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".cmd");
+                    try
+                    {
+                        string normalized = cmd.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+                        File.WriteAllText(tmpCmd, "@echo off\r\n" + normalized + "\r\n", new UTF8Encoding(false));
+                        return Run("cmd.exe", "/d /c " + QuoteArg(tmpCmd), workDir, timeoutMs, onLine);
+                    }
+                    finally { try { File.Delete(tmpCmd); } catch { } }
+                }
+                return Run("cmd.exe", "/d /c " + cmd, workDir, timeoutMs, onLine);
+            }
+            return Run("/bin/sh", "-c " + QuoteArg(cmd), workDir, timeoutMs, onLine);
         }
 
         public static string FindExecutable(params string[] candidates)

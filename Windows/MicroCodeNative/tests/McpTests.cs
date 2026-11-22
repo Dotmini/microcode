@@ -191,7 +191,7 @@ for line in sys.stdin:
         string conn = McpManager.Orchestrate(A("action", "connect", "server_name", "Py2", "command", "python", "args", script));
         string saved = File.ReadAllText(Path.Combine(home, ".microcode", "mcp.json"));
         Check(conn.StartsWith("✅ Connected MCP Server 'py2'") && conn.Contains("`mcp__py2__echo`") && saved.Contains("\"py2\"") && McpManager.Get("py2").Connected, "mcp_orchestrator connect: registers in ~/.microcode/mcp.json and mounts the tools");
-        Check(McpManager.Orchestrate(A("action", "authenticate", "server_name", "py2")).Contains("not available in MicroCode for Windows yet"), "mcp_orchestrator authenticate: honest message (no OAuth yet)");
+        Check(McpManager.Orchestrate(A("action", "authenticate", "server_name", "py2")).Contains("no remote URL registered"), "mcp_orchestrator authenticate: reports missing URL for stdio server (OAuth 2.1 supported for HTTP)");
         Check(McpManager.LooksReadOnlyTool("mcp__py__list_calls") && !McpManager.LooksReadOnlyTool("mcp__py__crash"), "Approval: read-looking MCP tool names are treated as safe");
         McpManager.StopAll();
     }

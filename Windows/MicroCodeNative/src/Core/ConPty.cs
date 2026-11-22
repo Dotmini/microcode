@@ -209,6 +209,7 @@ namespace MicroCode.Core
         IntPtr _hProcess = IntPtr.Zero;
         IntPtr _hThread = IntPtr.Zero;
         Process _fallbackProc;
+        Thread _conPtyReader;
         int _exitedRaised;
         volatile bool _running;
 
@@ -374,6 +375,7 @@ namespace MicroCode.Core
             var reader = new Thread(ReadConPtyLoop);
             reader.IsBackground = true;
             reader.Name = "ConPtyReader";
+            _conPtyReader = reader;
             reader.Start();
 
             var waiter = new Thread(WaitConPtyLoop);
@@ -411,7 +413,8 @@ namespace MicroCode.Core
         void WaitConPtyLoop()
         {
             IntPtr hProc;
-            lock (_gate) { hProc = _hProcess; }
+            Thread reader;
+            lock (_gate) { hProc = _hProcess; reader = _conPtyReader; }
             if (hProc == IntPtr.Zero) return;
 
             try { ConPty.NativeMethods.WaitForSingleObject(hProc, ConPty.NativeMethods.INFINITE); } catch { }
@@ -419,6 +422,20 @@ namespace MicroCode.Core
             uint code = 0;
             try { ConPty.NativeMethods.GetExitCodeProcess(hProc, out code); } catch { }
             ExitCode = unchecked((int)code);
+
+            // Allow conhost to flush final VT stdout/stderr, then close the pseudo-console so ReadFile sees EOF.
+            try { Thread.Sleep(50); } catch { }
+            IntPtr hpc = IntPtr.Zero;
+            lock (_gate) { hpc = _hPC; _hPC = IntPtr.Zero; }
+            if (hpc != IntPtr.Zero)
+            {
+                try { ConPty.NativeMethods.ClosePseudoConsole(hpc); } catch { }
+            }
+            if (reader != null && Thread.CurrentThread != reader)
+            {
+                try { reader.Join(1500); } catch { }
+            }
+
             _running = false;
             RaiseExited(ExitCode);
         }
