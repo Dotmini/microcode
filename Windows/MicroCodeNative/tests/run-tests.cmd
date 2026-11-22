@@ -10,6 +10,7 @@ rem   CollabTests         Team Collaboration: a real host + peer on loopback (jo
 rem   PhoneCompanionTests Mobile Connect 2.0 (QR encoder, PIN/approval auth, HTTP routes, CloudAI sync, Dotmini Cloud LocalBridge)
 rem   CollabOTTests       ot1 real-time OT protocol (UTF-16 transforms, fuzz convergence, WebSocket + HTTP relay, deep-links)
 rem   StudioModesTests    Science, RemoteX/SSH, Scenario, Embedded/Serial, OpenVSX, Database/SQLite, Container, CI/CD, CloudGPU
+rem   ClaimCheckTests     P1 claim-vs-evidence check on the final answer (mirror of the macOS AgentClaimCheck)
 rem   HarnessParityTests  ConPTY + ANSI stripper, LSP JSON-RPC stdio, SubAgentHarness, ACP, Memory, RepoMap, ARX, Evidence, ComputerUse
 setlocal
 set FW=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319
@@ -43,6 +44,8 @@ if errorlevel 1 set FAILED=1
 call :suite StudioModesTests
 if errorlevel 1 set FAILED=1
 call :suite HarnessParityTests
+if errorlevel 1 set FAILED=1
+call :suite ClaimCheckTests
 if errorlevel 1 set FAILED=1
 exit /b %FAILED%
 

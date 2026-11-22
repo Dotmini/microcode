@@ -295,7 +295,7 @@ namespace MicroCode.Views
             };
             var schemas = tools ? buildSchemas() : null;
             int maxIter = (int)Defaults.Num("agentMaxIterations", 0); if (maxIter <= 0) maxIter = 500;
-            bool refreshed = false, preFinishChecked = false;
+            bool refreshed = false, preFinishChecked = false, claimChecked = false;
             for (int iter = 0; iter < maxIter; iter++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -346,6 +346,34 @@ namespace MicroCode.Views
                             continue;
                         }
                     }
+                    // P1: the model decided to stop. Check once that the answer does not report results this turn has no evidence for.
+                    if (schemas != null && !readOnly && !claimChecked)
+                    {
+                        string visible = ClaimCheck.Visible(turn.Text);
+                        string checkPrompt = null;
+                        if (visible.Length == 0 && res.Steps.Count > 0 && ClaimCheck.Visible(res.Text).Length == 0) checkPrompt = ClaimCheck.EmptyAnswerPrompt;
+                        else
+                        {
+                            var evidence = res.Steps.Select(st => new ClaimEvidence
+                            {
+                                Executed = st.Name == "shell" || st.Name == "playground_run" || st.Name == "device_runtime",
+                                Mutated = IsEdit(st.Name),
+                                ExportedPdf = st.Name == "export_pdf",
+                                Ok = st.Ok
+                            }).ToList();
+                            string reason = ClaimCheck.Mismatch(visible, evidence);
+                            if (reason != null) checkPrompt = ClaimCheck.Prompt(reason);
+                        }
+                        if (checkPrompt != null)
+                        {
+                            claimChecked = true;
+                            Say(cb.OnActivity, "Checking the answer against this turn's results…");
+                            msgs.Add(new Dictionary<string, object> { { "role", "assistant" }, { "content", turn.Text.Length > 0 ? turn.Text : "(no visible answer)" } });
+                            msgs.Add(new Dictionary<string, object> { { "role", "user" }, { "content", checkPrompt } });
+                            continue;
+                        }
+                    }
+                    res.Text = ClaimCheck.StripEmptyThought(res.Text);
                     return res;
                 }
 
