@@ -96,6 +96,9 @@ namespace MicroCode.Views
         /// <summary>A teammate's @ai request: run it in the host's workspace agent and call done(reply, error) once, for this
         /// request, when its turn ends (on any thread).</summary>
         void RunAgentPrompt(string prompt, Action<string, string> done);
+        /// <summary>ot1: patch op (base text = previous) into the open editor of this file, transforming keystrokes typed since
+        /// previous; then call applied(editorTextAfter) once (null when the file is not open in an editor).</summary>
+        void ApplyRemoteOp(string fullPath, TextOperation op, string previous, string resulting, Action<string> applied);
     }
 
     public enum CollabStatus { Disconnected, Connecting, Connected, Reconnecting, Error }
@@ -211,7 +214,6 @@ namespace MicroCode.Views
         /// as on the Mac).</summary>
         public readonly TeamTaskStore Tasks;
         public readonly TeamIntegrations Integrations;
-        DateTime _tasksPushedAt = DateTime.MinValue;
 
         string SelectedTaskTitle { get { var t = Tasks.SelectedTask; return t != null ? t.Title : null; } }
 
@@ -228,19 +230,43 @@ namespace MicroCode.Views
                 Server.Broadcast(Json(new Dictionary<string, object> { { "type", "teamTasks" }, { "teamTasksJSON", json } }), null);
                 return;
             }
-            _tasksPushedAt = DateTime.UtcNow;
-            var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "teamTasksJSON", json } };
+            // One push at a time, always the latest board: whole-list replacement means a slower, older push arriving after a
+            // newer one would undo it on the host (it did: a Claim vanished behind the earlier Create's push).
+            lock (_taskPushLock)
+            {
+                _taskLocalVersion++;
+                _taskPushPending = true;
+                if (_taskPushRunning) return;
+                _taskPushRunning = true;
+            }
             var _ = Task.Run(async () =>
             {
-                try
+                while (true)
                 {
-                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
-                    using (var resp = await Http.PostAsync(s.RemoteEndpoint + "/api/collab/sync", new StringContent(Json(body), Encoding.UTF8, "application/json"), cts.Token))
-                        Trace("tasks pushed " + (int)resp.StatusCode);
+                    long version;
+                    lock (_taskPushLock)
+                    {
+                        if (!_taskPushPending || Session != s) { _taskPushRunning = false; return; }
+                        _taskPushPending = false;
+                        version = _taskLocalVersion;
+                    }
+                    var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "teamTasksJSON", TeamTaskJson.ArrayJson(Tasks.Tasks) } };
+                    try
+                    {
+                        using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
+                        using (var resp = await SendRoom(HttpMethod.Post, s.RemoteEndpoint + "/api/collab/sync", new StringContent(Json(body), Encoding.UTF8, "application/json"), cts.Token))
+                            Trace("tasks pushed " + (int)resp.StatusCode);
+                    }
+                    catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Trace("tasks push failed: " + ex.Message); }
+                    // answered (or given up on): room lists are accepted again once nothing newer is waiting
+                    lock (_taskPushLock) { if (version > _taskAckedVersion) _taskAckedVersion = version; }
                 }
-                catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Trace("tasks push failed: " + ex.Message); }
             });
         }
+
+        readonly object _taskPushLock = new object();
+        bool _taskPushPending, _taskPushRunning;
+        long _taskLocalVersion, _taskAckedVersion;
 
         /// <summary>A list from the room (sync payload or the teamTasks WebSocket message). Swift decodes the array all-or-nothing:
         /// one invalid task drops the whole list, and so does this.</summary>
@@ -249,8 +275,9 @@ namespace MicroCode.Views
             if (json == null) return;
             var list = TeamTaskJson.ParseArray(json);
             if (list == null) { Trace("tasks: invalid list ignored"); return; }
-            // a poll answer that left the host before our own push landed must not undo it (the WS echo is authoritative)
-            if (!authoritative && (DateTime.UtcNow - _tasksPushedAt).TotalMilliseconds < 1500) return;
+            // while the host has not acknowledged our latest local change, any room list (poll answer or WS echo of an older
+            // push) predates it and would undo it: keep ours until the push that carries it is answered
+            lock (_taskPushLock) { if (Session != null && !Session.IsHostingLocally && _taskLocalVersion > _taskAckedVersion) return; }
             Tasks.ApplyRemoteTasks(list);
         }
 
@@ -292,6 +319,17 @@ namespace MicroCode.Views
 
         public void SetDisplayName(string name) { LocalDisplayName = name; Defaults.Set("collabDisplayName", name); UpdateSelfInParticipants(); Fire(); }
         public void SetRole(string role) { LocalRole = role; Defaults.Set("collabUserRole", role); UpdateSelfInParticipants(); Fire(); }
+
+        /// <summary>A request to the room's host carrying the room credential (X-Collab-Code), which every host route checks.</summary>
+        Task<HttpResponseMessage> SendRoom(HttpMethod method, string url, HttpContent content, CancellationToken ct)
+        {
+            var req = new HttpRequestMessage(method, url) { Content = content };
+            AddRoomCredential(req);
+            return Http.SendAsync(req, ct);
+        }
+
+        /// <summary>The room code being joined (before Session exists), so the first requests carry the credential too.</summary>
+        string _joiningCode;
 
         void Fire() { var c = Changed; if (c != null) { try { c(); } catch (Exception ex) { Debug.WriteLine("collab changed: " + ex); } } }
 
@@ -585,7 +623,8 @@ namespace MicroCode.Views
             {
                 SharedRoot = ws != null ? Path.GetFullPath(ws).TrimEnd('\\') : null;
                 Server.OnRequest = HandleHttp;
-                Server.OnUpgrade = r => r.Path == "/ws/collab" && Session != null && QueryCode(r).Length > 0 && QueryCode(r) != Session.ShareCode ? CollabResponse.Text("403 Forbidden", "text/plain", "Invalid code") : (r.Path == "/ws/collab" ? null : CollabResponse.Text("404 Not Found", "application/json", "{\"error\":\"Not found\"}"));
+                Server.OnUpgrade = r => r.Path != "/ws/collab" ? CollabResponse.Text("404 Not Found", "application/json", "{\"error\":\"Not found\"}")
+                    : (Session == null || !HasRoomCredential(r)) ? CollabResponse.Text("403 Forbidden", "text/plain", "Invalid code") : null;
                 Server.OnWsOpen = c => c.SendText(Json(new Dictionary<string, object> { { "type", "welcome" }, { "shareCode", Session != null ? Session.ShareCode : "" }, { "workspaceName", Session != null ? Session.WorkspaceName : "Workspace" }, { "participants", WithGate(SerializeParticipants) } }));
                 Server.OnWsText = HandleHostWsText;
                 if (!Server.Start()) { Status = CollabStatus.Error; StatusError = "No free port in 8490-8515"; Fire(); return null; }
@@ -606,6 +645,29 @@ namespace MicroCode.Views
         T WithGate<T>(Func<T> f) { lock (_gate) return f(); }
 
         static string QueryCode(CollabRequest r) { string c; return r.Query.TryGetValue("code", out c) ? (c ?? "").Trim().ToUpperInvariant() : ""; }
+
+        static string CookieCode(CollabRequest r)
+        {
+            string raw = r.Header("Cookie");
+            if (raw != null) foreach (var pair in raw.Split(';')) { var kv = pair.Trim().Split('='); if (kv.Length >= 2 && kv[0] == "mc_collab_code") return kv[1].Trim().ToUpperInvariant(); }
+            return "";
+        }
+
+        /// <summary>The room credential: query code, X-Collab-Code header, or the portal's mc_collab_code cookie (constant-time).</summary>
+        bool HasRoomCredential(CollabRequest r)
+        {
+            var s = Session;
+            if (s == null) return false;
+            string expected = s.ShareCode.ToUpperInvariant();
+            foreach (var given in new[] { QueryCode(r), (r.Header("X-Collab-Code") ?? "").Trim().ToUpperInvariant(), CookieCode(r) })
+            {
+                if (given.Length != expected.Length) continue;
+                int diff = 0;
+                for (int i = 0; i < given.Length; i++) diff |= given[i] ^ expected[i];
+                if (diff == 0) return true;
+            }
+            return false;
+        }
 
         static string DetectWorkspaceLang(string ws)
         {
@@ -635,15 +697,15 @@ namespace MicroCode.Views
                 string rel = NormalizeRelativePath(f.FullPath);
                 if (rel.Length == 0 || f.Content == null) continue;
                 openSet.Add(rel);
-                string prev; bool had = _contents.TryGetValue(rel, out prev);
-                _contents[rel] = f.Content;
-                int rev;
-                if (_revisions.TryGetValue(rel, out rev))
+                // the first sight of an open buffer seeds the room's copy; later typing reaches the room only as commits
+                // (NotifyLocalFileEdited → ot1), never by bumping the revision here behind the op log's back
+                if (!_contents.ContainsKey(rel))
                 {
-                    if (had && prev != f.Content) { _revisions[rel] = rev + 1; RecordSnapshot(rel, rev + 1, f.Content); }
-                    else if (Snapshot(rel, rev) == null) RecordSnapshot(rel, rev, f.Content);
+                    _contents[rel] = f.Content.Replace("\r\n", "\n");
+                    int rev;
+                    if (!_revisions.TryGetValue(rel, out rev)) { rev = 1; _revisions[rel] = 1; }
+                    RecordSnapshot(rel, rev, _contents[rel]);
                 }
-                else { _revisions[rel] = 1; RecordSnapshot(rel, 1, f.Content); }
             }
             if (!forceDiskScan && _sharedFiles.Count > 0 && (DateTime.UtcNow - _lastDiskScan).TotalSeconds < 2.5)
             {
@@ -688,9 +750,8 @@ namespace MicroCode.Views
                         string old;
                         if (text != null && (!_contents.TryGetValue(rel, out old) || old != text))
                         {
-                            int next = Rev(rel) + 1;
-                            _contents[rel] = text; _revisions[rel] = next; RecordSnapshot(rel, next, text);
-                            Server.Broadcast(Json(new Dictionary<string, object> { { "type", "fileBuffer" }, { "path", rel }, { "content", text }, { "revision", next }, { "authorId", LocalUserId }, { "authorName", LocalDisplayName }, { "authorColor", LocalColor } }), null);
+                            _diskMod[rel] = fi.LastWriteTimeUtc;
+                            HostCommitContent(rel, text, LocalUserId, LocalDisplayName, LocalColor, false, true, true);
                         }
                     }
                     _diskMod[rel] = fi.LastWriteTimeUtc;
@@ -778,15 +839,12 @@ namespace MicroCode.Views
             string baseSnap = baseRevision.HasValue && baseRevision.Value < currentRev ? Snapshot(rel, baseRevision.Value) : null;
             if (baseSnap != null) { var m = CollabMerge.Merge(baseSnap, current, content); merged = m.Merged; didMerge = m.DidAutoMerge; }
             if (merged == current) return Tuple.Create(current, currentRev, didMerge);
-            _contents[rel] = merged;
-            int next = currentRev + 1;
-            _revisions[rel] = next;
-            RecordSnapshot(rel, next, merged);
-            WriteRelative(rel, merged);
-            PushToEditor(rel, merged);
-            if (!_sharedFiles.Any(f => f.RelativePath == rel)) { IndexLocalWorkspaceFiles(true); _ide.RefreshTree(); }
-            RecordActivity(authorName, authorColor, didMerge ? "merged edit" : "edited", rel);
-            return Tuple.Create(merged, next, didMerge);
+            // a legacy full-text edit is one ot1 commit: ot1 clients get the op, legacy clients the buffer (the author only
+            // when the merge changed its text)
+            HostFlushLiveEditor(rel);
+            var commit = HostCommitContent(rel, merged, authorId, authorName, authorColor, true, true, didMerge);
+            if (didMerge) RecordActivity(authorName, authorColor, "merged edit", rel);
+            return Tuple.Create(merged, commit != null ? commit.Revision : Rev(rel), didMerge);
         }
 
         /// <summary>Moves every per-file record of a file, or of everything under a folder, to its new relative path.</summary>
@@ -799,6 +857,8 @@ namespace MicroCode.Views
             foreach (var k in _peerBaseRevisions.Keys.ToList()) { string n = map(k); if (n != null) { _peerBaseRevisions[n] = _peerBaseRevisions[k]; _peerBaseRevisions.Remove(k); } }
             foreach (var k in _lastSynced.Keys.ToList()) { string n = map(k); if (n != null) { _lastSynced[n] = _lastSynced[k]; _lastSynced.Remove(k); } }
             foreach (var k in _diskMod.Keys.ToList()) { string n = map(k); if (n != null) { _diskMod[n] = _diskMod[k]; _diskMod.Remove(k); } }
+            foreach (var k in _otDocs.Keys.ToList()) { string n = map(k); if (n != null) { _otDocs[n] = _otDocs[k]; _otDocs.Remove(k); } }
+            foreach (var k in _peerOT.Keys.ToList()) { string n = map(k); if (n != null) { _peerOT[n] = _peerOT[k]; _peerOT.Remove(k); } }
             foreach (var f in _sharedFiles) { string n = map(f.RelativePath); if (n != null) { f.RelativePath = n; f.Name = n.Split('/').Last(); } }
             _sharedDirs = _sharedDirs.Select(d => map(d) ?? d).ToList();
         }
@@ -812,6 +872,8 @@ namespace MicroCode.Views
             foreach (var k in _peerBaseRevisions.Keys.Where(hit).ToList()) _peerBaseRevisions.Remove(k);
             foreach (var k in _lastSynced.Keys.Where(hit).ToList()) _lastSynced.Remove(k);
             foreach (var k in _diskMod.Keys.Where(hit).ToList()) _diskMod.Remove(k);
+            foreach (var k in _otDocs.Keys.Where(hit).ToList()) _otDocs.Remove(k);
+            foreach (var k in _peerOT.Keys.Where(hit).ToList()) _peerOT.Remove(k);
             _sharedDirs.RemoveAll(d => hit(d));
             _sharedFiles.RemoveAll(f => hit(f.RelativePath));
         }
@@ -836,14 +898,15 @@ namespace MicroCode.Views
                     {
                         string content = (S(ev, "content") ?? "").Replace("\r\n", "\n");
                         int? baseRev = I(ev, "baseRevision");
-                        if (hosting && baseRev.HasValue && _contents.ContainsKey(rel))
+                        if (hosting && (_otDocs.ContainsKey(rel) || _contents.ContainsKey(rel) || File.Exists(target)))
                         {
+                            // an existing file: the write is just another edit, committed through ot1 so every client stays in
+                            // step (a base revision from an older Windows peer still gets the 3-way merge)
                             string uid = S(ev, "userId") ?? senderUserId ?? "peer", name = S(ev, "displayName") ?? "Collaborator";
                             var known = Find(uid);
                             string color = known != null ? known.Color : (S(ev, "color") ?? "#3B82F6");
-                            var o = ApplyIncomingFileContent(rel, content, baseRev, uid, name, color);
-                            // the writer gets the merged text back only when the merge changed it
-                            Server.Broadcast(Json(FileBufferMessage(rel, o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
+                            if (baseRev.HasValue) ApplyIncomingFileContent(rel, content, baseRev, uid, name, color);
+                            else { HostFlushLiveEditor(rel); HostCommitContent(rel, content, uid, name, color, true, true, false); }
                             IndexLocalWorkspaceFiles(true);
                             _ide.RefreshTree();
                             return;
@@ -929,6 +992,17 @@ namespace MicroCode.Views
                 {
                     case "write":
                         if (content == null) return;
+                        // saving a file the room already has is just an edit (ot1), never a full-content write event
+                        if (s.IsHostingLocally && (_otDocs.ContainsKey(rel) || _contents.ContainsKey(rel)))
+                        {
+                            if (Pending(rel) == 0) HostCommitContent(rel, content, LocalUserId, LocalDisplayName, LocalColor, false, false, false);
+                            return;
+                        }
+                        if (!s.IsHostingLocally && PeerUsesOT && (_peerOT.ContainsKey(rel) || _contents.ContainsKey(rel)))
+                        {
+                            if (Pending(rel) == 0) PeerSubmitLocalContent(rel, content);
+                            return;
+                        }
                         if (s.IsHostingLocally)
                         {
                             string prev;
@@ -967,7 +1041,7 @@ namespace MicroCode.Views
                 {
                     var _ = Task.Run(async () =>
                     {
-                        try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8))) (await Http.PostAsync(s.RemoteEndpoint + "/api/collab/fs-event", new StringContent(Json(payload), Encoding.UTF8, "application/json"), cts.Token)).Dispose(); }
+                        try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8))) (await SendRoom(HttpMethod.Post, s.RemoteEndpoint + "/api/collab/fs-event", new StringContent(Json(payload), Encoding.UTF8, "application/json"), cts.Token)).Dispose(); }
                         catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Debug.WriteLine("collab fs-event: " + ex.Message); }
                     });
                 }
@@ -1018,10 +1092,14 @@ namespace MicroCode.Views
             var buffers = new Dictionary<string, object>(); var bufferRevs = new Dictionary<string, object>();
             foreach (var f in _ide.OpenFiles().Take(24))
             {
+                // the room's committed copy with its revision (the live editor may hold keystrokes not committed yet, and a
+                // buffer that does not match its revision would put ot1 clients on the wrong base)
                 string rel = NormalizeRelativePath(f.FullPath);
-                if (rel.Length == 0 || f.Content == null || Encoding.UTF8.GetByteCount(f.Content) > InlineFileLimit) continue;
-                buffers[rel] = f.Content; int rev = Rev(rel); bufferRevs[rel] = rev;
-                if (Snapshot(rel, rev) == null) RecordSnapshot(rel, rev, f.Content);
+                if (rel.Length == 0 || f.Content == null) continue;
+                var doc = HostDoc(rel);
+                if (Encoding.UTF8.GetByteCount(doc.Content) > InlineFileLimit) continue;
+                buffers[rel] = doc.Content; bufferRevs[rel] = doc.Revision;
+                if (Snapshot(rel, doc.Revision) == null) RecordSnapshot(rel, doc.Revision, doc.Content);
             }
             foreach (var kv in _contents)
             {
@@ -1040,7 +1118,8 @@ namespace MicroCode.Views
                 { "chatMessages", _chat.Skip(Math.Max(0, _chat.Count - 50)).Select(m => new Dictionary<string, object> { { "id", m.Id }, { "userId", m.UserId }, { "displayName", m.DisplayName }, { "userColor", m.UserColor }, { "message", m.Message }, { "timestamp", Iso(m.Timestamp) } }).ToList() },
                 { "activityLog", _activity.Skip(Math.Max(0, _activity.Count - 30)).Select(a => new Dictionary<string, object> { { "id", a.Id }, { "actorName", a.ActorName }, { "actorColor", a.ActorColor }, { "action", a.Action }, { "target", a.Target }, { "timestamp", Iso(a.Timestamp) } }).ToList() },
                 // the whole board as a JSON string (Codable [TeamTask], ISO-8601 dates), like the Mac host
-                { "teamTasksJSON", TeamTaskJson.ArrayJson(Tasks.Tasks) }
+                { "teamTasksJSON", TeamTaskJson.ArrayJson(Tasks.Tasks) },
+                { "caps", Caps() }
             };
             if (assignedColor != null) payload["assignedColor"] = assignedColor;
             return Json(payload);
@@ -1055,11 +1134,19 @@ namespace MicroCode.Views
 
         CollabResponse HandleHttp(CollabRequest r)
         {
-            if (r.Method == "GET" && (r.Path == "/" || r.Path == "/index.html")) return PortalPage(r);
+            // invite links open the app: /join always serves the "Open in MicroCode" page; / does too unless the host also
+            // allows the browser editor (then / is the portal, as before)
+            if (r.Method == "GET" && (r.Path == "/join" || r.Path == "/join/")) return JoinPage(r);
+            if (r.Method == "GET" && (r.Path == "/" || r.Path == "/index.html")) return AllowBrowserGuests ? PortalPage(r) : JoinPage(r);
             var body = r.Method == "POST" ? Parse(r.BodyText) : null;
             lock (_gate)
             {
                 if (Session == null) return CollabResponse.Text("404 Not Found", "application/json", "{\"error\":\"No active session\"}");
+                // every room route needs the room credential (query code, X-Collab-Code header or the portal cookie); join may
+                // carry it in its body instead
+                bool joinWithCode = r.Method + " " + r.Path == "POST /api/collab/join" && (S(body, "code") ?? "").Trim().ToUpperInvariant() == Session.ShareCode;
+                if (r.Path.StartsWith("/api/collab/") && !joinWithCode && !HasRoomCredential(r))
+                    return new CollabResponse { Status = "403 Forbidden", ContentType = "application/json", Body = Encoding.UTF8.GetBytes("{\"error\":\"Invalid room code\"}") };
                 switch (r.Method + " " + r.Path)
                 {
                     case "POST /api/collab/join":
@@ -1077,6 +1164,18 @@ namespace MicroCode.Views
                         return resp;
                     }
                     case "GET /api/collab/workspace-bundle": return CollabResponse.Json(BuildWorkspaceBundle());
+                    case "POST /api/collab/op":
+                    {
+                        var reply = HostHandleOpHttp(body);
+                        FireAsync();
+                        return CollabResponse.Json(Json(reply));
+                    }
+                    case "GET /api/collab/ops":
+                    {
+                        string qp, qs; r.Query.TryGetValue("path", out qp); r.Query.TryGetValue("since", out qs);
+                        int since; int.TryParse(qs ?? "0", out since);
+                        return CollabResponse.Json(Json(HostHandleOpsHttp(qp, since)));
+                    }
                     case "POST /api/collab/sync": case "GET /api/collab/sync":
                         if (body != null) ProcessPeerSync(body);
                         FireAsync();
@@ -1084,7 +1183,7 @@ namespace MicroCode.Views
                     case "GET /api/collab/file":
                     {
                         string q; r.Query.TryGetValue("path", out q);
-                        string rel = SanitizeRelativePath(q ?? "");
+                        string rel = NormalizeRelativePath(q ?? ""); // the same normalizer as the op routes, so a resync reads the same document
                         string content = ResolveFileContent(rel);
                         return CollabResponse.Json(Json(new Dictionary<string, object> { { "path", rel }, { "content", content }, { "revision", Rev(rel) } }));
                     }
@@ -1098,7 +1197,6 @@ namespace MicroCode.Views
                             var o = ApplyIncomingFileContent(path, content, I(body, "baseRevision"), uid, name, color);
                             resp["revision"] = o.Item2; resp["merged"] = o.Item3;
                             if (o.Item3) resp["content"] = o.Item1;
-                            Server.Broadcast(Json(FileBufferMessage(NormalizeRelativePath(path), o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
                             FireAsync();
                         }
                         return CollabResponse.Json(Json(resp));
@@ -1175,7 +1273,6 @@ namespace MicroCode.Views
                     string path = S(e, "path"), content = S(e, "content");
                     if (path == null || content == null) continue;
                     var o = ApplyIncomingFileContent(path, content, I(e, "baseRevision"), uid, name, color);
-                    Server.Broadcast(Json(FileBufferMessage(NormalizeRelativePath(path), o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
                 }
         }
 
@@ -1216,8 +1313,9 @@ namespace MicroCode.Views
                     {
                         if (uid.Length == 0) return;
                         string assigned = AssignDistinctColor(S(msg, "color"), uid);
+                        if (HasOT(msg)) client.SupportsOT = true;
                         Upsert(uid, S(msg, "displayName") ?? "Collaborator", S(msg, "role") ?? "Editor", assigned, null);
-                        client.SendText(Json(new Dictionary<string, object> { { "type", "assignedIdentity" }, { "userId", uid }, { "color", assigned } }));
+                        client.SendText(Json(new Dictionary<string, object> { { "type", "assignedIdentity" }, { "userId", uid }, { "color", assigned }, { "caps", Caps() } }));
                         BroadcastParticipants();
                         break;
                     }
@@ -1251,10 +1349,11 @@ namespace MicroCode.Views
                         var ack = new Dictionary<string, object> { { "type", "editAck" }, { "path", rel }, { "revision", o.Item2 }, { "merged", o.Item3 } };
                         if (o.Item3) ack["content"] = o.Item1;
                         client.SendText(Json(ack));
-                        Server.Broadcast(Json(FileBufferMessage(rel, o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
                         break;
                     }
                     case "fsEvent": ApplyFileSystemEvent(msg, true, uid); break;
+                    case "op": HostHandleOpMessage(client, msg, uid); break;
+                    case "opSync": HostHandleOpSync(client, msg); break;
                     case "chat":
                     {
                         string t = S(msg, "message");
@@ -1289,15 +1388,28 @@ namespace MicroCode.Views
 
         /// <summary>Parses a full invite URL (http(s)://host[:port][/relay-prefix]/?code=X), a LAN token (host:port#CODE),
         /// host:port, or a bare 6-character room code (tried against this machine's own LAN host).</summary>
+        /// <summary>The token / code / url query value of a microcode: or codetuner: link (query names case-insensitive, no
+        /// '+'-to-space decoding), or null when the text is not such a link.</summary>
+        public static string DeepLinkToken(string link)
+        {
+            if (!CollabDeepLink.IsAppUrl(link)) return null;
+            return CollabDeepLink.QueryValue(link, "token", "code", "url") ?? "";
+        }
+
         public Tuple<string, string> ParseJoinInput(string raw)
         {
             string t = (raw ?? "").Trim(), baseEndpoint = "", code = "";
+            // a pasted microcode://collab?token=… (or codetuner://) link carries the real join input inside
+            string inner = DeepLinkToken(t);
+            if (inner != null && inner.Length > 0 && inner != t) return ParseJoinInput(inner);
             if (t.StartsWith("http://") || t.StartsWith("https://"))
             {
                 Uri u;
                 if (Uri.TryCreate(t, UriKind.Absolute, out u))
                 {
-                    string path = System.Text.RegularExpressions.Regex.Replace(System.Text.RegularExpressions.Regex.Replace(u.AbsolutePath, "/index\\.html$", ""), "/+$", "");
+                    string path = System.Text.RegularExpressions.Regex.Replace(u.AbsolutePath, "/index\\.html$", "");
+                    path = System.Text.RegularExpressions.Regex.Replace(path, "/join/?$", "");
+                    path = System.Text.RegularExpressions.Regex.Replace(path, "/+$", "");
                     baseEndpoint = u.Scheme + "://" + u.Host + (u.IsDefaultPort ? "" : ":" + u.Port) + path;
                     foreach (var pair in u.Query.TrimStart('?').Split('&')) { var kv = pair.Split(new[] { '=' }, 2); if (kv.Length == 2 && kv[0] == "code") code = Uri.UnescapeDataString(kv[1]).ToUpperInvariant(); }
                 }
@@ -1319,13 +1431,13 @@ namespace MicroCode.Views
             var parsed = ParseJoinInput(input);
             string baseEndpoint = parsed.Item1, code = parsed.Item2;
             if (baseEndpoint.Length == 0) { Status = CollabStatus.Error; StatusError = "Invalid address"; Fire(); return null; }
-            Status = CollabStatus.Connecting; StatusError = null; Fire();
+            Status = CollabStatus.Connecting; StatusError = null; _joiningCode = code; Fire();
             Dictionary<string, object> json;
             try
             {
                 var body = Json(new Dictionary<string, object> { { "code", code }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor } });
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
-                using (var resp = await Http.PostAsync(baseEndpoint + "/api/collab/join", new StringContent(body, Encoding.UTF8, "application/json"), cts.Token))
+                using (var resp = await SendRoom(HttpMethod.Post, baseEndpoint + "/api/collab/join", new StringContent(body, Encoding.UTF8, "application/json"), cts.Token))
                 {
                     if (resp.StatusCode != HttpStatusCode.OK) { Status = CollabStatus.Error; StatusError = "Session not found or rejected"; Fire(); return null; }
                     json = Parse(await resp.Content.ReadAsStringAsync());
@@ -1340,6 +1452,7 @@ namespace MicroCode.Views
             lock (_gate)
             {
                 if (!string.IsNullOrEmpty(S(json, "assignedColor"))) LocalColor = S(json, "assignedColor");
+                HostSupportsOT = HasOT(json);
                 Session = new CollabSession { Id = resolved, ShareCode = resolved, ProjectId = wsName, WorkspaceName = wsName, WorkspaceLang = S(json, "workspaceLang") ?? "code", HostUserId = S(json, "hostUserId") ?? "host", HostDisplayName = S(json, "hostDisplayName") ?? "Host", IsHostingLocally = false, RemoteEndpoint = baseEndpoint };
                 Status = CollabStatus.Connected;
             }
@@ -1363,7 +1476,7 @@ namespace MicroCode.Views
             try
             {
                 string text;
-                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15))) text = await (await Http.GetAsync(baseEndpoint + "/api/collab/workspace-bundle", cts.Token)).Content.ReadAsStringAsync();
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15))) text = await (await SendRoom(HttpMethod.Get, baseEndpoint + "/api/collab/workspace-bundle", null, cts.Token)).Content.ReadAsStringAsync();
                 var bundle = Parse(text);
                 lock (_gate)
                 {
@@ -1429,7 +1542,7 @@ namespace MicroCode.Views
 
         async Task<Dictionary<string, object>> GetJson(string url)
         {
-            try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10))) return Parse(await (await Http.GetAsync(url, cts.Token)).Content.ReadAsStringAsync()); }
+            try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10))) return Parse(await (await SendRoom(HttpMethod.Get, url, null, cts.Token)).Content.ReadAsStringAsync()); }
             catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; return null; }
         }
 
@@ -1490,6 +1603,8 @@ namespace MicroCode.Views
                 {
                     string rel = SanitizeRelativePath(kv.Key), remote = kv.Value as string;
                     if (rel.Length == 0 || remote == null) continue;
+                    // ot1 owns files it tracks: a polled buffer would land on top of ops still in flight
+                    if (PeerUsesOT && (_peerOT.ContainsKey(rel) || _peerResyncQueue.ContainsKey(rel))) continue;
                     int remoteRev = I(revs, kv.Key) ?? I(revs, rel) ?? Rev(rel);
                     int knownBase; _peerBaseRevisions.TryGetValue(rel, out knownBase);
                     if (knownBase > 0 && remoteRev <= knownBase) continue;
@@ -1546,7 +1661,9 @@ namespace MicroCode.Views
                     await ws.ConnectAsync(uri, ct);
                     connected = true;
                     _peerWs = ws; IsWebSocketRealtimeActive = true; Trace("ws connected");
-                    await SendPeer(new Dictionary<string, object> { { "type", "hello" }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor } });
+                    await SendPeer(new Dictionary<string, object> { { "type", "hello" }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "caps", Caps() } });
+                    // ot1: fetch what we missed while offline, then resend the op that was in flight
+                    PeerCatchUpAfterConnect();
                     Fire();
                     var buf = new byte[65536]; var msg = new MemoryStream();
                     while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
@@ -1593,7 +1710,10 @@ namespace MicroCode.Views
                 switch (type)
                 {
                     case "welcome": case "participants": { var arr = Arr(msg, "participants"); Trace("ws " + type + " (" + (arr != null ? arr.Count : -1) + " people)"); if (arr != null) ApplyParticipantsArray(arr); break; }
-                    case "assignedIdentity": if (!string.IsNullOrEmpty(S(msg, "color"))) { LocalColor = S(msg, "color"); Upsert(LocalUserId, LocalDisplayName, LocalRole, LocalColor, null); } break;
+                    case "assignedIdentity":
+                        if (HasOT(msg)) HostSupportsOT = true;
+                        if (!string.IsNullOrEmpty(S(msg, "color"))) { LocalColor = S(msg, "color"); Upsert(LocalUserId, LocalDisplayName, LocalRole, LocalColor, null); }
+                        break;
                     case "mouse":
                     {
                         string uid = S(msg, "userId");
@@ -1645,6 +1765,8 @@ namespace MicroCode.Views
                     }
                     case "fsEvent": ApplyFileSystemEvent(msg, false, null); break;
                     case "teamTasks": ApplyRoomTasks(S(msg, "teamTasksJSON"), true); break;
+                    case "op": PeerHandleCommit(msg); break;
+                    case "opError": PeerHandleOTError(msg); break;
                     case "chat":
                     {
                         string t = S(msg, "message");
@@ -1667,12 +1789,14 @@ namespace MicroCode.Views
             {
                 try
                 {
-                    var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "isAIActive", false }, { "aiStatusText", "" }, { "activeTaskTitle", SelectedTaskTitle ?? "" } };
+                    // ot1 without WebSocket (relay): poll the commits of the files we track
+                    await PeerPollOperations(endpoint);
+                    var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "isAIActive", _agentRunActive }, { "aiStatusText", _agentPhaseText }, { "activeTaskTitle", SelectedTaskTitle ?? "" } };
                     var cur = CurrentLocalCursor();
                     if (cur != null) body["cursor"] = CursorDict(cur);
                     if (_localMouse != null) body["mouse"] = MouseDict(_localMouse);
                     using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4)))
-                    using (var resp = await Http.PostAsync(endpoint + "/api/collab/sync", new StringContent(Json(body), Encoding.UTF8, "application/json"), cts.Token))
+                    using (var resp = await SendRoom(HttpMethod.Post, endpoint + "/api/collab/sync", new StringContent(Json(body), Encoding.UTF8, "application/json"), cts.Token))
                     {
                         var json = resp.StatusCode == HttpStatusCode.OK ? Parse(await resp.Content.ReadAsStringAsync()) : null;
                         Trace("sync " + (int)resp.StatusCode + (json == null ? " (unusable)" : ""));
@@ -1740,7 +1864,7 @@ namespace MicroCode.Views
                 if (s.IsHostingLocally) { Server.Stop(); StopOnlineTunnel(); }
                 else if (s.RemoteEndpoint.Length > 0)
                 {
-                    try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4))) (await Http.PostAsync(s.RemoteEndpoint + "/api/collab/leave", new StringContent(Json(new Dictionary<string, object> { { "userId", LocalUserId } }), Encoding.UTF8, "application/json"), cts.Token)).Dispose(); }
+                    try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4))) (await SendRoom(HttpMethod.Post, s.RemoteEndpoint + "/api/collab/leave", new StringContent(Json(new Dictionary<string, object> { { "userId", LocalUserId } }), Encoding.UTF8, "application/json"), cts.Token)).Dispose(); }
                     catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Debug.WriteLine("collab leave: " + ex.Message); }
                 }
             }
@@ -1749,6 +1873,7 @@ namespace MicroCode.Views
                 Session = null; _participants = new List<CollabParticipant>(); _sharedFiles = new List<CollabSharedFile>(); _sharedDirs = new List<string>();
                 _contents.Clear(); _revisions.Clear(); _snapshots.Clear(); _peerBaseRevisions.Clear(); _lastSynced.Clear(); _diskMod.Clear();
                 FollowingUserId = null; _localCursor = null; _localMouse = null; SharedRoot = null; _syncFailures = 0; _pendingDisk.Clear(); ResetAITeammate();
+                _otDocs.Clear(); _peerOT.Clear(); _peerResyncQueue.Clear(); _editorPending.Clear(); _lastEditActivity.Clear(); HostSupportsOT = false;
                 Status = CollabStatus.Disconnected; IsWebSocketRealtimeActive = false;
             }
             Fire();
@@ -1767,19 +1892,18 @@ namespace MicroCode.Views
             Dictionary<string, object> peerMsg = null;
             lock (_gate)
             {
+                // a remote op is still being patched into this editor: its callback re-sends the editor text afterwards
+                if (Pending(rel) > 0) return;
+                if (s.IsHostingLocally)
+                {
+                    // one ot1 commit; the host's own unsaved typing stays unsaved on disk (its Save writes the file)
+                    HostCommitContent(rel, content, LocalUserId, LocalDisplayName, LocalColor, false, false, false);
+                    return;
+                }
+                if (PeerUsesOT) { PeerSubmitLocalContent(rel, content); return; }
                 string last;
                 if (_lastSynced.TryGetValue(rel, out last) && last == content) return;
                 _lastSynced[rel] = content;
-                if (s.IsHostingLocally)
-                {
-                    string prev;
-                    if (_contents.TryGetValue(rel, out prev) && !_snapshots.ContainsKey(rel)) { int r0 = Rev(rel); _revisions[rel] = r0; RecordSnapshot(rel, r0, prev); }
-                    int next = Rev(rel) + 1;
-                    // the host's own unsaved typing stays unsaved (its Save writes the file); peers get the buffer live
-                    _contents[rel] = content; _revisions[rel] = next; RecordSnapshot(rel, next, content);
-                    Server.Broadcast(Json(FileBufferMessage(rel, content, next, LocalUserId, LocalDisplayName, LocalColor)), LocalUserId);
-                    return;
-                }
                 int pb; int baseRev = _peerBaseRevisions.TryGetValue(rel, out pb) ? pb : Rev(rel);
                 _contents[rel] = content;
                 WriteRelative(rel, content);
@@ -1792,7 +1916,7 @@ namespace MicroCode.Views
                 {
                     peerMsg.Remove("type");
                     using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
-                    using (var resp = await Http.PostAsync(s.RemoteEndpoint + "/api/collab/edit", new StringContent(Json(peerMsg), Encoding.UTF8, "application/json"), cts.Token))
+                    using (var resp = await SendRoom(HttpMethod.Post, s.RemoteEndpoint + "/api/collab/edit", new StringContent(Json(peerMsg), Encoding.UTF8, "application/json"), cts.Token))
                     {
                         var j = Parse(await resp.Content.ReadAsStringAsync());
                         lock (_gate)
@@ -1846,7 +1970,7 @@ namespace MicroCode.Views
             if (clean.Length == 0 || s == null) return;
             if (s.IsHostingLocally) { lock (_gate) { AddChat(LocalUserId, LocalDisplayName, LocalColor, clean, null); HandleChatAIMention(LocalUserId, LocalDisplayName, clean); } Fire(); return; }
             if (IsWebSocketRealtimeActive) { await SendPeer(new Dictionary<string, object> { { "type", "chat" }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor }, { "message", clean } }); return; }
-            try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8))) (await Http.PostAsync(s.RemoteEndpoint + "/api/collab/chat", new StringContent(Json(new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor }, { "message", clean } }), Encoding.UTF8, "application/json"), cts.Token)).Dispose(); }
+            try { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8))) (await SendRoom(HttpMethod.Post, s.RemoteEndpoint + "/api/collab/chat", new StringContent(Json(new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor }, { "message", clean } }), Encoding.UTF8, "application/json"), cts.Token)).Dispose(); }
             catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Debug.WriteLine("collab chat: " + ex.Message); }
             PeerSyncTick();
         }
@@ -1905,9 +2029,39 @@ namespace MicroCode.Views
         {
             var s = Session;
             if (s == null) return null;
-            if (OnlineMode && !string.IsNullOrEmpty(PublicTunnelUrl)) return PublicTunnelUrl.TrimEnd('/') + "/?code=" + s.ShareCode;
-            if (s.IsHostingLocally) return "http://" + SelectedLanAddress + ":" + Server.Port + "/?code=" + s.ShareCode;
-            return s.RemoteEndpoint.TrimEnd('/') + "/?code=" + s.ShareCode;
+            // invite links are /join pages that open microcode://collab (the join token keeps /?code= and host:port#CODE)
+            if (OnlineMode && !string.IsNullOrEmpty(PublicTunnelUrl)) return PublicTunnelUrl.TrimEnd('/') + "/join?code=" + s.ShareCode;
+            if (s.IsHostingLocally) return "http://" + SelectedLanAddress + ":" + Server.Port + "/join?code=" + s.ShareCode;
+            return s.RemoteEndpoint.TrimEnd('/') + "/join?code=" + s.ShareCode;
+        }
+
+        public const string DownloadPageUrl = "https://github.com/Dotmini/microcode/releases/latest";
+
+        /// <summary>"Also allow editing in a web browser" (collabAllowBrowserGuests, off by default): when off, / serves the
+        /// join page instead of the browser editor.</summary>
+        public bool AllowBrowserGuests
+        {
+            get { return Defaults.Bool("collabAllowBrowserGuests", false); }
+            set { Defaults.Set("collabAllowBrowserGuests", value); Fire(); }
+        }
+
+        /// <summary>buildOpenInMicroCodeHTML: the invite page that deep-links into microcode://collab (no credential needed,
+        /// no cookie set). Values go in as serializer-escaped JSON arrays, so nothing can close the script tag.</summary>
+        CollabResponse JoinPage(CollabRequest r)
+        {
+            string q; r.Query.TryGetValue("code", out q);
+            string code = new string((q ?? "").ToUpperInvariant().Where(char.IsLetterOrDigit).Take(16).ToArray());
+            var s = Session;
+            var values = new Dictionary<string, string>
+            {
+                { "CODE_JSON", Json(new[] { code }) },
+                { "NAME_JSON", Json(new[] { s != null ? s.WorkspaceName : "Workspace" }) },
+                { "DOWNLOAD_JSON", Json(new[] { DownloadPageUrl }) },
+                { "BROWSER_ALLOWED", AllowBrowserGuests ? "true" : "false" }
+            };
+            // one pass, so a workspace name that contains "{{…}}" is never filled in again
+            string html = System.Text.RegularExpressions.Regex.Replace(CollabPortal.OpenInApp, @"\{\{(CODE_JSON|NAME_JSON|DOWNLOAD_JSON|BROWSER_ALLOWED)\}\}", m => values[m.Groups[1].Value]);
+            return CollabResponse.Text("200 OK", "text/html; charset=utf-8", html);
         }
 
         public string GetJoinToken()

@@ -1,5 +1,5 @@
 """Extracts the zero-install web collaboration pages from MicroCode/Services/CollaborationService.swift
-(buildRoomCodeEntryGateHTML + buildWebCollabPortalHTML) into src/Collab/CollabPortal.g.cs, so a Windows host serves
+(buildRoomCodeEntryGateHTML + buildWebCollabPortalHTML + buildOpenInMicroCodeHTML) into src/Collab/CollabPortal.g.cs, so a Windows host serves
 the same browser portal as the Mac. Swift raw-string interpolations become {{TOKENS}} the C# side fills in.
 
     python tools/extract_collab_portal.py ../../MicroCode/Services/CollaborationService.swift src/Collab/CollabPortal.g.cs
@@ -19,7 +19,8 @@ def raw_string_after(signature):
         body.append(l[indent:] if l.startswith(' ' * indent) else l.lstrip(' '))
     return '\n'.join(body)
 
-tokens = {r'\#(escapedWS)': '{{WS_NAME}}', r'\#(errHTML)': '{{ERROR_HTML}}', r'\#(wsName)': '{{WS_NAME}}', r'\#(code)': '{{CODE}}'}
+tokens = {r'\#(escapedWS)': '{{WS_NAME}}', r'\#(errHTML)': '{{ERROR_HTML}}', r'\#(wsName)': '{{WS_NAME}}', r'\#(code)': '{{CODE}}',
+          r'\#(codeJSON)': '{{CODE_JSON}}', r'\#(nameJSON)': '{{NAME_JSON}}', r'\#(downloadJSON)': '{{DOWNLOAD_JSON}}', r'\#(browserAllowed)': '{{BROWSER_ALLOWED}}'}
 
 def convert(text):
     for k, v in tokens.items():
@@ -32,6 +33,7 @@ def convert(text):
 
 gate = convert(raw_string_after('func buildRoomCodeEntryGateHTML'))
 portal = convert(raw_string_after('func buildWebCollabPortalHTML'))
+open_in_app = convert(raw_string_after('func buildOpenInMicroCodeHTML'))
 
 def cs(s):
     return '@"' + s.replace('"', '""') + '"'
@@ -42,6 +44,9 @@ io.open(out, 'w', encoding='utf-8', newline='\n').write(
     '        /// <summary>buildRoomCodeEntryGateHTML: {{WS_NAME}} (HTML-escaped), {{ERROR_HTML}}.</summary>\n'
     '        public const string Gate = ' + cs(gate) + ';\n\n'
     '        /// <summary>buildWebCollabPortalHTML: {{WS_NAME}}, {{CODE}}.</summary>\n'
-    '        public const string Portal = ' + cs(portal) + ';\n'
+    '        public const string Portal = ' + cs(portal) + ';\n\n'
+    '        /// <summary>buildOpenInMicroCodeHTML (the /join invite page): {{CODE_JSON}}, {{NAME_JSON}}, {{DOWNLOAD_JSON}} (JSON\n'
+    '        /// arrays from a serializer), {{BROWSER_ALLOWED}} (true / false).</summary>\n'
+    '        public const string OpenInApp = ' + cs(open_in_app) + ';\n'
     '    }\n}\n')
-print('gate %d chars, portal %d chars' % (len(gate), len(portal)))
+print('gate %d chars, portal %d chars, join page %d chars' % (len(gate), len(portal), len(open_in_app)))

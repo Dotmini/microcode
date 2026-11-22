@@ -85,6 +85,30 @@ namespace MicroCode.Views
 
         public void RefreshTree() { Ui(() => AppState.Shared.RefreshFileTree()); }
 
+        public void ApplyRemoteOp(string fullPath, TextOperation op, string previous, string resulting, Action<string> applied)
+        {
+            Ui(() =>
+            {
+                string after = null;
+                try
+                {
+                    var f = AppState.Shared.OpenFiles.FirstOrDefault(x => string.Equals(x.Path, fullPath, StringComparison.OrdinalIgnoreCase));
+                    if (f == null || f.ReadOnly) return;
+                    string current = (f.Content ?? "").Replace("\r\n", "\n");
+                    // keystrokes typed after the op was committed are transformed over it (client op first)
+                    var patch = OTEditorPatch.Rebase(previous, current, op);
+                    after = patch.Apply(current);
+                    var area = EditorArea.Current;
+                    var ed = area != null ? area.EditorFor(f) : null;
+                    if (ed != null && !ed.ApplyOperation(patch)) ed.ReplaceText(after);
+                    f.Content = after;
+                    CaptureContent(fullPath, after);
+                }
+                catch (OTException) { after = resulting; }
+                finally { applied(after); }
+            });
+        }
+
         public void RunAgentPrompt(string prompt, Action<string, string> done)
         {
             Ui(() =>

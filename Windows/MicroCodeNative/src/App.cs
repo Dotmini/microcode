@@ -40,6 +40,14 @@ namespace MicroCode
 
         static int Run(string[] args)
         {
+            // --open-url <microcode:…> is how Windows starts us for a link (HKCU protocol handler): a web page controls that
+            // string, so nothing else on that command line counts and only microcode: / codetuner: URLs are accepted.
+            string openUrl = Arg(args, "--open-url");
+            if (args.Contains("--open-url"))
+            {
+                if (!CollabDeepLink.IsAppUrl(openUrl)) openUrl = null;
+                args = new string[0];
+            }
             // Test renders get their own data folder so they can never touch the user's settings, keys, chats or notebooks.
             string dataDir = Arg(args, "--data-dir");
             if (dataDir == null && Arg(args, "--snapshot") != null) dataDir = Path.Combine(Path.GetTempPath(), "MicroCode-snapshot");
@@ -78,6 +86,27 @@ namespace MicroCode
                 if (!int.TryParse(Arg(args, "--pns-port") ?? "", out pnsPort) || pnsPort <= 0) pnsPort = PnsOrchestrator.DefaultDaemonPort;
                 return PnsDaemon.RunHeadless(app, pnsPort);
             }
+            // A real run (not a snapshot / isolated test run) owns the microcode:// links: register the protocols for this user,
+            // and either become the instance that receives links or hand this launch's link to the one already running.
+            SingleInstance instance = null;
+            if (dataDir == null)
+            {
+                instance = new SingleInstance(Defaults.Dir);
+                if (!instance.IsFirst)
+                {
+                    if (openUrl != null && instance.Forward(openUrl)) { instance.Dispose(); return 0; }
+                    // no URL (a plain second window, as before) or the running one did not answer: carry on here
+                    instance.Dispose(); instance = null;
+                }
+                else
+                {
+                    instance.Listen(CollabDeepLink.Enqueue);
+                    string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+                    System.Threading.Tasks.Task.Run(() => UrlProtocol.EnsureRegistered(exe));
+                    app.Exit += delegate { instance.Dispose(); };
+                }
+            }
+            if (openUrl != null) CollabDeepLink.Enqueue(openUrl);
             var state = AppState.Shared;
             string snapshot = Arg(args, "--snapshot");
             string agentPrompt = Arg(args, "--agent-prompt");
@@ -207,6 +236,7 @@ namespace MicroCode
             string settingsTab = Arg(args, "--settings-tab");
             if (snapshot != null && settingsTab != null) return Snapshot(app, new SettingsSheet(state, int.Parse(settingsTab)), snapshot, Arg(args, "--size") ?? "1000x700", false);
             if (snapshot != null) return Snapshot(app, win, snapshot, Arg(args, "--size") ?? "1440x900", args.Contains("--run"));
+            if (instance != null || openUrl != null) win.ContentRendered += delegate { CollabDeepLink.MarkReady(); };
             app.Run(win);
             return 0;
         }

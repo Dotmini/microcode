@@ -24,8 +24,15 @@ namespace MicroCode.Views
         DebugArea _debug;
         bool _inlineEdit;
 
+        /// <summary>The window's editor area (Team Collaboration patches remote ot1 operations into its open editors).</summary>
+        public static EditorArea Current { get; private set; }
+
+        /// <summary>The cached editor of an open file, or null when its tab has not been shown yet.</summary>
+        public CodeEditorView EditorFor(CodeFile f) { CodeEditorView e; return f != null && _editors.TryGetValue(f.Id, out e) ? e : null; }
+
         public EditorArea(AppState app)
         {
+            Current = this;
             _app = app;
             RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
