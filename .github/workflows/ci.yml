@@ -197,7 +197,7 @@ jobs:
           elif git describe --tags --abbrev=0 2>/dev/null; then
             VERSION="$(git describe --tags --abbrev=0 | sed 's/^v//')"
           else
-            VERSION="2.5.43"
+            VERSION="2.5.44"
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)
@@ -661,6 +661,75 @@ jobs:
           echo "✅ Release created: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # Windows (native WPF, built with the C# compiler that ships with Windows — no SDK needed)
+  # Independent of the macOS jobs: a Windows failure never blocks the macOS release.
+  # ══════════════════════════════════════════════════════════════════════════
+  windows:
+    name: "🪟 Windows build"
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build MicroCode.exe
+        shell: cmd
+        working-directory: Windows/MicroCodeNative
+        run: call build.cmd out-ci
+
+      - name: Run Windows test suites
+        shell: cmd
+        working-directory: Windows/MicroCodeNative
+        # Reports failures but does not block packaging: some suites need network, git and Python on the runner.
+        continue-on-error: true
+        run: call tests\run-tests.cmd
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $ver = if ($ref -like 'v*') { $ref.Substring(1) } else { "dev-${{ github.run_number }}" }
+          $dir = "Windows/MicroCodeNative/out-ci"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $files = @("$dir/MicroCode.exe", "$dir/MicroCode.exe.config", "$dir/MicroCode.ico") | Where-Object { Test-Path $_ }
+          $zip = "dist/Dotmini_MicroCode_Windows_x64.zip"
+          Compress-Archive -Path $files -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  Dotmini_MicroCode_Windows_x64.zip" | Out-File -Encoding ascii dist/SHA256SUMS-windows.txt
+          Get-Content dist/SHA256SUMS-windows.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*
+          retention-days: 30
+
+  windows-release:
+    name: "🪟 Attach Windows to release"
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && needs.windows.result == 'success' && needs.release.result == 'success' }}
+    needs: [windows, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64
+          path: windows-assets
+
+      - name: Upload to release and update notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" windows-assets/* --repo ${{ github.repository }} --clobber
+          gh release view "${{ github.ref_name }}" --repo ${{ github.repository }} --json body --jq .body > body.md
+          {
+            cat body.md
+            echo ""
+            echo "### 🪟 Windows (native)"
+            echo "\`Dotmini_MicroCode_Windows_x64.zip\` — MicroCode.exe (WPF, .NET Framework 4.8; Windows 10/11, no installer or SDK needed). Checksum: \`SHA256SUMS-windows.txt\`."
+          } > body-new.md
+          gh release edit "${{ github.ref_name }}" --repo ${{ github.repository }} --notes-file body-new.md
 
   # ══════════════════════════════════════════════════════════════════════════
   # Job 7: Notify (after release, optional)
