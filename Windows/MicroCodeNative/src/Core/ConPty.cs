@@ -305,6 +305,8 @@ namespace MicroCode.Core
 
                 var si = new ConPty.NativeMethods.STARTUPINFOEX();
                 si.StartupInfo.cb = Marshal.SizeOf(typeof(ConPty.NativeMethods.STARTUPINFOEX));
+                // Force the child off any redirected parent pipes so stdout/stderr bind to ConPTY's CONOUT$.
+                si.StartupInfo.dwFlags = ConPty.NativeMethods.STARTF_USESTDHANDLES;
                 si.lpAttributeList = attrList;
 
                 var pi = new ConPty.NativeMethods.PROCESS_INFORMATION();
