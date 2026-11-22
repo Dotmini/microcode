@@ -77,6 +77,9 @@ All captures use a neutral demo workspace (`MicroCodeDemo`: `src/main.py`, `src/
 | [68-composer-acp-harness-menu.png](68-composer-acp-harness-menu.png) | Composer — ACP Harnesses submenu | Composer provider ▸ **ACP Harnesses ▸** | Harness list (AGY, Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Copilot, Goose, Cline, Qwen Code, Aider) and the AGY model list |
 | [69-notebook-vars-inspector.png](69-notebook-vars-inspector.png) | Notebook — Live Kernel Memory | Notebook toolbar **Vars** | Variable / memory inspector strip (empty: 0 vars) |
 | [70-notebook-app-mode.png](70-notebook-app-mode.png) | Notebook — App / dashboard mode | Notebook toolbar **App** | Presentation mode: cell outputs only (tables, logs, error output; paths redacted) |
+| [71-science-structure.png](71-science-structure.png) | Science — Structure | Science ▸ **Structure** | Protein Structure Preview (PDB / mmCIF / AlphaFold), Choose Structure (chat column redacted) |
+| [72-science-results.png](72-science-results.png) | Science — Results | Science ▸ **Results** | Results preview empty state (chat column redacted) |
+| [73-science-paper.png](73-science-paper.png) | Science — Paper | Science ▸ **Paper** | Scientific paper workspace, Draft LaTeX Paper (chat column redacted) |
 
 ## Zoomed detail crops
 
@@ -101,5 +104,5 @@ Cut from the redacted captures above (2× upscale where small), for pixel-level 
 - A dedicated ACP chat screen: `MicroCode/Views/AI/ACPAgentChatView.swift` exists, but no current UI presents it. ACP agents are reached through screens 22–26 and the composer picker (13).
 - The "Toggle Git Panel" menu item showed nothing beyond the sidebar Source Control view (08, 60–63).
 - A running simulator, a physical device or the Android emulator. None was started.
-- Science mode Structure / Results / Paper tabs and Cloud GPU Wallet / Git Ingest / SSH tabs. These are SwiftUI segmented pickers that did not react to the synthetic clicks used for capture; only the default tab of each is shown (29, 47).
+- Cloud GPU Wallet / Git Ingest / SSH tabs: only the default GPU Cluster tab is shown (47).
 - Notebook **DAG** is a reactive-mode setting toggle, not a panel; it was switched back off and not captured.
