@@ -107,17 +107,17 @@ namespace MicroCode.Core
 
             if (IsDark)
             {
-                PrimaryColor = Rgba(255, 255, 255, 0.85);
-                Secondary = B(Rgba(255, 255, 255, 0.55));
-                Tertiary = B(Rgba(255, 255, 255, 0.25));
-                Quaternary = B(Rgba(255, 255, 255, 0.10));
-                Separator = B(Rgba(255, 255, 255, 0.10));
+                PrimaryColor = Rgba(255, 255, 255, 0.90);
+                Secondary = B(Rgba(255, 255, 255, 0.58));
+                Tertiary = B(Rgba(255, 255, 255, 0.28));
+                Quaternary = B(Rgba(255, 255, 255, 0.12));
+                Separator = B(Rgba(255, 255, 255, 0.11));
                 AccentColor = Rgb(10, 132, 255);
-                WindowBackground = B(Rgb(50, 50, 50));
-                TextBackground = B(Rgb(30, 30, 30));
-                ControlBackground = B(Rgb(30, 30, 30));
+                WindowBackground = B(Rgb(20, 20, 24));
+                TextBackground = B(Rgb(26, 26, 32));
+                ControlBackground = B(Rgb(28, 28, 34));
                 SelectedContent = B(Rgb(0, 88, 208));
-                MenuBackground = B(Rgba(40, 40, 42, 0.96));
+                MenuBackground = B(Rgba(32, 32, 38, 0.98));
                 MenuBorder = B(Rgba(255, 255, 255, 0.14));
                 SysRed = B(Rgb(255, 69, 58)); SysOrange = B(Rgb(255, 159, 10)); SysYellow = B(Rgb(255, 214, 10));
                 SysGreen = B(Rgb(50, 215, 75)); SysBlue = B(Rgb(10, 132, 255)); SysPurple = B(Rgb(191, 90, 242));

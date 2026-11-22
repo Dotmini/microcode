@@ -233,6 +233,7 @@ namespace MicroCode.Views
     {
         const string FileName = "team-tasks.json";
         readonly object _lock = new object();
+        readonly object _fileLock = new object();
         readonly Func<string> _actor;
         List<TeamTask> _tasks = new List<TeamTask>();
         FileSystemWatcher _watcher;
@@ -282,9 +283,12 @@ namespace MicroCode.Views
                 return;
             }
             string err = null; List<TeamTask> list = null;
-            try { list = TeamTaskJson.ParseDocument(File.ReadAllText(path), out err); }
-            catch (IOException ex) { err = ex.Message; }
-            catch (UnauthorizedAccessException ex) { err = ex.Message; }
+            lock (_fileLock)
+            {
+                try { list = TeamTaskJson.ParseDocument(File.ReadAllText(path), out err); }
+                catch (IOException ex) { err = ex.Message; }
+                catch (UnauthorizedAccessException ex) { err = ex.Message; }
+            }
             lock (_lock)
             {
                 if (list == null) LastError = "Unable to read shared tasks: " + err;
@@ -322,8 +326,8 @@ namespace MicroCode.Views
                 var w = new FileSystemWatcher(dir, Path.GetFileName(file)) { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size };
                 FileSystemEventHandler h = (s, e) =>
                 {
-                    // our own save echoes back here; the Mac ignores events for 0.15 s after persisting
-                    if ((DateTime.UtcNow - _persistedAt).TotalMilliseconds < 400) return;
+                    // our own save echoes back here; allow 1200ms margin on loaded CI NTFS runners
+                    if ((DateTime.UtcNow - _persistedAt).TotalMilliseconds < 1200) return;
                     ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(80); Reload(); });
                 };
                 w.Changed += h; w.Created += h; w.Renamed += (s, e) => h(s, e);
@@ -475,19 +479,28 @@ namespace MicroCode.Views
             if (broadcast) { var lc = LocalChange; if (lc != null) lc(snapshot); }
             if (ws != null)
             {
-                try
+                lock (_fileLock)
                 {
                     string path = TaskFiles.Managed(ws, FileName);
-                    Directory.CreateDirectory(Path.GetDirectoryName(path));
-                    _persistedAt = DateTime.UtcNow;
-                    string tmp = path + ".tmp";
-                    File.WriteAllText(tmp, TeamTaskJson.Document(snapshot), new UTF8Encoding(false));
-                    if (File.Exists(path)) File.Replace(tmp, path, null, true); else File.Move(tmp, path);
-                    _persistedAt = DateTime.UtcNow;
+                    string doc = TeamTaskJson.Document(snapshot);
                     LastError = null;
+                    for (int attempt = 0; attempt < 3; attempt++)
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(path));
+                            _persistedAt = DateTime.UtcNow;
+                            string tmp = path + ".tmp";
+                            File.WriteAllText(tmp, doc, new UTF8Encoding(false));
+                            if (File.Exists(path)) File.Replace(tmp, path, null, true); else File.Move(tmp, path);
+                            _persistedAt = DateTime.UtcNow;
+                            LastError = null;
+                            break;
+                        }
+                        catch (IOException ex) { LastError = "Unable to save shared tasks: " + ex.Message; Thread.Sleep(15); }
+                        catch (UnauthorizedAccessException ex) { LastError = "Unable to save shared tasks: " + ex.Message; break; }
+                    }
                 }
-                catch (IOException ex) { LastError = "Unable to save shared tasks: " + ex.Message; }
-                catch (UnauthorizedAccessException ex) { LastError = "Unable to save shared tasks: " + ex.Message; }
             }
             Fire();
         }

@@ -67,7 +67,9 @@ namespace MicroCode.Views
             root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(236) });
             root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1) });
             root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            _sidebar.Background = Theme.B(t.IsDark ? Theme.Rgb(38, 38, 40) : Theme.Rgb(232, 232, 234));
+            _sidebar.Background = Theme.B(t.IsDark ? Theme.Rgb(14, 14, 18) : Theme.Rgb(236, 236, 240));
+            TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
+            RenderOptions.SetClearTypeHint(this, ClearTypeHint.Enabled);
             root.Children.Add(_sidebar);
             var div = new Border { Background = t.Separator }; Grid.SetColumn(div, 1); root.Children.Add(div);
             var right = new Grid();
@@ -152,9 +154,12 @@ namespace MicroCode.Views
             // Title bar
             string title = "Settings";
             for (int i = 0; i < Items.GetLength(0); i++) if ((int)Items[i, 0] == _tab) title = (string)Items[i, 1];
-            var cancel = V.Button(V.Box(V.T("Cancel", 11.5, FontWeights.Medium, t.Secondary), V.P(12, 5), t.P(0.05), 6, t.P(0.09), 1), Close);
-            var save = V.Button(V.Box(V.T("Save Changes", 11.5, FontWeights.SemiBold, t.Primary), V.P(14, 5), t.P(0.10), 6, t.P(0.20), 1), Save);
-            var head = V.VLead(0, V.Self(V.Box(V.H(8, V.T(title, 20, FontWeights.Bold, t.Primary), V.Sp(), cancel, save), V.P(32, 20, 32, 16), null, 0), Cross.Stretch),
+            var cancel = V.Button(V.Box(V.T("Cancel", 11.5, FontWeights.Medium, t.Secondary), V.P(12, 6), t.P(0.05), 6, t.P(0.10), 1), Close);
+            var save = V.Button(V.Box(V.T("Save Changes", 11.5, FontWeights.SemiBold, Brushes.White), V.P(14, 6), t.Accent, 6), Save);
+            var closeX = V.Button(V.Size(V.Box(Sym.Icon("xmark", 11, t.Secondary, FontWeights.SemiBold), V.P(0), Brushes.Transparent, 6), 28, 28), Close);
+            closeX.ToolTip = "Close (Esc)";
+            closeX.OnState = b => ((Border)b.Child).Background = b.IsHover ? Theme.B(Theme.Rgb(196, 43, 28)) : Brushes.Transparent;
+            var head = V.VLead(0, V.Self(V.Box(V.H(8, V.T(title, 20, FontWeights.Bold, t.Primary), V.Sp(), cancel, save, closeX), V.P(32, 18, 20, 14), null, 0), Cross.Stretch),
                 V.Self(V.Line(t.Op(t.Separator, 0.5), true), Cross.Stretch));
             head.Align = Cross.Stretch;
             _title.Child = head;
@@ -561,30 +566,66 @@ namespace MicroCode.Views
 
         void FetchModels(string pid)
         {
-            _fetchStatus = "…"; Rerender();
-            string url = Get("base:" + pid, AIConfig.BaseUrlFor(pid)).TrimEnd('/') + "/models";
+            _fetchStatus = "Scanning…"; Rerender();
+            string rawBase = Get("base:" + pid, AIConfig.BaseUrlFor(pid));
+            string normBase = pid == "local" ? AIConfig.NormalizeLocalBaseUrl(rawBase) : rawBase.TrimEnd('/');
+            string url = normBase + "/models";
             string key = _pending.ContainsKey("key:" + pid) ? (string)_pending["key:" + pid] : AIConfig.KeyFor(pid);
             bool anthropic = pid == "anthropic";
             Task.Run(async () =>
             {
-                using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) })
+                using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) })
                 {
-                    var req = new HttpRequestMessage(HttpMethod.Get, pid == "gemini" ? url + "?key=" + Uri.EscapeDataString(key ?? "") : url);
-                    if (anthropic) { req.Headers.Add("x-api-key", key ?? ""); req.Headers.Add("anthropic-version", "2023-06-01"); }
-                    else if (!string.IsNullOrEmpty(key) && pid != "gemini") req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                    var resp = await http.SendAsync(req);
-                    string body = await resp.Content.ReadAsStringAsync();
-                    if (!resp.IsSuccessStatusCode) throw AIException.FromHttp((int)resp.StatusCode, body, null);
-                    var o = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(body);
-                    var arr = (o.ContainsKey("data") ? o["data"] : o.ContainsKey("models") ? o["models"] : null) as System.Collections.ArrayList;
                     var ids = new List<string>();
-                    if (arr != null) foreach (Dictionary<string, object> m in arr) { object id; if (m.TryGetValue("id", out id) || m.TryGetValue("name", out id)) ids.Add(Convert.ToString(id).Replace("models/", "")); }
+                    string lastErr = null;
+                    try
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Get, pid == "gemini" ? url + "?key=" + Uri.EscapeDataString(key ?? "") : url);
+                        if (anthropic) { req.Headers.Add("x-api-key", key ?? ""); req.Headers.Add("anthropic-version", "2023-06-01"); }
+                        else if (!string.IsNullOrEmpty(key) && pid != "gemini") req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                        var resp = await http.SendAsync(req);
+                        string body = await resp.Content.ReadAsStringAsync();
+                        if (!resp.IsSuccessStatusCode) throw AIException.FromHttp((int)resp.StatusCode, body, null);
+                        var o = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(body);
+                        var arr = (o != null && o.ContainsKey("data") ? o["data"] : o != null && o.ContainsKey("models") ? o["models"] : null) as System.Collections.ArrayList;
+                        if (arr != null) foreach (Dictionary<string, object> m in arr) { object id; if (m.TryGetValue("id", out id) || m.TryGetValue("name", out id)) ids.Add(Convert.ToString(id).Replace("models/", "")); }
+                    }
+                    catch (Exception ex) { lastErr = AIException.Describe(ex, false); }
+
+                    // Fallback for native Ollama /api/tags when /v1/models fails or returns empty
+                    if (ids.Count == 0 && pid == "local" && normBase.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            string tagsUrl = normBase.Substring(0, normBase.Length - 3) + "/api/tags";
+                            var resp = await http.GetAsync(tagsUrl);
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                string body = await resp.Content.ReadAsStringAsync();
+                                var o = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(body);
+                                var arr = o != null && o.ContainsKey("models") ? o["models"] as System.Collections.ArrayList : null;
+                                if (arr != null) foreach (Dictionary<string, object> m in arr) { object id; if (m.TryGetValue("name", out id) || m.TryGetValue("model", out id)) ids.Add(Convert.ToString(id)); }
+                            }
+                        }
+                        catch { }
+                    }
+                    if (ids.Count == 0 && !string.IsNullOrEmpty(lastErr)) throw new Exception(lastErr);
                     return ids;
                 }
             }).ContinueWith(tk => Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (tk.IsFaulted) { _fetchStatus = "Could not fetch models: " + AIException.Describe(tk.Exception, false); _fetched = null; }
-                else { _fetched = tk.Result.OrderBy(x => x).ToList(); _fetchStatus = "✓ " + _fetched.Count + " models available"; }
+                if (tk.IsFaulted) { _fetchStatus = "Could not connect to " + normBase + ": " + tk.Exception.GetBaseException().Message; _fetched = null; }
+                else
+                {
+                    _fetched = tk.Result.Distinct().OrderBy(x => x).ToList();
+                    if (pid == "local" && _fetched.Count > 0)
+                    {
+                        string cur = Get("ai_model_local", AIConfig.ModelFor("local"));
+                        if (string.IsNullOrWhiteSpace(cur) || !_fetched.Contains(cur)) Set("ai_model_local", _fetched[0]);
+                        Set("base:local", normBase);
+                    }
+                    _fetchStatus = _fetched.Count > 0 ? ("✓ Connected — " + _fetched.Count + " model(s) ready") : "Connected, but no models are loaded yet (pull a model in Ollama or load one in LM Studio).";
+                }
                 Rerender();
             })));
         }
@@ -596,17 +637,21 @@ namespace MicroCode.Views
             string model = Get("ai_model_local", AIConfig.ModelFor("local"));
             var s = V.VLead(12); s.Align = Cross.Stretch;
             s.Children.Add(V.H(8, Sym.Icon("desktopcomputer", 12, t.Primary, FontWeights.SemiBold), V.T("Local LLM (Ollama · LM Studio · llama.cpp · vLLM)", 13, FontWeights.SemiBold, t.Primary)));
-            s.Children.Add(V.Wrap(V.T("Runs fully on this PC or your LAN. Any OpenAI-compatible endpoint works: Ollama http://localhost:11434/v1, LM Studio http://localhost:1234/v1.", 11.5, FontWeights.Normal, t.Secondary), TextAlignment.Left));
+            s.Children.Add(V.Wrap(V.T("Runs fully on this PC or your LAN (uses 127.0.0.1 to avoid Windows IPv6 localhost delays). Click Scan Models to auto-detect running models, then click Save Changes.", 11.5, FontWeights.Normal, t.Secondary), TextAlignment.Left));
             var l1 = V.T("Endpoint:", 12, FontWeights.Medium, t.Primary); l1.Width = 110;
-            s.Children.Add(V.Self(V.H(8, l1, V.Flex(Field("http://localhost:11434/v1", ep, false, v => Set("base:local", v), double.NaN)),
-                V.Button(V.Box(V.T("Ollama", 11, FontWeights.Medium, t.Primary), V.P(8, 4), t.P(0.1), 5), () => { Set("base:local", "http://localhost:11434/v1"); Rerender(); }),
-                V.Button(V.Box(V.T("LM Studio", 11, FontWeights.Medium, t.Primary), V.P(8, 4), t.P(0.1), 5), () => { Set("base:local", "http://localhost:1234/v1"); Rerender(); })), Cross.Stretch));
-            var l2 = V.T("Model:", 12, FontWeights.Medium, t.Primary); l2.Width = 110;
+            s.Children.Add(V.Self(V.H(8, l1, V.Flex(Field("http://127.0.0.1:11434/v1", ep, false, v => Set("base:local", v), double.NaN)),
+                V.Button(V.Box(V.T("Ollama", 11, FontWeights.Medium, t.Primary), V.P(8, 4), t.P(0.1), 5), () => { Set("base:local", "http://127.0.0.1:11434/v1"); FetchModels("local"); }),
+                V.Button(V.Box(V.T("LM Studio", 11, FontWeights.Medium, t.Primary), V.P(8, 4), t.P(0.1), 5), () => { Set("base:local", "http://127.0.0.1:1234/v1"); FetchModels("local"); }),
+                V.Button(V.Box(V.T("llama.cpp", 11, FontWeights.Medium, t.Primary), V.P(8, 4), t.P(0.1), 5), () => { Set("base:local", "http://127.0.0.1:8080/v1"); FetchModels("local"); })), Cross.Stretch));
+            var l2 = V.T("Model ID:", 12, FontWeights.Medium, t.Primary); l2.Width = 110;
             var models = _fetched ?? new List<string> { model };
-            if (!models.Contains(model)) models.Insert(0, model);
-            var scan = V.Button(V.Box(V.H(4, Sym.Icon("arrow.clockwise", 11, t.Primary), V.T("Scan Models", 10.5, FontWeights.Medium, t.Primary)), V.P(8, 3), t.P(0.1), 5), () => FetchModels("local"));
-            s.Children.Add(V.Self(V.H(8, l2, V.Flex(PopUp(model, models, v => { Set("ai_model_local", v); Rerender(); }, double.NaN)), scan), Cross.Stretch));
-            if (_fetchStatus.Length > 1) s.Children.Add(V.T(_fetchStatus, 10.5, FontWeights.Medium, _fetchStatus.StartsWith("✓") ? t.SysGreen : t.SysOrange));
+            if (!string.IsNullOrEmpty(model) && !models.Contains(model)) models.Insert(0, model);
+            var scan = V.Button(V.Box(V.H(4, Sym.Icon("arrow.clockwise", 11, t.Primary), V.T("Scan Models", 10.5, FontWeights.Medium, t.Primary)), V.P(8, 4), t.P(0.1), 5), () => FetchModels("local"));
+            s.Children.Add(V.Self(V.H(8, l2,
+                V.Flex(Field("e.g. qwen2.5-coder:7b or llama3.1", model, false, v => Set("ai_model_local", v), double.NaN)),
+                models.Count > 1 ? (UIElement)PopUp(model, models, v => { Set("ai_model_local", v); Rerender(); }, 180) : null,
+                scan), Cross.Stretch));
+            if (_fetchStatus.Length > 1) s.Children.Add(V.Wrap(V.T(_fetchStatus, 11, FontWeights.Medium, _fetchStatus.StartsWith("✓") ? t.SysGreen : t.SysOrange), TextAlignment.Left));
             return V.Self(V.Box(s, V.P(16), t.ControlBackground, 8, t.P(0.08), 1), Cross.Stretch);
         }
 

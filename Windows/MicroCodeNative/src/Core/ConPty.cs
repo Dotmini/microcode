@@ -209,6 +209,7 @@ namespace MicroCode.Core
         IntPtr _hProcess = IntPtr.Zero;
         IntPtr _hThread = IntPtr.Zero;
         Process _fallbackProc;
+        Thread _conPtyReader;
         int _exitedRaised;
         volatile bool _running;
 
@@ -304,6 +305,8 @@ namespace MicroCode.Core
 
                 var si = new ConPty.NativeMethods.STARTUPINFOEX();
                 si.StartupInfo.cb = Marshal.SizeOf(typeof(ConPty.NativeMethods.STARTUPINFOEX));
+                // Force the child off any redirected parent pipes so stdout/stderr bind to ConPTY's CONOUT$.
+                si.StartupInfo.dwFlags = ConPty.NativeMethods.STARTF_USESTDHANDLES;
                 si.lpAttributeList = attrList;
 
                 var pi = new ConPty.NativeMethods.PROCESS_INFORMATION();
@@ -374,6 +377,7 @@ namespace MicroCode.Core
             var reader = new Thread(ReadConPtyLoop);
             reader.IsBackground = true;
             reader.Name = "ConPtyReader";
+            _conPtyReader = reader;
             reader.Start();
 
             var waiter = new Thread(WaitConPtyLoop);
@@ -411,7 +415,8 @@ namespace MicroCode.Core
         void WaitConPtyLoop()
         {
             IntPtr hProc;
-            lock (_gate) { hProc = _hProcess; }
+            Thread reader;
+            lock (_gate) { hProc = _hProcess; reader = _conPtyReader; }
             if (hProc == IntPtr.Zero) return;
 
             try { ConPty.NativeMethods.WaitForSingleObject(hProc, ConPty.NativeMethods.INFINITE); } catch { }
@@ -419,6 +424,20 @@ namespace MicroCode.Core
             uint code = 0;
             try { ConPty.NativeMethods.GetExitCodeProcess(hProc, out code); } catch { }
             ExitCode = unchecked((int)code);
+
+            // Allow conhost to flush final VT stdout/stderr, then close the pseudo-console so ReadFile sees EOF.
+            try { Thread.Sleep(50); } catch { }
+            IntPtr hpc = IntPtr.Zero;
+            lock (_gate) { hpc = _hPC; _hPC = IntPtr.Zero; }
+            if (hpc != IntPtr.Zero)
+            {
+                try { ConPty.NativeMethods.ClosePseudoConsole(hpc); } catch { }
+            }
+            if (reader != null && Thread.CurrentThread != reader)
+            {
+                try { reader.Join(1500); } catch { }
+            }
+
             _running = false;
             RaiseExited(ExitCode);
         }
@@ -447,16 +466,6 @@ namespace MicroCode.Core
 
             var proc = new Process();
             proc.StartInfo = psi;
-            proc.EnableRaisingEvents = true;
-            proc.Exited += delegate
-            {
-                int code = 0;
-                try { code = proc.ExitCode; } catch { }
-                ExitCode = code;
-                _running = false;
-                RaiseExited(code);
-            };
-
             if (!proc.Start()) return false;
             lock (_gate)
             {
@@ -465,12 +474,26 @@ namespace MicroCode.Core
                 _running = true;
             }
 
-            StartStreamPump(proc.StandardOutput.BaseStream, "TerminalStdout");
-            StartStreamPump(proc.StandardError.BaseStream, "TerminalStderr");
+            var tOut = StartStreamPump(proc.StandardOutput.BaseStream, "TerminalStdout");
+            var tErr = StartStreamPump(proc.StandardError.BaseStream, "TerminalStderr");
+            var tWait = new Thread(delegate()
+            {
+                try { proc.WaitForExit(); } catch { }
+                try { tOut.Join(1500); } catch { }
+                try { tErr.Join(1500); } catch { }
+                int code = 0;
+                try { code = proc.ExitCode; } catch { }
+                ExitCode = code;
+                _running = false;
+                RaiseExited(code);
+            });
+            tWait.IsBackground = true;
+            tWait.Name = "TerminalFallbackWait";
+            tWait.Start();
             return true;
         }
 
-        void StartStreamPump(Stream stream, string threadName)
+        Thread StartStreamPump(Stream stream, string threadName)
         {
             var t = new Thread(delegate()
             {
@@ -492,6 +515,7 @@ namespace MicroCode.Core
             t.IsBackground = true;
             t.Name = threadName;
             t.Start();
+            return t;
         }
 
         static void SplitCommand(string commandLine, out string exe, out string args)

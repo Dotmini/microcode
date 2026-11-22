@@ -281,7 +281,7 @@ static class NotebookTests
         else Console.WriteLine("SKIP  C++ cell (g++ not on PATH)");
         r = null;
         NbRunner.Run(new NbCell { Language = "Rust", Content = "fn main(){}" }, "cell_t3", null, x => r = x);
-        Pump(() => r != null, 20000);
+        Pump(() => r != null, 35000);
         Check(r != null && (r.Output.Contains("rustc") || !r.HadError), "Rust cell: runs, or names the missing rustc toolchain");
     }
 

@@ -538,6 +538,11 @@ namespace MicroCode.Views
             SixDigitPIN = GenerateSixDigitPIN();
             foreach (var id in Defaults.List(PrefApprovedIds)) _approvedIds.Add(id);
             RefreshNetworks();
+            DotminiAuth.Changed += () =>
+            {
+                if (IsEnabled && ConnectionMode == PhoneConnectionMode.Online && DotminiAuth.SignedIn && TunnelStatus != "connected")
+                    StartOnlineTunnel();
+            };
         }
 
         void NotifyChanged()
@@ -592,30 +597,49 @@ namespace MicroCode.Views
             return diff == 0;
         }
 
+        static bool IsVirtualAdapter(NetworkInterface ni)
+        {
+            string txt = ((ni.Name ?? "") + " " + (ni.Description ?? "")).ToLowerInvariant();
+            string[] virt = { "vethernet", "wsl", "hyper-v", "virtualbox", "vmware", "virtual", "docker", "bluetooth", "zerotier", "tailscale", "wireguard", "tap-", "tun", "loopback", "pseudo", "npcap", "nordlynx" };
+            foreach (var v in virt) if (txt.Contains(v)) return true;
+            return false;
+        }
+
         public void RefreshNetworks()
         {
-            var found = new List<NetworkAdapterInfo>();
+            var ranked = new List<Tuple<int, NetworkAdapterInfo>>();
             string tsIp = null;
             try
             {
                 foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
                     if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback || ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
                     var props = ni.GetIPProperties();
+                    bool hasGateway = props.GatewayAddresses.Any(g => g.Address != null && g.Address.AddressFamily == AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any));
+                    bool virt = IsVirtualAdapter(ni);
                     foreach (var ua in props.UnicastAddresses)
                     {
                         if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
                         string ip = ua.Address.ToString();
-                        if (ip.StartsWith("169.254.")) continue;
+                        if (ip.StartsWith("169.254.") || ip == "127.0.0.1") continue;
                         var octets = ip.Split('.').Select(s => { int n; return int.TryParse(s, out n) ? n : -1; }).ToArray();
                         bool isCgnat = octets.Length == 4 && octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127;
                         if (isCgnat && tsIp == null) tsIp = ip;
-                        found.Add(new NetworkAdapterInfo { InterfaceName = ni.Name, IpAddress = ip });
+                        int score = 0;
+                        if (!virt) score += 100;
+                        if (hasGateway) score += 50;
+                        if (ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211) score += 30;
+                        else if (ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet) score += 20;
+                        if (ip.StartsWith("192.168.")) score += 15;
+                        else if (ip.StartsWith("10.")) score += 10;
+                        if (isCgnat) score -= 80;
+                        ranked.Add(Tuple.Create(score, new NetworkAdapterInfo { InterfaceName = ni.Name, IpAddress = ip }));
                     }
                 }
             }
             catch { }
+            var found = ranked.OrderByDescending(x => x.Item1).Select(x => x.Item2).ToList();
             AllAdapters = found;
             TailscaleIp = tsIp;
             if (!string.IsNullOrEmpty(SelectedLanIp) && found.Any(a => a.IpAddress == SelectedLanIp))
@@ -884,6 +908,8 @@ namespace MicroCode.Views
             {
                 if (ct.IsCancellationRequested || !IsEnabled || ConnectionMode != PhoneConnectionMode.Online) return;
                 var ws = new ClientWebSocket();
+                ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+                ws.Options.SetRequestHeader("User-Agent", DotminiNet.UserAgent);
                 ws.Options.SetRequestHeader("X-Relay-Node-Proof", proof);
                 ws.Options.SetRequestHeader("X-Relay-Epoch", epoch);
                 ws.Options.SetRequestHeader("X-Relay-User-Hint", hint);
@@ -1004,6 +1030,20 @@ namespace MicroCode.Views
             string method = (DJ.Str(payload, "method") ?? "GET").ToUpperInvariant();
             string target = DJ.Str(payload, "target") ?? "/";
             if (!target.StartsWith("/")) target = "/" + target;
+            // SSE stream cannot be buffered via request/response relay: return an immediate state event burst
+            if (method == "GET" && target.StartsWith("/api/stream", StringComparison.OrdinalIgnoreCase))
+            {
+                string fp;
+                string sseBody = "retry: 2500\ndata: " + JsonSer.Serialize(BuildStateObject(out fp)) + "\n\n";
+                var sseObj = new Dictionary<string, object> {
+                    { "type", "http_response" }, { "id", id }, { "status", 200 },
+                    { "headers", new Dictionary<string, object> { { "Content-Type", "text/event-stream; charset=utf-8" }, { "Cache-Control", "no-cache" } } },
+                    { "body_b64", Convert.ToBase64String(Encoding.UTF8.GetBytes(sseBody)) }
+                };
+                await SendRelayText(ws, JsonSer.Serialize(sseObj));
+                return;
+            }
+            bool failed = false;
             try
             {
                 using (var req = new HttpRequestMessage(new HttpMethod(method), "http://127.0.0.1:" + port + target))
@@ -1047,6 +1087,11 @@ namespace MicroCode.Views
                 }
             }
             catch
+            {
+                failed = true;
+            }
+            // C# 5 forbids await inside a catch block: send the 502 after it
+            if (failed)
             {
                 var errObj = new Dictionary<string, object> {
                     { "type", "http_response" }, { "id", id }, { "status", 502 },
@@ -1212,84 +1257,80 @@ namespace MicroCode.Views
 
         void HandleClient(TcpClient tcp)
         {
-            using (tcp)
+            bool keepAliveSse = false;
+            try
             {
-                bool keepAliveSse = false;
-                try
+                var ns = tcp.GetStream();
+                ns.ReadTimeout = 10000;
+                var raw = new MemoryStream();
+                var tmp = new byte[8192];
+                int hdrEnd = -1;
+                while (hdrEnd < 0 && raw.Length < 128 * 1024)
                 {
-                    var ns = tcp.GetStream();
-                    ns.ReadTimeout = 10000;
-                    var raw = new MemoryStream();
-                    var tmp = new byte[8192];
-                    int hdrEnd = -1;
-                    while (hdrEnd < 0 && raw.Length < 128 * 1024)
-                    {
-                        int n = ns.Read(tmp, 0, tmp.Length);
-                        if (n <= 0) break;
-                        raw.Write(tmp, 0, n);
-                        hdrEnd = FindHeaderEnd(raw.GetBuffer(), (int)raw.Length);
-                    }
-                    if (hdrEnd < 0) return;
+                    int n = ns.Read(tmp, 0, tmp.Length);
+                    if (n <= 0) break;
+                    raw.Write(tmp, 0, n);
+                    hdrEnd = FindHeaderEnd(raw.GetBuffer(), (int)raw.Length);
+                }
+                if (hdrEnd < 0) return;
 
-                    var all = raw.ToArray();
-                    string head = Encoding.ASCII.GetString(all, 0, hdrEnd);
-                    var lines = head.Split(new[] { "\r\n" }, StringSplitOptions.None);
-                    var first = lines[0].Split(' ');
-                    if (first.Length < 2) return;
-                    string method = first[0].ToUpperInvariant();
-                    string rawTarget = first[1];
-                    string path = rawTarget;
-                    var query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    int qIdx = rawTarget.IndexOf('?');
-                    if (qIdx >= 0)
+                var all = raw.ToArray();
+                string head = Encoding.ASCII.GetString(all, 0, hdrEnd);
+                var lines = head.Split(new[] { "\r\n" }, StringSplitOptions.None);
+                var first = lines[0].Split(' ');
+                if (first.Length < 2) return;
+                string method = first[0].ToUpperInvariant();
+                string rawTarget = first[1];
+                string path = rawTarget;
+                var query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                int qIdx = rawTarget.IndexOf('?');
+                if (qIdx >= 0)
+                {
+                    path = rawTarget.Substring(0, qIdx);
+                    foreach (var part in rawTarget.Substring(qIdx + 1).Split('&'))
                     {
-                        path = rawTarget.Substring(0, qIdx);
-                        foreach (var part in rawTarget.Substring(qIdx + 1).Split('&'))
-                        {
-                            int eq = part.IndexOf('=');
-                            if (eq > 0) query[Uri.UnescapeDataString(part.Substring(0, eq))] = Uri.UnescapeDataString(part.Substring(eq + 1).Replace('+', ' '));
-                        }
-                    }
-
-                    var hdrs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var l in lines.Skip(1))
-                    {
-                        int c = l.IndexOf(':');
-                        if (c > 0) hdrs[l.Substring(0, c).Trim()] = l.Substring(c + 1).Trim();
-                    }
-
-                    int cl = 0; string clStr; if (hdrs.TryGetValue("Content-Length", out clStr)) int.TryParse(clStr, out cl);
-                    cl = Math.Min(cl, 24 * 1024 * 1024);
-                    var bodyMs = new MemoryStream();
-                    int bodyStart = hdrEnd + 4;
-                    bodyMs.Write(all, bodyStart, all.Length - bodyStart);
-                    while (bodyMs.Length < cl)
-                    {
-                        int n = ns.Read(tmp, 0, Math.Min(tmp.Length, cl - (int)bodyMs.Length));
-                        if (n <= 0) break;
-                        bodyMs.Write(tmp, 0, n);
-                    }
-
-                    string remoteIp = ((IPEndPoint)tcp.Client.RemoteEndPoint).Address.ToString();
-                    if (remoteIp.StartsWith("::ffff:")) remoteIp = remoteIp.Substring(7);
-
-                    bool handledSse;
-                    byte[] resp = ProcessHttpRequest(method, path, rawTarget, query, hdrs, bodyMs.ToArray(), remoteIp, tcp, ns, out handledSse);
-                    if (handledSse) { keepAliveSse = true; return; }
-                    if (resp != null)
-                    {
-                        ns.Write(resp, 0, resp.Length);
-                        ns.Flush();
+                        int eq = part.IndexOf('=');
+                        if (eq > 0) query[Uri.UnescapeDataString(part.Substring(0, eq))] = Uri.UnescapeDataString(part.Substring(eq + 1).Replace('+', ' '));
                     }
                 }
-                catch { }
-                finally
+
+                var hdrs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var l in lines.Skip(1))
                 {
-                    if (keepAliveSse)
-                    {
-                        // Keep socket open in _sseClients; disposed when closed or Stop()
-                        while (_running && !tcp.Connected) break;
-                    }
+                    int c = l.IndexOf(':');
+                    if (c > 0) hdrs[l.Substring(0, c).Trim()] = l.Substring(c + 1).Trim();
+                }
+
+                int cl = 0; string clStr; if (hdrs.TryGetValue("Content-Length", out clStr)) int.TryParse(clStr, out cl);
+                cl = Math.Min(cl, 24 * 1024 * 1024);
+                var bodyMs = new MemoryStream();
+                int bodyStart = hdrEnd + 4;
+                bodyMs.Write(all, bodyStart, all.Length - bodyStart);
+                while (bodyMs.Length < cl)
+                {
+                    int n = ns.Read(tmp, 0, Math.Min(tmp.Length, cl - (int)bodyMs.Length));
+                    if (n <= 0) break;
+                    bodyMs.Write(tmp, 0, n);
+                }
+
+                string remoteIp = ((IPEndPoint)tcp.Client.RemoteEndPoint).Address.ToString();
+                if (remoteIp.StartsWith("::ffff:")) remoteIp = remoteIp.Substring(7);
+
+                bool handledSse;
+                byte[] resp = ProcessHttpRequest(method, path, rawTarget, query, hdrs, bodyMs.ToArray(), remoteIp, tcp, ns, out handledSse);
+                if (handledSse) { keepAliveSse = true; return; }
+                if (resp != null)
+                {
+                    ns.Write(resp, 0, resp.Length);
+                    ns.Flush();
+                }
+            }
+            catch { }
+            finally
+            {
+                if (!keepAliveSse)
+                {
+                    try { tcp.Close(); } catch { }
                 }
             }
         }

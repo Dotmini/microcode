@@ -91,14 +91,19 @@ static class HarnessParityTests
             term.Resize(120, 40);
             Check(term.Cols == 120 && term.Rows == 40, "TerminalSession.Resize updates Cols/Rows");
 
-            term.WriteInput(isWin ? "echo conpty_parity_ok\r\nexit\r\n" : "echo conpty_parity_ok\nexit\n");
+            if (isWin) Thread.Sleep(300);
+            term.WriteInput(isWin ? "echo conpty_parity_ok\r\n" : "echo conpty_parity_ok\n");
+            if (isWin) Thread.Sleep(400);
+            term.WriteInput(isWin ? "exit\r\n" : "exit\n");
             bool finished = done.Wait(8000);
             Thread.Sleep(100);
             string output;
             lock (sb) { output = ConPty.StripAnsi(sb.ToString()); }
 
             Check(finished && exitCode == 0, "TerminalSession exits cleanly with code 0 (finished=" + finished + ", code=" + exitCode + ")");
-            Check(output.Contains("conpty_parity_ok"), "TerminalSession captures shell output");
+            string sample = output.Replace("\r", "\\r").Replace("\n", "\\n");
+            if (sample.Length > 140) sample = sample.Substring(0, 140);
+            Check(output.Contains("conpty_parity_ok"), "TerminalSession captures shell output (conpty=" + term.UsingConPty + ", len=" + output.Length + ", out=" + sample + ")");
         }
     }
 

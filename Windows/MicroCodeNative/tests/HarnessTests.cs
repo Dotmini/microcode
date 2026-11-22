@@ -239,8 +239,10 @@ static class HarnessTests
         Check(AgentRunner.Normalize("MultiEdit") == "multi_replace_in_file" && AgentRunner.Normalize("mkdir") == "create_directory" && AgentRunner.Normalize("webfetch") == "web_fetch", "Tool aliases: MultiEdit, mkdir, webfetch");
         var schemas = AgentRunner.ToolSchemas(true).Select(s => (string)s["name"]).ToList();
         var all = AgentRunner.ToolSchemas(false).Select(s => (string)s["name"]).ToList();
-        Check(schemas.Contains("multi_file_read") && schemas.Contains("find_symbol") && schemas.Contains("git_status") && schemas.Contains("web_fetch") && !schemas.Contains("apply_patch") && !schemas.Contains("rename_file")
-            && all.Contains("apply_patch") && all.Contains("patch_file") && all.Contains("multi_replace_in_file") && all.Contains("create_directory") && all.Contains("rename_file") && all.Count == 17, "Schemas: 17 tools; plan mode keeps only the read-only ones (" + all.Count + ")");
+        Check(schemas.Contains("multi_file_read") && schemas.Contains("find_symbol") && schemas.Contains("git_status") && schemas.Contains("web_fetch")
+            && schemas.Contains("repo_map") && schemas.Contains("lsp_hover") && !schemas.Contains("apply_patch") && !schemas.Contains("rename_file") && !schemas.Contains("computer_use")
+            && all.Contains("apply_patch") && all.Contains("patch_file") && all.Contains("multi_replace_in_file") && all.Contains("create_directory") && all.Contains("rename_file") && all.Contains("computer_use")
+            && all.Count >= 35 && all.Count > schemas.Count, "Schemas: >= 35 tools; plan mode keeps only the read-only ones (" + all.Count + ")");
     }
 
     /// <summary>The real agent loop (AgentRunner.RunIsolated) against a scripted OpenAI-compatible server on loopback:
