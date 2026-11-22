@@ -796,9 +796,12 @@ namespace MicroCode.Views
                     Disabled = !agent.Available,
                     Action = () =>
                     {
-                        _input.Text = "/acp " + agent.Id + " ";
-                        _input.CaretIndex = _input.Text.Length;
-                        _input.Focus();
+                        // BuildModelMenu is static: act on the agent view that is on screen
+                        var view = AgentStore.CurrentView;
+                        if (view == null || view._input == null) return;
+                        view._input.Text = "/acp " + agent.Id + " ";
+                        view._input.CaretIndex = view._input.Text.Length;
+                        view._input.Focus();
                     }
                 });
             }

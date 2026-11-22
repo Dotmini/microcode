@@ -972,9 +972,9 @@ namespace MicroCode.Views
                     System.Threading.Tasks.Task.Run(() =>
                     {
                         var swRemote = System.Diagnostics.Stopwatch.StartNew();
-                        var prof = new SSHConfigProfile { Host = sshHost, HostName = sshHost };
+                        var prof = new SSHConfigProfile { Name = sshHost, HostName = sshHost };
                         int at = sshHost.IndexOf('@');
-                        if (at > 0) { prof.User = sshHost.Substring(0, at); prof.HostName = sshHost.Substring(at + 1); prof.Host = prof.HostName; }
+                        if (at > 0) { prof.User = sshHost.Substring(0, at); prof.HostName = sshHost.Substring(at + 1); prof.Name = prof.HostName; }
                         var res = RemoteWorkspaceManager.RunCommand(prof, "python3 - <<'__MC_EOF__'\n" + (c.Content ?? "") + "\n__MC_EOF__", 60000);
                         swRemote.Stop();
                         Dispatcher.BeginInvoke(new Action(() =>

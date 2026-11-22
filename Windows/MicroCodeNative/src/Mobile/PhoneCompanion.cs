@@ -1004,6 +1004,7 @@ namespace MicroCode.Views
             string method = (DJ.Str(payload, "method") ?? "GET").ToUpperInvariant();
             string target = DJ.Str(payload, "target") ?? "/";
             if (!target.StartsWith("/")) target = "/" + target;
+            bool failed = false;
             try
             {
                 using (var req = new HttpRequestMessage(new HttpMethod(method), "http://127.0.0.1:" + port + target))
@@ -1047,6 +1048,11 @@ namespace MicroCode.Views
                 }
             }
             catch
+            {
+                failed = true;
+            }
+            // C# 5 forbids await inside a catch block: send the 502 after it
+            if (failed)
             {
                 var errObj = new Dictionary<string, object> {
                     { "type", "http_response" }, { "id", id }, { "status", 502 },
