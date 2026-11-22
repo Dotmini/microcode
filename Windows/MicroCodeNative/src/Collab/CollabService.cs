@@ -240,12 +240,15 @@ namespace MicroCode.Views
         public readonly TeamTaskStore Tasks;
         public readonly TeamIntegrations Integrations;
         DateTime _tasksPushedAt = DateTime.MinValue;
+        readonly object _taskPushGate = new object();
+        string _queuedTaskJson, _queuedTaskEndpoint;
+        bool _taskPushing;
 
         string SelectedTaskTitle { get { var t = Tasks.SelectedTask; return t != null ? t.Title : null; } }
 
         /// <summary>broadcastTeamTasksIfActive. A peer POSTs its whole list to /api/collab/sync (what a Mac host understands);
         /// a Windows host also pushes the list over WebSocket as {"type":"teamTasks"} so Windows peers update at once — Mac
-        /// peers ignore the unknown type and keep polling.</summary>
+        /// peers ignore the unknown type and keep polling. Peer pushes are serialized so rapid local edits cannot arrive out of order.</summary>
         void BroadcastTeamTasksIfActive(List<TeamTask> tasks)
         {
             var s = Session;
@@ -257,16 +260,35 @@ namespace MicroCode.Views
                 return;
             }
             _tasksPushedAt = DateTime.UtcNow;
-            var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "teamTasksJSON", json } };
+            bool startLoop = false;
+            lock (_taskPushGate)
+            {
+                _queuedTaskJson = json;
+                _queuedTaskEndpoint = s.RemoteEndpoint;
+                if (!_taskPushing) { _taskPushing = true; startLoop = true; }
+            }
+            if (!startLoop) return;
             var _ = Task.Run(async () =>
             {
-                try
+                while (true)
                 {
-                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
-                    using (var resp = await Http.PostAsync(s.RemoteEndpoint + "/api/collab/sync", new StringContent(Json(body), Encoding.UTF8, "application/json"), cts.Token))
-                        Trace("tasks pushed " + (int)resp.StatusCode);
+                    string nextJson, ep;
+                    lock (_taskPushGate)
+                    {
+                        nextJson = _queuedTaskJson;
+                        ep = _queuedTaskEndpoint;
+                        _queuedTaskJson = null;
+                        if (nextJson == null || string.IsNullOrEmpty(ep)) { _taskPushing = false; break; }
+                    }
+                    try
+                    {
+                        var body = new Dictionary<string, object> { { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "teamTasksJSON", nextJson } };
+                        using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
+                        using (var resp = await Http.PostAsync(ep + "/api/collab/sync", new StringContent(Json(body), Encoding.UTF8, "application/json"), cts.Token))
+                            Trace("tasks pushed " + (int)resp.StatusCode);
+                    }
+                    catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Trace("tasks push failed: " + ex.Message); }
                 }
-                catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Trace("tasks push failed: " + ex.Message); }
             });
         }
 
