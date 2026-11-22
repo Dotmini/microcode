@@ -2432,6 +2432,9 @@ class AgentService: ObservableObject {
         var completeAfterLocalSynthesizedTools = false
         var kernelRecoveryCount = 0
         var followThroughNagCount = 0
+        // P1: the model decides when it is done; legacy fallbacks/nags/directives only behind a flag.
+        let legacyHarness = AgentHarnessPolicy.legacyInterventionsEnabled()
+        var usedClaimCheck = false
         // Provider-reported reason the latest model turn ended (nil when the provider/bridge does not report one).
         var lastStopReason: AIStopReason?
         var maxTokenContinuations = 0
@@ -2814,6 +2817,65 @@ class AgentService: ObservableObject {
                 continue
             }
 
+            // P1 (default): no tool calls means the model chose to stop. The harness only runs the user's
+            // pre_finish hooks and checks once that the answer does not report results this turn has no
+            // evidence for. Everything below this block is the legacy path (AgentHarnessPolicy flag).
+            if receivedToolCalls.isEmpty, !legacyHarness {
+                if !isChatMode, !filesModified.isEmpty, !usedPreFinishHookCheck {
+                    usedPreFinishHookCheck = true
+                    turnTrace.note("check.pre_finish")
+                    let preFinish = await MultiPlatformRulesEngine.shared.executeHooks(
+                        stage: .preFinish,
+                        filePath: filesModified.last,
+                        workspaceRoot: currentWorkspace ?? ""
+                    )
+                    if !preFinish.allowed {
+                        logActivity(.error, "pre_finish hook blocked completion; prompting agent to fix")
+                        history.append((role: "assistant", content: streamedText.isEmpty ? "(no visible answer)" : streamedText))
+                        history.append((role: "user", content: "\(preFinish.feedback)\n\nPlease fix the issue reported by the `pre_finish` hook before concluding your turn."))
+                        currentToolExecution = "Fixing pre_finish hook failure..."
+                        agentPhase = .validating
+                        continue
+                    }
+                }
+                let visibleAnswer = AIStructuredTurnCodec.stripThoughtTags(
+                    streamedText.isEmpty ? finalText : streamedText
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !isChatMode, !usedClaimCheck, lastStopReason != .refusal {
+                    var checkPrompt: String?
+                    if visibleAnswer.isEmpty, !allToolResults.isEmpty {
+                        checkPrompt = AgentClaimCheck.emptyAnswerPrompt
+                        turnTrace.note("check.empty_answer")
+                    } else {
+                        let evidence = allToolResults.map { result in
+                            ClaimEvidenceItem(
+                                executed: AgentExecutionEvidence.executes(name: result.toolName, arguments: result.toolParams ?? [:]),
+                                mutated: didMutateWorkspace(result),
+                                exportedPDF: normalizeToolName(result.toolName) == "export_pdf",
+                                success: result.success
+                            )
+                        }
+                        if let mismatch = AgentClaimCheck.mismatch(answer: visibleAnswer, evidence: evidence) {
+                            checkPrompt = AgentClaimCheck.prompt(for: mismatch)
+                            turnTrace.note("check.claim_evidence")
+                            logActivity(.info, "Claim check: \(mismatch.reason)")
+                        }
+                    }
+                    if let checkPrompt {
+                        usedClaimCheck = true
+                        history.append((role: "assistant", content: streamedText.isEmpty ? "(no visible answer)" : streamedText))
+                        history.append((role: "user", content: checkPrompt))
+                        currentToolExecution = "Checking the answer against this turn's results..."
+                        agentPhase = .validating
+                        continue
+                    }
+                }
+                kernelVerified = true
+                currentToolExecution = nil
+                turnTrace.end("model_stop")
+                break
+            }
+
             // A natural-language plan is not evidence of unfinished work. Claude
             // commonly says "I'll …" before a complete answer; using those words
             // as a signal to continue was the source of runaway agent loops.
@@ -3026,7 +3088,7 @@ class AgentService: ObservableObject {
                                 agentPhase = .thinking
                                 try? await Task.sleep(nanoseconds: delay * 1_000_000)
                             }
-                            history.append((role: "assistant", content: streamedText.isEmpty ? "<thought>Completed preliminary inspection.</thought>" : streamedText))
+                            history.append((role: "assistant", content: streamedText.isEmpty ? "(no visible answer)" : streamedText))
                             let followUpPrompt: String
                             if missingRequiredPDF {
                                 followUpPrompt = """
@@ -3680,20 +3742,20 @@ class AgentService: ObservableObject {
                 turnTrace.note("instruction.budget_ceiling")
             } else if !requiresMutation && iteration >= 24 {
                 dynamicInstruction = "You have completed \(iteration) inspection steps. Synthesize your verified findings and conclude with a concise, well-structured summary."
-                turnTrace.note("instruction.synthesize")
+                if legacyHarness { turnTrace.note("instruction.synthesize") }
             } else if !pendingDeliverableItems.isEmpty {
                 let checklist = pendingDeliverableItems.enumerated().map { "[\($0.offset + 1)] \($0.element)" }.joined(separator: "; ")
                 dynamicInstruction = "PENDING DELIVERABLES STILL REQUIRED BEFORE YOU MAY STOP: \(checklist). Reading or listing files is NOT completing the task — do NOT summarize or stop early, and NEVER dump unapplied code into chat. Immediately invoke the next required action tool now!"
-                turnTrace.note("instruction.pending_deliverables")
+                if legacyHarness { turnTrace.note("instruction.pending_deliverables") }
             } else if pendingVerificationAfterEdit {
                 dynamicInstruction = "Workspace source files have been modified. Continue creating or editing any remaining files required for the objective (NEVER dump file source code into chat), or run a build/diagnostic check (`shell` build/test or `get_diagnostics`) before concluding."
-                turnTrace.note("instruction.verify_edits")
+                if legacyHarness { turnTrace.note("instruction.verify_edits") }
             } else if !filesModified.isEmpty {
                 dynamicInstruction = "Latest source edits have been verified (\(verificationPassCount) check(s) passed). If additional implementation tasks or files remain for the user's objective, continue immediately with the next action; otherwise conclude your turn now with a concise, structured summary using clickable file links (NEVER dump source code in chat)."
-                turnTrace.note("instruction.edits_verified")
+                if legacyHarness { turnTrace.note("instruction.edits_verified") }
             } else {
                 dynamicInstruction = "Continue executing the user's request. Batch independent read/search operations together when exploring, and verify all facts before concluding."
-                turnTrace.note("instruction.continue")
+                if legacyHarness { turnTrace.note("instruction.continue") }
             }
             
             var directiveLines: [String] = []
@@ -3703,8 +3765,13 @@ class AgentService: ObservableObject {
             if let stallGuardWarning = stallGuardWarning {
                 directiveLines.append(stallGuardWarning)
             }
-            directiveLines.append("Kernel directive: \(kernelFollowUp ?? "Continue only with the next necessary action. Do not repeat completed calls.")")
-            directiveLines.append("Instruction: \(dynamicInstruction)")
+            if legacyHarness {
+                directiveLines.append("Kernel directive: \(kernelFollowUp ?? "Continue only with the next necessary action. Do not repeat completed calls.")")
+                directiveLines.append("Instruction: \(dynamicInstruction)")
+            } else if nearBudgetCeiling {
+                // P1: only facts about this run (budget, stall, consensus) — no per-batch steering.
+                directiveLines.append("Note: \(iteration) of the step budget used; wrap up soon.")
+            }
             
             let structuredResultsRecord = AIStructuredTurnCodec.encodeToolResultsTurn(
                 results: batchResults,
@@ -3778,7 +3845,7 @@ class AgentService: ObservableObject {
             logActivity(.info, detail)
         }
 
-        if terminationNotice == nil, !isChatMode, !kernelVerified, kernelOnline {
+        if legacyHarness, terminationNotice == nil, !isChatMode, !kernelVerified, kernelOnline {
             let response = await agentKernel.observe(
                 runID: kernelRunID,
                 kind: "final_candidate",
@@ -3805,6 +3872,7 @@ class AgentService: ObservableObject {
             }
         }
         
+        finalText = AgentHarnessPolicy.stripEmptyThoughtTags(finalText)
         if finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !lastPreToolText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             finalText = lastPreToolText
         }

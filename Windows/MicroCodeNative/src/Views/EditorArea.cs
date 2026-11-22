@@ -24,15 +24,8 @@ namespace MicroCode.Views
         DebugArea _debug;
         bool _inlineEdit;
 
-        /// <summary>The window's editor area (Team Collaboration patches remote ot1 operations into its open editors).</summary>
-        public static EditorArea Current { get; private set; }
-
-        /// <summary>The cached editor of an open file, or null when its tab has not been shown yet.</summary>
-        public CodeEditorView EditorFor(CodeFile f) { CodeEditorView e; return f != null && _editors.TryGetValue(f.Id, out e) ? e : null; }
-
         public EditorArea(AppState app)
         {
-            Current = this;
             _app = app;
             RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -424,11 +417,11 @@ namespace MicroCode.Views
         }
     }
 
-    /// <summary>Shell session (cmd.exe / PowerShell) with redirected I/O for the TERMINAL tab.</summary>
+    /// <summary>Shell session using Win32 ConPTY (fallback to redirected stdio PowerShell) for the TERMINAL tab.</summary>
     public class TerminalView : Grid
     {
         readonly string _cwd;
-        Process _p;
+        TerminalSession _session;
         readonly TextBox _out, _in;
         readonly StringBuilder _buf = new StringBuilder();
 
@@ -446,27 +439,40 @@ namespace MicroCode.Views
             SetRow(prompt, 1); Children.Add(prompt);
             _in.KeyDown += delegate(object s, KeyEventArgs e)
             {
-                if (e.Key == Key.Enter && _p != null && !_p.HasExited)
+                if (e.Key == Key.C && (Keyboard.Modifiers & ModifierKeys.Control) != 0 && string.IsNullOrEmpty(_in.SelectedText) && _session != null && _session.IsRunning)
+                {
+                    _session.WriteInput("\x03");
+                    e.Handled = true;
+                    return;
+                }
+                if (e.Key == Key.Enter && _session != null && _session.IsRunning)
                 {
                     string cmd = _in.Text; _in.Text = "";
-                    Append(cmd + "\n");
-                    try { _p.StandardInput.WriteLine(cmd); } catch { }
+                    if (!_session.UsingConPty) Append(cmd + "\n");
+                    _session.WriteInput(cmd + "\r\n");
                     e.Handled = true;
                 }
             };
-            Loaded += delegate { if (_p == null) Start(); _in.Focus(); };
+            Loaded += delegate { if (_session == null) Start(); _in.Focus(); };
         }
 
         void Start()
         {
             try
             {
-                var psi = new ProcessStartInfo("powershell.exe", "-NoLogo -NoExit -Command -") { WorkingDirectory = _cwd, UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
-                _p = new Process { StartInfo = psi, EnableRaisingEvents = true };
-                DataReceivedEventHandler h = (s, e) => { if (e.Data != null) Dispatcher.BeginInvoke(new Action(() => Append(e.Data + "\n"))); };
-                _p.OutputDataReceived += h; _p.ErrorDataReceived += h;
-                _p.Start(); _p.BeginOutputReadLine(); _p.BeginErrorReadLine();
-                Append("PowerShell — " + _cwd + "\n");
+                _session = new TerminalSession();
+                _session.OutputReceived += raw =>
+                {
+                    string clean = ConPty.StripAnsi(raw);
+                    if (!string.IsNullOrEmpty(clean))
+                        Dispatcher.BeginInvoke(new Action(() => Append(clean)));
+                };
+                _session.Exited += code =>
+                {
+                    Dispatcher.BeginInvoke(new Action(() => Append("\n[Process exited with code " + code + "]\n")));
+                };
+                _session.Start("powershell.exe -NoLogo", _cwd, 120, 34);
+                Append((_session.UsingConPty ? "ConPTY PowerShell" : "PowerShell") + " — " + _cwd + "\n");
             }
             catch (Exception ex) { Append("Failed to start shell: " + ex.Message + "\n"); }
         }
@@ -474,7 +480,7 @@ namespace MicroCode.Views
         void Append(string s) { _buf.Append(s); if (_buf.Length > 400000) _buf.Remove(0, 100000); _out.Text = _buf.ToString(); _out.ScrollToEnd(); }
         public void Clear() { _buf.Clear(); _out.Text = ""; }
         public string Recent() { var s = _buf.ToString(); return s.Length > 4000 ? s.Substring(s.Length - 4000) : s; }
-        public void Restart() { try { if (_p != null && !_p.HasExited) _p.Kill(); } catch { } _p = null; Clear(); Start(); }
+        public void Restart() { try { if (_session != null) _session.Dispose(); } catch { } _session = null; Clear(); Start(); }
     }
 
     /// <summary>

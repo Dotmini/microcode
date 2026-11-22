@@ -9,7 +9,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -470,7 +472,7 @@ namespace MicroCode.Views
                         if (resp.Headers.TryGetValues("Mcp-Session-Id", out sid)) { string s = sid.FirstOrDefault(); if (!string.IsNullOrEmpty(s)) _session = s; }
                         int st = (int)resp.StatusCode;
                         if (st == 401 || st == 403)
-                            throw new McpException("AUTH_REQUIRED (HTTP " + st + " at " + Spec.Url + "). OAuth sign-in for remote MCP servers is not available on Windows yet; pass a token with `mcp_orchestrator(action: \"connect\", server_name: \"" + Name + "\", bearer_token: \"...\")` or an Authorization header in mcp.json.");
+                            throw new McpException("AUTH_REQUIRED (HTTP " + st + " at " + Spec.Url + "). Run `mcp_orchestrator(action: \"authenticate\", server_name: \"" + Name + "\")` for OAuth 2.1 browser login, or pass `bearer_token: \"...\"` with action='connect'.");
                         if (st >= 400)
                         {
                             string body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
@@ -823,7 +825,18 @@ namespace MicroCode.Views
             return string.Join("\n", lines);
         }
 
-        /// <summary>Runs mcp__server__tool. Server names are matched longest-first so a server name containing "__" still resolves.</summary>
+        /// <summary>Classifies an external MCP server into a PNS tract (Cognitive / Reflex / Autonomic).</summary>
+        public static string TractFor(string name, List<McpToolInfo> tools)
+        {
+            string s = ((name ?? "") + " " + string.Join(" ", (tools ?? new List<McpToolInfo>()).Select(t => t.Name))).ToLowerInvariant();
+            if (s.Contains("browser") || s.Contains("playwright") || s.Contains("chrome") || s.Contains("dom")) return "Browser";
+            if (s.Contains("sql") || s.Contains("bigquery") || s.Contains("spanner") || s.Contains("postgres") || s.Contains("firestore")) return "Data";
+            if (s.Contains("git") || s.Contains("lsp") || s.Contains("file") || s.Contains("code")) return "Coding";
+            if (s.Contains("cloud") || s.Contains("gcs") || s.Contains("deploy") || s.Contains("docker")) return "Cloud";
+            return "General";
+        }
+
+        /// <summary>Runs mcp__server__tool with auto-restart recovery if the server died. Server names are matched longest-first.</summary>
         public static string Call(string fullName, Dictionary<string, object> args)
         {
             if (!fullName.StartsWith("mcp__")) return "Error: not an MCP tool: " + fullName;
@@ -832,7 +845,16 @@ namespace MicroCode.Views
             if (conn == null) return "Error: no MCP server for " + fullName + ". Use mcp_orchestrator(action: \"status\") to see connected servers.";
             string tool = rest.Substring(conn.Name.Length + 2);
             try { return conn.CallTool(tool, args); }
-            catch (McpException ex) { return "Error: " + ex.Message; }
+            catch (McpException)
+            {
+                try
+                {
+                    conn.Stop();
+                    conn.Start(20000);
+                    return conn.CallTool(tool, args);
+                }
+                catch (McpException ex2) { return "Error: " + ex2.Message; }
+            }
         }
 
         public static bool LooksReadOnlyTool(string fullName)
@@ -950,7 +972,7 @@ namespace MicroCode.Views
                     return string.Join("\n", hits.Select(h => "- `" + ToolName(h.Item1, h.Item2.Name) + "`: " + h.Item2.Description));
                 }
                 case "authenticate": case "login": case "sign_in": case "signin":
-                    return arg("server_name").Length == 0 ? "Error: `server_name` is required for 'authenticate'." : "OAuth sign-in for remote MCP servers is not available in MicroCode for Windows yet. Connect with a token instead: `mcp_orchestrator(action: \"connect\", server_name: \"" + arg("server_name") + "\", url: \"...\", bearer_token: \"...\")`.";
+                    return AuthenticateOAuth(arg("server_name").Length > 0 ? arg("server_name") : arg("query"), arg("url"), arg("bearer_token"));
                 case "restart":
                 {
                     var c = Get(arg("server_name"));
@@ -962,10 +984,187 @@ namespace MicroCode.Views
                     return "Restarted MCP server '" + c.Name + "' (" + (c.Connected ? "ONLINE" : "STARTING") + ", " + c.Tools.Count + " tools)." + (c.Error != null && !c.Connected ? " Error: " + c.Error : "");
                 }
                 case "synthesize": case "create":
-                    return "Synthesizing a Python MCP server is not available in MicroCode for Windows yet. Write the server yourself and register it with `mcp_orchestrator(action: \"connect\", server_name: \"...\", command: \"python\", args: \"server.py\")`.";
+                    return SynthesizePythonServer(arg("server_name").Length > 0 ? arg("server_name") : arg("query"), arg("description"), ws);
                 default:
                     return "Unknown mcp_orchestrator action '" + action + "'. Supported: status, discover, connect, authenticate, search_tools, restart, synthesize.";
             }
+        }
+
+        /// <summary>MCP OAuth 2.1 (RFC 9728 Protected Resource + Authorization Server Metadata + PKCE S256 loopback callback).</summary>
+        public static string AuthenticateOAuth(string rawName, string url, string explicitBearer)
+        {
+            string name = (rawName ?? "").Trim().ToLowerInvariant();
+            if (name.Length == 0) return "Error: `server_name` is required for 'authenticate'.";
+            var conn = Get(name);
+            string targetUrl = !string.IsNullOrWhiteSpace(url) ? url.Trim() : (conn != null ? conn.Spec.Url : null);
+            if (string.IsNullOrWhiteSpace(targetUrl))
+            {
+                string official;
+                if (OfficialEndpoints.TryGetValue(name, out official)) targetUrl = official;
+            }
+            if (string.IsNullOrWhiteSpace(targetUrl)) return "Error: no remote URL registered for MCP server '" + name + "'.";
+            if (!string.IsNullOrWhiteSpace(explicitBearer))
+                return Connect(name, targetUrl, null, null, explicitBearer);
+
+            try
+            {
+                DotminiNet.EnableTls();
+                string origin = Origin(targetUrl);
+                if (origin == null) return "Error: invalid MCP URL '" + targetUrl + "'.";
+
+                // Step 1: Discover Authorization Server via RFC 9728
+                string authServer = origin;
+                try
+                {
+                    string prm = DotminiNet.Http.GetStringAsync(origin + "/.well-known/oauth-protected-resource").Result;
+                    var prmObj = Js.DeserializeObject(prm) as Dictionary<string, object>;
+                    object asArr;
+                    if (prmObj != null && prmObj.TryGetValue("authorization_servers", out asArr) && asArr is object[] && ((object[])asArr).Length > 0)
+                        authServer = Convert.ToString(((object[])asArr)[0]).TrimEnd('/');
+                }
+                catch { }
+
+                string metaRaw = DotminiNet.Http.GetStringAsync(authServer + "/.well-known/oauth-authorization-server").Result;
+                var meta = Js.DeserializeObject(metaRaw) as Dictionary<string, object>;
+                if (meta == null) return "Error: server does not expose /.well-known/oauth-authorization-server metadata.";
+                string authEndpoint = DJ.Str(meta, "authorization_endpoint");
+                string tokenEndpoint = DJ.Str(meta, "token_endpoint");
+                string regEndpoint = DJ.Str(meta, "registration_endpoint");
+                if (string.IsNullOrEmpty(authEndpoint) || string.IsNullOrEmpty(tokenEndpoint))
+                    return "Error: incomplete OAuth metadata from " + authServer + ". Pass `bearer_token` directly with action='connect'.";
+
+                // Step 2: Start ephemeral loopback callback listener
+                var cbListener = new TcpListener(IPAddress.Loopback, 0);
+                cbListener.Start();
+                int cbPort = ((IPEndPoint)cbListener.LocalEndpoint).Port;
+                string redirectUri = "http://127.0.0.1:" + cbPort + "/callback";
+
+                // Step 3: Dynamic Client Registration (RFC 7591) if supported
+                string clientId = "microcode-windows";
+                if (!string.IsNullOrEmpty(regEndpoint))
+                {
+                    try
+                    {
+                        var regBody = Js.Serialize(new Dictionary<string, object> {
+                            { "client_name", "MicroCode Windows" },
+                            { "redirect_uris", new[] { redirectUri } },
+                            { "grant_types", new[] { "authorization_code" } },
+                            { "response_types", new[] { "code" } },
+                            { "token_endpoint_auth_method", "none" }
+                        });
+                        var regResp = DotminiNet.Http.PostAsync(regEndpoint, new StringContent(regBody, Encoding.UTF8, "application/json")).Result;
+                        var regObj = Js.DeserializeObject(regResp.Content.ReadAsStringAsync().Result) as Dictionary<string, object>;
+                        string cid = DJ.Str(regObj, "client_id");
+                        if (!string.IsNullOrEmpty(cid)) clientId = cid;
+                    }
+                    catch { }
+                }
+
+                // Step 4: PKCE S256 verifier + challenge
+                var rngBytes = new byte[32];
+                using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(rngBytes);
+                string verifier = Convert.ToBase64String(rngBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+                byte[] hash;
+                using (var sha = SHA256.Create()) hash = sha.ComputeHash(Encoding.ASCII.GetBytes(verifier));
+                string challenge = Convert.ToBase64String(hash).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+                string state = Guid.NewGuid().ToString("N");
+
+                string fullAuthUrl = authEndpoint + (authEndpoint.Contains("?") ? "&" : "?")
+                    + "response_type=code&client_id=" + Uri.EscapeDataString(clientId)
+                    + "&redirect_uri=" + Uri.EscapeDataString(redirectUri)
+                    + "&code_challenge=" + Uri.EscapeDataString(challenge)
+                    + "&code_challenge_method=S256&state=" + Uri.EscapeDataString(state);
+
+                DotminiNet.OpenExternalUrl(fullAuthUrl);
+
+                // Wait up to 90s for browser callback
+                string code = null;
+                var deadline = DateTime.UtcNow.AddSeconds(90);
+                while (DateTime.UtcNow < deadline && code == null)
+                {
+                    if (!cbListener.Pending()) { Thread.Sleep(100); continue; }
+                    using (var client = cbListener.AcceptTcpClient())
+                    {
+                        var ns = client.GetStream();
+                        var buf = new byte[4096];
+                        int n = ns.Read(buf, 0, buf.Length);
+                        string reqLine = Encoding.ASCII.GetString(buf, 0, n).Split('\n')[0];
+                        int sp1 = reqLine.IndexOf(' '), sp2 = sp1 > 0 ? reqLine.IndexOf(' ', sp1 + 1) : -1;
+                        if (sp2 > sp1)
+                        {
+                            string pathQ = reqLine.Substring(sp1 + 1, sp2 - sp1 - 1);
+                            int qi = pathQ.IndexOf('?');
+                            if (qi >= 0)
+                            {
+                                foreach (var kv in pathQ.Substring(qi + 1).Split('&'))
+                                {
+                                    int eq = kv.IndexOf('=');
+                                    if (eq > 0 && kv.Substring(0, eq) == "code") code = Uri.UnescapeDataString(kv.Substring(eq + 1));
+                                }
+                            }
+                        }
+                        byte[] html = Encoding.UTF8.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style='font-family:sans-serif;background:#141417;color:#fff;padding:40px;text-align:center'><h2>MicroCode MCP Authorized</h2><p>You can close this browser tab and return to MicroCode.</p></body></html>");
+                        ns.Write(html, 0, html.Length);
+                    }
+                }
+                cbListener.Stop();
+                if (string.IsNullOrEmpty(code)) return "OAuth login timed out waiting for browser authorization on " + targetUrl + ".";
+
+                var form = new FormUrlEncodedContent(new[] {
+                    new KeyValuePair<string, string>("grant_type", "authorization_code"),
+                    new KeyValuePair<string, string>("code", code),
+                    new KeyValuePair<string, string>("redirect_uri", redirectUri),
+                    new KeyValuePair<string, string>("client_id", clientId),
+                    new KeyValuePair<string, string>("code_verifier", verifier)
+                });
+                var tokResp = DotminiNet.Http.PostAsync(tokenEndpoint, form).Result;
+                var tokObj = Js.DeserializeObject(tokResp.Content.ReadAsStringAsync().Result) as Dictionary<string, object>;
+                string access = DJ.Str(tokObj, "access_token");
+                if (string.IsNullOrEmpty(access)) return "OAuth token exchange failed for '" + name + "': " + tokResp.StatusCode;
+                return Connect(name, targetUrl, null, null, access);
+            }
+            catch (Exception ex)
+            {
+                return "OAuth 2.1 flow for '" + name + "' failed (" + ex.GetBaseException().Message + "). You can still pass `bearer_token` manually with action='connect'.";
+            }
+        }
+
+        /// <summary>Synthesizes a ready-to-run stdio Python MCP server in .microcode/mcp/<name>.py and hot-spawns it.</summary>
+        public static string SynthesizePythonServer(string rawName, string description, string ws)
+        {
+            string safe = Regex.Replace((rawName ?? "custom-mcp").ToLowerInvariant(), @"[^a-z0-9_-]+", "-").Trim('-');
+            if (safe.Length == 0) safe = "custom-mcp";
+            string dir = Path.Combine(!string.IsNullOrEmpty(ws) ? Path.Combine(ws, ".microcode") : TaskFiles.Home, "mcp");
+            Directory.CreateDirectory(dir);
+            string pyPath = Path.Combine(dir, safe + ".py");
+            if (!File.Exists(pyPath))
+            {
+                string script = "#!/usr/bin/env python3\n"
+                    + "import json, sys\n\n"
+                    + "TOOLS = [{\"name\": \"ping\", \"description\": " + Js.Serialize(description ?? ("Custom tool for " + safe)) + ", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"message\": {\"type\": \"string\"}}, \"required\": []}}]\n\n"
+                    + "def handle(req):\n"
+                    + "    mid = req.get(\"id\")\n"
+                    + "    m = req.get(\"method\", \"\")\n"
+                    + "    if m == \"initialize\":\n"
+                    + "        return {\"jsonrpc\": \"2.0\", \"id\": mid, \"result\": {\"protocolVersion\": \"2025-11-25\", \"capabilities\": {\"tools\": {}}, \"serverInfo\": {\"name\": " + Js.Serialize(safe) + ", \"version\": \"1.0.0\"}}}\n"
+                    + "    if m == \"tools/list\":\n"
+                    + "        return {\"jsonrpc\": \"2.0\", \"id\": mid, \"result\": {\"tools\": TOOLS}}\n"
+                    + "    if m == \"tools/call\":\n"
+                    + "        params = req.get(\"params\") or {}\n"
+                    + "        args = params.get(\"arguments\") or {}\n"
+                    + "        return {\"jsonrpc\": \"2.0\", \"id\": mid, \"result\": {\"content\": [{\"type\": \"text\", \"text\": f\"pong from " + safe + ": {args.get('message', 'ok')}\"}]}}\n"
+                    + "    return {\"jsonrpc\": \"2.0\", \"id\": mid, \"result\": {}}\n\n"
+                    + "for line in sys.stdin:\n"
+                    + "    line = line.strip()\n"
+                    + "    if not line: continue\n"
+                    + "    req = json.loads(line)\n"
+                    + "    if \"id\" not in req: continue\n"
+                    + "    sys.stdout.write(json.dumps(handle(req)) + \"\\n\")\n"
+                    + "    sys.stdout.flush()\n";
+                File.WriteAllText(pyPath, script, Encoding.UTF8);
+            }
+            string connOut = Connect(safe, null, "python", new List<string> { pyPath }, null);
+            return "Synthesized Python MCP server at " + pyPath + "\n" + connOut;
         }
 
         public static Dictionary<string, object> OrchestratorSchema()
@@ -986,6 +1185,178 @@ namespace MicroCode.Views
                         { "query", p("string", "Keyword query for 'search_tools'") }
                     } } } }
             };
+        }
+    }
+
+    /// <summary>Port of MCPServer.swift: local HTTP JSON-RPC 2.0 MCP server exposed at 127.0.0.1:18888/mcp.</summary>
+    public static class LocalMcpServer
+    {
+        static readonly JavaScriptSerializer Js = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+        public static Func<string, Dictionary<string, object>, string> IdeToolHandler;
+        public static bool Enabled { get { return Defaults.Bool("mcpServerEnabled", true); } set { Defaults.Set("mcpServerEnabled", value); } }
+        public static int RequestCount;
+        public static string LastActivity = "No requests yet";
+
+        static Dictionary<string, object> ToolDef(string name, string desc, Dictionary<string, object> props, string[] req)
+        {
+            return new Dictionary<string, object>
+            {
+                { "name", name },
+                { "description", desc },
+                { "inputSchema", new Dictionary<string, object> { { "type", "object" }, { "properties", props }, { "required", req ?? new string[0] } } }
+            };
+        }
+
+        public static List<Dictionary<string, object>> ToolDefinitions()
+        {
+            Func<string, string, Dictionary<string, object>> sp = (tp, d) => new Dictionary<string, object> { { "type", tp }, { "description", d } };
+            return new List<Dictionary<string, object>>
+            {
+                ToolDef("file_read", "Read a workspace file", new Dictionary<string, object> { { "path", sp("string", "Workspace-relative or absolute path") } }, new[] { "path" }),
+                ToolDef("file_write", "Write or overwrite a file inside workspace", new Dictionary<string, object> { { "path", sp("string", "Target path") }, { "content", sp("string", "UTF-8 file content") } }, new[] { "path", "content" }),
+                ToolDef("list_directory_tree", "List directory files", new Dictionary<string, object> { { "path", sp("string", "Directory path (optional)") } }, null),
+                ToolDef("grep_search", "Search text inside workspace files", new Dictionary<string, object> { { "query", sp("string", "Text or pattern to search") } }, new[] { "query" }),
+                ToolDef("git_status", "Show git status and branch in active workspace", new Dictionary<string, object>(), null),
+                ToolDef("playground_run", "Execute code snippet in MicroCode Playground runtime", new Dictionary<string, object> { { "language", sp("string", "python|javascript|powershell|shell") }, { "code", sp("string", "Source code") } }, new[] { "language", "code" }),
+                ToolDef("api_studio", "Send HTTP test request via API Studio", new Dictionary<string, object> { { "method", sp("string", "GET|POST|PUT|DELETE") }, { "url", sp("string", "Request URL") }, { "body", sp("string", "Optional JSON body") } }, new[] { "url" }),
+                ToolDef("database_studio", "Execute SQL query via Database Studio engine", new Dictionary<string, object> { { "engine", sp("string", "sqlite|postgres|mysql") }, { "connection", sp("string", "DB file or connection string") }, { "sql", sp("string", "SQL query") } }, new[] { "sql" }),
+                ToolDef("ide_browser", "Inspect or navigate URL in IDE Web Browser", new Dictionary<string, object> { { "action", sp("string", "navigate|status") }, { "url", sp("string", "URL") } }, null),
+                ToolDef("computer_use", "Capture screen or inspect active Windows UI", new Dictionary<string, object> { { "action", sp("string", "screenshot|click|type") }, { "x", sp("integer", "Screen X") }, { "y", sp("integer", "Screen Y") }, { "text", sp("string", "Text to type") } }, new[] { "action" })
+            };
+        }
+
+        public static string HandleJsonRpc(string rawBody)
+        {
+            if (!Enabled)
+                return Js.Serialize(new Dictionary<string, object> { { "jsonrpc", "2.0" }, { "error", new Dictionary<string, object> { { "code", -32000 }, { "message", "MicroCode Local MCP Server is disabled in Settings." } } } });
+
+            Dictionary<string, object> req;
+            try { req = Js.DeserializeObject(rawBody ?? "") as Dictionary<string, object>; }
+            catch { req = null; }
+            if (req == null)
+                return Js.Serialize(new Dictionary<string, object> { { "jsonrpc", "2.0" }, { "error", new Dictionary<string, object> { { "code", -32700 }, { "message", "Invalid JSON" } } } });
+
+            object idVal; req.TryGetValue("id", out idVal);
+            string method = DJ.Str(req, "method") ?? "";
+            System.Threading.Interlocked.Increment(ref RequestCount);
+            LastActivity = DateTime.Now.ToString("HH:mm:ss") + " · " + method;
+
+            if (method == "initialize")
+            {
+                return Js.Serialize(new Dictionary<string, object>
+                {
+                    { "jsonrpc", "2.0" },
+                    { "id", idVal },
+                    { "result", new Dictionary<string, object> {
+                        { "protocolVersion", "2025-11-25" },
+                        { "capabilities", new Dictionary<string, object> { { "tools", new Dictionary<string, object>() } } },
+                        { "serverInfo", new Dictionary<string, object> { { "name", "MicroCode Windows" }, { "version", DotminiNet.AppVersion } } }
+                    } }
+                });
+            }
+            if (method == "tools/list")
+            {
+                return Js.Serialize(new Dictionary<string, object>
+                {
+                    { "jsonrpc", "2.0" },
+                    { "id", idVal },
+                    { "result", new Dictionary<string, object> { { "tools", ToolDefinitions() } } }
+                });
+            }
+            if (method == "tools/call")
+            {
+                var p = DJ.Child(req, "params") ?? new Dictionary<string, object>();
+                string tName = DJ.Str(p, "name") ?? "";
+                var tArgs = DJ.Child(p, "arguments") ?? new Dictionary<string, object>();
+                string text = ExecuteTool(tName, tArgs);
+                return Js.Serialize(new Dictionary<string, object>
+                {
+                    { "jsonrpc", "2.0" },
+                    { "id", idVal },
+                    { "result", new Dictionary<string, object> {
+                        { "content", new[] { new Dictionary<string, object> { { "type", "text" }, { "text", text } } } }
+                    } }
+                });
+            }
+            return Js.Serialize(new Dictionary<string, object> { { "jsonrpc", "2.0" }, { "id", idVal }, { "result", new Dictionary<string, object>() } });
+        }
+
+        static string ResolveWsPath(string relOrAbs)
+        {
+            string ws = AppState.Shared.WorkspaceFolder;
+            if (string.IsNullOrEmpty(relOrAbs)) return ws ?? Environment.CurrentDirectory;
+            if (Path.IsPathRooted(relOrAbs)) return Path.GetFullPath(relOrAbs);
+            string root = ws ?? Environment.CurrentDirectory;
+            string combined = Path.GetFullPath(Path.Combine(root, relOrAbs.Replace('/', Path.DirectorySeparatorChar)));
+            if (!combined.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Path escapes workspace root");
+            return combined;
+        }
+
+        static string ExecuteTool(string name, Dictionary<string, object> args)
+        {
+            if (IdeToolHandler != null)
+            {
+                string custom = IdeToolHandler(name, args);
+                if (custom != null) return custom;
+            }
+            try
+            {
+                string ws = AppState.Shared.WorkspaceFolder ?? Environment.CurrentDirectory;
+                switch (name)
+                {
+                    case "file_read":
+                    {
+                        string p = ResolveWsPath(DJ.Str(args, "path"));
+                        return File.Exists(p) ? File.ReadAllText(p, Encoding.UTF8) : "Error: file not found: " + p;
+                    }
+                    case "file_write":
+                    {
+                        string p = ResolveWsPath(DJ.Str(args, "path"));
+                        string dir = Path.GetDirectoryName(p);
+                        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                        File.WriteAllText(p, DJ.Str(args, "content") ?? "", Encoding.UTF8);
+                        return "Wrote " + p;
+                    }
+                    case "list_directory_tree":
+                    {
+                        string p = ResolveWsPath(DJ.Str(args, "path"));
+                        if (!Directory.Exists(p)) return "Error: directory not found: " + p;
+                        var items = Directory.GetFileSystemEntries(p).Take(200).Select(x => (Directory.Exists(x) ? "[D] " : "[F] ") + Path.GetFileName(x));
+                        return string.Join("\n", items);
+                    }
+                    case "grep_search":
+                    {
+                        string q = DJ.Str(args, "query") ?? "";
+                        if (q.Length == 0 || !Directory.Exists(ws)) return "No query or workspace.";
+                        var hits = new List<string>();
+                        foreach (var f in Directory.GetFiles(ws, "*", SearchOption.AllDirectories))
+                        {
+                            if (f.Contains(".git") || f.Contains("node_modules")) continue;
+                            try
+                            {
+                                var lines = File.ReadAllLines(f);
+                                for (int i = 0; i < lines.Length; i++)
+                                    if (lines[i].IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
+                                    {
+                                        hits.Add(f + ":" + (i + 1) + ": " + lines[i].Trim());
+                                        if (hits.Count >= 50) return string.Join("\n", hits);
+                                    }
+                            }
+                            catch { }
+                        }
+                        return hits.Count == 0 ? "No matches." : string.Join("\n", hits);
+                    }
+                    case "git_status":
+                    {
+                        var psi = new ProcessStartInfo("git", "status -sb") { WorkingDirectory = ws, UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
+                        var p = Process.Start(psi); string o = p.StandardOutput.ReadToEnd(); p.WaitForExit(5000); return o;
+                    }
+                    default:
+                        return "Tool '" + name + "' requires IDE runtime handler or valid arguments.";
+                }
+            }
+            catch (Exception ex) { return "Error: " + ex.Message; }
         }
     }
 }

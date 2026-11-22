@@ -40,14 +40,12 @@ namespace MicroCode
 
         static int Run(string[] args)
         {
-            // --open-url <microcode:…> is how Windows starts us for a link (HKCU protocol handler): a web page controls that
-            // string, so nothing else on that command line counts and only microcode: / codetuner: URLs are accepted.
-            string openUrl = Arg(args, "--open-url");
-            if (args.Contains("--open-url"))
-            {
-                if (!CollabDeepLink.IsAppUrl(openUrl)) openUrl = null;
-                args = new string[0];
-            }
+            DotminiNet.EnableTls();
+            string pendingDeepLink = null;
+            for (int i = 0; i < args.Length; i++)
+                if (args[i] != null && args[i].StartsWith("microcode://", StringComparison.OrdinalIgnoreCase)) { pendingDeepLink = args[i]; break; }
+            if (pendingDeepLink != null && Arg(args, "--snapshot") == null && DotminiAuth.TryForwardDeepLinkToRunningInstance(pendingDeepLink)) return 0;
+
             // Test renders get their own data folder so they can never touch the user's settings, keys, chats or notebooks.
             string dataDir = Arg(args, "--data-dir");
             if (dataDir == null && Arg(args, "--snapshot") != null) dataDir = Path.Combine(Path.GetTempPath(), "MicroCode-snapshot");
@@ -58,7 +56,7 @@ namespace MicroCode
             }
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
             // stdio MCP servers woken by the agent are child processes: end them with the app (npx/uvx wrappers included)
-            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); McpManager.StopAll(); if (CollabService.HasShared && CollabService.Shared.Session != null) System.Threading.Tasks.Task.Run(() => CollabService.Shared.LeaveSession()).Wait(3000); };
+            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); McpManager.StopAll(); PhoneCompanionService.Shared.Stop(); if (CollabService.HasShared && CollabService.Shared.Session != null) System.Threading.Tasks.Task.Run(() => CollabService.Shared.LeaveSession()).Wait(3000); };
             app.DispatcherUnhandledException += (s, e) =>
             {
                 try { File.AppendAllText(Path.Combine(Defaults.Dir, "crash.log"), DateTime.Now + " " + e.Exception + "\n\n"); } catch { }
@@ -86,28 +84,41 @@ namespace MicroCode
                 if (!int.TryParse(Arg(args, "--pns-port") ?? "", out pnsPort) || pnsPort <= 0) pnsPort = PnsOrchestrator.DefaultDaemonPort;
                 return PnsDaemon.RunHeadless(app, pnsPort);
             }
-            // A real run (not a snapshot / isolated test run) owns the microcode:// links: register the protocols for this user,
-            // and either become the instance that receives links or hand this launch's link to the one already running.
-            SingleInstance instance = null;
-            if (dataDir == null)
-            {
-                instance = new SingleInstance(Defaults.Dir);
-                if (!instance.IsFirst)
-                {
-                    if (openUrl != null && instance.Forward(openUrl)) { instance.Dispose(); return 0; }
-                    // no URL (a plain second window, as before) or the running one did not answer: carry on here
-                    instance.Dispose(); instance = null;
-                }
-                else
-                {
-                    instance.Listen(CollabDeepLink.Enqueue);
-                    string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
-                    System.Threading.Tasks.Task.Run(() => UrlProtocol.EnsureRegistered(exe));
-                    app.Exit += delegate { instance.Dispose(); };
-                }
-            }
-            if (openUrl != null) CollabDeepLink.Enqueue(openUrl);
             var state = AppState.Shared;
+            DotminiNet.StandaloneAI = args.Contains("--standalone-ai") || System.IO.Path.GetFileNameWithoutExtension(Environment.GetCommandLineArgs()[0] ?? "").Equals("MicroCode AI", StringComparison.OrdinalIgnoreCase);
+            LocalBridge.McpRpcHandler = LocalMcpServer.HandleJsonRpc;
+            LocalMcpServer.IdeToolHandler = (tName, tArgs) =>
+            {
+                if (tName == "playground_run")
+                {
+                    string lang = DJ.Str(tArgs, "language") ?? "python";
+                    string code = DJ.Str(tArgs, "code") ?? "";
+                    string tmpF = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "mc-mcp-pg-" + Guid.NewGuid().ToString("N").Substring(0, 6) + (lang == "python" ? ".py" : lang == "powershell" ? ".ps1" : ".js"));
+                    System.IO.File.WriteAllText(tmpF, code, System.Text.Encoding.UTF8);
+                    string exe = lang == "python" ? "python" : lang == "powershell" ? "powershell" : "node";
+                    string a = lang == "powershell" ? "-NoProfile -File \"" + tmpF + "\"" : "\"" + tmpF + "\"";
+                    var pr = StudioProcess.Run(exe, a, null, 20000, null);
+                    try { System.IO.File.Delete(tmpF); } catch { }
+                    return "Exit " + pr.ExitCode + "\n" + pr.Combined;
+                }
+                if (tName == "api_studio" || tName == "database_studio" || tName == "computer_use")
+                    return AgentRunner.ExecuteIsolated(AppState.Shared.WorkspaceFolder ?? Environment.CurrentDirectory, AppState.Shared.WorkspaceFolder, tName, tArgs, new ToolStep(), System.Threading.CancellationToken.None);
+                if (tName == "ide_browser")
+                {
+                    string u = DJ.Str(tArgs, "url");
+                    if (!string.IsNullOrEmpty(u)) { IdeBrowserView.InitialUrl = u; Application.Current.Dispatcher.BeginInvoke(new Action(() => AppState.Shared.SwitchToMode(EditorMode.Browser))); }
+                    return "Navigated IDE Browser to " + (u ?? "(current)");
+                }
+                return null;
+            };
+            SubAgentHarness.CustomExecutor = ctx =>
+            {
+                var msgs = new List<ChatMessage> { new ChatMessage { Role = "user", Content = ctx.Prompt ?? "" } };
+                string sys = !string.IsNullOrEmpty(ctx.Definition.SystemPrompt) ? ctx.Definition.SystemPrompt : ("You are a specialized sub-agent in MicroCode. Workspace: " + (ctx.Workspace ?? ""));
+                var res = AgentRunner.Run(msgs, sys, !string.IsNullOrEmpty(ctx.Workspace), !ctx.Definition.AllowWrite, null, new AgentCallbacks(), ctx.Token).GetAwaiter().GetResult();
+                return res.Text ?? "";
+            };
+            DotminiAuth.CollabDeepLinkReceived += uri => { var _ = CollabService.Shared.JoinFromDeepLink(uri); };
             string snapshot = Arg(args, "--snapshot");
             string agentPrompt = Arg(args, "--agent-prompt");
             if (snapshot != null)
@@ -119,6 +130,7 @@ namespace MicroCode
             else
             {
                 state.Load();
+                DotminiAuth.RegisterUriScheme();
                 // loopback bridge for the web sign-in hand-off (microcode.dotmini.net/auth.html → 127.0.0.1:18888) + account refresh
                 LocalBridge.Start();
                 if (DotminiAuth.SignedIn) System.Threading.Tasks.Task.Run(() => DotminiAuth.RefreshEntitlement());
@@ -126,6 +138,15 @@ namespace MicroCode
             }
             Styles.Install(app);
             AgentStore.Load();
+            if (snapshot == null)
+            {
+                PhoneCompanionService.Shared.StartIfEnabled();
+                if (pendingDeepLink != null)
+                {
+                    string dl = pendingDeepLink;
+                    System.Threading.Tasks.Task.Run(() => DotminiAuth.HandleDeepLink(dl));
+                }
+            }
 
             // first-launch onboarding stays out of snapshots unless asked for
             FirstLaunchWelcome.Suppressed = snapshot != null && !args.Contains("--first-launch");
@@ -135,6 +156,7 @@ namespace MicroCode
             if (folder != null) state.OpenWorkspace(Path.GetFullPath(folder));
             if (file != null) state.LoadFile(Path.GetFullPath(file));
             string mode = Arg(args, "--mode");
+            if (DotminiNet.StandaloneAI && mode == null) state.SwitchToMode(EditorMode.AIAgent);
             if (mode == "agent") state.SwitchToMode(EditorMode.AIAgent);
             else if (mode == "playground") state.SwitchToMode(EditorMode.Playground);
             else if (mode == "api")
@@ -236,7 +258,6 @@ namespace MicroCode
             string settingsTab = Arg(args, "--settings-tab");
             if (snapshot != null && settingsTab != null) return Snapshot(app, new SettingsSheet(state, int.Parse(settingsTab)), snapshot, Arg(args, "--size") ?? "1000x700", false);
             if (snapshot != null) return Snapshot(app, win, snapshot, Arg(args, "--size") ?? "1440x900", args.Contains("--run"));
-            if (instance != null || openUrl != null) win.ContentRendered += delegate { CollabDeepLink.MarkReady(); };
             app.Run(win);
             return 0;
         }

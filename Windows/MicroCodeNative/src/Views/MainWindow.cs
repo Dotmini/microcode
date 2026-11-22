@@ -39,7 +39,7 @@ namespace MicroCode.Views
         public MainWindow(AppState app)
         {
             _app = app;
-            Title = "MicroCode";
+            Title = DotminiNet.StandaloneAI ? "MicroCode AI" : "MicroCode";
             var wa = SystemParameters.WorkArea;
             Width = Math.Min(1440, wa.Width * 0.92); Height = Math.Min(900, wa.Height * 0.92);
             MinWidth = Math.Min(1200, wa.Width); MinHeight = Math.Min(800, wa.Height);
@@ -380,6 +380,40 @@ namespace MicroCode.Views
             _app.SelectFile(_app.OpenFiles[i]);
         }
 
+        public static void ExportArxCapsule(AppState app)
+        {
+            var s = AgentStore.Active;
+            if (s == null) { MessageBox.Show("Start or open an AI conversation first.", "Export .ARX Capsule"); return; }
+            var dlg = new Microsoft.Win32.SaveFileDialog { Filter = "MicroCode ARX Capsule (*.arx)|*.arx", FileName = "agent-capsule.arx" };
+            if (dlg.ShowDialog() == true)
+            {
+                try { string saved = ArxCapsuleService.ExportCapsule(s, dlg.FileName); MessageBox.Show("Exported capsule to:\n" + saved, "Export .ARX Capsule"); }
+                catch (Exception ex) { MessageBox.Show("Export failed: " + ex.Message, "Export .ARX Capsule"); }
+            }
+        }
+
+        public static void ImportArxCapsule(AppState app)
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "MicroCode ARX Capsule (*.arx)|*.arx|JSON (*.json)|*.json" };
+            if (dlg.ShowDialog() == true)
+            {
+                try
+                {
+                    var cap = ArxCapsuleService.ImportCapsule(dlg.FileName);
+                    if (cap != null && cap.Session != null)
+                    {
+                        AgentStore.Sessions.Insert(0, cap.Session);
+                        AgentStore.ActiveId = cap.Session.Id;
+                        AgentStore.Save();
+                        AgentStore.Notify();
+                        app.SwitchToMode(EditorMode.AIAgent);
+                        MessageBox.Show("Imported capsule (" + cap.Session.Messages.Count + " messages, " + cap.Rules.Count + " rules, " + cap.Memories.Count + " memories).", "Import .ARX Capsule");
+                    }
+                }
+                catch (Exception ex) { MessageBox.Show("Import failed: " + ex.Message, "Import .ARX Capsule"); }
+            }
+        }
+
         // MARK: - macOS menu bar commands
         public List<Tuple<string, Func<List<MenuItemSpec>>>> Menus()
         {
@@ -392,8 +426,8 @@ namespace MicroCode.Views
             list.Add(Tuple.Create<string, Func<List<MenuItemSpec>>>("File", () => new List<MenuItemSpec> {
                 I("New File", null, "Ctrl+N", a.NewFile), I("New AI Conversation", null, "Ctrl+Shift+N", () => { a.SwitchToMode(EditorMode.AIAgent); a.Notify("agent:new"); }),
                 I("Open File...", null, "Ctrl+O", a.OpenFileDialog), I("Open Folder...", null, "Ctrl+Shift+O", a.OpenFolderDialog), MenuItemSpec.Sep(),
-                // .ARX capsules (ARXCapsuleService) are not ported yet: shown disabled instead of a menu item that does nothing
-                new MenuItemSpec { Title = "Import .ARX Capsule… (not on Windows yet)", Disabled = true }, new MenuItemSpec { Title = "Export .ARX Capsule… (not on Windows yet)", Disabled = true }, MenuItemSpec.Sep(),
+                I("Import .ARX Capsule…", null, null, () => ImportArxCapsule(a)),
+                I("Export .ARX Capsule…", null, null, () => ExportArxCapsule(a)), MenuItemSpec.Sep(),
                 I("Close Tab", null, "Ctrl+W", () => { if (a.CurrentFile != null) a.CloseFile(a.CurrentFile); }),
                 I("Close Other Tabs", null, "Ctrl+Alt+W", () => { var cur = a.CurrentFile; foreach (var f in a.OpenFiles.Where(x => x != cur).ToList()) a.CloseFile(f); }),
                 I("Close Workspace", null, "Ctrl+Shift+W", a.CloseWorkspace), MenuItemSpec.Sep(),
@@ -700,16 +734,20 @@ namespace MicroCode.Views
             b.MenuItems = () => new List<MenuItemSpec>
             {
                 MenuItemSpec.Header("Agents, Rules & MCP"),
-                MenuItemSpec.Item("Connect External Agents (1-Click)…", "link.badge.plus", () => SettingsWindow.Show(_app)),
-                MenuItemSpec.Item("Rules, MCP & Context Settings…", "slider.horizontal.3", () => SettingsWindow.Show(_app)),
+                MenuItemSpec.Item("Connect External Agents (1-Click)…", "link.badge.plus", () => SettingsWindow.Show(_app, 2)),
+                MenuItemSpec.Item("Rules, MCP & Context Settings…", "slider.horizontal.3", () => SettingsWindow.Show(_app, 0)),
                 MenuItemSpec.Item("Team Tasks…", "checklist", () => AgentStore.SelectTask()),
-                MenuItemSpec.Item("Configure Team Collaboration…", "person.2", () => SettingsWindow.Show(_app)),
+                MenuItemSpec.Item("Configure Team Collaboration…", "person.2", () => SettingsWindow.Show(_app, 12)),
                 MenuItemSpec.Sep(),
-                // codebase index (RepoMapService) and .ARX capsules are not ported yet: disabled, not silent no-ops
-                new MenuItemSpec { Title = "Index Project (not on Windows yet)", Icon = "database", Disabled = true },
+                MenuItemSpec.Item("Index Project (Repo Map)", "database", () =>
+                {
+                    if (_app.WorkspaceFolder == null) { MessageBox.Show("Open a folder first to index its symbols.", "MicroCode"); return; }
+                    string map = RepoMapService.BuildRepoMap(_app.WorkspaceFolder, 8000);
+                    MessageBox.Show("Indexed workspace symbols:\n\n" + (map.Length > 1200 ? map.Substring(0, 1200) + "…" : map), "Index Project");
+                }),
                 MenuItemSpec.Sep(),
-                new MenuItemSpec { Title = "Export .ARX Capsule… (not on Windows yet)", Icon = "shippingbox.and.arrow.backward", Disabled = true },
-                new MenuItemSpec { Title = "Import .ARX Capsule… (not on Windows yet)", Icon = "shippingbox", Disabled = true },
+                MenuItemSpec.Item("Export .ARX Capsule…", "shippingbox.and.arrow.backward", () => MainWindow.ExportArxCapsule(_app)),
+                MenuItemSpec.Item("Import .ARX Capsule…", "shippingbox", () => MainWindow.ImportArxCapsule(_app)),
                 MenuItemSpec.Sep(),
                 MenuItemSpec.Item("Undo Last", "arrow.uturn.backward", () => _app.Notify("agent:undoLast")),
                 new MenuItemSpec { Title = "Clear Chat", Icon = "trash", Destructive = true, Action = () => _app.Notify("agent:clear") }
@@ -734,7 +772,7 @@ namespace MicroCode.Views
                 MenuItemSpec.Header("Window & Panels"),
                 new MenuItemSpec { Title = "Auto-Hide Window Controls", Icon = "macwindow", Checked = _app.AutoHideTrafficLights, Action = () => { _app.AutoHideTrafficLights = !_app.AutoHideTrafficLights; Defaults.Set("autoHideWindowTrafficLights", _app.AutoHideTrafficLights); _app.Notify("lights"); } },
                 MenuItemSpec.Item(_app.AgenticContextVisible ? "Hide Context Inspector" : "Show Context Inspector (Ctrl+I)", "sidebar.right", _app.ToggleAgenticContext),
-                MenuItemSpec.Item("Connect with Phone (QR)…", "qrcode", () => SettingsWindow.Show(_app))
+                MenuItemSpec.Item("Connect with Phone (QR)…", "qrcode", () => SettingsWindow.Show(_app, 11))
             };
         }
     }

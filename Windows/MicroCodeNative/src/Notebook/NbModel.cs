@@ -184,7 +184,11 @@ namespace MicroCode.Views
                 case "Local CPU": return null;
                 case "Nvidia GPU (CUDA/eGPU)": return HasNvidia ? null : "no NVIDIA driver found (nvidia-smi)";
                 case "Apple Silicon (NPU/Metal)": return "Apple Silicon only exists on Macs";
-                default: return "not available in MicroCode for Windows yet";
+                case "Your Cloud (SSH)": return string.IsNullOrEmpty(Defaults.Str("cloudGpuSshTarget", "")) ? "Configure SSH host in Settings → Cloud GPU" : null;
+                case "Google Colab (Cloud GPU/TPU)": return string.IsNullOrEmpty(Defaults.Str("colabEndpoint", "")) ? "Connect Colab via microcode://colab or Settings → Cloud GPU" : null;
+                case "Microrent Cloud (Serverless)":
+                case "Custom Cloud GPU (RunPod/Vast.ai/Akamai)": return string.IsNullOrEmpty(Defaults.Str("cloudGpuEndpoint", "")) && !DotminiAuth.SignedIn ? "Sign in to Dotmini Cloud or configure Cloud GPU in Settings → Cloud GPU" : null;
+                default: return "Unknown compute target";
             }
         }
 

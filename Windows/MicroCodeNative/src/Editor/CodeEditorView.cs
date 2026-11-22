@@ -4,7 +4,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -309,51 +308,6 @@ namespace MicroCode.Editor
             if (caret + selLen <= pre) Box.Select(caret, selLen);                                        // wholly before the change
             else if (caret >= old.Length - suf) Box.Select(Math.Min(len, caret + delta), Math.Min(selLen, Math.Max(0, len - caret - delta))); // wholly after
             else Box.Select(Math.Min(len, pre + (text.Length - pre - suf)), 0);                           // inside it: end of the new text
-        }
-
-        /// <summary>collabApplyRemoteOperation: patches a collaborator's ot1 operation into the text in place (never re-assigning
-        /// the document), maps the caret and selection through it (text inserted at the caret stays after it) and keeps the lines
-        /// in view where they were. Does not raise TextEdited. False when the operation does not fit the current text.</summary>
-        public bool ApplyOperation(MicroCode.Views.TextOperation op)
-        {
-            string text = Box.Text;
-            if (op == null || text.Length != op.BaseLength) return false;
-            if (op.IsNoop) return true;
-            // splices in base coordinates
-            var splices = new List<Tuple<int, int, string>>();
-            int pos = 0;
-            foreach (var c in op.Components)
-            {
-                if (c.Kind == MicroCode.Views.TextOperation.Kind.Retain) pos += c.Count;
-                else if (c.Kind == MicroCode.Views.TextOperation.Kind.Insert) splices.Add(Tuple.Create(pos, 0, c.Text));
-                else { splices.Add(Tuple.Create(pos, c.Count, "")); pos += c.Count; }
-            }
-            int caret = Box.SelectionStart, selEnd = Box.SelectionStart + Box.SelectionLength;
-            int newStart = op.TransformIndex(caret), newEnd = op.TransformIndex(selEnd);
-            // scroll anchor: lines added / removed above the first visible line
-            int firstVisible = 0;
-            try { int fl = Box.GetFirstVisibleLineIndex(); if (fl >= 0) firstVisible = Box.GetCharacterIndexFromLineIndex(fl); } catch (ArgumentOutOfRangeException) { firstVisible = 0; }
-            int lineDelta = 0;
-            foreach (var sp in splices.Where(s => s.Item1 < firstVisible))
-                lineDelta += sp.Item3.Count(ch => ch == '\n') - text.Substring(sp.Item1, Math.Min(sp.Item2, Math.Max(0, firstVisible - sp.Item1))).Count(ch => ch == '\n');
-            double vOff = Box.VerticalOffset;
-            _suppress = true;
-            try
-            {
-                for (int i = splices.Count - 1; i >= 0; i--)
-                {
-                    var sp = splices[i];
-                    Box.Select(sp.Item1, sp.Item2);
-                    Box.SelectedText = sp.Item3;
-                }
-            }
-            finally { _suppress = false; }
-            int len = Box.Text.Length;
-            newStart = Math.Max(0, Math.Min(len, newStart)); newEnd = Math.Max(newStart, Math.Min(len, newEnd));
-            Box.Select(newStart, newEnd - newStart);
-            if (lineDelta != 0 && LineHeight > 0) Box.ScrollToVerticalOffset(Math.Max(0, vOff + lineDelta * LineHeight));
-            else Box.ScrollToVerticalOffset(vOff);
-            return true;
         }
 
         public void Focus2() { Box.Focus(); Keyboard.Focus(Box); }

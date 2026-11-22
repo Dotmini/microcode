@@ -1,4 +1,4 @@
-// Mode surfaces reachable from "More Mode": Playground, Cell Mode, API Studio and the Web Browser are ported; the remaining studios show their entry surface.
+// Mode surfaces reachable from "More Mode": routes Playground, Cell Mode, API Studio, Web Browser, Science, Scenario, RemoteX, Embedded, Extension Studio, Database, Container, and CI/CD via Studios.cs.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -22,16 +22,14 @@ namespace MicroCode.Views
             if (mode == EditorMode.Notebook) return new NotebookView(app);
             if (mode == EditorMode.ApiClient) return new ApiStudioView(app);
             if (mode == EditorMode.Browser) return new IdeBrowserView(app);
+            var studio = StudioFactory.Create(mode, app);
+            if (studio != null) return studio;
             return new StudioPlaceholder(EditorModeInfo.DisplayName(mode), EditorModeInfo.Icon(mode));
         }
 
         public static void ShowStudio(string name)
         {
-            var t = Theme.Current;
-            var w = new Window { Title = name, Width = 900, Height = 600, Owner = Application.Current.MainWindow, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = t.WorkspaceBackground, FontFamily = UIFonts.UI };
-            w.SourceInitialized += delegate { Native.StyleWindow(w, t.IsDark); };
-            w.Content = new StudioPlaceholder(name, "square.grid.2x2");
-            w.Show();
+            StudioFactory.ShowWindow(name, AppState.Shared);
         }
     }
 

@@ -295,13 +295,13 @@ namespace MicroCode.Views
                 }
                 if (updatedContent != null && rel.Length > 0 && filePath != null && IsInsideShared(filePath))
                 {
-                    // the agent already wrote the file: one ot1 commit by the AI (op to ot1 clients, buffer to legacy ones)
                     string text = updatedContent.Replace("\r\n", "\n");
-                    HostFlushLiveEditor(rel);
-                    if (HostCommitContent(rel, text, AITeammateUserId, AITeammateDisplayName, AITeammateColor, false, true, true) != null)
+                    string prev;
+                    if (!_contents.TryGetValue(rel, out prev) || prev != text)
                     {
                         try { string full = FullPathOf(rel); if (full != null && File.Exists(full)) _diskMod[rel] = File.GetLastWriteTimeUtc(full); } catch (IOException) { } catch (UnauthorizedAccessException) { }
                         RecordActivity(AITeammateDisplayName, AITeammateColor, "AI edited", rel + ":" + safeLine);
+                        HostCommitContent(rel, text, AITeammateUserId, AITeammateDisplayName, AITeammateColor, false, true, true, false);
                     }
                 }
                 BroadcastParticipants();

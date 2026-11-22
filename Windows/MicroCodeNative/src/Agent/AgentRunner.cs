@@ -138,7 +138,41 @@ namespace MicroCode.Views
                 Tool("git_status", "Get git status of the current repository.",
                     new Dictionary<string, object> { { "path", P("string", "Repository path (default: the workspace root).") } }),
                 Tool("web_fetch", "Fetch content from a URL.",
-                    new Dictionary<string, object> { { "url", P("string", "URL to fetch (http or https).") } }, "url")
+                    new Dictionary<string, object> { { "url", P("string", "URL to fetch (http or https).") } }, "url"),
+                Tool("repo_map", "Build a compact structural map of files and symbols across the workspace.",
+                    new Dictionary<string, object> { { "max_chars", P("integer", "Maximum output length (default 6000).") } }),
+                Tool("codebase_search", "Search workspace files and symbols ranked by relevance to a query.",
+                    new Dictionary<string, object> { { "query", P("string", "Concept, symbol, or keyword query.") }, { "limit", P("integer", "Max results (default 15).") } }, "query"),
+                Tool("skill_engine", "Match skills, read instructions, run bundled scripts/ or crystallize a new skill.",
+                    new Dictionary<string, object> { { "action", P("string", "match|read|run_script|crystallize") }, { "skill_name", P("string", "Skill name") }, { "query_or_script", P("string", "Query, script relative path, or description") }, { "instructions", P("string", "Body markdown for crystallize") } }, "action"),
+                Tool("create_plan", "Record or update a structured Markdown implementation plan (.microcode/plan.md & task.md).",
+                    new Dictionary<string, object> { { "title", P("string", "Plan title") }, { "plan", P("string", "Full implementation plan Markdown") }, { "todos", P("string", "Optional checklist lines (- [ ] ...)") } }, "plan"),
+                Tool("agent_plan", "Sync structured tasks/milestones in .microcode/task.md.",
+                    new Dictionary<string, object> { { "action", P("string", "read|write|check") }, { "content", P("string", "Updated task.md Markdown or item substring to check") } }, "action"),
+                Tool("lsp_status", "Show active Language Server (LSP) connections and diagnostic totals.",
+                    new Dictionary<string, object>()),
+                Tool("lsp_hover", "Get type/documentation hover info from Language Server at file:line:col.",
+                    new Dictionary<string, object> { { "path", P("string", "Workspace file path") }, { "line", P("integer", "1-based line") }, { "column", P("integer", "1-based column") } }, "path", "line", "column"),
+                Tool("lsp_definition", "Go to symbol definition via Language Server at file:line:col.",
+                    new Dictionary<string, object> { { "path", P("string", "Workspace file path") }, { "line", P("integer", "1-based line") }, { "column", P("integer", "1-based column") } }, "path", "line", "column"),
+                Tool("lsp_completions", "Request LSP completions at file:line:col.",
+                    new Dictionary<string, object> { { "path", P("string", "Workspace file path") }, { "line", P("integer", "1-based line") }, { "column", P("integer", "1-based column") } }, "path", "line", "column"),
+                Tool("lsp_diagnostics", "Read LSP compiler/linter diagnostics for a file or workspace.",
+                    new Dictionary<string, object> { { "path", P("string", "File path (optional)") } }),
+                Tool("define_subagent", "Define a reusable specialist sub-agent profile.",
+                    new Dictionary<string, object> { { "name", P("string", "Unique sub-agent type name") }, { "description", P("string", "Purpose") }, { "system_prompt", P("string", "Instructions for the sub-agent") }, { "enable_write_tools", P("boolean", "Allow workspace edits") } }, "name", "description", "system_prompt"),
+                Tool("invoke_subagent", "Spawn a sub-agent to execute a scoped task concurrently or sequentially.",
+                    new Dictionary<string, object> { { "type_name", P("string", "Defined type or 'self'") }, { "role", P("string", "Short role title") }, { "prompt", P("string", "Actionable task prompt") }, { "wait", P("boolean", "Wait for result (default true)") } }, "role", "prompt"),
+                Tool("manage_subagents", "List or stop active sub-agents.",
+                    new Dictionary<string, object> { { "action", P("string", "list|kill|kill_all") }, { "id", P("string", "Target conversationId for kill") } }, "action"),
+                Tool("send_message", "Send a follow-up message or prompt to a running/idle sub-agent.",
+                    new Dictionary<string, object> { { "recipient", P("string", "Sub-agent conversationId") }, { "message", P("string", "Message text") } }, "recipient", "message"),
+                Tool("editor_control", "Open a file or switch IDE mode (code|agent|notebook|playground|science|remote|embedded|api|browser).",
+                    new Dictionary<string, object> { { "action", P("string", "open_file|switch_mode|list_open") }, { "path", P("string", "File path for open_file") }, { "mode", P("string", "Mode name for switch_mode") } }, "action"),
+                Tool("api_studio", "Execute an HTTP request for API testing.",
+                    new Dictionary<string, object> { { "method", P("string", "GET|POST|PUT|DELETE|PATCH") }, { "url", P("string", "Target URL") }, { "body", P("string", "Optional JSON request body") } }, "url"),
+                Tool("database_studio", "Run a read/write SQL query against SQLite or configured database.",
+                    new Dictionary<string, object> { { "connection", P("string", "Path to .sqlite/.db or connection string") }, { "sql", P("string", "SQL query") } }, "connection", "sql")
             };
             if (!readOnly)
             {
@@ -158,6 +192,8 @@ namespace MicroCode.Views
                     new Dictionary<string, object> { { "old_path", P("string", "Current file path.") }, { "new_path", P("string", "New file path.") } }, "old_path", "new_path"));
                 list.Add(Tool("shell", "Run a command in the workspace on Windows (cmd.exe /c). Returns the exit code and output. Use it for builds, tests, git and package managers; never for interactive programs.",
                     new Dictionary<string, object> { { "command", P("string", "Command line to execute.") }, { "timeout_seconds", P("integer", "Kill the command after this many seconds (default 120, max 600).") } }, "command"));
+                list.Add(Tool("computer_use", "Capture desktop screenshot or automate mouse/keyboard input on Windows.",
+                    new Dictionary<string, object> { { "action", P("string", "screenshot|click|double_click|type|key") }, { "x", P("integer", "Screen X coordinate") }, { "y", P("integer", "Screen Y coordinate") }, { "text", P("string", "Text or key combination") } }, "action"));
             }
             return list;
         }
@@ -259,7 +295,7 @@ namespace MicroCode.Views
             };
             var schemas = tools ? buildSchemas() : null;
             int maxIter = (int)Defaults.Num("agentMaxIterations", 0); if (maxIter <= 0) maxIter = 500;
-            bool refreshed = false, preFinishChecked = false;
+            bool refreshed = false, preFinishChecked = false, claimChecked = false;
             for (int iter = 0; iter < maxIter; iter++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -310,6 +346,34 @@ namespace MicroCode.Views
                             continue;
                         }
                     }
+                    // P1: the model decided to stop. Check once that the answer does not report results this turn has no evidence for.
+                    if (schemas != null && !readOnly && !claimChecked)
+                    {
+                        string visible = ClaimCheck.Visible(turn.Text);
+                        string checkPrompt = null;
+                        if (visible.Length == 0 && res.Steps.Count > 0 && ClaimCheck.Visible(res.Text).Length == 0) checkPrompt = ClaimCheck.EmptyAnswerPrompt;
+                        else
+                        {
+                            var evidence = res.Steps.Select(st => new ClaimEvidence
+                            {
+                                Executed = st.Name == "shell" || st.Name == "playground_run" || st.Name == "device_runtime",
+                                Mutated = IsEdit(st.Name),
+                                ExportedPdf = st.Name == "export_pdf",
+                                Ok = st.Ok
+                            }).ToList();
+                            string reason = ClaimCheck.Mismatch(visible, evidence);
+                            if (reason != null) checkPrompt = ClaimCheck.Prompt(reason);
+                        }
+                        if (checkPrompt != null)
+                        {
+                            claimChecked = true;
+                            Say(cb.OnActivity, "Checking the answer against this turn's results…");
+                            msgs.Add(new Dictionary<string, object> { { "role", "assistant" }, { "content", turn.Text.Length > 0 ? turn.Text : "(no visible answer)" } });
+                            msgs.Add(new Dictionary<string, object> { { "role", "user" }, { "content", checkPrompt } });
+                            continue;
+                        }
+                    }
+                    res.Text = ClaimCheck.StripEmptyThought(res.Text);
                     return res;
                 }
 
@@ -414,8 +478,10 @@ namespace MicroCode.Views
                     if (Regex.IsMatch(c, @"rm\s+-rf|rmdir\s+/s|rd\s+/s|del\s+/s|del\s+/q|format\s+[a-z]:|drop\s+(table|database)|git\s+push\s+.*--force|reg\s+delete|shutdown")) return "critical";
                     return "dangerous";
                 case "file_write": case "replace_in_file": case "multi_replace_in_file": case "patch_file": case "apply_patch":
-                case "rename_file": case "create_directory": case "web_fetch": return "moderate";
-                case "mcp_orchestrator": return Regex.IsMatch(s.Target ?? "", "^(connect|configure|restart)", RegexOptions.IgnoreCase) ? "dangerous" : "safe";
+                case "rename_file": case "create_directory": case "web_fetch": case "invoke_subagent": case "api_studio": case "database_studio": return "moderate";
+                case "computer_use": return (s.Target ?? "").StartsWith("screenshot", StringComparison.OrdinalIgnoreCase) ? "safe" : "dangerous";
+                case "skill_engine": return (s.Target ?? "").StartsWith("run_script", StringComparison.OrdinalIgnoreCase) ? "moderate" : "safe";
+                case "mcp_orchestrator": return Regex.IsMatch(s.Target ?? "", "^(connect|configure|restart|authenticate|synthesize)", RegexOptions.IgnoreCase) ? "dangerous" : "safe";
                 default:
                     // external MCP tools: read-looking names (get_ / list_ / read_ / search_ …) run in Smart mode, anything else asks
                     if ((s.Name ?? "").StartsWith("mcp__")) return McpManager.LooksReadOnlyTool(s.Name) ? "safe" : "moderate";
@@ -1161,10 +1227,148 @@ namespace MicroCode.Views
                     string outp = FindSymbol(sym, Arg(a, "type"), root, ct);
                     return outp.Length > 100000 ? outp.Substring(0, 100000) + "\n... (results truncated)" : outp;
                 }
+                case "repo_map":
+                {
+                    int mc = 6000; int.TryParse(Arg(a, "max_chars"), out mc); if (mc <= 0) mc = 6000;
+                    string rm = RepoMapService.BuildRepoMap(Resolve("."), mc);
+                    return rm.Length == 0 ? "(empty workspace)" : rm;
+                }
+                case "codebase_search":
+                {
+                    int lim = 15; int.TryParse(Arg(a, "limit"), out lim); if (lim <= 0) lim = 15;
+                    var hits = RepoMapService.CodebaseSearch(Resolve("."), Arg(a, "query"), lim);
+                    if (hits.Count == 0) return "No matching files or symbols.";
+                    return string.Join("\n", hits.Select(h => h.FilePath + ":" + h.Line + " (score " + h.Score + ") — " + h.Snippet));
+                }
+                case "skill_engine":
+                    return SkillEngine.Invoke(Arg(a, "action"), Arg(a, "skill_name"), Arg(a, "query_or_script"), Arg(a, "instructions"), Resolve("."));
+                case "create_plan":
+                {
+                    string ws = Resolve(".");
+                    string planMd = Arg(a, "plan");
+                    TaskFiles.Write(ws, "plan.md", planMd);
+                    string todos = Arg(a, "todos");
+                    if (!string.IsNullOrWhiteSpace(todos)) TaskFiles.Write(ws, "task.md", "# " + (Arg(a, "title").Length > 0 ? Arg(a, "title") : "Task Checklist") + "\n\n" + todos);
+                    AgentStore.Notify();
+                    return "Saved implementation plan to .microcode/plan.md" + (!string.IsNullOrWhiteSpace(todos) ? " and checklist to .microcode/task.md" : "") + ".";
+                }
+                case "agent_plan":
+                {
+                    string ws = Resolve(".");
+                    string act = Arg(a, "action").ToLowerInvariant();
+                    if (act == "read") return TaskFiles.Read(ws, "task.md") ?? "(no .microcode/task.md yet)";
+                    if (act == "write") { TaskFiles.Write(ws, "task.md", Arg(a, "content")); AgentStore.Notify(); return "Updated .microcode/task.md"; }
+                    if (act == "check")
+                    {
+                        string cur = TaskFiles.Read(ws, "task.md") ?? "";
+                        string pat = Arg(a, "content");
+                        string next = pat.Length > 0 ? cur.Replace("- [ ] " + pat, "- [x] " + pat) : cur;
+                        TaskFiles.Write(ws, "task.md", next); AgentStore.Notify();
+                        return "Updated checklist item.";
+                    }
+                    return "Unknown agent_plan action. Use read, write, or check.";
+                }
+                case "lsp_status": return LspManager.Shared.StatusSummary();
+                case "lsp_hover":
+                {
+                    int ln = 1, col = 1; int.TryParse(Arg(a, "line"), out ln); int.TryParse(Arg(a, "column"), out col);
+                    return LspManager.Shared.Hover(Resolve(Arg(a, "path")), Math.Max(0, ln - 1), Math.Max(0, col - 1));
+                }
+                case "lsp_definition":
+                {
+                    int ln = 1, col = 1; int.TryParse(Arg(a, "line"), out ln); int.TryParse(Arg(a, "column"), out col);
+                    var locs = LspManager.Shared.Definition(Resolve(Arg(a, "path")), Math.Max(0, ln - 1), Math.Max(0, col - 1));
+                    return locs.Count == 0 ? "No definitions found." : string.Join("\n", locs.Select(l => (!string.IsNullOrEmpty(l.FilePath) ? l.FilePath : LspServerProcess.UriToPath(l.Uri)) + ":" + (l.StartLine + 1) + ":" + (l.StartColumn + 1)));
+                }
+                case "lsp_completions":
+                {
+                    int ln = 1, col = 1; int.TryParse(Arg(a, "line"), out ln); int.TryParse(Arg(a, "column"), out col);
+                    var items = LspManager.Shared.Completion(Resolve(Arg(a, "path")), Math.Max(0, ln - 1), Math.Max(0, col - 1));
+                    return items.Count == 0 ? "No completions." : string.Join("\n", items.Take(30).Select(c => "- " + c.Label + (string.IsNullOrEmpty(c.Detail) ? "" : " : " + c.Detail)));
+                }
+                case "lsp_diagnostics":
+                {
+                    string p = Arg(a, "path");
+                    var diags = LspManager.Shared.GetDiagnostics(p.Length > 0 ? Resolve(p) : null);
+                    return diags.Count == 0 ? "No LSP diagnostics." : string.Join("\n", diags.Select(d => d.Severity + " L" + (d.StartLine + 1) + ":" + (d.StartColumn + 1) + " — " + d.Message));
+                }
+                case "define_subagent":
+                {
+                    var def = SubAgentHarness.DefineSubagent(Arg(a, "name"), Arg(a, "description"), Arg(a, "system_prompt"), Arg(a, "enable_write_tools").ToLowerInvariant() == "true");
+                    return "Defined subagent '" + def.Name + "' (allowWrite=" + def.AllowWrite + ").";
+                }
+                case "invoke_subagent":
+                {
+                    var inst = SubAgentHarness.InvokeSubagent(Arg(a, "type_name"), Arg(a, "role"), Arg(a, "prompt"), null, Resolve("."));
+                    bool wait = Arg(a, "wait").ToLowerInvariant() != "false";
+                    if (wait)
+                    {
+                        SubAgentHarness.WaitSubagent(inst.Id, 90000);
+                        return "Subagent " + inst.Id + " [" + inst.Status + "]:\n" + (inst.Result ?? inst.Error ?? "");
+                    }
+                    return "Subagent launched: " + inst.Id;
+                }
+                case "manage_subagents":
+                    return SubAgentHarness.ManageSubagents(Arg(a, "action"), Arg(a, "id"));
+                case "send_message":
+                    return SubAgentHarness.SendMessage(Arg(a, "recipient"), Arg(a, "message")) ? "Delivered message to " + Arg(a, "recipient") : "Subagent not found: " + Arg(a, "recipient");
+                case "editor_control":
+                {
+                    string act = Arg(a, "action").ToLowerInvariant();
+                    if (act == "list_open") return string.Join("\n", AppState.Shared.OpenFiles.Select(f => f.Path ?? f.Name));
+                    if (act == "open_file")
+                    {
+                        string fp = Resolve(Arg(a, "path"));
+                        if (!File.Exists(fp)) return "Error: file not found: " + fp;
+                        if (Application.Current != null) Application.Current.Dispatcher.BeginInvoke(new Action(() => AppState.Shared.LoadFile(fp)));
+                        return "Opened " + fp;
+                    }
+                    if (act == "switch_mode")
+                    {
+                        string m = Arg(a, "mode").ToLowerInvariant();
+                        EditorMode em = m == "agent" ? EditorMode.AIAgent : m == "notebook" ? EditorMode.Notebook : m == "playground" ? EditorMode.Playground : m == "science" ? EditorMode.Science : m == "remote" ? EditorMode.RemoteX : m == "embedded" ? EditorMode.Embedded : m == "api" ? EditorMode.ApiClient : m == "browser" ? EditorMode.Browser : EditorMode.Code;
+                        if (Application.Current != null) Application.Current.Dispatcher.BeginInvoke(new Action(() => AppState.Shared.SwitchToMode(em)));
+                        return "Switched mode to " + em;
+                    }
+                    return "Unknown editor_control action.";
+                }
+                case "api_studio":
+                {
+                    string mStr = Arg(a, "method").ToUpperInvariant(); if (mStr.Length == 0) mStr = "GET";
+                    var req = new HttpRequestMessage(new HttpMethod(mStr), Arg(a, "url"));
+                    string bd = Arg(a, "body");
+                    if (!string.IsNullOrEmpty(bd)) req.Content = new StringContent(bd, Encoding.UTF8, "application/json");
+                    var resp = FetchHttp.SendAsync(req, ct).GetAwaiter().GetResult();
+                    string rb = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    return "HTTP " + (int)resp.StatusCode + " " + resp.ReasonPhrase + "\n" + (rb.Length > 15000 ? rb.Substring(0, 15000) : rb);
+                }
+                case "database_studio":
+                {
+                    string conn = Arg(a, "connection"), sql = Arg(a, "sql");
+                    string pyScript = "import sqlite3, json; c = sqlite3.connect(" + Js.Serialize(Resolve(conn)) + "); r = c.execute(" + Js.Serialize(sql) + ").fetchall(); c.commit(); print(json.dumps(r[:200], default=str))";
+                    var psi = new ProcessStartInfo("python", "-c " + McpConnection.Quote(pyScript)) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+                    var p = Process.Start(psi); string so = p.StandardOutput.ReadToEnd(); string se = p.StandardError.ReadToEnd(); p.WaitForExit(15000);
+                    return p.ExitCode == 0 ? so : "SQL Error: " + se;
+                }
+                case "computer_use":
+                {
+                    string act = Arg(a, "action").ToLowerInvariant();
+                    if (act == "screenshot")
+                    {
+                        string outImg = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "microcode-cu-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".png");
+                        return ComputerUseService.Screenshot(outImg) ? "Screenshot saved: " + outImg : "Screenshot failed (Windows GDI/display required)";
+                    }
+                    int cx = 0, cy = 0; int.TryParse(Arg(a, "x"), out cx); int.TryParse(Arg(a, "y"), out cy);
+                    if (act == "click") return ComputerUseService.Click(cx, cy, "left", 1) ? "Clicked (" + cx + "," + cy + ")" : "Error clicking";
+                    if (act == "double_click") return ComputerUseService.Click(cx, cy, "left", 2) ? "Double-clicked (" + cx + "," + cy + ")" : "Error clicking";
+                    if (act == "type") return ComputerUseService.TypeText(Arg(a, "text")) ? "Typed text" : "Error typing";
+                    if (act == "key") return ComputerUseService.SendKey(Arg(a, "text")) ? "Sent key" : "Error sending key";
+                    return "Unknown computer_use action.";
+                }
             }
             if (name.StartsWith("mcp__")) return McpManager.Call(name, a);
             if (name == "mcp_orchestrator") return McpManager.Orchestrate(a);
-            return "Error: unknown tool " + name + ". Available: list_directory_tree, file_read, multi_file_read, grep_search, file_search, find_symbol, git_status, web_fetch, file_write, replace_in_file, multi_replace_in_file, patch_file, apply_patch, create_directory, rename_file, shell, read_skill.";
+            return "Error: unknown tool " + name + ".";
         }
 
         // ── edit helpers ───────────────────────────────────────────────────────

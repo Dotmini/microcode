@@ -38,8 +38,8 @@ namespace MicroCode.Views
     {
         public readonly Guid Id = Guid.NewGuid();
         public string UserId;
-        /// <summary>Said caps:["ot1"] in its hello: gets "op" messages instead of legacy "fileBuffer".</summary>
-        public volatile bool SupportsOT;
+        public bool SupportsOT;
+        public string Protocol;
         internal NetworkStream Stream;
         internal TcpClient Tcp;
         readonly object _send = new object();
@@ -221,9 +221,8 @@ namespace MicroCode.Views
                 {
                     if (pair.Length == 0) continue;
                     int e = pair.IndexOf('=');
-                    // like URLComponents: percent-decoding only, '+' stays '+' (Mac peers send file names like a+b.txt unescaped)
-                    string k = Uri.UnescapeDataString(e >= 0 ? pair.Substring(0, e) : pair);
-                    string v = e >= 0 ? Uri.UnescapeDataString(pair.Substring(e + 1)) : "";
+                    string k = Uri.UnescapeDataString((e >= 0 ? pair.Substring(0, e) : pair).Replace('+', ' '));
+                    string v = e >= 0 ? Uri.UnescapeDataString(pair.Substring(e + 1).Replace('+', ' ')) : "";
                     if (!req.Query.ContainsKey(k)) req.Query[k] = v;
                 }
             int len = 0; string cl = req.Header("Content-Length");
@@ -327,6 +326,11 @@ namespace MicroCode.Views
         public void Broadcast(string json, string excludingUserId)
         {
             foreach (var c in Clients) if (excludingUserId == null || c.UserId != excludingUserId) c.SendText(json);
+        }
+
+        public void BroadcastWhere(string json, Func<CollabWsClient, bool> predicate)
+        {
+            foreach (var c in Clients) if (predicate == null || predicate(c)) c.SendText(json);
         }
     }
 }

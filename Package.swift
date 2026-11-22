@@ -156,6 +156,7 @@ let package = Package(
                 "Services/AgentCore/FollowUpIntent.swift",
                 "Services/AgentCore/AgentTaskFile.swift",
                 "Services/AgentCore/AgentTurnTrace.swift",
+                "Services/AgentCore/AgentClaimCheck.swift",
                 "Services/AgentCore/AgentEvalGrader.swift",
                 "Services/AgentCore/AgentEvalRunner.swift",
                 "Services/LocalServerTrust.swift",

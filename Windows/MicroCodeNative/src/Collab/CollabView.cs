@@ -518,22 +518,7 @@ namespace MicroCode.Views
             linkText.ToolTip = link;
             var copyLink = V.Button(V.Box(V.H(4, Sym.Icon(_copiedLink ? "checkmark" : "link", 10, t.Primary, FontWeights.SemiBold), V.T(_copiedLink ? "Copied Link" : "Copy Invite Link", 11, FontWeights.SemiBold, t.Primary)), V.P(10, 4.5), t.P(0.10), 5, t.P(0.18), 1), connectingOnline ? null : (Action)(() => Copy(link, v => _copiedLink = v)));
             var row = V.H(8, V.Flex(V.Shrink(linkText)), copyLink);
-            var body = V.VLead(4, V.Self(head, Cross.Stretch), V.Self(row, Cross.Stretch));
-            if (_svc.Session != null && _svc.Session.IsHostingLocally)
-                body.Children.Add(V.Tip(BrowserGuestsCheckbox(), "Invite links open MicroCode. Turn this on to also offer the browser editor on the invite page."));
-            return V.Box(body, V.P(11, 8), t.P(0.035), 7, t.P(0.09), 1);
-        }
-
-        /// <summary>Toggle(isOn: $collab.allowBrowserGuests).toggleStyle(.checkbox), 11 pt secondary label.</summary>
-        Btn BrowserGuestsCheckbox()
-        {
-            var t = Theme.Current;
-            bool on = _svc.AllowBrowserGuests;
-            var mark = Sym.Icon("checkmark", 9, Brushes.White, FontWeights.Bold);
-            mark.Visibility = on ? Visibility.Visible : Visibility.Hidden;
-            var box = new Border { Width = 14, Height = 14, CornerRadius = new CornerRadius(3.5), Child = mark, VerticalAlignment = VerticalAlignment.Center,
-                Background = on ? t.Accent : t.P(0.08), BorderBrush = on ? t.Accent : t.P(0.32), BorderThickness = new Thickness(on ? 0 : 1) };
-            return V.Button(V.H(6, box, V.T("Also allow editing in a web browser", 11, FontWeights.Normal, t.Secondary)), () => _svc.AllowBrowserGuests = !_svc.AllowBrowserGuests);
+            return V.Box(V.VLead(4, V.Self(head, Cross.Stretch), V.Self(row, Cross.Stretch)), V.P(11, 8), t.P(0.035), 7, t.P(0.09), 1);
         }
 
         UIElement ParticipantsCard()
