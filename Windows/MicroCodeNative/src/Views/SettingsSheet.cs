@@ -813,16 +813,7 @@ namespace MicroCode.Views
         // Port of the Mac's Team Collaboration tab: the same CollaborationView, embedded (no nested scroll view)
         UIElement TeamTab() { return new CollabView(true); }
 
-        UIElement CloudGPUTab()
-        {
-            var t = Theme.Current;
-            var tabs = V.H(2, V.Box(V.T("GPU Cluster", 11.5, FontWeights.SemiBold, t.Primary), V.P(10, 5), t.P(0.1), 6), V.Box(V.T("GPU Wallet (Pay As You Go)", 11.5, FontWeights.Medium, t.Secondary), V.P(10, 5), Brushes.Transparent, 6),
-                V.Box(V.T("Git Ingest (10Gbps)", 11.5, FontWeights.Medium, t.Secondary), V.P(10, 5), Brushes.Transparent, 6), V.Box(V.T("SSH / Custom", 11.5, FontWeights.Medium, t.Secondary), V.P(10, 5), Brushes.Transparent, 6));
-            var s = V.VLead(12, V.Box(tabs, V.P(2), t.P(0.04), 8), V.T("Select a GPU instance. Rates are billed per minute from your GPU Wallet.", 11.5, FontWeights.Normal, t.Secondary),
-                Note("Sign in to Dotmini Cloud (Account & License) to list GPU instances and your wallet balance."));
-            s.Align = Cross.Stretch;
-            return HeroCard("cpu", "Dotmini Cloud GPU Hub", "High-performance compute clusters, persistent storage, and dataset ingestion.", s);
-        }
+        UIElement CloudGPUTab() { return V.Self(new CloudGpuHubView(), Cross.Stretch); }
 
         // ── Skills ─────────────────────────────────────────────────────
         string _skillQuery = "";
@@ -865,21 +856,35 @@ namespace MicroCode.Views
         UIElement MCPTab()
         {
             var t = Theme.Current;
+            bool running = LocalBridge.Running && LocalMcpServer.Enabled;
+            var toolDefs = LocalMcpServer.ToolDefinitions();
             Func<string, string, UIElement> stat = (label, value) => V.VLead(2, V.T(label, 9, FontWeights.SemiBold, t.Secondary), V.Mono(value, 16, FontWeights.Bold, t.Primary));
             var tools = new WrapPanel();
-            foreach (var n in new[] { "read_file", "write_file", "list_directory", "search_code", "run_terminal", "git_status", "git_diff", "get_diagnostics" })
+            foreach (var td in toolDefs)
             {
+                string n = Convert.ToString(td["name"]);
                 var chip = V.Box(V.Mono(n, 10, FontWeights.Medium, t.P(0.85)), V.P(7, 3), t.P(0.06), 5);
                 chip.Margin = new Thickness(0, 0, 6, 6);
                 tools.Children.Add(chip);
             }
+            var toggleBtn = V.Button(V.Box(V.T(running ? "Stop" : "Start", 11.5, FontWeights.SemiBold, running ? t.Primary : Brushes.White), V.P(12, 4), running ? t.P(0.12) : t.Accent, 6), () =>
+            {
+                LocalMcpServer.Enabled = !LocalMcpServer.Enabled;
+                if (LocalMcpServer.Enabled) { LocalBridge.McpRpcHandler = LocalMcpServer.HandleJsonRpc; LocalBridge.Start(); }
+                Rerender();
+            });
+            var copyBtn = SmallBtn("Copy Config", "doc.on.doc", () =>
+            {
+                try { Clipboard.SetText("{\"mcpServers\":{\"microcode\":{\"url\":\"http://127.0.0.1:" + LocalBridge.Port + "/mcp\"}}}"); } catch { }
+            });
             var s = V.VLead(12,
-                V.Self(V.H(8, Sym.Icon("server.rack", 13, t.Primary), V.T("MCP Protocol Server", 13, FontWeights.SemiBold, t.Primary), V.Box(V.H(4, V.Dot(6, t.SysGray), V.T("Stopped", 10, FontWeights.Medium, t.Secondary)), V.P(6, 2), t.P(0.06), 4), V.Sp(),
-                    V.Button(V.Box(V.T("Start", 11.5, FontWeights.Medium, t.Primary), V.P(12, 4), t.P(0.1), 6), () => MessageBox.Show(this, "The built-in MCP server is not available in the Windows build yet.", "MCP Servers"))), Cross.Stretch),
-                V.Wrap(V.T("Model Context Protocol server exposes workspace tools (read, write, search, terminal, git) to external AI clients like Claude Desktop, Cursor, and ChatGPT plugins.", 11, FontWeights.Normal, t.Secondary), TextAlignment.Left),
-                V.H(24, stat("Requests", "0"), stat("Clients", "0"), stat("Tools", "8")),
+                V.Self(V.H(8, Sym.Icon("server.rack", 13, t.Primary), V.T("MCP Protocol Server", 13, FontWeights.SemiBold, t.Primary),
+                    V.Box(V.H(4, V.Dot(6, running ? t.SysGreen : t.SysGray), V.T(running ? "Listening :" + LocalBridge.Port + "/mcp" : "Stopped", 10, FontWeights.Medium, running ? t.SysGreen : t.Secondary)), V.P(6, 2), t.P(0.06), 4),
+                    V.Sp(), copyBtn, toggleBtn), Cross.Stretch),
+                V.Wrap(V.T("Streamable HTTP JSON-RPC 2.0 MCP server exposes MicroCode workspace, browser, API, database, and computer-use tools to Claude Desktop, Cursor, and external clients.", 11, FontWeights.Normal, t.Secondary), TextAlignment.Left),
+                V.H(24, stat("Requests", LocalMcpServer.RequestCount.ToString()), stat("Endpoint", "127.0.0.1:" + LocalBridge.Port), stat("Tools", toolDefs.Count.ToString())),
                 V.T("Available Tools", 10, FontWeights.SemiBold, t.Secondary), V.Self(tools, Cross.Stretch),
-                V.T("Recent Activity", 10, FontWeights.SemiBold, t.Secondary), V.T("No requests yet", 11, FontWeights.Normal, t.S(0.7)));
+                V.T("Recent Activity", 10, FontWeights.SemiBold, t.Secondary), V.Mono(LocalMcpServer.LastActivity, 11, FontWeights.Normal, t.S(0.75)));
             s.Align = Cross.Stretch;
             var col = V.VLead(18, V.Self(V.Box(s, V.P(16), t.ControlBackground, 12, t.P(0.08), 1), Cross.Stretch), V.Self(ExternalMcpSection(), Cross.Stretch));
             col.Align = Cross.Stretch;
@@ -960,24 +965,7 @@ namespace MicroCode.Views
             return root;
         }
 
-        UIElement ExtensionsTab()
-        {
-            var t = Theme.Current;
-            string dir = Path.Combine(Defaults.Dir, "Extensions");
-            var installed = Directory.Exists(dir) ? Directory.GetFileSystemEntries(dir).ToList() : new List<string>();
-            Func<string, string, Action, UIElement> btn = (icon, label, a) => V.Button(V.Box(V.H(5, Sym.Icon(icon, 11, t.Primary), V.T(label, 12, FontWeights.Medium, t.Primary)), V.P(10, 5), t.P(0.08), 6), a);
-            var actions = V.H(8, btn("arrow.down.circle", "Install File", () =>
-            {
-                var d = new Microsoft.Win32.OpenFileDialog { Filter = "Extensions (*.vsix;*.mcx;*.zip)|*.vsix;*.mcx;*.zip" };
-                if (d.ShowDialog() == true) { Directory.CreateDirectory(dir); File.Copy(d.FileName, Path.Combine(dir, Path.GetFileName(d.FileName)), true); Rerender(); }
-            }), btn("plus", "New Starter", null), btn("folder", "All Types", () => { Directory.CreateDirectory(dir); Process.Start("explorer.exe", dir); }));
-            var list = V.VLead(6); list.Align = Cross.Stretch;
-            if (installed.Count == 0) list.Children.Add(V.Box(V.Vs(6, Sym.Icon("puzzlepiece.extension", 22, t.S(0.6)), V.T("No extensions installed", 12, FontWeights.Normal, t.Secondary)), V.P(0, 24), null, 0));
-            foreach (var f in installed) list.Children.Add(V.Self(V.Box(V.H(10, Sym.Icon("puzzlepiece.extension", 13, t.Accent), V.T(Path.GetFileName(f), 12.5, FontWeights.Medium, t.Primary), V.Sp()), V.P(12, 8), t.ControlBackground, 8), Cross.Stretch));
-            var root = V.VLead(14, HeroCard("puzzlepiece.extension.fill", "Extension Hub", "Install, manage, and mount community and official extensions.", actions), list);
-            root.Align = Cross.Stretch;
-            return root;
-        }
+        UIElement ExtensionsTab() { return V.Self(new ExtensionStudioView(), Cross.Stretch); }
 
         // ── Dotmini Cloud panel (AI & Agent → Dotmini Cloud) ───────────────────
         UIElement CloudPanel()

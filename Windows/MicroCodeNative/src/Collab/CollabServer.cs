@@ -38,6 +38,8 @@ namespace MicroCode.Views
     {
         public readonly Guid Id = Guid.NewGuid();
         public string UserId;
+        public bool SupportsOT;
+        public string Protocol;
         internal NetworkStream Stream;
         internal TcpClient Tcp;
         readonly object _send = new object();
@@ -324,6 +326,11 @@ namespace MicroCode.Views
         public void Broadcast(string json, string excludingUserId)
         {
             foreach (var c in Clients) if (excludingUserId == null || c.UserId != excludingUserId) c.SendText(json);
+        }
+
+        public void BroadcastWhere(string json, Func<CollabWsClient, bool> predicate)
+        {
+            foreach (var c in Clients) if (predicate == null || predicate(c)) c.SendText(json);
         }
     }
 }

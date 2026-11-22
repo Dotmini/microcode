@@ -960,7 +960,32 @@ namespace MicroCode.Views
             string target = c.ComputeOverride ?? ComputeTargets.Current;
             if (!ComputeTargets.IsLocal(target))
             {
-                done(Finalize(c, "\u274C " + ComputeTargets.Display(target) + " is not available in MicroCode for Windows yet (" + ComputeTargets.Unavailable(target) + "). Set this cell's compute engine to Local CPU.", null, null, null, true));
+                string why = ComputeTargets.Unavailable(target);
+                if (why != null)
+                {
+                    done(Finalize(c, "\u26A0 " + ComputeTargets.Display(target) + ": " + why, null, null, null, true));
+                    return;
+                }
+                if (target == "Your Cloud (SSH)")
+                {
+                    string sshHost = Defaults.Str("cloudGpuSshTarget", "");
+                    System.Threading.Tasks.Task.Run(() =>
+                    {
+                        var swRemote = System.Diagnostics.Stopwatch.StartNew();
+                        var prof = new SSHConfigProfile { Host = sshHost, HostName = sshHost };
+                        int at = sshHost.IndexOf('@');
+                        if (at > 0) { prof.User = sshHost.Substring(0, at); prof.HostName = sshHost.Substring(at + 1); prof.Host = prof.HostName; }
+                        var res = RemoteWorkspaceManager.RunCommand(prof, "python3 - <<'__MC_EOF__'\n" + (c.Content ?? "") + "\n__MC_EOF__", 60000);
+                        swRemote.Stop();
+                        Dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            string outText = (res.StdOut ?? "") + (string.IsNullOrEmpty(res.StdErr) ? "" : "\n[stderr]\n" + res.StdErr);
+                            done(Finalize(c, outText, null, null, new CellTelemetry { DurationMs = swRemote.Elapsed.TotalMilliseconds }, res.ExitCode != 0));
+                        }));
+                    });
+                    return;
+                }
+                done(Finalize(c, "Remote target '" + ComputeTargets.Display(target) + "' selected. Configure active cluster session in Settings → Cloud GPU or use Your Cloud (SSH).", null, null, null, false));
                 return;
             }
             string tag = CellTag(c);

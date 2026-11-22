@@ -79,6 +79,12 @@ namespace MicroCode.Views
 
     public class CollabOpenFile { public string FullPath, Name, Language, Content; }
 
+    public class CollabInviteInfo
+    {
+        public string Action = "", Mode = "", Token = "", Endpoint = "", Code = "", HostDisplay = "";
+        public bool IsValid;
+    }
+
     /// <summary>What the service needs from the IDE (AppState on the real app, an in-memory stand-in in tests).</summary>
     public interface ICollabIde
     {
@@ -159,12 +165,34 @@ namespace MicroCode.Views
         }
 
         // file state
+        public const string OTCapability = "ot1";
+        class PeerOTFileState
+        {
+            public CollabOTClient Client;
+            public string Shadow;
+            public string OutstandingOpId;
+        }
+        enum HostOpStatus { Committed, Duplicate, Rejected }
+        class HostOpOutcome
+        {
+            public HostOpStatus Status;
+            public CollabOTServerDocument.Commit Commit;
+            public string Reason;
+        }
+
         readonly Dictionary<string, string> _contents = new Dictionary<string, string>(StringComparer.Ordinal);
         readonly Dictionary<string, int> _revisions = new Dictionary<string, int>(StringComparer.Ordinal);
         readonly Dictionary<string, SortedDictionary<int, string>> _snapshots = new Dictionary<string, SortedDictionary<int, string>>(StringComparer.Ordinal);
         readonly Dictionary<string, int> _peerBaseRevisions = new Dictionary<string, int>(StringComparer.Ordinal);
         readonly Dictionary<string, string> _lastSynced = new Dictionary<string, string>(StringComparer.Ordinal);
         readonly Dictionary<string, DateTime> _diskMod = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        readonly Dictionary<string, CollabOTServerDocument> _otDocs = new Dictionary<string, CollabOTServerDocument>(StringComparer.Ordinal);
+        readonly Dictionary<string, PeerOTFileState> _peerOT = new Dictionary<string, PeerOTFileState>(StringComparer.Ordinal);
+        readonly Dictionary<string, List<Dictionary<string, object>>> _peerResyncQueue = new Dictionary<string, List<Dictionary<string, object>>>(StringComparer.Ordinal);
+        readonly Dictionary<string, DateTime> _lastEditActivityAt = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        bool _hostSupportsOT;
+        public bool HostSupportsOT { get { lock (_gate) return _hostSupportsOT; } }
+        bool PeerUsesOT { get { return _hostSupportsOT && Session != null && !Session.IsHostingLocally; } }
         DateTime _lastDiskScan = DateTime.MinValue;
         volatile bool _applyingRemote;
         CollabCursor _localCursor;
@@ -318,6 +346,21 @@ namespace MicroCode.Views
             catch (ArgumentException) { return null; } catch (InvalidOperationException) { return null; }
         }
         string Json(object o) { return _js.Serialize(o); }
+        static bool HasOTCapability(Dictionary<string, object> msg)
+        {
+            if (msg == null) return false;
+            if (string.Equals(S(msg, "protocol"), OTCapability, StringComparison.OrdinalIgnoreCase)) return true;
+            var caps = Arr(msg, "caps");
+            if (caps != null)
+            {
+                foreach (var item in caps)
+                {
+                    var s = item as string;
+                    if (s != null && string.Equals(s, OTCapability, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+            return false;
+        }
         static string Iso(DateTime t) { return t.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture); }
         static DateTime ParseIso(string s) { DateTime t; return s != null && DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out t) ? t : DateTime.UtcNow; }
 
@@ -354,11 +397,11 @@ namespace MicroCode.Views
             bool absolute = t.StartsWith("/") || (t.Length > 2 && t[1] == ':' && (t[2] == '\\' || t[2] == '/'));
             if (absolute)
             {
-                string full; try { full = Path.GetFullPath(t.Replace('/', '\\')); } catch (ArgumentException) { return Path.GetFileName(t); } catch (NotSupportedException) { return Path.GetFileName(t); }
+                string full; try { full = Path.GetFullPath(t.Replace('/', Path.DirectorySeparatorChar)); } catch (ArgumentException) { return Path.GetFileName(t); } catch (NotSupportedException) { return Path.GetFileName(t); }
                 foreach (var root in new[] { SharedRoot, _ide.WorkspaceFolder })
                 {
                     if (string.IsNullOrEmpty(root)) continue;
-                    string r = Path.GetFullPath(root).TrimEnd('\\') + "\\";
+                    string r = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
                     if (full.StartsWith(r, StringComparison.OrdinalIgnoreCase)) return SanitizeRelativePath(full.Substring(r.Length));
                 }
                 return Path.GetFileName(full);
@@ -370,9 +413,9 @@ namespace MicroCode.Views
         {
             string root = SharedRoot ?? _ide.WorkspaceFolder;
             if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(rel)) return null;
-            string r = Path.GetFullPath(root).TrimEnd('\\');
-            string full = Path.GetFullPath(Path.Combine(r, rel.Replace('/', '\\')));
-            return full.StartsWith(r + "\\", StringComparison.OrdinalIgnoreCase) ? full : null;
+            string r = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+            string full = Path.GetFullPath(Path.Combine(r, rel.Replace('/', Path.DirectorySeparatorChar)));
+            return full.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? full : null;
         }
 
         void RecordSnapshot(string rel, int rev, string content)
@@ -578,19 +621,20 @@ namespace MicroCode.Views
             RefreshNetworkAddresses();
             string code = GenerateShareCode();
             string ws = _ide.WorkspaceFolder;
-            string wsName = ws != null ? Path.GetFileName(Path.GetFullPath(ws).TrimEnd('\\')) : "Workspace";
+            string wsName = ws != null ? Path.GetFileName(Path.GetFullPath(ws).TrimEnd(Path.DirectorySeparatorChar)) : "Workspace";
             Integrations.SetTeamTasksEnabled(true);
             Tasks.Load(ws);
             lock (_gate)
             {
-                SharedRoot = ws != null ? Path.GetFullPath(ws).TrimEnd('\\') : null;
+                SharedRoot = ws != null ? Path.GetFullPath(ws).TrimEnd(Path.DirectorySeparatorChar) : null;
                 Server.OnRequest = HandleHttp;
                 Server.OnUpgrade = r => r.Path == "/ws/collab" && Session != null && QueryCode(r).Length > 0 && QueryCode(r) != Session.ShareCode ? CollabResponse.Text("403 Forbidden", "text/plain", "Invalid code") : (r.Path == "/ws/collab" ? null : CollabResponse.Text("404 Not Found", "application/json", "{\"error\":\"Not found\"}"));
-                Server.OnWsOpen = c => c.SendText(Json(new Dictionary<string, object> { { "type", "welcome" }, { "shareCode", Session != null ? Session.ShareCode : "" }, { "workspaceName", Session != null ? Session.WorkspaceName : "Workspace" }, { "participants", WithGate(SerializeParticipants) } }));
+                Server.OnWsOpen = c => c.SendText(Json(new Dictionary<string, object> { { "type", "welcome" }, { "shareCode", Session != null ? Session.ShareCode : "" }, { "workspaceName", Session != null ? Session.WorkspaceName : "Workspace" }, { "protocol", OTCapability }, { "caps", new[] { OTCapability } }, { "participants", WithGate(SerializeParticipants) } }));
                 Server.OnWsText = HandleHostWsText;
                 if (!Server.Start()) { Status = CollabStatus.Error; StatusError = "No free port in 8490-8515"; Fire(); return null; }
                 Session = new CollabSession { Id = code, ShareCode = code, ProjectId = wsName, WorkspaceName = wsName, WorkspaceLang = DetectWorkspaceLang(ws), HostUserId = LocalUserId, HostDisplayName = LocalDisplayName, IsHostingLocally = true, RemoteEndpoint = "http://" + SelectedLanAddress + ":" + Server.Port };
                 _participants = new List<CollabParticipant>();
+                _otDocs.Clear(); _peerOT.Clear(); _peerResyncQueue.Clear(); _lastEditActivityAt.Clear(); _hostSupportsOT = false;
                 UpsertSelf(); EnsureAITeammate();
                 _chat.Clear(); _activity.Clear();
                 Status = CollabStatus.Connected; StatusError = null; IsWebSocketRealtimeActive = true;
@@ -635,15 +679,30 @@ namespace MicroCode.Views
                 string rel = NormalizeRelativePath(f.FullPath);
                 if (rel.Length == 0 || f.Content == null) continue;
                 openSet.Add(rel);
+                string normalized = f.Content.Replace("\r\n", "\n");
+                if (Session != null && Session.IsHostingLocally)
+                {
+                    if (!_otDocs.ContainsKey(rel))
+                    {
+                        string baseline;
+                        if (!_contents.TryGetValue(rel, out baseline)) baseline = normalized;
+                        int r0 = Rev(rel);
+                        _otDocs[rel] = new CollabOTServerDocument(baseline, r0);
+                        _contents[rel] = baseline; _revisions[rel] = r0;
+                        RecordSnapshot(rel, r0, baseline);
+                    }
+                    HostCommitContent(rel, normalized, LocalUserId, LocalDisplayName, LocalColor, false, false, false, false);
+                    continue;
+                }
                 string prev; bool had = _contents.TryGetValue(rel, out prev);
-                _contents[rel] = f.Content;
+                _contents[rel] = normalized;
                 int rev;
                 if (_revisions.TryGetValue(rel, out rev))
                 {
-                    if (had && prev != f.Content) { _revisions[rel] = rev + 1; RecordSnapshot(rel, rev + 1, f.Content); }
-                    else if (Snapshot(rel, rev) == null) RecordSnapshot(rel, rev, f.Content);
+                    if (had && prev != normalized) { _revisions[rel] = rev + 1; RecordSnapshot(rel, rev + 1, normalized); }
+                    else if (Snapshot(rel, rev) == null) RecordSnapshot(rel, rev, normalized);
                 }
-                else { _revisions[rel] = 1; RecordSnapshot(rel, 1, f.Content); }
+                else { _revisions[rel] = 1; RecordSnapshot(rel, 1, normalized); }
             }
             if (!forceDiskScan && _sharedFiles.Count > 0 && (DateTime.UtcNow - _lastDiskScan).TotalSeconds < 2.5)
             {
@@ -688,9 +747,7 @@ namespace MicroCode.Views
                         string old;
                         if (text != null && (!_contents.TryGetValue(rel, out old) || old != text))
                         {
-                            int next = Rev(rel) + 1;
-                            _contents[rel] = text; _revisions[rel] = next; RecordSnapshot(rel, next, text);
-                            Server.Broadcast(Json(new Dictionary<string, object> { { "type", "fileBuffer" }, { "path", rel }, { "content", text }, { "revision", next }, { "authorId", LocalUserId }, { "authorName", LocalDisplayName }, { "authorColor", LocalColor } }), null);
+                            HostCommitContent(rel, text, LocalUserId, LocalDisplayName, LocalColor, false, false, false, false);
                         }
                     }
                     _diskMod[rel] = fi.LastWriteTimeUtc;
@@ -726,7 +783,7 @@ namespace MicroCode.Views
             }
             foreach (var rel in gone)
             {
-                foreach (var k in _contents.Keys.Where(k => k == rel || k.StartsWith(rel + "/")).ToList()) { _contents.Remove(k); _revisions.Remove(k); _snapshots.Remove(k); _diskMod.Remove(k); }
+                foreach (var k in _contents.Keys.Where(k => k == rel || k.StartsWith(rel + "/")).ToList()) { _contents.Remove(k); _revisions.Remove(k); _snapshots.Remove(k); _diskMod.Remove(k); _otDocs.Remove(k); _peerOT.Remove(k); _peerResyncQueue.Remove(k); }
                 Server.Broadcast(Json(new Dictionary<string, object> { { "type", "fsEvent" }, { "op", "delete" }, { "path", rel }, { "userId", LocalUserId }, { "displayName", LocalDisplayName } }), LocalUserId);
                 RecordActivity(LocalDisplayName, LocalColor, "deleted", rel);
             }
@@ -771,22 +828,139 @@ namespace MicroCode.Views
             string rel = NormalizeRelativePath(relRaw);
             if (rel.Length == 0) return Tuple.Create(content, 1, false);
             content = content.Replace("\r\n", "\n");
-            string current = ResolveFileContent(rel);
-            int currentRev = Rev(rel);
+            var doc = HostOTDocument(rel);
+            string current = doc.Content;
+            int currentRev = doc.Revision;
             if (current == content) return Tuple.Create(current, currentRev, false);
             string merged = content; bool didMerge = false;
-            string baseSnap = baseRevision.HasValue && baseRevision.Value < currentRev ? Snapshot(rel, baseRevision.Value) : null;
-            if (baseSnap != null) { var m = CollabMerge.Merge(baseSnap, current, content); merged = m.Merged; didMerge = m.DidAutoMerge; }
+            if (baseRevision.HasValue && baseRevision.Value < currentRev)
+            {
+                var later = doc.OperationsSince(baseRevision.Value);
+                bool onlyOwn = later != null && later.Count > 0 && later.All(c => c.AuthorId == authorId);
+                string baseSnap = !onlyOwn ? Snapshot(rel, baseRevision.Value) : null;
+                if (baseSnap != null) { var m = CollabMerge.Merge(baseSnap, current, content); merged = m.Merged; didMerge = m.DidAutoMerge; }
+            }
             if (merged == current) return Tuple.Create(current, currentRev, didMerge);
-            _contents[rel] = merged;
-            int next = currentRev + 1;
-            _revisions[rel] = next;
-            RecordSnapshot(rel, next, merged);
-            WriteRelative(rel, merged);
-            PushToEditor(rel, merged);
-            if (!_sharedFiles.Any(f => f.RelativePath == rel)) { IndexLocalWorkspaceFiles(true); _ide.RefreshTree(); }
+            var commit = HostCommitContent(rel, merged, authorId, authorName, authorColor, true, true, didMerge, false);
+            if (commit == null) return Tuple.Create(current, currentRev, didMerge);
             RecordActivity(authorName, authorColor, didMerge ? "merged edit" : "edited", rel);
-            return Tuple.Create(merged, next, didMerge);
+            return Tuple.Create(merged, commit.Revision, didMerge);
+        }
+
+        // ── ot1 host helpers ──
+
+        string NewOperationId()
+        {
+            return LocalUserId + "-" + Guid.NewGuid().ToString("N").Substring(0, 12);
+        }
+
+        CollabOTServerDocument HostOTDocument(string rel)
+        {
+            CollabOTServerDocument doc;
+            if (_otDocs.TryGetValue(rel, out doc)) return doc;
+            string content = ResolveFileContent(rel);
+            doc = new CollabOTServerDocument(content, Rev(rel));
+            _otDocs[rel] = doc;
+            return doc;
+        }
+
+        internal CollabOTServerDocument.Commit HostCommitContent(string rel, string content, string authorId, string authorName, string authorColor, bool writeToDisk, bool updateEditor, bool legacyEchoToAuthor, bool recordEditActivity)
+        {
+            var doc = HostOTDocument(rel);
+            var commit = doc.ReplaceContent(content, authorId);
+            if (commit == null) return null;
+            HostPublishCommit(rel, commit, authorName, authorColor, writeToDisk, updateEditor, legacyEchoToAuthor, recordEditActivity);
+            return commit;
+        }
+
+        HostOpOutcome HostReceiveOperation(string rel, CollabTextOperation op, int baseRevision, string authorId, string authorName, string authorColor, string opId)
+        {
+            if (op.TargetLength > 8000000) return new HostOpOutcome { Status = HostOpStatus.Rejected, Reason = "too_large" };
+            var doc = HostOTDocument(rel);
+            int prevRev = doc.Revision;
+            CollabOTServerDocument.Commit commit;
+            try
+            {
+                commit = doc.Receive(op, baseRevision, authorId, opId);
+            }
+            catch (CollabOTException ex)
+            {
+                return new HostOpOutcome { Status = HostOpStatus.Rejected, Reason = ex.Kind == CollabOTErrorKind.StaleBase ? "stale" : "invalid" };
+            }
+            if (commit.Revision <= prevRev)
+            {
+                return new HostOpOutcome { Status = HostOpStatus.Duplicate, Commit = commit };
+            }
+            HostPublishCommit(rel, commit, authorName, authorColor, true, true, false, true);
+            return new HostOpOutcome { Status = HostOpStatus.Committed, Commit = commit };
+        }
+
+        void HostPublishCommit(string rel, CollabOTServerDocument.Commit commit, string authorName, string authorColor, bool writeToDisk, bool updateEditor, bool legacyEchoToAuthor, bool recordEditActivity)
+        {
+            CollabOTServerDocument doc;
+            if (!_otDocs.TryGetValue(rel, out doc)) return;
+            string content = doc.Content;
+            _contents[rel] = content;
+            _revisions[rel] = commit.Revision;
+            RecordSnapshot(rel, commit.Revision, content);
+            if (writeToDisk) WriteRelative(rel, content);
+            if (updateEditor) PushToEditor(rel, content);
+            else _lastSynced[rel] = content;
+
+            string opJson = Json(HostOTCommitPayload(rel, commit, authorName, authorColor));
+            string legacyJson = Json(FileBufferMessage(rel, content, commit.Revision, commit.AuthorId, authorName, authorColor));
+            foreach (var c in Server.Clients)
+            {
+                if (c.SupportsOT) c.SendText(opJson);
+                else if (legacyEchoToAuthor || c.UserId != commit.AuthorId) c.SendText(legacyJson);
+            }
+
+            if (recordEditActivity && commit.AuthorId != LocalUserId && commit.AuthorId != AITeammateUserId)
+            {
+                string key = commit.AuthorId + "|" + rel;
+                DateTime lastAt;
+                if (!_lastEditActivityAt.TryGetValue(key, out lastAt) || (DateTime.UtcNow - lastAt).TotalSeconds > 20)
+                {
+                    _lastEditActivityAt[key] = DateTime.UtcNow;
+                    RecordActivity(authorName, authorColor, "edited", rel);
+                }
+            }
+            if (!_sharedFiles.Any(f => f.RelativePath == rel)) { IndexLocalWorkspaceFiles(true); _ide.RefreshTree(); }
+        }
+
+        Dictionary<string, object> HostOTCommitPayload(string rel, CollabOTServerDocument.Commit commit, string authorName = null, string authorColor = null)
+        {
+            var participant = Find(commit.AuthorId);
+            string resolvedName = authorName ?? (participant != null ? participant.DisplayName : (commit.AuthorId == LocalUserId ? LocalDisplayName : "Collaborator"));
+            string resolvedColor = authorColor ?? (participant != null ? participant.Color : (commit.AuthorId == LocalUserId ? LocalColor : "#3B82F6"));
+            var payload = new Dictionary<string, object>
+            {
+                { "type", "op" },
+                { "path", rel },
+                { "revision", commit.Revision },
+                { "op", commit.Operation.ToJson() },
+                { "authorId", commit.AuthorId },
+                { "authorName", resolvedName },
+                { "authorColor", resolvedColor }
+            };
+            if (!string.IsNullOrEmpty(commit.OpId)) payload["opId"] = commit.OpId;
+            CollabOTServerDocument doc;
+            if (_otDocs.TryGetValue(rel, out doc) && commit.Revision == doc.Revision) payload["length"] = doc.Content.Length;
+            return payload;
+        }
+
+        Dictionary<string, object> HostOTErrorPayload(string rel, string opId, string reason)
+        {
+            var payload = new Dictionary<string, object> { { "type", "opError" }, { "ok", false }, { "path", rel }, { "reason", reason } };
+            if (!string.IsNullOrEmpty(opId)) payload["opId"] = opId;
+            if (!string.IsNullOrEmpty(rel))
+            {
+                var doc = HostOTDocument(rel);
+                payload["revision"] = doc.Revision;
+                payload["content"] = doc.Content;
+                payload["resync"] = true;
+            }
+            return payload;
         }
 
         /// <summary>Moves every per-file record of a file, or of everything under a folder, to its new relative path.</summary>
@@ -799,6 +973,9 @@ namespace MicroCode.Views
             foreach (var k in _peerBaseRevisions.Keys.ToList()) { string n = map(k); if (n != null) { _peerBaseRevisions[n] = _peerBaseRevisions[k]; _peerBaseRevisions.Remove(k); } }
             foreach (var k in _lastSynced.Keys.ToList()) { string n = map(k); if (n != null) { _lastSynced[n] = _lastSynced[k]; _lastSynced.Remove(k); } }
             foreach (var k in _diskMod.Keys.ToList()) { string n = map(k); if (n != null) { _diskMod[n] = _diskMod[k]; _diskMod.Remove(k); } }
+            foreach (var k in _otDocs.Keys.ToList()) { string n = map(k); if (n != null) { _otDocs[n] = _otDocs[k]; _otDocs.Remove(k); } }
+            foreach (var k in _peerOT.Keys.ToList()) { string n = map(k); if (n != null) { _peerOT[n] = _peerOT[k]; _peerOT.Remove(k); } }
+            foreach (var k in _peerResyncQueue.Keys.ToList()) { string n = map(k); if (n != null) { _peerResyncQueue[n] = _peerResyncQueue[k]; _peerResyncQueue.Remove(k); } }
             foreach (var f in _sharedFiles) { string n = map(f.RelativePath); if (n != null) { f.RelativePath = n; f.Name = n.Split('/').Last(); } }
             _sharedDirs = _sharedDirs.Select(d => map(d) ?? d).ToList();
         }
@@ -812,6 +989,9 @@ namespace MicroCode.Views
             foreach (var k in _peerBaseRevisions.Keys.Where(hit).ToList()) _peerBaseRevisions.Remove(k);
             foreach (var k in _lastSynced.Keys.Where(hit).ToList()) _lastSynced.Remove(k);
             foreach (var k in _diskMod.Keys.Where(hit).ToList()) _diskMod.Remove(k);
+            foreach (var k in _otDocs.Keys.Where(hit).ToList()) _otDocs.Remove(k);
+            foreach (var k in _peerOT.Keys.Where(hit).ToList()) _peerOT.Remove(k);
+            foreach (var k in _peerResyncQueue.Keys.Where(hit).ToList()) _peerResyncQueue.Remove(k);
             _sharedDirs.RemoveAll(d => hit(d));
             _sharedFiles.RemoveAll(f => hit(f.RelativePath));
         }
@@ -836,14 +1016,22 @@ namespace MicroCode.Views
                     {
                         string content = (S(ev, "content") ?? "").Replace("\r\n", "\n");
                         int? baseRev = I(ev, "baseRevision");
-                        if (hosting && baseRev.HasValue && _contents.ContainsKey(rel))
+                        if (hosting && baseRev.HasValue && (_contents.ContainsKey(rel) || _otDocs.ContainsKey(rel)))
                         {
                             string uid = S(ev, "userId") ?? senderUserId ?? "peer", name = S(ev, "displayName") ?? "Collaborator";
                             var known = Find(uid);
                             string color = known != null ? known.Color : (S(ev, "color") ?? "#3B82F6");
-                            var o = ApplyIncomingFileContent(rel, content, baseRev, uid, name, color);
-                            // the writer gets the merged text back only when the merge changed it
-                            Server.Broadcast(Json(FileBufferMessage(rel, o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
+                            ApplyIncomingFileContent(rel, content, baseRev, uid, name, color);
+                            IndexLocalWorkspaceFiles(true);
+                            _ide.RefreshTree();
+                            return;
+                        }
+                        if (hosting && (_otDocs.ContainsKey(rel) || File.Exists(target)))
+                        {
+                            string uid = S(ev, "userId") ?? senderUserId ?? "peer", name = S(ev, "displayName") ?? "Collaborator";
+                            var known = Find(uid);
+                            string color = known != null ? known.Color : (S(ev, "color") ?? "#3B82F6");
+                            HostCommitContent(rel, content, uid, name, color, true, true, false, true);
                             IndexLocalWorkspaceFiles(true);
                             _ide.RefreshTree();
                             return;
@@ -855,7 +1043,8 @@ namespace MicroCode.Views
                             int? sentRev = I(ev, "revision");
                             int next = !hosting && sentRev.HasValue ? sentRev.Value : (_revisions.ContainsKey(rel) ? Rev(rel) + 1 : 1);
                             _contents[rel] = content; _revisions[rel] = next; RecordSnapshot(rel, next, content);
-                            if (!hosting) _peerBaseRevisions[rel] = next;
+                            if (!hosting) { _peerBaseRevisions[rel] = next; _peerOT.Remove(rel); }
+                            else _otDocs[rel] = new CollabOTServerDocument(content, next);
                             WriteRelative(rel, content);
                             PushToEditor(rel, content);
                         }
@@ -905,7 +1094,7 @@ namespace MicroCode.Views
             if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(path)) return false;
             try
             {
-                string full = Path.GetFullPath(path), r = Path.GetFullPath(root).TrimEnd('\\') + "\\";
+                string full = Path.GetFullPath(path), r = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
                 return full.StartsWith(r, StringComparison.OrdinalIgnoreCase);
             }
             catch (ArgumentException) { return false; } catch (NotSupportedException) { return false; } catch (PathTooLongException) { return false; }
@@ -923,6 +1112,7 @@ namespace MicroCode.Views
             var payload = new Dictionary<string, object> { { "type", "fsEvent" }, { "op", op }, { "path", rel }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor } };
             if (newRel != null) payload["newPath"] = newRel;
             if (content != null) payload["content"] = content;
+            bool sendPeerOTWrite = false;
             lock (_gate)
             {
                 switch (op)
@@ -931,34 +1121,53 @@ namespace MicroCode.Views
                         if (content == null) return;
                         if (s.IsHostingLocally)
                         {
-                            string prev;
-                            if (!_contents.TryGetValue(rel, out prev) || prev != content)
-                            {
-                                int next = _revisions.ContainsKey(rel) ? Rev(rel) + 1 : 1;
-                                _contents[rel] = content; _revisions[rel] = next; RecordSnapshot(rel, next, content);
-                            }
-                            payload["revision"] = Rev(rel);
+                            bool known = _otDocs.ContainsKey(rel) || _contents.ContainsKey(rel);
+                            var commit = HostCommitContent(rel, content, LocalUserId, LocalDisplayName, LocalColor, false, false, false, false);
                             try { _diskMod[rel] = File.GetLastWriteTimeUtc(Path.GetFullPath(path)); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                            _lastSynced[rel] = content;
+                            if (known || commit != null)
+                            {
+                                RecordActivity(LocalDisplayName, LocalColor, FsActionLabel(op), rel);
+                                IndexLocalWorkspaceFiles(true);
+                                FireAsync();
+                                return;
+                            }
+                            payload["revision"] = HostOTDocument(rel).Revision;
+                        }
+                        else if (PeerUsesOT && (_peerOT.ContainsKey(rel) || _contents.ContainsKey(rel)))
+                        {
+                            _lastSynced[rel] = content;
+                            RecordActivity(LocalDisplayName, LocalColor, FsActionLabel(op), rel);
+                            sendPeerOTWrite = true;
                         }
                         else
                         {
                             int pb;
                             if (_peerBaseRevisions.TryGetValue(rel, out pb)) payload["baseRevision"] = pb;
                             _contents[rel] = content;
+                            _lastSynced[rel] = content;
                         }
-                        _lastSynced[rel] = content;
                         break;
                     case "rename": MoveKeys(rel, newRel); break;
                     case "delete": DropKeys(rel); break;
                     case "mkdir": if (!_sharedDirs.Contains(rel)) _sharedDirs.Add(rel); break;
                     default: return;
                 }
-                RecordActivity(LocalDisplayName, LocalColor, FsActionLabel(op), op == "rename" ? rel + " → " + newRel : rel);
-                if (s.IsHostingLocally)
+                if (!sendPeerOTWrite)
                 {
-                    IndexLocalWorkspaceFiles(true);
-                    Server.Broadcast(Json(payload), LocalUserId);
+                    RecordActivity(LocalDisplayName, LocalColor, FsActionLabel(op), op == "rename" ? rel + " → " + newRel : rel);
+                    if (s.IsHostingLocally)
+                    {
+                        IndexLocalWorkspaceFiles(true);
+                        Server.Broadcast(Json(payload), LocalUserId);
+                    }
                 }
+            }
+            if (sendPeerOTWrite)
+            {
+                PeerSubmitLocalContent(rel, content);
+                Fire();
+                return;
             }
             if (!s.IsHostingLocally)
             {
@@ -985,9 +1194,13 @@ namespace MicroCode.Views
             foreach (var f in _sharedFiles)
             {
                 string rel = f.RelativePath;
-                var item = new Dictionary<string, object> { { "path", rel }, { "name", f.Name }, { "language", f.Language }, { "revision", Rev(rel) } };
+                CollabOTServerDocument otDoc;
                 string mem; int len;
-                if (_contents.TryGetValue(rel, out mem) && (len = Encoding.UTF8.GetByteCount(mem)) <= InlineFileLimit && len <= budget) { item["hasInlineContent"] = true; item["content"] = mem; budget -= len; }
+                int rev = Rev(rel);
+                if (_otDocs.TryGetValue(rel, out otDoc)) { mem = otDoc.Content; rev = otDoc.Revision; }
+                else _contents.TryGetValue(rel, out mem);
+                var item = new Dictionary<string, object> { { "path", rel }, { "name", f.Name }, { "language", f.Language }, { "revision", rev } };
+                if (mem != null && (len = Encoding.UTF8.GetByteCount(mem)) <= InlineFileLimit && len <= budget) { item["hasInlineContent"] = true; item["content"] = mem; budget -= len; }
                 else
                 {
                     string full = FullPathOf(rel);
@@ -999,7 +1212,7 @@ namespace MicroCode.Views
                         if (text != null)
                         {
                             item["hasInlineContent"] = true; item["content"] = text; budget -= (int)fi.Length;
-                            _contents[rel] = text; int rev = Rev(rel); _revisions[rel] = rev;
+                            _contents[rel] = text; _revisions[rel] = rev;
                             if (Snapshot(rel, rev) == null) RecordSnapshot(rel, rev, text);
                         }
                         else item["hasInlineContent"] = false;
@@ -1020,6 +1233,12 @@ namespace MicroCode.Views
             {
                 string rel = NormalizeRelativePath(f.FullPath);
                 if (rel.Length == 0 || f.Content == null || Encoding.UTF8.GetByteCount(f.Content) > InlineFileLimit) continue;
+                CollabOTServerDocument otDoc;
+                if (_otDocs.TryGetValue(rel, out otDoc))
+                {
+                    buffers[rel] = otDoc.Content; bufferRevs[rel] = otDoc.Revision;
+                    continue;
+                }
                 buffers[rel] = f.Content; int rev = Rev(rel); bufferRevs[rel] = rev;
                 if (Snapshot(rel, rev) == null) RecordSnapshot(rel, rev, f.Content);
             }
@@ -1034,6 +1253,7 @@ namespace MicroCode.Views
             {
                 { "shareCode", Session.ShareCode }, { "shareLink", GetShareLink() ?? "" }, { "publicTunnelURL", PublicTunnelUrl ?? "" }, { "tunnelProvider", TunnelProvider },
                 { "workspaceName", Session.WorkspaceName }, { "workspaceLang", Session.WorkspaceLang }, { "hostUserId", Session.HostUserId }, { "hostDisplayName", Session.HostDisplayName },
+                { "protocol", OTCapability }, { "caps", new[] { OTCapability } },
                 { "participants", SerializeParticipants() }, { "sharedDirectories", _sharedDirs },
                 { "sharedFiles", _sharedFiles.Select(f => new Dictionary<string, object> { { "relativePath", f.RelativePath }, { "name", f.Name }, { "language", f.Language }, { "isOpenOnHost", f.IsOpenOnHost }, { "activeEditorName", f.ActiveEditorName ?? "" }, { "activeEditorColor", f.ActiveEditorColor ?? "" }, { "revision", Rev(f.RelativePath) } }).ToList() },
                 { "openBuffers", buffers }, { "fileRevisions", bufferRevs },
@@ -1056,6 +1276,7 @@ namespace MicroCode.Views
         CollabResponse HandleHttp(CollabRequest r)
         {
             if (r.Method == "GET" && (r.Path == "/" || r.Path == "/index.html")) return PortalPage(r);
+            if (r.Method == "GET" && (r.Path == "/join" || r.Path == "/join/")) return OpenInMicroCodePage(r);
             var body = r.Method == "POST" ? Parse(r.BodyText) : null;
             lock (_gate)
             {
@@ -1098,10 +1319,85 @@ namespace MicroCode.Views
                             var o = ApplyIncomingFileContent(path, content, I(body, "baseRevision"), uid, name, color);
                             resp["revision"] = o.Item2; resp["merged"] = o.Item3;
                             if (o.Item3) resp["content"] = o.Item1;
-                            Server.Broadcast(Json(FileBufferMessage(NormalizeRelativePath(path), o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
                             FireAsync();
                         }
                         return CollabResponse.Json(Json(resp));
+                    }
+                    case "POST /api/collab/op":
+                    {
+                        body = body ?? new Dictionary<string, object>();
+                        string rel = NormalizeRelativePath(S(body, "path") ?? "");
+                        string uid = S(body, "userId") ?? "";
+                        string opId = S(body, "opId");
+                        int? baseRev = I(body, "baseRevision");
+                        CollabTextOperation op = null;
+                        object rawOp;
+                        if (body.TryGetValue("op", out rawOp))
+                        {
+                            try { op = CollabTextOperation.FromJson(rawOp); }
+                            catch (CollabOTException) { op = null; }
+                        }
+                        Dictionary<string, object> reply;
+                        if (rel.Length > 0 && uid.Length > 0 && baseRev.HasValue && op != null)
+                        {
+                            var known = Find(uid);
+                            string name = S(body, "displayName") ?? (known != null ? known.DisplayName : "Collaborator");
+                            string color = known != null ? known.Color : (S(body, "color") ?? "#3B82F6");
+                            var outcome = HostReceiveOperation(rel, op, baseRev.Value, uid, name, color, opId);
+                            if (outcome.Status == HostOpStatus.Committed || outcome.Status == HostOpStatus.Duplicate)
+                            {
+                                var commits = HostOTDocument(rel).OperationsSince(baseRev.Value) ?? new List<CollabOTServerDocument.Commit>();
+                                reply = new Dictionary<string, object>
+                                {
+                                    { "ok", true },
+                                    { "path", rel },
+                                    { "commits", commits.Select(c => HostOTCommitPayload(rel, c)).ToList() }
+                                };
+                                FireAsync();
+                            }
+                            else
+                            {
+                                reply = HostOTErrorPayload(rel, opId, outcome.Reason);
+                            }
+                        }
+                        else
+                        {
+                            reply = HostOTErrorPayload(rel, opId, "invalid");
+                        }
+                        return CollabResponse.Json(Json(reply));
+                    }
+                    case "GET /api/collab/ops":
+                    {
+                        string q; r.Query.TryGetValue("path", out q);
+                        string rel = NormalizeRelativePath(q ?? "");
+                        string sq; r.Query.TryGetValue("since", out sq);
+                        int since = 0;
+                        if (sq != null) int.TryParse(sq, out since);
+                        Dictionary<string, object> reply;
+                        if (rel.Length > 0)
+                        {
+                            var doc = HostOTDocument(rel);
+                            var commits = doc.OperationsSince(since);
+                            if (commits != null)
+                            {
+                                reply = new Dictionary<string, object>
+                                {
+                                    { "ok", true },
+                                    { "path", rel },
+                                    { "revision", doc.Revision },
+                                    { "commits", commits.Select(c => HostOTCommitPayload(rel, c)).ToList() }
+                                };
+                            }
+                            else
+                            {
+                                reply = HostOTErrorPayload(rel, null, "stale");
+                            }
+                        }
+                        else
+                        {
+                            reply = HostOTErrorPayload(rel, null, "invalid");
+                        }
+                        return CollabResponse.Json(Json(reply));
                     }
                     case "POST /api/collab/fs-event":
                         if (body != null) ApplyFileSystemEvent(body, true, S(body, "userId"));
@@ -1153,6 +1449,33 @@ namespace MicroCode.Views
             return CollabResponse.Text("200 OK", "text/html; charset=utf-8", CollabPortal.Gate.Replace("{{WS_NAME}}", esc).Replace("{{ERROR_HTML}}", err));
         }
 
+        CollabResponse OpenInMicroCodePage(CollabRequest r)
+        {
+            CollabSession s = Session;
+            string code = QueryCode(r);
+            if (code.Length == 0 && s != null) code = (s.ShareCode ?? "").ToUpperInvariant();
+            string wsName = s != null ? s.WorkspaceName : "Workspace";
+            string codeJson = Json(new[] { code });
+            string nameJson = Json(new[] { wsName });
+            string html = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Join in MicroCode</title>"
+                + "<style>:root{color-scheme:dark;--bg:#0d0f14;--card:#151922;--text:#e5e7eb;--muted:#9ca3af;--line:rgba(255,255,255,.09);--accent:#3b82f6}"
+                + "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;padding:16px}"
+                + ".card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px}h1{font-size:18px;margin:0 0 4px}p{margin:0 0 18px;color:var(--muted)}"
+                + ".code{font:600 13px Consolas,monospace;letter-spacing:.08em;padding:3px 8px;border:1px solid var(--line);border-radius:6px}"
+                + "a.btn{display:block;text-align:center;text-decoration:none;padding:11px 14px;border-radius:9px;font-weight:600;margin-top:10px}.primary{background:var(--accent);color:#fff}.secondary{color:var(--text);border:1px solid var(--line)}</style></head>"
+                + "<body><div class=\"card\"><h1 id=\"title\">Join live session</h1><p>Opening MicroCode… Room <span class=\"code\" id=\"room\"></span></p>"
+                + "<a class=\"btn primary\" id=\"open\" href=\"#\">Open in MicroCode</a><a class=\"btn secondary\" id=\"browser\" href=\"#\">Continue in browser</a></div>"
+                + "<script>const CODE=" + codeJson + "[0];const WORKSPACE=" + nameJson + "[0];"
+                + "const base=location.origin+location.pathname.replace(/\\/(join\\/?|index\\.html)?$/i,\"\");"
+                + "const joinURL=base+\"/?code=\"+encodeURIComponent(CODE);"
+                + "const deepLink=\"microcode://collab?token=\"+encodeURIComponent(joinURL);"
+                + "document.getElementById(\"title\").textContent=\"Join \\u201c\"+WORKSPACE+\"\\u201d\";"
+                + "document.getElementById(\"room\").textContent=CODE||\"\\u2014\";"
+                + "document.getElementById(\"open\").href=deepLink;document.getElementById(\"browser\").href=joinURL;"
+                + "if(CODE)setTimeout(function(){location.href=deepLink;},250);</script></body></html>";
+            return CollabResponse.Text("200 OK", "text/html; charset=utf-8", html);
+        }
+
         void ProcessPeerSync(Dictionary<string, object> body)
         {
             string uid = S(body, "userId");
@@ -1174,8 +1497,7 @@ namespace MicroCode.Views
                 {
                     string path = S(e, "path"), content = S(e, "content");
                     if (path == null || content == null) continue;
-                    var o = ApplyIncomingFileContent(path, content, I(e, "baseRevision"), uid, name, color);
-                    Server.Broadcast(Json(FileBufferMessage(NormalizeRelativePath(path), o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
+                    ApplyIncomingFileContent(path, content, I(e, "baseRevision"), uid, name, color);
                 }
         }
 
@@ -1215,9 +1537,11 @@ namespace MicroCode.Views
                     case "hello":
                     {
                         if (uid.Length == 0) return;
+                        client.SupportsOT = HasOTCapability(msg);
+                        client.Protocol = S(msg, "protocol");
                         string assigned = AssignDistinctColor(S(msg, "color"), uid);
                         Upsert(uid, S(msg, "displayName") ?? "Collaborator", S(msg, "role") ?? "Editor", assigned, null);
-                        client.SendText(Json(new Dictionary<string, object> { { "type", "assignedIdentity" }, { "userId", uid }, { "color", assigned } }));
+                        client.SendText(Json(new Dictionary<string, object> { { "type", "assignedIdentity" }, { "userId", uid }, { "color", assigned }, { "protocol", OTCapability }, { "caps", new[] { OTCapability } } }));
                         BroadcastParticipants();
                         break;
                     }
@@ -1251,7 +1575,53 @@ namespace MicroCode.Views
                         var ack = new Dictionary<string, object> { { "type", "editAck" }, { "path", rel }, { "revision", o.Item2 }, { "merged", o.Item3 } };
                         if (o.Item3) ack["content"] = o.Item1;
                         client.SendText(Json(ack));
-                        Server.Broadcast(Json(FileBufferMessage(rel, o.Item1, o.Item2, uid, name, color)), o.Item3 ? null : uid);
+                        break;
+                    }
+                    case "op":
+                    {
+                        string rel = NormalizeRelativePath(S(msg, "path") ?? "");
+                        string opId = S(msg, "opId");
+                        int? baseRev = I(msg, "baseRevision");
+                        CollabTextOperation op = null;
+                        object rawOp;
+                        if (msg.TryGetValue("op", out rawOp))
+                        {
+                            try { op = CollabTextOperation.FromJson(rawOp); }
+                            catch (CollabOTException) { op = null; }
+                        }
+                        if (rel.Length == 0 || uid.Length == 0 || !baseRev.HasValue || op == null)
+                        {
+                            client.SendText(Json(HostOTErrorPayload(rel, opId, "invalid")));
+                            return;
+                        }
+                        string name = S(msg, "displayName") ?? (known != null ? known.DisplayName : "Collaborator");
+                        string color = known != null ? known.Color : (S(msg, "color") ?? "#3B82F6");
+                        var outcome = HostReceiveOperation(rel, op, baseRev.Value, uid, name, color, opId);
+                        if (outcome.Status == HostOpStatus.Duplicate)
+                        {
+                            client.SendText(Json(HostOTCommitPayload(rel, outcome.Commit, name, color)));
+                        }
+                        else if (outcome.Status == HostOpStatus.Rejected)
+                        {
+                            client.SendText(Json(HostOTErrorPayload(rel, opId, outcome.Reason)));
+                        }
+                        break;
+                    }
+                    case "opSync":
+                    {
+                        string rel = NormalizeRelativePath(S(msg, "path") ?? "");
+                        if (rel.Length == 0) return;
+                        int since = I(msg, "since") ?? 0;
+                        var doc = HostOTDocument(rel);
+                        var commits = doc.OperationsSince(since);
+                        if (commits != null)
+                        {
+                            foreach (var c in commits) client.SendText(Json(HostOTCommitPayload(rel, c)));
+                        }
+                        else
+                        {
+                            client.SendText(Json(HostOTErrorPayload(rel, null, "stale")));
+                        }
                         break;
                     }
                     case "fsEvent": ApplyFileSystemEvent(msg, true, uid); break;
@@ -1285,21 +1655,33 @@ namespace MicroCode.Views
             Fire();
         }
 
-        // ── peer: join ──
+        // ── peer: join & deep-links ──
 
-        /// <summary>Parses a full invite URL (http(s)://host[:port][/relay-prefix]/?code=X), a LAN token (host:port#CODE),
-        /// host:port, or a bare 6-character room code (tried against this machine's own LAN host).</summary>
-        public Tuple<string, string> ParseJoinInput(string raw)
+        static string GetQ(Dictionary<string, string> q, string k)
+        {
+            string v;
+            return q.TryGetValue(k, out v) ? v : null;
+        }
+
+        static Tuple<string, string> ParseJoinTarget(string raw)
         {
             string t = (raw ?? "").Trim(), baseEndpoint = "", code = "";
-            if (t.StartsWith("http://") || t.StartsWith("https://"))
+            if (t.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || t.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
                 Uri u;
                 if (Uri.TryCreate(t, UriKind.Absolute, out u))
                 {
-                    string path = System.Text.RegularExpressions.Regex.Replace(System.Text.RegularExpressions.Regex.Replace(u.AbsolutePath, "/index\\.html$", ""), "/+$", "");
-                    baseEndpoint = u.Scheme + "://" + u.Host + (u.IsDefaultPort ? "" : ":" + u.Port) + path;
-                    foreach (var pair in u.Query.TrimStart('?').Split('&')) { var kv = pair.Split(new[] { '=' }, 2); if (kv.Length == 2 && kv[0] == "code") code = Uri.UnescapeDataString(kv[1]).ToUpperInvariant(); }
+                    string path = System.Text.RegularExpressions.Regex.Replace(u.AbsolutePath, "/(join/?|index\\.html)$", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    path = System.Text.RegularExpressions.Regex.Replace(path, "/+$", "");
+                    baseEndpoint = u.Scheme.ToLowerInvariant() + "://" + u.Host + (u.IsDefaultPort ? "" : ":" + u.Port) + path;
+                    foreach (var pair in u.Query.TrimStart('?').Split('&'))
+                    {
+                        var kv = pair.Split(new[] { '=' }, 2);
+                        if (kv.Length == 2 && string.Equals(Uri.UnescapeDataString(kv[0]), "code", StringComparison.OrdinalIgnoreCase))
+                        {
+                            code = Uri.UnescapeDataString(kv[1]).ToUpperInvariant();
+                        }
+                    }
                 }
             }
             else if (t.Contains("#"))
@@ -1307,11 +1689,149 @@ namespace MicroCode.Views
                 var parts = t.Split('#');
                 string host = System.Text.RegularExpressions.Regex.Replace(parts[0].Trim(), "/+$", "");
                 code = (parts.Length > 1 ? parts[1] : "").Trim().ToUpperInvariant();
-                baseEndpoint = host.StartsWith("http") ? host : "http://" + host;
+                baseEndpoint = host.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || host.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ? host : "http://" + host;
             }
-            else if (t.Contains(":") && !t.Contains(" ")) baseEndpoint = "http://" + t;
-            else { code = t.ToUpperInvariant(); baseEndpoint = "http://" + SelectedLanAddress + ":" + (Server.IsRunning ? Server.Port : CollabServer.FirstPort); }
+            else if (t.Contains(":") && !t.Contains(" "))
+            {
+                baseEndpoint = "http://" + t;
+            }
+            else
+            {
+                code = t.ToUpperInvariant();
+            }
             return Tuple.Create(baseEndpoint, code);
+        }
+
+        /// <summary>Parses a MicroCode-only invite deep-link (microcode://collab?...).</summary>
+        public static CollabInviteInfo ParseInviteUri(string raw)
+        {
+            var info = new CollabInviteInfo();
+            string t = (raw ?? "").Trim();
+            if (t.Length == 0) return info;
+            Uri u;
+            if (!Uri.TryCreate(t, UriKind.Absolute, out u)) return info;
+            if (!string.Equals(u.Scheme, "microcode", StringComparison.OrdinalIgnoreCase)) return info;
+            string uriHost = (u.Host ?? "").ToLowerInvariant();
+            if (uriHost != "collab" && uriHost != "team-collab") return info;
+
+            var q = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in (u.Query ?? "").TrimStart('?').Split('&'))
+            {
+                if (pair.Length == 0) continue;
+                int eq = pair.IndexOf('=');
+                string k = Uri.UnescapeDataString(eq >= 0 ? pair.Substring(0, eq) : pair);
+                string v = eq >= 0 ? Uri.UnescapeDataString(pair.Substring(eq + 1)) : "";
+                if (!q.ContainsKey(k)) q[k] = v;
+            }
+
+            string action = (GetQ(q, "action") ?? "").Trim().ToLowerInvariant();
+            string mode = (GetQ(q, "mode") ?? "").Trim().ToLowerInvariant();
+            string token = (GetQ(q, "token") ?? GetQ(q, "url") ?? "").Trim();
+            string endpoint = (GetQ(q, "endpoint") ?? GetQ(q, "host") ?? "").Trim();
+            string code = (GetQ(q, "code") ?? "").Trim().ToUpperInvariant();
+
+            if (action == "host")
+            {
+                info.Action = "host";
+                info.Mode = (mode == "tunnel" || mode == "online") ? "online" : (mode.Length > 0 ? mode : "lan");
+                info.IsValid = true;
+                return info;
+            }
+            if (action == "leave" || action == "stop")
+            {
+                info.Action = "leave";
+                info.IsValid = true;
+                return info;
+            }
+
+            if (token.Length > 0 || endpoint.Length > 0 || code.Length > 0)
+            {
+                info.Action = "join";
+                if (token.Length > 0)
+                {
+                    info.Token = token;
+                    var p = ParseJoinTarget(token);
+                    info.Endpoint = p.Item1;
+                    info.Code = p.Item2.Length > 0 ? p.Item2 : code;
+                }
+                else if (endpoint.Length > 0)
+                {
+                    var p = ParseJoinTarget(endpoint);
+                    info.Endpoint = p.Item1;
+                    info.Code = p.Item2.Length > 0 ? p.Item2 : code;
+                    info.Token = info.Code.Length > 0 ? (info.Endpoint + "/?code=" + Uri.EscapeDataString(info.Code)) : info.Endpoint;
+                }
+                else
+                {
+                    info.Code = code;
+                    info.Token = code;
+                }
+
+                Uri eu;
+                if (info.Endpoint.Length > 0 && Uri.TryCreate(info.Endpoint, UriKind.Absolute, out eu))
+                {
+                    info.HostDisplay = eu.Host + (eu.IsDefaultPort ? "" : ":" + eu.Port);
+                }
+                else if (info.Token.Contains("#"))
+                {
+                    info.HostDisplay = info.Token.Split('#')[0];
+                }
+                else
+                {
+                    info.HostDisplay = info.Endpoint.Length > 0 ? info.Endpoint : "LAN host";
+                }
+                info.IsValid = info.Endpoint.Length > 0 || info.Code.Length > 0;
+                return info;
+            }
+
+            info.Action = "open";
+            info.IsValid = true;
+            return info;
+        }
+
+        /// <summary>Parses a full invite URL (http(s)://host[:port][/relay-prefix]/?code=X), a microcode://collab deep-link,
+        /// a LAN token (host:port#CODE), host:port, or a bare 6-character room code (tried against this machine's own LAN host).</summary>
+        public Tuple<string, string> ParseJoinInput(string raw)
+        {
+            string t = (raw ?? "").Trim();
+            if (t.StartsWith("microcode://", StringComparison.OrdinalIgnoreCase))
+            {
+                var invite = ParseInviteUri(t);
+                if (!invite.IsValid || invite.Action != "join") return Tuple.Create("", "");
+                string ep = invite.Endpoint.Length > 0 ? invite.Endpoint : ("http://" + SelectedLanAddress + ":" + (Server.IsRunning ? Server.Port : CollabServer.FirstPort));
+                return Tuple.Create(ep, invite.Code);
+            }
+            var parsed = ParseJoinTarget(t);
+            string baseEndpoint = parsed.Item1;
+            if (baseEndpoint.Length == 0 && parsed.Item2.Length > 0)
+            {
+                baseEndpoint = "http://" + SelectedLanAddress + ":" + (Server.IsRunning ? Server.Port : CollabServer.FirstPort);
+            }
+            return Tuple.Create(baseEndpoint, parsed.Item2);
+        }
+
+        public async Task<CollabSession> JoinFromDeepLink(string rawUrl, bool mount = true)
+        {
+            var info = ParseInviteUri(rawUrl);
+            if (!info.IsValid || info.Action != "join")
+            {
+                Status = CollabStatus.Error;
+                StatusError = "Invalid invite link";
+                Fire();
+                return null;
+            }
+            if (Session != null)
+            {
+                if (!Session.IsHostingLocally && !string.IsNullOrEmpty(info.Code) && string.Equals(Session.ShareCode, info.Code, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Session;
+                }
+                await LeaveSession();
+            }
+            string target = info.Endpoint.Length > 0
+                ? (info.Code.Length > 0 ? info.Endpoint.TrimEnd('/') + "/?code=" + Uri.EscapeDataString(info.Code) : info.Endpoint)
+                : info.Code;
+            return await JoinSession(target, mount);
         }
 
         public async Task<CollabSession> JoinSession(string input, bool mount = true)
@@ -1319,6 +1839,7 @@ namespace MicroCode.Views
             var parsed = ParseJoinInput(input);
             string baseEndpoint = parsed.Item1, code = parsed.Item2;
             if (baseEndpoint.Length == 0) { Status = CollabStatus.Error; StatusError = "Invalid address"; Fire(); return null; }
+            lock (_gate) { _hostSupportsOT = false; _peerOT.Clear(); _peerResyncQueue.Clear(); }
             Status = CollabStatus.Connecting; StatusError = null; Fire();
             Dictionary<string, object> json;
             try
@@ -1359,7 +1880,7 @@ namespace MicroCode.Views
             Directory.CreateDirectory(root);
             string hostActive = "";
             var lazy = new List<string>();
-            lock (_gate) SharedRoot = Path.GetFullPath(root).TrimEnd('\\');
+            lock (_gate) SharedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
             try
             {
                 string text;
@@ -1483,9 +2004,10 @@ namespace MicroCode.Views
                     });
                 }
             }
+            if (HasOTCapability(json) && !Session.IsHostingLocally) _hostSupportsOT = true;
             var revs = Obj(json, "fileRevisions") ?? new Dictionary<string, object>();
             var buffers = Obj(json, "openBuffers");
-            if (buffers != null)
+            if (!PeerUsesOT && buffers != null)
                 foreach (var kv in buffers)
                 {
                     string rel = SanitizeRelativePath(kv.Key), remote = kv.Value as string;
@@ -1546,7 +2068,7 @@ namespace MicroCode.Views
                     await ws.ConnectAsync(uri, ct);
                     connected = true;
                     _peerWs = ws; IsWebSocketRealtimeActive = true; Trace("ws connected");
-                    await SendPeer(new Dictionary<string, object> { { "type", "hello" }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor } });
+                    await SendPeer(new Dictionary<string, object> { { "type", "hello" }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "role", LocalRole }, { "color", LocalColor }, { "protocol", OTCapability }, { "caps", new[] { OTCapability } } });
                     Fire();
                     var buf = new byte[65536]; var msg = new MemoryStream();
                     while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
@@ -1588,12 +2110,27 @@ namespace MicroCode.Views
             string type = S(msg, "type");
             if (type == null) return;
             if (type != "mouse" && type != "cursor") Trace("ws in " + type + (S(msg, "path") != null ? " " + S(msg, "path") : "") + (I(msg, "revision").HasValue ? " rev " + I(msg, "revision") : ""));
+            bool catchUp = false;
+            var pendingSends = new List<Action>();
             lock (_gate)
             {
                 switch (type)
                 {
-                    case "welcome": case "participants": { var arr = Arr(msg, "participants"); Trace("ws " + type + " (" + (arr != null ? arr.Count : -1) + " people)"); if (arr != null) ApplyParticipantsArray(arr); break; }
-                    case "assignedIdentity": if (!string.IsNullOrEmpty(S(msg, "color"))) { LocalColor = S(msg, "color"); Upsert(LocalUserId, LocalDisplayName, LocalRole, LocalColor, null); } break;
+                    case "welcome":
+                    {
+                        if (HasOTCapability(msg)) _hostSupportsOT = true;
+                        var arr = Arr(msg, "participants"); Trace("ws " + type + " (" + (arr != null ? arr.Count : -1) + " people)"); if (arr != null) ApplyParticipantsArray(arr);
+                        break;
+                    }
+                    case "participants": { var arr = Arr(msg, "participants"); Trace("ws " + type + " (" + (arr != null ? arr.Count : -1) + " people)"); if (arr != null) ApplyParticipantsArray(arr); break; }
+                    case "assignedIdentity":
+                    {
+                        if (!string.IsNullOrEmpty(S(msg, "color"))) { LocalColor = S(msg, "color"); Upsert(LocalUserId, LocalDisplayName, LocalRole, LocalColor, null); }
+                        if (HasOTCapability(msg)) { _hostSupportsOT = true; catchUp = true; }
+                        break;
+                    }
+                    case "op": PeerHandleCommit(msg, pendingSends); break;
+                    case "opError": PeerHandleOTError(msg, pendingSends); break;
                     case "mouse":
                     {
                         string uid = S(msg, "userId");
@@ -1629,6 +2166,7 @@ namespace MicroCode.Views
                     }
                     case "fileBuffer":
                     {
+                        if (PeerUsesOT) return;
                         string raw = S(msg, "path"), remote = S(msg, "content");
                         if (raw == null || remote == null) return;
                         if (S(msg, "authorId") == LocalUserId && B(msg, "merged") != true) return;
@@ -1656,7 +2194,310 @@ namespace MicroCode.Views
                     default: return;
                 }
             }
+            if (catchUp) PeerCatchUpAfterConnect();
+            foreach (var act in pendingSends) act();
             Fire();
+        }
+
+        // ── ot1 peer helpers ──
+
+        PeerOTFileState PeerOTState(string rel)
+        {
+            PeerOTFileState state;
+            if (_peerOT.TryGetValue(rel, out state)) return state;
+            string initContent;
+            if (!_contents.TryGetValue(rel, out initContent)) initContent = "";
+            state = new PeerOTFileState
+            {
+                Client = new CollabOTClient(Rev(rel)),
+                Shadow = initContent,
+                OutstandingOpId = null
+            };
+            _peerOT[rel] = state;
+            return state;
+        }
+
+        void PeerSubmitLocalContent(string rel, string content)
+        {
+            CollabTextOperation outgoing = null;
+            int baseRev = 0;
+            string opId = null;
+            bool needResync = false;
+            lock (_gate)
+            {
+                if (_peerResyncQueue.ContainsKey(rel))
+                {
+                    _contents[rel] = content;
+                    return;
+                }
+                var state = PeerOTState(rel);
+                if (content == state.Shadow) return;
+                var op = CollabTextOperation.FromDiff(state.Shadow, content);
+                state.Shadow = content;
+                try
+                {
+                    outgoing = state.Client.ApplyLocal(op);
+                    if (outgoing != null)
+                    {
+                        opId = NewOperationId();
+                        state.OutstandingOpId = opId;
+                        baseRev = state.Client.Revision;
+                    }
+                }
+                catch (CollabOTException)
+                {
+                    needResync = true;
+                }
+                _contents[rel] = content;
+                WriteRelative(rel, content);
+                if (needResync) PeerResync(rel);
+            }
+            if (!needResync && outgoing != null)
+            {
+                PeerSendOperation(rel, outgoing, baseRev, opId);
+            }
+        }
+
+        void PeerSendOperation(string rel, CollabTextOperation op, int baseRevision, string opId)
+        {
+            var s = Session;
+            if (s == null) return;
+            var payload = new Dictionary<string, object>
+            {
+                { "type", "op" },
+                { "path", rel },
+                { "baseRevision", baseRevision },
+                { "op", op.ToJson() },
+                { "opId", opId },
+                { "userId", LocalUserId },
+                { "displayName", LocalDisplayName },
+                { "color", LocalColor }
+            };
+            if (IsWebSocketRealtimeActive && _peerWs != null)
+            {
+                SendPeerFireAndForget(payload);
+                return;
+            }
+            var _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
+                    using (var resp = await Http.PostAsync(s.RemoteEndpoint + "/api/collab/op", new StringContent(Json(payload), Encoding.UTF8, "application/json"), cts.Token))
+                    {
+                        var json = Parse(await resp.Content.ReadAsStringAsync());
+                        if (json != null)
+                        {
+                            var pending = new List<Action>();
+                            lock (_gate) PeerHandleOTReply(json, pending);
+                            foreach (var act in pending) act();
+                            Fire();
+                        }
+                    }
+                }
+                catch (Exception ex) { if (!(ex is HttpRequestException || ex is TaskCanceledException)) throw; Debug.WriteLine("collab op: " + ex.Message); }
+            });
+        }
+
+        void PeerHandleOTReply(Dictionary<string, object> json, List<Action> pendingSends)
+        {
+            if (json == null) return;
+            if (B(json, "ok") == false || S(json, "type") == "opError")
+            {
+                PeerHandleOTError(json, pendingSends);
+                return;
+            }
+            var commits = Arr(json, "commits");
+            if (commits == null) return;
+            foreach (var item in commits.OfType<Dictionary<string, object>>())
+            {
+                PeerHandleCommit(item, pendingSends);
+            }
+        }
+
+        void PeerHandleCommit(Dictionary<string, object> msg, List<Action> pendingSends)
+        {
+            string rel = NormalizeRelativePath(S(msg, "path") ?? "");
+            int? revOpt = I(msg, "revision");
+            if (rel.Length == 0 || !revOpt.HasValue) return;
+            int revision = revOpt.Value;
+            List<Dictionary<string, object>> resyncList;
+            if (_peerResyncQueue.TryGetValue(rel, out resyncList))
+            {
+                resyncList.Add(msg);
+                return;
+            }
+
+            CollabTextOperation op;
+            object rawOp;
+            if (!msg.TryGetValue("op", out rawOp)) { PeerResync(rel); return; }
+            try { op = CollabTextOperation.FromJson(rawOp); }
+            catch (CollabOTException) { PeerResync(rel); return; }
+
+            if (!_peerOT.ContainsKey(rel))
+            {
+                int known = _revisions.ContainsKey(rel) ? _revisions[rel] : 0;
+                if (revision <= known) return;
+                if (revision != known + 1 || (!_contents.ContainsKey(rel) && op.BaseLength != 0))
+                {
+                    PeerResync(rel);
+                    return;
+                }
+            }
+
+            var state = PeerOTState(rel);
+            if (revision <= state.Client.Revision) return;
+            if (revision != state.Client.Revision + 1)
+            {
+                PeerResync(rel);
+                return;
+            }
+
+            string opId = S(msg, "opId");
+            if (!string.IsNullOrEmpty(opId) && opId == state.OutstandingOpId)
+            {
+                var next = state.Client.Acknowledge(revision);
+                if (next != null)
+                {
+                    string nextId = NewOperationId();
+                    state.OutstandingOpId = nextId;
+                    int nextBase = revision;
+                    var nextOp = next;
+                    pendingSends.Add(() => PeerSendOperation(rel, nextOp, nextBase, nextId));
+                }
+                else
+                {
+                    state.OutstandingOpId = null;
+                }
+                _revisions[rel] = revision;
+                _peerBaseRevisions[rel] = revision;
+                return;
+            }
+
+            try
+            {
+                var local = state.Client.ApplyRemote(op, revision);
+                state.Shadow = local.Apply(state.Shadow);
+                _revisions[rel] = revision;
+                _peerBaseRevisions[rel] = revision;
+                _contents[rel] = state.Shadow;
+                int? expectedLen = I(msg, "length");
+                if (state.Client.IsSynchronized && expectedLen.HasValue && expectedLen.Value != state.Shadow.Length)
+                {
+                    PeerResync(rel);
+                    return;
+                }
+                WriteRelative(rel, state.Shadow);
+                PushToEditor(rel, state.Shadow);
+            }
+            catch (CollabOTException)
+            {
+                PeerResync(rel);
+            }
+        }
+
+        void PeerHandleOTError(Dictionary<string, object> msg, List<Action> pendingSends)
+        {
+            string rel = NormalizeRelativePath(S(msg, "path") ?? "");
+            if (rel.Length == 0) return;
+            string content = S(msg, "content");
+            int? rev = I(msg, "revision");
+            if (content != null && rev.HasValue)
+            {
+                PeerApplySnapshot(rel, content, rev.Value, pendingSends);
+            }
+            else
+            {
+                PeerResync(rel);
+            }
+        }
+
+        void PeerResync(string rel)
+        {
+            if (_peerResyncQueue.ContainsKey(rel) || Session == null) return;
+            string endpoint = Session.RemoteEndpoint;
+            if (string.IsNullOrEmpty(endpoint)) return;
+            _peerResyncQueue[rel] = new List<Dictionary<string, object>>();
+            var _ = Task.Run(async () =>
+            {
+                var j = await GetJson(endpoint + "/api/collab/file?path=" + Uri.EscapeDataString(rel));
+                string content = S(j, "content");
+                var pending = new List<Action>();
+                lock (_gate)
+                {
+                    if (content == null)
+                    {
+                        _peerResyncQueue.Remove(rel);
+                        _peerOT.Remove(rel);
+                        return;
+                    }
+                    PeerApplySnapshot(rel, content, I(j, "revision") ?? 1, pending);
+                }
+                foreach (var act in pending) act();
+                Fire();
+            });
+        }
+
+        void PeerApplySnapshot(string rel, string content, int revision, List<Action> pendingSends)
+        {
+            List<Dictionary<string, object>> queued;
+            if (_peerResyncQueue.TryGetValue(rel, out queued)) _peerResyncQueue.Remove(rel);
+            _peerOT[rel] = new PeerOTFileState { Client = new CollabOTClient(revision), Shadow = content, OutstandingOpId = null };
+            _contents[rel] = content;
+            _revisions[rel] = revision;
+            _peerBaseRevisions[rel] = revision;
+            RecordSnapshot(rel, revision, content);
+            WriteRelative(rel, content);
+            PushToEditor(rel, content);
+            if (queued != null)
+            {
+                foreach (var qmsg in queued.OrderBy(m => I(m, "revision") ?? 0))
+                {
+                    PeerHandleCommit(qmsg, pendingSends);
+                }
+            }
+        }
+
+        void PeerCatchUpAfterConnect()
+        {
+            var items = new List<Tuple<string, int, CollabTextOperation, string>>();
+            lock (_gate)
+            {
+                if (!PeerUsesOT) return;
+                foreach (var kv in _peerOT)
+                {
+                    items.Add(Tuple.Create(kv.Key, kv.Value.Client.Revision, kv.Value.Client.Outstanding, kv.Value.OutstandingOpId));
+                }
+            }
+            foreach (var it in items)
+            {
+                SendPeerFireAndForget(new Dictionary<string, object> { { "type", "opSync" }, { "path", it.Item1 }, { "since", it.Item2 } });
+                if (it.Item3 != null && it.Item4 != null)
+                {
+                    PeerSendOperation(it.Item1, it.Item3, it.Item2, it.Item4);
+                }
+            }
+        }
+
+        async Task PeerPollOperationsIfNeeded(string endpoint)
+        {
+            var targets = new List<Tuple<string, int>>();
+            lock (_gate)
+            {
+                if (!PeerUsesOT || IsWebSocketRealtimeActive) return;
+                foreach (var kv in _peerOT)
+                {
+                    if (!_peerResyncQueue.ContainsKey(kv.Key)) targets.Add(Tuple.Create(kv.Key, kv.Value.Client.Revision));
+                }
+            }
+            foreach (var t in targets)
+            {
+                var json = await GetJson(endpoint + "/api/collab/ops?path=" + Uri.EscapeDataString(t.Item1) + "&since=" + t.Item2);
+                if (json == null) continue;
+                var pending = new List<Action>();
+                lock (_gate) PeerHandleOTReply(json, pending);
+                foreach (var act in pending) act();
+            }
         }
 
         void PeerSyncTick()
@@ -1680,6 +2521,7 @@ namespace MicroCode.Views
                         {
                             Interlocked.Exchange(ref _syncFailures, 0);
                             lock (_gate) { if (Session == null || Session.IsHostingLocally) return; Status = CollabStatus.Connected; ApplySyncPayload(json); FlushPendingWrites(); }
+                            if (!IsWebSocketRealtimeActive && PeerUsesOT) await PeerPollOperationsIfNeeded(endpoint);
                             Fire();
                         }
                         else SyncFailed();
@@ -1748,6 +2590,7 @@ namespace MicroCode.Views
             {
                 Session = null; _participants = new List<CollabParticipant>(); _sharedFiles = new List<CollabSharedFile>(); _sharedDirs = new List<string>();
                 _contents.Clear(); _revisions.Clear(); _snapshots.Clear(); _peerBaseRevisions.Clear(); _lastSynced.Clear(); _diskMod.Clear();
+                _otDocs.Clear(); _peerOT.Clear(); _peerResyncQueue.Clear(); _lastEditActivityAt.Clear(); _hostSupportsOT = false;
                 FollowingUserId = null; _localCursor = null; _localMouse = null; SharedRoot = null; _syncFailures = 0; _pendingDisk.Clear(); ResetAITeammate();
                 Status = CollabStatus.Disconnected; IsWebSocketRealtimeActive = false;
             }
@@ -1765,6 +2608,7 @@ namespace MicroCode.Views
             string rel = NormalizeRelativePath(path);
             if (rel.Length == 0) return;
             Dictionary<string, object> peerMsg = null;
+            bool submitPeerOT = false;
             lock (_gate)
             {
                 string last;
@@ -1772,19 +2616,23 @@ namespace MicroCode.Views
                 _lastSynced[rel] = content;
                 if (s.IsHostingLocally)
                 {
-                    string prev;
-                    if (_contents.TryGetValue(rel, out prev) && !_snapshots.ContainsKey(rel)) { int r0 = Rev(rel); _revisions[rel] = r0; RecordSnapshot(rel, r0, prev); }
-                    int next = Rev(rel) + 1;
-                    // the host's own unsaved typing stays unsaved (its Save writes the file); peers get the buffer live
-                    _contents[rel] = content; _revisions[rel] = next; RecordSnapshot(rel, next, content);
-                    Server.Broadcast(Json(FileBufferMessage(rel, content, next, LocalUserId, LocalDisplayName, LocalColor)), LocalUserId);
+                    // the host's own unsaved typing stays unsaved (its Save writes the file); peers get the op/buffer live
+                    HostCommitContent(rel, content, LocalUserId, LocalDisplayName, LocalColor, false, false, false, false);
                     return;
                 }
-                int pb; int baseRev = _peerBaseRevisions.TryGetValue(rel, out pb) ? pb : Rev(rel);
-                _contents[rel] = content;
-                WriteRelative(rel, content);
-                peerMsg = new Dictionary<string, object> { { "type", "edit" }, { "path", rel }, { "content", content }, { "baseRevision", baseRev }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor } };
+                if (PeerUsesOT)
+                {
+                    submitPeerOT = true;
+                }
+                else
+                {
+                    int pb; int baseRev = _peerBaseRevisions.TryGetValue(rel, out pb) ? pb : Rev(rel);
+                    _contents[rel] = content;
+                    WriteRelative(rel, content);
+                    peerMsg = new Dictionary<string, object> { { "type", "edit" }, { "path", rel }, { "content", content }, { "baseRevision", baseRev }, { "userId", LocalUserId }, { "displayName", LocalDisplayName }, { "color", LocalColor } };
+                }
             }
+            if (submitPeerOT) { PeerSubmitLocalContent(rel, content); return; }
             if (IsWebSocketRealtimeActive) { SendPeerFireAndForget(peerMsg); return; }
             var _ = Task.Run(async () =>
             {
@@ -1917,6 +2765,13 @@ namespace MicroCode.Views
             if (OnlineMode && !string.IsNullOrEmpty(PublicTunnelUrl)) return PublicTunnelUrl.TrimEnd('/') + "/?code=" + s.ShareCode;
             if (s.IsHostingLocally) return SelectedLanAddress + ":" + Server.Port + "#" + s.ShareCode;
             return s.RemoteEndpoint + "#" + s.ShareCode;
+        }
+
+        public string GetDeepLink()
+        {
+            string link = GetShareLink();
+            if (string.IsNullOrEmpty(link)) return null;
+            return "microcode://collab?token=" + Uri.EscapeDataString(link);
         }
 
         // ── online relay (Dotmini official HTTPS relay, cloudflared fallback) ──

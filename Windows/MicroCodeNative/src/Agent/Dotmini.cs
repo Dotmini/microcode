@@ -122,8 +122,9 @@ namespace MicroCode.Views
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
             catch { try { System.Diagnostics.Process.Start(url); } catch { } }
         }
+        public static bool StandaloneAI;
         public static string AppVersion { get { return AppInfo.Version; } }
-        public static string UserAgent { get { return "MicroCode/" + AppVersion + " (Windows)"; } }
+        public static string UserAgent { get { return (StandaloneAI ? "MicroCodeAI/" : "MicroCode/") + AppVersion + " (Windows)"; } }
         public static double UnixNow() { return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds; }
 
         /// <summary>Raises a static event on the UI thread.</summary>
@@ -362,6 +363,8 @@ namespace MicroCode.Views
             catch { return false; }
         }
 
+        public static event Action<string> CollabDeepLinkReceived;
+
         public static async Task<bool> HandleDeepLink(string rawUri)
         {
             Uri u;
@@ -370,6 +373,27 @@ namespace MicroCode.Views
             var qp = ParseQueryString(u.Query);
             string host = (u.Host ?? "").ToLowerInvariant();
             string path = (u.AbsolutePath ?? "").Trim('/').ToLowerInvariant();
+            if (host == "collab" || path == "collab")
+            {
+                if (CollabDeepLinkReceived != null)
+                {
+                    string raw = rawUri.Trim();
+                    DotminiNet.Raise(() => CollabDeepLinkReceived(raw));
+                    return true;
+                }
+                return false;
+            }
+            if (host == "colab" || path == "colab")
+            {
+                string ep; string tk;
+                qp.TryGetValue("endpoint", out ep);
+                qp.TryGetValue("token", out tk);
+                if (!string.IsNullOrEmpty(ep)) Defaults.Set("colabEndpoint", ep);
+                if (!string.IsNullOrEmpty(tk)) Defaults.Set("colabToken", Dpapi.Protect(tk));
+                Defaults.Flush();
+                DotminiNet.Raise(Changed);
+                return !string.IsNullOrEmpty(ep);
+            }
             if (host == "platform-connect" || path == "platform-connect")
             {
                 string code;
@@ -1227,6 +1251,7 @@ namespace MicroCode.Views
         public const int Port = 18888;
         static TcpListener _listener;
         public static string Error;
+        public static Func<string, string> McpRpcHandler;
         public static bool Running { get { return _listener != null; } }
 
         public static bool Start()
@@ -1346,6 +1371,18 @@ namespace MicroCode.Views
                         json = DJ.Ser(new Dictionary<string, object> { { "success", ok }, { "error", DotminiAuth.LastError ?? "" } });
                         status = ok ? "200 OK" : "400 Bad Request";
                         if (ok) DotminiNet.Raise(BringToFront);
+                    }
+                    else if (method == "POST" && (path == "/mcp" || path == "/v1/mcp"))
+                    {
+                        json = LocalBridge.McpRpcHandler != null
+                            ? LocalBridge.McpRpcHandler(bodyText)
+                            : "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"MCP handler not bound\"}}";
+                        status = "200 OK";
+                    }
+                    else if (method == "GET" && (path == "/mcp" || path == "/v1/mcp"))
+                    {
+                        json = DJ.Ser(new Dictionary<string, object> { { "status", "ok" }, { "protocol", "mcp-streamable-http" }, { "endpoint", "http://127.0.0.1:" + Port + "/mcp" } });
+                        status = "200 OK";
                     }
                     else if (method == "GET" && (path.StartsWith("/v1/status") || path == "/v1/health"))
                     {

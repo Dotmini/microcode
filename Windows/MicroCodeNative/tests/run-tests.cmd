@@ -8,6 +8,9 @@ rem   HarnessTests        agent harness: multi-platform rules, hooks + workspace
 rem   StudioTests         API Studio (cURL, environments, route scan, .env, real loopback requests) + first-launch onboarding
 rem   CollabTests         Team Collaboration: a real host + peer on loopback (join, merge, realtime CRUD, presence, chat, portal, relay)
 rem   PhoneCompanionTests Mobile Connect 2.0 (QR encoder, PIN/approval auth, HTTP routes, CloudAI sync, Dotmini Cloud LocalBridge)
+rem   CollabOTTests       ot1 real-time OT protocol (UTF-16 transforms, fuzz convergence, WebSocket + HTTP relay, deep-links)
+rem   StudioModesTests    Science, RemoteX/SSH, Scenario, Embedded/Serial, OpenVSX, Database/SQLite, Container, CI/CD, CloudGPU
+rem   HarnessParityTests  ConPTY + ANSI stripper, LSP JSON-RPC stdio, SubAgentHarness, ACP, Memory, RepoMap, ARX, Evidence, ComputerUse
 setlocal
 set FW=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319
 set WPF=%FW%\WPF
@@ -34,6 +37,12 @@ if errorlevel 1 set FAILED=1
 call :suite CollabTests
 if errorlevel 1 set FAILED=1
 call :suite PhoneCompanionTests
+if errorlevel 1 set FAILED=1
+call :suite CollabOTTests
+if errorlevel 1 set FAILED=1
+call :suite StudioModesTests
+if errorlevel 1 set FAILED=1
+call :suite HarnessParityTests
 if errorlevel 1 set FAILED=1
 exit /b %FAILED%
 

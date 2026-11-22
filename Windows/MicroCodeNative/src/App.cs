@@ -85,6 +85,40 @@ namespace MicroCode
                 return PnsDaemon.RunHeadless(app, pnsPort);
             }
             var state = AppState.Shared;
+            DotminiNet.StandaloneAI = args.Contains("--standalone-ai") || System.IO.Path.GetFileNameWithoutExtension(Environment.GetCommandLineArgs()[0] ?? "").Equals("MicroCode AI", StringComparison.OrdinalIgnoreCase);
+            LocalBridge.McpRpcHandler = LocalMcpServer.HandleJsonRpc;
+            LocalMcpServer.IdeToolHandler = (tName, tArgs) =>
+            {
+                if (tName == "playground_run")
+                {
+                    string lang = DJ.Str(tArgs, "language") ?? "python";
+                    string code = DJ.Str(tArgs, "code") ?? "";
+                    string tmpF = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "mc-mcp-pg-" + Guid.NewGuid().ToString("N").Substring(0, 6) + (lang == "python" ? ".py" : lang == "powershell" ? ".ps1" : ".js"));
+                    System.IO.File.WriteAllText(tmpF, code, System.Text.Encoding.UTF8);
+                    string exe = lang == "python" ? "python" : lang == "powershell" ? "powershell" : "node";
+                    string a = lang == "powershell" ? "-NoProfile -File \"" + tmpF + "\"" : "\"" + tmpF + "\"";
+                    var pr = StudioProcess.Run(exe, a, null, 20000, null);
+                    try { System.IO.File.Delete(tmpF); } catch { }
+                    return "Exit " + pr.ExitCode + "\n" + pr.Combined;
+                }
+                if (tName == "api_studio" || tName == "database_studio" || tName == "computer_use")
+                    return AgentRunner.ExecuteIsolated(AppState.Shared.WorkspaceFolder ?? Environment.CurrentDirectory, AppState.Shared.WorkspaceFolder, tName, tArgs, new ToolStep(), System.Threading.CancellationToken.None);
+                if (tName == "ide_browser")
+                {
+                    string u = DJ.Str(tArgs, "url");
+                    if (!string.IsNullOrEmpty(u)) { IdeBrowserView.InitialUrl = u; Application.Current.Dispatcher.BeginInvoke(new Action(() => AppState.Shared.SwitchToMode(EditorMode.Browser))); }
+                    return "Navigated IDE Browser to " + (u ?? "(current)");
+                }
+                return null;
+            };
+            SubAgentHarness.CustomExecutor = ctx =>
+            {
+                var msgs = new List<ChatMessage> { new ChatMessage { Role = "user", Content = ctx.Prompt ?? "" } };
+                string sys = !string.IsNullOrEmpty(ctx.Definition.SystemPrompt) ? ctx.Definition.SystemPrompt : ("You are a specialized sub-agent in MicroCode. Workspace: " + (ctx.Workspace ?? ""));
+                var res = AgentRunner.Run(msgs, sys, !string.IsNullOrEmpty(ctx.Workspace), !ctx.Definition.AllowWrite, null, new AgentCallbacks(), ctx.Token).GetAwaiter().GetResult();
+                return res.Text ?? "";
+            };
+            DotminiAuth.CollabDeepLinkReceived += uri => { var _ = CollabService.Shared.JoinFromDeepLink(uri); };
             string snapshot = Arg(args, "--snapshot");
             string agentPrompt = Arg(args, "--agent-prompt");
             if (snapshot != null)
@@ -122,6 +156,7 @@ namespace MicroCode
             if (folder != null) state.OpenWorkspace(Path.GetFullPath(folder));
             if (file != null) state.LoadFile(Path.GetFullPath(file));
             string mode = Arg(args, "--mode");
+            if (DotminiNet.StandaloneAI && mode == null) state.SwitchToMode(EditorMode.AIAgent);
             if (mode == "agent") state.SwitchToMode(EditorMode.AIAgent);
             else if (mode == "playground") state.SwitchToMode(EditorMode.Playground);
             else if (mode == "api")

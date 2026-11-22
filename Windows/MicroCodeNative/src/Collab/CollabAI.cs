@@ -299,14 +299,9 @@ namespace MicroCode.Views
                     string prev;
                     if (!_contents.TryGetValue(rel, out prev) || prev != text)
                     {
-                        int next = Rev(rel) + 1;
-                        if (prev != null && !_snapshots.ContainsKey(rel)) RecordSnapshot(rel, next - 1, prev);
-                        _contents[rel] = text; _revisions[rel] = next; _lastSynced[rel] = text; RecordSnapshot(rel, next, text);
                         try { string full = FullPathOf(rel); if (full != null && File.Exists(full)) _diskMod[rel] = File.GetLastWriteTimeUtc(full); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-                        PushToEditor(rel, text);
                         RecordActivity(AITeammateDisplayName, AITeammateColor, "AI edited", rel + ":" + safeLine);
-                        Server.Broadcast(Json(FileBufferMessage(rel, text, next, AITeammateUserId, AITeammateDisplayName, AITeammateColor)), null);
-                        if (!_sharedFiles.Any(f => f.RelativePath == rel)) IndexLocalWorkspaceFiles(true);
+                        HostCommitContent(rel, text, AITeammateUserId, AITeammateDisplayName, AITeammateColor, false, true, true, false);
                     }
                 }
                 BroadcastParticipants();

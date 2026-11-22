@@ -411,10 +411,14 @@ namespace MicroCode.Views
         }
     }
 
-    /// <summary>Source Control navigator (GitPanelView): branch + changed files from `git status --porcelain`.</summary>
+    /// <summary>Source Control navigator (GitPanelView): branches, commit/pull/push, history, and merge conflict resolver.</summary>
     public class GitPanel : Border
     {
         readonly AppState _app;
+        string _commitMsg = "", _statusNote = "";
+        int _subTab; // 0=Changes, 1=History, 2=Branches
+        string _selectedCommitHash = "", _selectedCommitDiff = "";
+
         public GitPanel(AppState app) { _app = app; Refresh(); }
 
         void Refresh()
@@ -427,21 +431,143 @@ namespace MicroCode.Views
                 return;
             }
             string branch = Git(ws, "rev-parse --abbrev-ref HEAD").Trim();
+            if (branch.Length == 0) branch = "HEAD";
             var lines = Git(ws, "status --porcelain").Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var list = V.VLead(2); list.Align = Cross.Stretch;
-            list.Children.Add(V.Box(V.H(6, Sym.Icon("arrow.triangle.branch", 11, t.Accent), V.T(branch, 11.5, FontWeights.SemiBold, t.Primary), V.Sp(),
-                V.Button(Sym.Icon("arrow.clockwise", 10.5, t.Secondary), Refresh)), V.P(10, 8), null, 0));
-            list.Children.Add(V.Box(V.T("CHANGES (" + lines.Length + ")", 9.5, FontWeights.Bold, t.Secondary), V.P(10, 4), null, 0));
-            foreach (var l in lines.Take(500))
+            var conflicts = new List<string>();
+            foreach (var l in lines)
             {
                 if (l.Length < 4) continue;
-                string code = l.Substring(0, 2).Trim(), file = l.Substring(3).Trim().Trim('"');
-                Brush c = code.Contains("M") ? t.SysOrange : code.Contains("A") || code == "??" ? t.SysGreen : code.Contains("D") ? t.SysRed : t.Secondary;
-                string full = Path.Combine(ws, file.Replace('/', '\\'));
-                list.Children.Add(V.Button(V.Box(V.H(6, Sym.Icon(FileTreeView.IconName(file, false), 11, FileTreeView.IconColor(file, false)), V.Shrink(V.T(Path.GetFileName(file), 11.5, FontWeights.Normal, t.Primary)),
-                    V.Shrink(V.T(Path.GetDirectoryName(file), 10, FontWeights.Normal, t.S(0.7))), V.Sp(), V.Mono(code == "??" ? "U" : code, 10, FontWeights.Bold, c)), V.P(10, 3), null, 0), () => { if (File.Exists(full)) _app.LoadFile(full); }));
+                string c2 = l.Substring(0, 2);
+                if (c2 == "UU" || c2 == "AA" || c2 == "DD" || c2 == "AU" || c2 == "UA" || c2 == "DU" || c2 == "UD")
+                    conflicts.Add(l.Substring(3).Trim().Trim('"'));
+            }
+
+            var list = V.VLead(4); list.Align = Cross.Stretch;
+            // Header + Pull/Push/Fetch/Refresh actions
+            var pullBtn = V.Button(V.Box(V.T("Pull", 10, FontWeights.Medium, t.Primary), V.P(6, 2), t.P(0.08), 4), () => { _statusNote = GitResult(ws, "pull"); Refresh(); });
+            var pushBtn = V.Button(V.Box(V.T("Push", 10, FontWeights.Medium, t.Primary), V.P(6, 2), t.P(0.08), 4), () => { _statusNote = GitResult(ws, "push"); Refresh(); });
+            list.Children.Add(V.Box(V.H(5, Sym.Icon("arrow.triangle.branch", 11, t.Accent), V.Shrink(V.T(branch, 11.5, FontWeights.SemiBold, t.Primary)), V.Sp(), pullBtn, pushBtn,
+                V.Button(Sym.Icon("arrow.clockwise", 10.5, t.Secondary), Refresh)), V.P(10, 7), null, 0));
+
+            // Sub-tabs: Changes | History | Branches
+            Func<int, string, UIElement> tabBtn = (idx, title) =>
+            {
+                bool on = _subTab == idx;
+                return V.Button(V.Box(V.T(title, 10.5, on ? FontWeights.SemiBold : FontWeights.Normal, on ? t.Primary : t.Secondary), V.P(8, 3), on ? t.P(0.14) : Brushes.Transparent, 5), () => { _subTab = idx; Refresh(); });
+            };
+            list.Children.Add(V.Box(V.H(3, tabBtn(0, "Changes (" + lines.Length + ")"), tabBtn(1, "History"), tabBtn(2, "Branches")), V.P(10, 2), t.P(0.03), 0));
+
+            if (!string.IsNullOrEmpty(_statusNote))
+                list.Children.Add(V.Box(V.Wrap(V.Mono(_statusNote, 10, FontWeights.Normal, t.Secondary), TextAlignment.Left), V.P(10, 4), t.P(0.05), 4));
+
+            if (_subTab == 0)
+            {
+                // Commit box
+                var msgBox = new TextBox { Text = _commitMsg, FontSize = 11, Foreground = t.Primary, Background = t.P(0.06), BorderBrush = t.P(0.14), BorderThickness = new Thickness(1), Padding = new Thickness(6, 4, 6, 4), CaretBrush = t.Primary };
+                msgBox.TextChanged += delegate { _commitMsg = msgBox.Text; };
+                var commitBtn = V.Button(V.Box(V.T("Commit All", 10.5, FontWeights.SemiBold, Brushes.White), V.P(8, 4), t.Accent, 5), () =>
+                {
+                    if (string.IsNullOrWhiteSpace(_commitMsg)) { _statusNote = "Enter a commit message."; Refresh(); return; }
+                    Git(ws, "add -A");
+                    _statusNote = GitResult(ws, "commit -m \"" + _commitMsg.Replace("\"", "\\\"") + "\"");
+                    _commitMsg = "";
+                    Refresh();
+                });
+                list.Children.Add(V.Box(V.H(5, V.Flex(msgBox), commitBtn), V.P(10, 4), null, 0));
+
+                // Merge Conflicts Resolver section
+                if (conflicts.Count > 0)
+                {
+                    list.Children.Add(V.Box(V.T("MERGE CONFLICTS (" + conflicts.Count + ")", 9.5, FontWeights.Bold, t.SysRed), V.P(10, 4), null, 0));
+                    foreach (var cf in conflicts)
+                    {
+                        string relCf = cf;
+                        string fullCf = Path.Combine(ws, relCf.Replace('/', '\\'));
+                        var cRow = V.VLead(4,
+                            V.T(relCf, 11, FontWeights.SemiBold, t.SysRed),
+                            V.H(4,
+                                V.Button(V.Box(V.T("Keep Current", 9.5, FontWeights.Medium, t.Primary), V.P(6, 2), t.P(0.10), 4), () => { ResolveConflict(ws, fullCf, relCf, 0); Refresh(); }),
+                                V.Button(V.Box(V.T("Take Incoming", 9.5, FontWeights.Medium, t.Primary), V.P(6, 2), t.P(0.10), 4), () => { ResolveConflict(ws, fullCf, relCf, 1); Refresh(); }),
+                                V.Button(V.Box(V.T("Keep Both", 9.5, FontWeights.Medium, t.Primary), V.P(6, 2), t.P(0.10), 4), () => { ResolveConflict(ws, fullCf, relCf, 2); Refresh(); })));
+                        list.Children.Add(V.Box(cRow, V.P(10, 6), t.Op(t.SysRed, 0.08), 6));
+                    }
+                }
+
+                list.Children.Add(V.Box(V.T("CHANGES (" + lines.Length + ")", 9.5, FontWeights.Bold, t.Secondary), V.P(10, 4), null, 0));
+                foreach (var l in lines.Take(500))
+                {
+                    if (l.Length < 4) continue;
+                    string code = l.Substring(0, 2).Trim(), file = l.Substring(3).Trim().Trim('"');
+                    Brush c = code.Contains("M") ? t.SysOrange : code.Contains("A") || code == "??" ? t.SysGreen : code.Contains("D") ? t.SysRed : t.Secondary;
+                    string full = Path.Combine(ws, file.Replace('/', '\\'));
+                    list.Children.Add(V.Button(V.Box(V.H(6, Sym.Icon(FileTreeView.IconName(file, false), 11, FileTreeView.IconColor(file, false)), V.Shrink(V.T(Path.GetFileName(file), 11.5, FontWeights.Normal, t.Primary)),
+                        V.Shrink(V.T(Path.GetDirectoryName(file), 10, FontWeights.Normal, t.S(0.7))), V.Sp(), V.Mono(code == "??" ? "U" : code, 10, FontWeights.Bold, c)), V.P(10, 3), null, 0), () => { if (File.Exists(full)) _app.LoadFile(full); }));
+                }
+            }
+            else if (_subTab == 1)
+            {
+                var logLines = Git(ws, "log -n 25 --pretty=format:\"%h|%cr|%an|%s\"").Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var ll in logLines)
+                {
+                    var parts = ll.Split(new[] { '|' }, 4);
+                    if (parts.Length < 4) continue;
+                    string h = parts[0], relT = parts[1], auth = parts[2], subj = parts[3];
+                    list.Children.Add(V.Button(V.Box(V.VLead(2,
+                        V.H(6, V.Mono(h, 10, FontWeights.Bold, t.Accent), V.Shrink(V.T(subj, 11.5, FontWeights.Medium, t.Primary))),
+                        V.T(auth + " · " + relT, 10, FontWeights.Normal, t.Secondary)), V.P(10, 5), _selectedCommitHash == h ? t.P(0.08) : Brushes.Transparent, 5),
+                        () => { _selectedCommitHash = h; _selectedCommitDiff = Git(ws, "show --stat " + h); Refresh(); }));
+                }
+                if (_selectedCommitDiff.Length > 0)
+                    list.Children.Add(V.Box(V.Wrap(V.Mono(_selectedCommitDiff, 10, FontWeights.Normal, t.Secondary), TextAlignment.Left), V.P(10, 8), t.P(0.04), 6));
+            }
+            else
+            {
+                var brLines = Git(ws, "branch --format=\"%(refname:short)\"").Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var bLine in brLines)
+                {
+                    string bName = bLine.Trim();
+                    if (bName.Length == 0) continue;
+                    bool isCur = bName == branch;
+                    list.Children.Add(V.Button(V.Box(V.H(6, Sym.Icon("arrow.triangle.branch", 10.5, isCur ? t.SysGreen : t.Secondary), V.T(bName, 11.5, isCur ? FontWeights.SemiBold : FontWeights.Normal, isCur ? t.SysGreen : t.Primary)), V.P(10, 4), null, 0),
+                        () => { if (!isCur) { _statusNote = GitResult(ws, "checkout \"" + bName + "\""); Refresh(); } }));
+                }
             }
             Child = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        }
+
+        static void ResolveConflict(string ws, string fullPath, string relPath, int mode)
+        {
+            try
+            {
+                if (!File.Exists(fullPath)) return;
+                string raw = File.ReadAllText(fullPath, System.Text.Encoding.UTF8);
+                var sb = new System.Text.StringBuilder();
+                var lines = raw.Replace("\r\n", "\n").Split('\n');
+                int state = 0; // 0=normal, 1=ours, 2=theirs
+                foreach (var line in lines)
+                {
+                    if (line.StartsWith("<<<<<<<")) { state = 1; continue; }
+                    if (line.StartsWith("=======") && state == 1) { state = 2; continue; }
+                    if (line.StartsWith(">>>>>>>") && state == 2) { state = 0; continue; }
+                    if (state == 0 || (state == 1 && (mode == 0 || mode == 2)) || (state == 2 && (mode == 1 || mode == 2)))
+                        sb.Append(line).Append('\n');
+                }
+                File.WriteAllText(fullPath, sb.ToString(), System.Text.Encoding.UTF8);
+                Git(ws, "add \"" + relPath + "\"");
+            }
+            catch { }
+        }
+
+        static string GitResult(string cwd, string args)
+        {
+            try
+            {
+                var p = Process.Start(new ProcessStartInfo("git", args) { WorkingDirectory = cwd, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = System.Text.Encoding.UTF8, StandardErrorEncoding = System.Text.Encoding.UTF8 });
+                string o = p.StandardOutput.ReadToEnd() + "\n" + p.StandardError.ReadToEnd();
+                p.WaitForExit(15000);
+                return o.Trim();
+            }
+            catch (Exception ex) { return ex.Message; }
         }
 
         public static string Git(string cwd, string args)

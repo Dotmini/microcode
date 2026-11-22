@@ -156,6 +156,28 @@ static class PhoneCompanionTests
             Check(parsedModels.Count == 1 && parsedModels[0].Id == "claude-sonnet-4-6", "DotminiCloud.Parse decodes model catalog JSON");
             bool refreshDone = DotminiCloud.Refresh(false).Wait(25000);
             Check(refreshDone && (DotminiCloud.Models.Count > 0 || !string.IsNullOrEmpty(DotminiCloud.LastError)), "DotminiCloud.Refresh loads live models or captures diagnostic LastError (" + DotminiCloud.Models.Count + " models, err=" + (DotminiCloud.LastError ?? "") + ")");
+
+            // 6. LocalMcpServer JSON-RPC + LocalBridge /mcp + SkillRouter/SkillEngine
+            LocalMcpServer.Enabled = true;
+            LocalBridge.McpRpcHandler = LocalMcpServer.HandleJsonRpc;
+            string initRpc = LocalMcpServer.HandleJsonRpc("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+            Check(initRpc.Contains("MicroCode Windows") && initRpc.Contains("2025-11-25"), "LocalMcpServer initialize returns MCP 2025-11-25 handshake");
+            string listRpc = LocalMcpServer.HandleJsonRpc("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
+            Check(listRpc.Contains("computer_use") && listRpc.Contains("database_studio"), "LocalMcpServer tools/list exposes IDE tool suite");
+            string readRpc = LocalMcpServer.HandleJsonRpc("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"file_read\",\"arguments\":{\"path\":\"hello.cs\"}}}");
+            Check(readRpc.Contains("class Demo"), "LocalMcpServer tools/call executes file_read inside workspace");
+
+            if (LocalBridge.Running)
+            {
+                var mcpHttp = HttpReq(hc, HttpMethod.Post, "http://127.0.0.1:" + LocalBridge.Port + "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/list\"}", null, null);
+                Check(mcpHttp.Item1 == 200 && mcpHttp.Item2.Contains("file_read"), "LocalBridge POST /mcp routes live MCP JSON-RPC requests");
+            }
+
+            var thaiTokens = SkillRouter.Tokenize("สร้างเว็บ Python and Rust");
+            Check(thaiTokens.Contains("python") && thaiTokens.Contains("rust") && thaiTokens.Count >= 4, "SkillRouter tokenizes English and Thai spans");
+            string crys = SkillEngine.Crystallize("demo-test-skill", "Verify crystallized skill", "# Step 1\nRun tests", wsDir);
+            Check(crys.Contains("Crystallized skill") && File.Exists(Path.Combine(wsDir, ".microcode", "skills", "demo-test-skill", "SKILL.md")), "SkillEngine.Crystallize writes SKILL.md into project skills folder");
+            Check(McpManager.TractFor("postgres-mcp", new List<McpToolInfo>()) == "Data", "McpManager.TractFor classifies MCP servers into PNS tracts");
         }
         finally
         {

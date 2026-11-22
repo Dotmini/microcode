@@ -784,7 +784,25 @@ namespace MicroCode.Views
             local.Add(MenuItemSpec.Item("Configure Local LLM in Settings...", "gearshape", () => { Defaults.Set("ai_key_mode", "local"); settings(2); }));
             root.Add(new MenuItemSpec { Title = "Local LLM (Ollama, LM Studio, llama.cpp)", Icon = "desktopcomputer", Checked = mode == "local", Children = local });
 
-            root.Add(new MenuItemSpec { Title = "ACP Harnesses (Claude Code, Codex, Gemini CLI, Goose, Cursor...)", Icon = "terminal", Children = new List<MenuItemSpec> { new MenuItemSpec { Title = "External agent harnesses are not available on Windows yet", Disabled = true } } });
+            var acpItems = new List<MenuItemSpec>();
+            foreach (var ag in AcpHostService.ListKnown())
+            {
+                var agent = ag;
+                string badge = agent.Available ? "Installed" : "Not in PATH";
+                acpItems.Add(new MenuItemSpec
+                {
+                    Title = agent.Name + " (" + badge + ")",
+                    Icon = agent.Available ? "checkmark.circle.fill" : "circle.dashed",
+                    Disabled = !agent.Available,
+                    Action = () =>
+                    {
+                        _input.Text = "/acp " + agent.Id + " ";
+                        _input.CaretIndex = _input.Text.Length;
+                        _input.Focus();
+                    }
+                });
+            }
+            root.Add(new MenuItemSpec { Title = "ACP Harnesses (Claude Code, Codex, Gemini CLI, Goose, Cursor...)", Icon = "terminal", Children = acpItems });
 
             var cloud = new List<MenuItemSpec>();
             var sess = DotminiAuth.Session;
@@ -1210,7 +1228,7 @@ namespace MicroCode.Views
                 case "plan":
                     ClearComposer();
                     if (arg.Length == 0) { AgentStore.TogglePlan(); UpdatePlaceholder(); return true; }
-                    Start(arg, files, true);
+                    Start("[PLAN MODE — 3-Phase Analysis]\nAnalyze requirements, inspect relevant files/architecture read-only, then call `create_plan` (or present the structured Implementation Plan) for: " + arg, files, true);
                     return true;
                 case "task": ClearComposer(); AgentStore.SelectTask(); return true;
                 case "model": ClearComposer(); if (arg.Length > 0) { AIConfig.SetModelFor(AIConfig.Provider, arg); _app.Notify("agentBar"); } else SettingsWindow.Show(_app, 2); return true;
@@ -1249,9 +1267,98 @@ namespace MicroCode.Views
                     AgentStore.SelectTaskTab(7);
                     if (arg.Length > 0) { var dispatch = PnsOrchestrator.Shared.DispatchMission(arg, _app.WorkspaceFolder, Pns.PolicyIsolated, null, true); }
                     return true;
-                case "arx": case "compare": case "squad":
-                    ClearComposer(); LocalReply("/" + cmd, "`/" + cmd + "` is part of the macOS MicroCode agent platform and is not available in the Windows build yet.");
+                case "arx":
+                {
+                    ClearComposer();
+                    var sCur = AgentStore.Active;
+                    if (arg.StartsWith("import ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string impPath = arg.Substring(7).Trim().Trim('"');
+                        try
+                        {
+                            var cap = ArxCapsuleService.ImportCapsule(impPath);
+                            if (cap != null && cap.Session != null)
+                            {
+                                AgentStore.Sessions.Insert(0, cap.Session);
+                                AgentStore.ActiveId = cap.Session.Id;
+                                AgentStore.Save(); AgentStore.Notify();
+                                LocalReply("/arx import", "Imported `.arx` capsule (" + cap.Session.Messages.Count + " messages, " + cap.Rules.Count + " rules, " + cap.Memories.Count + " memories).");
+                            }
+                        }
+                        catch (Exception ex) { LocalReply("/arx import", "Failed: " + ex.Message); }
+                        return true;
+                    }
+                    if (sCur == null) { LocalReply("/arx", "No active conversation to export."); return true; }
+                    string defDir = _app.WorkspaceFolder != null ? Path.Combine(_app.WorkspaceFolder, ".microcode") : Defaults.Dir;
+                    string outPath = arg.Length > 0 && !arg.Equals("export", StringComparison.OrdinalIgnoreCase) ? arg.Trim('"') : Path.Combine(defDir, "capsule-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".arx");
+                    try { LocalReply("/arx export", "Exported `.arx` capsule to `" + ArxCapsuleService.ExportCapsule(sCur, outPath) + "`."); }
+                    catch (Exception ex) { LocalReply("/arx export", "Failed: " + ex.Message); }
                     return true;
+                }
+                case "acp":
+                {
+                    if (arg.Length == 0) { ClearComposer(); LocalReply("/acp", "Usage: `/acp <claude|codex|gemini|goose|opencode|aider> <prompt>`\nAvailable: " + string.Join(", ", AcpHostService.ListAvailable().Select(a => a.Id))); return true; }
+                    int sp = arg.IndexOf(' ');
+                    if (sp <= 0) { ClearComposer(); LocalReply("/acp " + arg, "Usage: `/acp " + arg + " <prompt>`"); return true; }
+                    string aid = arg.Substring(0, sp).Trim(), promptA = arg.Substring(sp + 1).Trim();
+                    ClearComposer();
+                    string wsA = _app.WorkspaceFolder;
+                    LocalReply("/acp " + aid + " " + promptA, "Running external ACP harness `" + aid + "`…");
+                    Task.Run(() => AcpHostService.RunPrompt(aid, promptA, wsA, 120000)).ContinueWith(tk => Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        var r = tk.Status == TaskStatus.RanToCompletion ? tk.Result : null;
+                        string outTxt = r == null ? "ACP execution failed." : (r.Success ? r.Output : "Exit " + r.ExitCode + "\n" + r.Error + "\n" + r.Output);
+                        var act = AgentStore.Active;
+                        if (act != null && act.Messages.Count > 0) { act.Messages[act.Messages.Count - 1].Content = "### ACP Harness (`" + aid + "`)\n\n" + outTxt; AgentStore.Save(); AgentStore.Notify(); }
+                    })));
+                    return true;
+                }
+                case "squad":
+                {
+                    if (arg.Length == 0) { ClearComposer(); LocalReply("/squad", "Usage: `/squad <task description>` — dispatches Architect, Implementer & Reviewer sub-agents."); return true; }
+                    ClearComposer();
+                    string wsS = _app.WorkspaceFolder;
+                    LocalReply("/squad " + arg, "Dispatching 3-specialist Agent Squad (Architect · Implementer · Reviewer)…");
+                    Task.Run(() => SubAgentHarness.RunSquad(arg, wsS)).ContinueWith(tk => Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        var act = AgentStore.Active;
+                        if (act != null && act.Messages.Count > 0)
+                        {
+                            act.Messages[act.Messages.Count - 1].Content = tk.Status == TaskStatus.RanToCompletion ? tk.Result.Summary : "Squad failed: " + (tk.Exception != null ? tk.Exception.GetBaseException().Message : "error");
+                            AgentStore.Save(); AgentStore.Notify();
+                        }
+                    })));
+                    return true;
+                }
+                case "compare":
+                {
+                    if (arg.Length == 0) { ClearComposer(); LocalReply("/compare", "Usage: `/compare <prompt>` — compares responses from 2 models side by side."); return true; }
+                    ClearComposer();
+                    if (!AIConfig.IsConfigured) { LocalReply("/compare " + arg, AIClient.NotConnectedText()); return true; }
+                    string altModel = DotminiCloud.Models.Count > 1 ? DotminiCloud.Models.Select(x => x.Id).FirstOrDefault(id => id != AIConfig.ModelDisplayName) : AIConfig.ModelFor(AIConfig.Provider);
+                    var msgListA = new List<ChatMessage> { new ChatMessage { Role = "user", Content = arg } };
+                    string wsCmp = _app.WorkspaceFolder;
+                    LocalReply("/compare " + arg, "Running parallel model comparison (`" + AIConfig.BadgeTitle + " · " + AIConfig.ModelDisplayName + "` vs `" + (altModel ?? "secondary") + "`)…");
+                    Task.Run(async () =>
+                    {
+                        var t1 = AgentRunner.Run(msgListA, "Answer concisely and accurately.", false, true, null, new AgentCallbacks(), CancellationToken.None);
+                        var inst = SubAgentHarness.InvokeSubagent("self", "Compare Model", arg, altModel ?? "secondary", wsCmp);
+                        await Task.WhenAll(t1);
+                        SubAgentHarness.WaitSubagent(inst.Id, 45000);
+                        string r1 = t1.Status == TaskStatus.RanToCompletion ? t1.Result.Text : "(error)";
+                        string r2 = !string.IsNullOrEmpty(inst.Result) ? inst.Result : r1;
+                        return "## Model Comparison\n\n### Model A (`" + AIConfig.ModelDisplayName + "`)\n" + r1 + "\n\n---\n\n### Model B (`" + (altModel ?? "secondary") + "`)\n" + r2;
+                    }).ContinueWith(tk => Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        var act = AgentStore.Active;
+                        if (act != null && act.Messages.Count > 0)
+                        {
+                            act.Messages[act.Messages.Count - 1].Content = tk.Status == TaskStatus.RanToCompletion ? tk.Result : "Compare failed.";
+                            AgentStore.Save(); AgentStore.Notify();
+                        }
+                    })));
+                    return true;
+                }
             }
             return false;
         }
@@ -1281,7 +1388,7 @@ namespace MicroCode.Views
         static readonly Regex MentionRe = new Regex(@"(?<=^|\s)@([^\s@]+)");
 
         // ── running a turn ─────────────────────────────────────────────────────
-        string SystemPrompt(string ws, bool plan, bool tools)
+        string SystemPrompt(string ws, bool plan, bool tools, string userPrompt)
         {
             string persona = Defaults.Str("agentPersona", "main");
             var sb = new StringBuilder();
@@ -1301,7 +1408,14 @@ namespace MicroCode.Views
                 sb.Append("\n[PLAN MODE — MANDATORY ANALYSIS BEFORE PLANNING (ห้ามมั่วเด็ดขาด)]\n1. Research first: explore the REAL workspace with `list_directory_tree`, `file_read`, `grep_search` and `file_search`. Never invent file paths or use generic placeholder steps.\n2. Then reply with the implementation plan in Markdown:\n   # Implementation Plan: <specific title>\n   ## Summary\n   ## User Review Required — breaking changes, trade-offs, decisions\n   ## Open Questions\n   ## Proposed Changes — grouped by component; tag every file `[NEW]`, `[MODIFY]` or `[DELETE]` and say exactly what changes\n   ## Verification Plan — exact build / test commands and manual checks\n3. ZERO MUTATION before approval: do NOT edit files or run mutating commands. The user reviews the plan and clicks Approve before anything is changed.\n");
             if (persona == "explorer") sb.Append("\n[EXPLORER] Research the codebase read-only and report findings with file:line references. Do not edit files.\n");
             else if (persona == "reviewer") sb.Append("\n[REVIEWER] Act as a senior code reviewer: find correctness bugs, security issues and risky patterns, most severe first, with file:line references. Do not edit files unless asked.\n");
-            sb.Append(AgentContext.Extra(ws));
+            sb.Append(AgentContext.Extra(ws, userPrompt));
+            string mem = AgentMemoryService.FormatForPrompt(userPrompt ?? "", ws, 5);
+            if (!string.IsNullOrEmpty(mem)) sb.Append(mem);
+            if (ws != null && tools)
+            {
+                string repoMap = RepoMapService.BuildRepoMap(ws, 2200);
+                if (!string.IsNullOrEmpty(repoMap)) sb.Append("\n\n").Append(repoMap);
+            }
             // Shared tasks are explicit, reviewable contracts: only the selected contract, never another person's prompts
             string teamTask = CollabService.HasShared ? CollabService.Shared.Tasks.ContextForSelectedTask() : null;
             if (teamTask != null) sb.Append("\n\n").Append(teamTask);
@@ -1342,7 +1456,7 @@ namespace MicroCode.Views
             bool plan = planOverride ?? (AgentStore.Bar.PlanMode || persona == "planner" || revision);
             bool tools = AgentRunner.AgentModeEnabled && ws != null;
             bool readOnly = plan || persona == "explorer" || persona == "reviewer";
-            string system = SystemPrompt(ws, plan && tools, tools);
+            string system = SystemPrompt(ws, plan && tools, tools, text);
             var history = s.Messages.ToList();
 
             _running = true;
@@ -1376,9 +1490,13 @@ namespace MicroCode.Views
                 if (task.Status == TaskStatus.RanToCompletion)
                 {
                     var r = task.Result;
-                    reply.Content = r.Text; reply.Thinking = r.Thinking; reply.Steps = r.Steps; reply.Model = r.Model;
+                    var ev = ExecutionEvidenceGuard.CheckCompletion(r.Steps, r.Text);
+                    reply.Content = (ev != null && !ev.Passed && ev.Warnings.Count > 0) ? (r.Text + "\n\n> ⚠️ **Evidence Guard**: " + string.Join("; ", ev.Warnings)) : r.Text;
+                    reply.Thinking = r.Thinking; reply.Steps = r.Steps; reply.Model = r.Model;
                     reply.InputTokens = r.InputTokens; reply.OutputTokens = r.OutputTokens; reply.Requests = r.Requests; reply.UsageEstimated = r.Estimated;
                     if (plan && tools && r.Text.Trim().Length > 0) reply.PlanState = "pending";
+                    if (r.Steps != null && r.Steps.Count > 0 && !string.IsNullOrEmpty(r.Text))
+                        AgentMemoryService.Remember(s.Name ?? "Task", r.Text.Length > 360 ? r.Text.Substring(0, 360) : r.Text, ws);
                 }
                 else
                 {
