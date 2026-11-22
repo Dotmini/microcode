@@ -25,5 +25,14 @@ if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1
 )
+(
+  echo ^<?xml version="1.0" encoding="utf-8"?^>
+  echo ^<configuration^>
+  echo   ^<startup^>^<supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" /^>^</startup^>
+  echo   ^<runtime^>
+  echo     ^<AppContextSwitchOverrides value="Switch.System.Net.DontEnableSystemDefaultTlsVersions=false;Switch.System.ServiceModel.DisableUsingServicePointManagerSecurityProtocols=false" /^>
+  echo   ^</runtime^>
+  echo ^</configuration^>
+) > "%OUT%\MicroCode.exe.config"
 echo Built %OUT%\MicroCode.exe
 endlocal

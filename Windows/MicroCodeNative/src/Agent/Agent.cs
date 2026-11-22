@@ -74,6 +74,7 @@ namespace MicroCode.Views
     {
         public static List<ChatSession> Sessions = new List<ChatSession>();
         public static string ActiveId;
+        public static AgentView CurrentView;
         public static readonly AgentBarState Bar = new AgentBarState();
         public static event Action Changed;
         static string FilePath { get { return Path.Combine(Defaults.Dir, "chats.json"); } }
@@ -117,6 +118,28 @@ namespace MicroCode.Views
             if (resetModes) ClearModes();
             Save(); Notify();
             return s;
+        }
+
+        public static void SwitchChat(string sessionId, string projectPath = null)
+        {
+            var target = Sessions.FirstOrDefault(x => x.Id == sessionId);
+            if (target != null)
+            {
+                ActiveId = target.Id;
+                if (!string.IsNullOrEmpty(target.ProjectPath) && Directory.Exists(target.ProjectPath))
+                {
+                    AppState.Shared.OpenWorkspace(target.ProjectPath);
+                }
+                ClearModes();
+                Notify();
+            }
+            else if (!string.IsNullOrEmpty(projectPath) && Directory.Exists(projectPath))
+            {
+                AppState.Shared.OpenWorkspace(projectPath);
+                var existing = Sessions.FirstOrDefault(x => string.Equals(x.ProjectPath, projectPath, StringComparison.OrdinalIgnoreCase));
+                if (existing != null) { ActiveId = existing.Id; ClearModes(); Notify(); }
+                else { NewChat(projectPath); }
+            }
         }
 
         static void ClearModes() { Bar.PlanMode = Bar.TaskMode = Bar.WalkthroughMode = Bar.CellMode = false; }
@@ -277,6 +300,30 @@ namespace MicroCode.Views
             Start(prompt, new List<string>(), null, onReply);
         }
         public void StopRun() { Stop(); }
+        public int QueuedCount { get { return _queue.Count; } }
+        public string PendingApprovalToolName { get { return _pendingApprovalToolName; } }
+        public string PendingApprovalDescription { get { return _pendingApprovalDescription; } }
+        public bool ApprovePendingTool(bool allow)
+        {
+            if (_pendingApproval == null) return false;
+            ResolveApproval(allow);
+            return true;
+        }
+        public bool ApproveLatestPlan(bool approve)
+        {
+            var s = AgentStore.Active;
+            if (s == null) return false;
+            var m = s.Messages.LastOrDefault(x => x.PlanState == "pending");
+            if (m == null) return false;
+            m.PlanState = approve ? "approved" : "rejected";
+            AgentStore.Save();
+            AgentStore.Notify();
+            if (approve && !_running)
+            {
+                Start("Plan approved. Execute the approved implementation plan cleanly step-by-step.", new List<string>(), false);
+            }
+            return true;
+        }
         readonly bool _embeddedInWelcome;
         readonly StackPanel _transcript = new StackPanel();
         readonly ScrollViewer _scroll;
@@ -298,11 +345,14 @@ namespace MicroCode.Views
         readonly List<Queued> _queue = new List<Queued>();
         Queued _sendAfterStop;
         TaskCompletionSource<bool> _pendingApproval;
+        string _pendingApprovalToolName = "", _pendingApprovalDescription = "";
         bool _planRevision;
 
         public AgentView(AppState app, bool embeddedInWelcome)
         {
             _app = app; _embeddedInWelcome = embeddedInWelcome;
+            if (!embeddedInWelcome) AgentStore.CurrentView = this;
+            Loaded += delegate { if (!embeddedInWelcome) AgentStore.CurrentView = this; };
             var t = Theme.Current;
             Background = t.WorkspaceBackground;
             _colChat = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 200 };
@@ -1371,6 +1421,8 @@ namespace MicroCode.Views
             if (_cts == null || _cts.IsCancellationRequested) { tcs.TrySetResult(false); return; }
             var t = Theme.Current;
             _pendingApproval = tcs;
+            _pendingApprovalToolName = step != null ? (step.Name ?? "tool") : "tool";
+            _pendingApprovalDescription = step != null ? AgentRunner.RequestText(step) : "";
             string risk = AgentRunner.Risk(step);
             Color rc = risk == "critical" ? Color.FromRgb(255, 69, 58) : risk == "dangerous" ? Color.FromRgb(255, 159, 10) : risk == "moderate" ? Color.FromRgb(255, 214, 10) : Color.FromRgb(48, 209, 88);
             var keys = args.Keys.OrderBy(k => k).ToList();
@@ -1428,6 +1480,8 @@ namespace MicroCode.Views
         void ResolveApproval(bool ok)
         {
             var p = _pendingApproval;
+            _pendingApprovalToolName = "";
+            _pendingApprovalDescription = "";
             _pendingApproval = null;
             _approvalHost.Child = null;
             if (p != null) p.TrySetResult(ok);

@@ -83,8 +83,10 @@ namespace MicroCode.Views
             PreviewKeyDown += (s, e) => { if (e.Key == Key.Escape) { Close(); e.Handled = true; } };
             if (SkillStore.Skills.Count == 0) SkillStore.Rescan();
             Action live = () => Dispatcher.BeginInvoke(new Action(() => { if (IsLoaded && (_tab == 6 || _tab == 2)) Rerender(); }));
+            Action phoneLive = () => Dispatcher.BeginInvoke(new Action(() => { if (IsLoaded && _tab == 11) Rerender(); }));
             DotminiAuth.Changed += live; DotminiPlatformKey.Changed += live; DotminiCloud.Changed += live;
-            Closed += delegate { DotminiAuth.Changed -= live; DotminiPlatformKey.Changed -= live; DotminiCloud.Changed -= live; };
+            PhoneCompanionService.Shared.Changed += phoneLive;
+            Closed += delegate { DotminiAuth.Changed -= live; DotminiPlatformKey.Changed -= live; DotminiCloud.Changed -= live; PhoneCompanionService.Shared.Changed -= phoneLive; };
             Render();
         }
 
@@ -623,10 +625,189 @@ namespace MicroCode.Views
             return V.Self(V.Box(V.H(8, V.Self(Sym.Icon("info.circle", 12, t.SysOrange), Cross.Start), V.Flex(V.Wrap(V.T(text, 11.5, FontWeights.Normal, t.Secondary), TextAlignment.Left))), V.P(12, 9), t.Op(t.SysOrange, 0.08), 8), Cross.Stretch);
         }
 
+        string _phoneCopyNotice = "";
+        bool _cloudProbing;
+        List<string> _cloudProbeSteps;
+
+        UIElement TogglePill(bool on, Action toggle)
+        {
+            var t = Theme.Current;
+            var knob = new Border { Width = 14, Height = 14, CornerRadius = new CornerRadius(7), Background = Brushes.White, Margin = on ? new Thickness(19, 0, 0, 0) : new Thickness(3, 0, 0, 0), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center };
+            var track = new Border { Width = 36, Height = 20, CornerRadius = new CornerRadius(10), Background = on ? t.Accent : t.P(0.16), BorderBrush = on ? t.Accent : t.P(0.22), BorderThickness = new Thickness(1), Child = knob };
+            return V.Button(track, toggle);
+        }
+
         UIElement PhoneTab()
         {
-            return HeroCard("qrcode", "Mobile Connect 2.0", "Remote Chat, File/Camera uploads, Live Preview, Git controls, Terminal, Voice Dictation, and Push.",
-                Note("The phone companion server is not available in the Windows build yet. Pairing, QR code and the 6-digit PIN will appear here once it ships."));
+            var t = Theme.Current;
+            var pc = PhoneCompanionService.Shared;
+            pc.RefreshNetworks();
+            string statusText = !pc.IsEnabled ? "OFF" : (pc.ConnectionMode == PhoneConnectionMode.Online ? "CLOUD RELAY" : ("ON :" + pc.ListeningPort));
+            Color statusClr = !pc.IsEnabled ? Color.FromRgb(142, 142, 147) : Color.FromRgb(48, 209, 88);
+            var statusBadge = V.Box(V.H(5, V.Dot(6, Theme.B(statusClr)), V.Mono(statusText, 10, FontWeights.SemiBold, pc.IsEnabled ? t.Primary : t.Secondary)), V.P(8, 3), t.P(0.08), 5);
+            var masterToggle = TogglePill(pc.IsEnabled, () => { pc.SetEnabled(!pc.IsEnabled); Rerender(); });
+
+            var header = V.Self(V.H(12,
+                V.Size(V.Box(Sym.Icon("qrcode", 18, t.Primary), V.P(0), t.P(0.08), 10), 40, 40),
+                V.Flex(V.VLead(2, V.T("Mobile Connect 2.0", 15, FontWeights.SemiBold, t.Primary),
+                    V.Wrap(V.T("Remote Chat, File/Camera uploads, Live Preview, Git controls, Terminal, Voice Dictation, and Seamless Cloud Standby.", 11.5, FontWeights.Normal, t.Secondary), TextAlignment.Left))),
+                statusBadge, masterToggle), Cross.Stretch);
+
+            var root = V.VLead(14, Card(header));
+            root.Align = Cross.Stretch;
+
+            if (!pc.IsEnabled)
+            {
+                var enableRow = V.Self(V.H(10,
+                    V.Flex(V.Wrap(V.T("Turn on Mobile Connect to control MicroCode from your phone over LAN, Tailscale, or Dotmini Cloud Relay (works even if your PC goes offline via Seamless Standby).", 11.5, FontWeights.Normal, t.Secondary), TextAlignment.Left)),
+                    PrimaryBtn("Enable Mobile Connect", () => { pc.SetEnabled(true); Rerender(); })), Cross.Stretch);
+                root.Children.Add(Card(enableRow));
+                return root;
+            }
+
+            // Pending approvals banner
+            var pendingDevs = pc.ConnectedDevices.Where(d => d.ApprovalState == PhoneDeviceApprovalState.Pending).ToList();
+            if (pendingDevs.Count > 0)
+            {
+                var pKids = new List<UIElement> {
+                    V.H(8, Sym.Icon("exclamationmark.shield.fill", 13, t.SysOrange), V.T("Pending Device Approval (" + pendingDevs.Count + ")", 12.5, FontWeights.SemiBold, t.SysOrange))
+                };
+                foreach (var d in pendingDevs)
+                {
+                    var dev = d;
+                    pKids.Add(V.Self(V.H(8,
+                        V.Flex(V.VLead(1, V.T(dev.Name + " (" + dev.IpAddress + ")", 12, FontWeights.Medium, t.Primary), V.Mono("via " + dev.ConnectionVia, 10, FontWeights.Normal, t.Secondary))),
+                        PrimaryBtn("Approve", () => { pc.ApproveDevice(dev.Id); Rerender(); }),
+                        SmallBtn("Reject", null, () => { pc.RejectDevice(dev.Id); Rerender(); })), Cross.Stretch));
+                }
+                var pStack = V.VLead(8, pKids.ToArray()); pStack.Align = Cross.Stretch;
+                root.Children.Add(V.Self(V.Box(pStack, V.P(14), t.Op(t.SysOrange, 0.10), 10, t.Op(t.SysOrange, 0.35), 1), Cross.Stretch));
+            }
+
+            // Connection Mode & Network Selector Card
+            int modeIdx = pc.ConnectionMode == PhoneConnectionMode.LAN ? 0 : pc.ConnectionMode == PhoneConnectionMode.Tailscale ? 1 : 2;
+            var modeSeg = Segmented(new[] { "Local Wi-Fi (LAN)", "Tailscale VPN", "Dotmini Cloud (Online)" }, modeIdx, idx =>
+            {
+                pc.SetConnectionMode(idx == 0 ? PhoneConnectionMode.LAN : idx == 1 ? PhoneConnectionMode.Tailscale : PhoneConnectionMode.Online);
+                Rerender();
+            });
+            var connKids = new List<UIElement> { SectionHeader("Connection Mode"), modeSeg };
+
+            if (pc.ConnectionMode == PhoneConnectionMode.LAN)
+            {
+                var adapterNames = pc.AllAdapters.Select(a => a.InterfaceName + " (" + a.IpAddress + ")").ToList();
+                string curAdapter = "";
+                foreach (var a in pc.AllAdapters) if (a.IpAddress == pc.LanIpAddress) { curAdapter = a.InterfaceName + " (" + a.IpAddress + ")"; break; }
+                if (adapterNames.Count > 0)
+                {
+                    var pop = PopUp(curAdapter.Length > 0 ? curAdapter : adapterNames[0], adapterNames, picked =>
+                    {
+                        foreach (var a in pc.AllAdapters)
+                            if (picked == a.InterfaceName + " (" + a.IpAddress + ")") { pc.SetSelectedLanIp(a.IpAddress); break; }
+                        Rerender();
+                    }, double.NaN);
+                    connKids.Add(V.Self(V.H(8, V.T("Network Adapter:", 12, FontWeights.Medium, t.Secondary), V.Flex(pop), SmallBtn("Refresh", "arrow.clockwise", () => { pc.RefreshNetworks(); Rerender(); })), Cross.Stretch));
+                }
+                else
+                {
+                    connKids.Add(V.Self(V.H(8, V.Flex(Note("No active IPv4 LAN adapter detected. Check your Wi-Fi / Ethernet connection.")), SmallBtn("Refresh", "arrow.clockwise", () => { pc.RefreshNetworks(); Rerender(); })), Cross.Stretch));
+                }
+            }
+            else if (pc.ConnectionMode == PhoneConnectionMode.Tailscale)
+            {
+                if (!string.IsNullOrEmpty(pc.TailscaleIp))
+                    connKids.Add(V.Self(V.H(8, V.Dot(7, Theme.B(Color.FromRgb(48, 209, 88))), V.T("Tailscale Interface Ready:", 12, FontWeights.Medium, t.Primary), V.Mono(pc.TailscaleIp, 12, FontWeights.SemiBold, t.Accent), V.Sp(), SmallBtn("Refresh", "arrow.clockwise", () => { pc.RefreshNetworks(); Rerender(); })), Cross.Stretch));
+                else
+                    connKids.Add(V.Self(V.H(8, V.Flex(Note("Tailscale IPv4 (100.64.0.0/10) not found on this PC. Ensure Tailscale is connected.")), SmallBtn("Refresh", "arrow.clockwise", () => { pc.RefreshNetworks(); Rerender(); })), Cross.Stretch));
+            }
+            else
+            {
+                string ts = pc.TunnelStatus ?? "stopped";
+                Color tClr = ts == "connected" ? Color.FromRgb(48, 209, 88) : ts == "starting" ? Color.FromRgb(255, 159, 10) : ts == "failed" ? Color.FromRgb(255, 69, 58) : Color.FromRgb(142, 142, 147);
+                string tLabel = ts == "connected" ? "LIVE RELAY · Seamless Standby Armed" : ts == "starting" ? "Connecting to CloudAI Relay…" : ts == "failed" ? ("Relay Error: " + (pc.TunnelError ?? "Disconnected")) : "Relay Stopped";
+                connKids.Add(V.Self(V.H(8,
+                    V.Dot(7, Theme.B(tClr)),
+                    V.Flex(V.T(tLabel, 12, FontWeights.Medium, ts == "failed" ? t.SysRed : t.Primary)),
+                    SmallBtn("Sync Standby", "arrow.triangle.2.circlepath", () => { pc.TriggerShadowSync(true); _phoneCopyNotice = "Shadow state synced to Cloud Standby."; Rerender(); }),
+                    SmallBtn("Reconnect", "arrow.clockwise", () => { pc.StartOnlineTunnel(); Rerender(); })), Cross.Stretch));
+                if (!DotminiAuth.SignedIn)
+                    connKids.Add(V.Self(V.H(8, V.Flex(Note("Sign in with your Dotmini ID for CloudAI Relay & Seamless Offline Standby continuity.")), SmallBtn("Sign In", null, () => { _tab = 6; Render(); _scroll.ScrollToTop(); })), Cross.Stretch));
+            }
+            root.Children.Add(Card(connKids.ToArray()));
+
+            // QR Code + Pairing URL + 6-Digit PIN Card
+            string pairUrl = pc.ActivePairingUrl ?? "";
+            string baseUrl = pc.ActiveBaseUrl ?? "";
+            UIElement qrBox;
+            if (!string.IsNullOrEmpty(pairUrl))
+            {
+                var bmp = QrEncoder.RenderBitmap(pairUrl, 6);
+                var img = new System.Windows.Controls.Image { Source = bmp, Width = 156, Height = 156, Stretch = Stretch.Uniform };
+                RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.NearestNeighbor);
+                qrBox = V.Box(img, V.P(10), Brushes.White, 12, t.P(0.12), 1);
+            }
+            else
+            {
+                qrBox = V.Size(V.Box(V.Vs(6, Sym.Icon("wifi.slash", 22, t.Secondary), V.T("Waiting for URL…", 11, FontWeights.Normal, t.Secondary)), V.P(12), t.P(0.05), 12), 176, 176);
+            }
+
+            var pinBox = V.Box(V.H(10,
+                V.VLead(2, V.T("6-DIGIT FALLBACK PIN", 9.5, FontWeights.Bold, t.Secondary), V.Mono(pc.SixDigitPIN ?? "000000", 20, FontWeights.Bold, t.Primary)),
+                V.Sp(),
+                SmallBtn("Copy PIN", "doc.on.doc", () => { try { Clipboard.SetText(pc.SixDigitPIN ?? ""); _phoneCopyNotice = "PIN copied."; Rerender(); } catch { } })),
+                V.P(12, 9), t.P(0.06), 8, t.P(0.10), 1);
+
+            var urlActions = V.H(6,
+                SmallBtn("Copy Link", "doc.on.doc", () => { try { if (pairUrl.Length > 0) Clipboard.SetText(pairUrl); _phoneCopyNotice = "Pairing URL copied."; Rerender(); } catch { } }),
+                SmallBtn("Open Web UI", "safari", () => { if (pairUrl.Length > 0) OpenUrl(pairUrl); }),
+                SmallBtn("New QR & PIN", "arrow.clockwise", () => { pc.RotateTokenAndUrl(); _phoneCopyNotice = "Rotated pairing token & PIN."; Rerender(); }));
+
+            var pairRight = V.VLead(8,
+                V.T("PAIRING URL", 9.5, FontWeights.Bold, t.Secondary),
+                V.Wrap(V.Mono(baseUrl.Length > 0 ? baseUrl : "(no network interface active)", 11.5, FontWeights.Medium, t.Accent), TextAlignment.Left),
+                urlActions,
+                pinBox,
+                V.Wrap(V.T("Scan the QR code with your phone camera, or open the link and enter the 6-digit PIN.", 10.5, FontWeights.Normal, t.Secondary), TextAlignment.Left));
+            pairRight.Align = Cross.Stretch;
+            if (!string.IsNullOrEmpty(_phoneCopyNotice))
+                pairRight.Children.Add(V.T(_phoneCopyNotice, 10.5, FontWeights.Medium, t.SysGreen));
+
+            root.Children.Add(Card(V.Self(V.H(16, V.Self(qrBox, Cross.Start), V.Flex(pairRight)), Cross.Stretch)));
+
+            // Security & Power Card
+            var secCard = Card(
+                SectionHeader("Security & Power"),
+                V.Self(V.H(10, V.Flex(V.VLead(1, V.T("Require PC Approval for New Devices", 12.5, FontWeights.Medium, t.Primary), V.T("Shows an Approve / Reject prompt here whenever a new phone pairs.", 10.5, FontWeights.Normal, t.Secondary))), TogglePill(pc.RequireApprovalForNewDevices, () => { pc.SetRequireApproval(!pc.RequireApprovalForNewDevices); Rerender(); })), Cross.Stretch),
+                V.Self(V.Line(t.Op(t.Separator, 0.5), true), Cross.Stretch),
+                V.Self(V.H(10, V.Flex(V.VLead(1, V.T("Keep PC Awake While Running", 12.5, FontWeights.Medium, t.Primary), V.T("Prevents Windows sleep (ES_SYSTEM_REQUIRED) so remote sessions stay reachable.", 10.5, FontWeights.Normal, t.Secondary))), TogglePill(pc.KeepAwake, () => { pc.SetKeepAwake(!pc.KeepAwake); Rerender(); })), Cross.Stretch));
+            root.Children.Add(secCard);
+
+            // Connected & Paired Devices Card
+            var devKids = new List<UIElement> { SectionHeader("Connected Devices (" + pc.ConnectedDevices.Count + ")") };
+            if (pc.ConnectedDevices.Count == 0)
+            {
+                devKids.Add(V.T("No phones connected yet. Scan the QR code above to pair your device.", 11.5, FontWeights.Normal, t.Secondary));
+            }
+            else
+            {
+                foreach (var d in pc.ConnectedDevices)
+                {
+                    var dev = d;
+                    string stText = dev.ApprovalState == PhoneDeviceApprovalState.Approved ? "APPROVED" : dev.ApprovalState == PhoneDeviceApprovalState.Pending ? "PENDING" : "REJECTED";
+                    Color stClr = dev.ApprovalState == PhoneDeviceApprovalState.Approved ? Color.FromRgb(48, 209, 88) : dev.ApprovalState == PhoneDeviceApprovalState.Pending ? Color.FromRgb(255, 159, 10) : Color.FromRgb(255, 69, 58);
+                    var acts = V.H(6);
+                    if (dev.ApprovalState != PhoneDeviceApprovalState.Approved)
+                        acts.Children.Add(SmallBtn("Approve", null, () => { pc.ApproveDevice(dev.Id); Rerender(); }));
+                    if (dev.ApprovalState != PhoneDeviceApprovalState.Rejected)
+                        acts.Children.Add(SmallBtn("Revoke", null, () => { pc.RejectDevice(dev.Id); Rerender(); }));
+                    devKids.Add(V.Self(V.Box(V.H(10,
+                        V.Dot(7, Theme.B(stClr)),
+                        V.Flex(V.VLead(1, V.T(dev.Name, 12, FontWeights.SemiBold, t.Primary), V.Mono(dev.IpAddress + " · " + dev.ConnectionVia + " · " + stText, 10, FontWeights.Normal, t.Secondary))),
+                        acts), V.P(10, 8), t.P(0.05), 8), Cross.Stretch));
+                }
+            }
+            root.Children.Add(Card(devKids.ToArray()));
+            return root;
         }
 
         // Port of the Mac's Team Collaboration tab: the same CollaborationView, embedded (no nested scroll view)
@@ -806,7 +987,13 @@ namespace MicroCode.Views
             var s = V.VLead(14); s.Align = Cross.Stretch;
             var tile = V.Size(V.Box(Sym.Icon("sparkles", 12, t.Primary), V.P(0), t.P(0.08), 5), 22, 22);
             var refresh = SmallBtn(DotminiCloud.Refreshing ? "Refreshing…" : "Refresh Catalog", null, () => RunAsync(async () => { await DotminiCloud.Refresh(true); await DotminiAuth.RefreshEntitlement(); }));
-            s.Children.Add(V.Self(V.H(10, tile, V.VLead(1, V.T("Dotmini Cloud Subscription", 13, FontWeights.SemiBold, t.Primary), V.Mono("microcode.dotmini.net/v1", 10, FontWeights.Normal, t.Secondary)), V.Sp(), V.T(DotminiCloud.Source, 10, FontWeights.Normal, t.Secondary), refresh), Cross.Stretch));
+            var testBtn = SmallBtn(_cloudProbing ? "Testing…" : "Test Connection", "bolt.horizontal.fill", () =>
+            {
+                if (_cloudProbing) return;
+                _cloudProbing = true; Rerender();
+                RunAsync(async () => { _cloudProbeSteps = await DotminiCloud.RunProbe(); _cloudProbing = false; });
+            });
+            s.Children.Add(V.Self(V.H(8, tile, V.VLead(1, V.T("Dotmini Cloud Subscription", 13, FontWeights.SemiBold, t.Primary), V.Mono("microcode.dotmini.net/v1", 10, FontWeights.Normal, t.Secondary)), V.Sp(), V.T(DotminiCloud.Source, 10, FontWeights.Normal, t.Secondary), testBtn, refresh), Cross.Stretch));
             s.Children.Add(V.Self(V.Line(t.Op(t.Separator, 0.6), true), Cross.Stretch));
             string cur = Get("ai_model_omni", AIConfig.ModelFor("omni"));
             var cm = DotminiCloud.Find(cur);
@@ -848,6 +1035,20 @@ namespace MicroCode.Views
                 status.Children.Add(SmallBtn("Sign In", null, () => { _tab = 6; Render(); _scroll.ScrollToTop(); }));
             }
             s.Children.Add(V.Self(V.Box(status, V.P(0, 2, 0, 0), null, 0), Cross.Stretch));
+            string cloudErr = !string.IsNullOrEmpty(DotminiCloud.LastError) ? DotminiCloud.LastError : DotminiAuth.LastError;
+            if (!string.IsNullOrEmpty(cloudErr))
+                s.Children.Add(V.Wrap(V.Mono("Diagnostics: " + cloudErr, 10.5, FontWeights.Normal, t.SysRed), TextAlignment.Left));
+            if (_cloudProbeSteps != null && _cloudProbeSteps.Count > 0)
+            {
+                var pList = V.VLead(3); pList.Align = Cross.Stretch;
+                foreach (var line in _cloudProbeSteps)
+                {
+                    bool pass = line.StartsWith("PASS");
+                    bool warn = line.StartsWith("WARN");
+                    pList.Children.Add(V.Wrap(V.Mono(line, 10.5, FontWeights.Normal, pass ? t.SysGreen : warn ? t.SysOrange : t.SysRed), TextAlignment.Left));
+                }
+                s.Children.Add(V.Self(V.Box(pList, V.P(10, 8), t.P(0.05), 6, t.P(0.10), 1), Cross.Stretch));
+            }
             return V.Self(V.Box(s, V.P(16), t.ControlBackground, 8, t.P(0.08), 1), Cross.Stretch);
         }
 
@@ -1163,6 +1364,6 @@ namespace MicroCode.Views
             return V.Self(col, Cross.Stretch);
         }
 
-        static void OpenUrl(string url) { try { Process.Start(url); } catch { } }
+        static void OpenUrl(string url) { DotminiNet.OpenExternalUrl(url); }
     }
 }

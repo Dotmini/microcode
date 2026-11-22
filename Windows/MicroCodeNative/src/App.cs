@@ -40,6 +40,12 @@ namespace MicroCode
 
         static int Run(string[] args)
         {
+            DotminiNet.EnableTls();
+            string pendingDeepLink = null;
+            for (int i = 0; i < args.Length; i++)
+                if (args[i] != null && args[i].StartsWith("microcode://", StringComparison.OrdinalIgnoreCase)) { pendingDeepLink = args[i]; break; }
+            if (pendingDeepLink != null && Arg(args, "--snapshot") == null && DotminiAuth.TryForwardDeepLinkToRunningInstance(pendingDeepLink)) return 0;
+
             // Test renders get their own data folder so they can never touch the user's settings, keys, chats or notebooks.
             string dataDir = Arg(args, "--data-dir");
             if (dataDir == null && Arg(args, "--snapshot") != null) dataDir = Path.Combine(Path.GetTempPath(), "MicroCode-snapshot");
@@ -50,7 +56,7 @@ namespace MicroCode
             }
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
             // stdio MCP servers woken by the agent are child processes: end them with the app (npx/uvx wrappers included)
-            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); McpManager.StopAll(); if (CollabService.HasShared && CollabService.Shared.Session != null) System.Threading.Tasks.Task.Run(() => CollabService.Shared.LeaveSession()).Wait(3000); };
+            app.Exit += delegate { Defaults.Flush(); NotebookView.ShutdownKernel(); McpManager.StopAll(); PhoneCompanionService.Shared.Stop(); if (CollabService.HasShared && CollabService.Shared.Session != null) System.Threading.Tasks.Task.Run(() => CollabService.Shared.LeaveSession()).Wait(3000); };
             app.DispatcherUnhandledException += (s, e) =>
             {
                 try { File.AppendAllText(Path.Combine(Defaults.Dir, "crash.log"), DateTime.Now + " " + e.Exception + "\n\n"); } catch { }
@@ -90,6 +96,7 @@ namespace MicroCode
             else
             {
                 state.Load();
+                DotminiAuth.RegisterUriScheme();
                 // loopback bridge for the web sign-in hand-off (microcode.dotmini.net/auth.html → 127.0.0.1:18888) + account refresh
                 LocalBridge.Start();
                 if (DotminiAuth.SignedIn) System.Threading.Tasks.Task.Run(() => DotminiAuth.RefreshEntitlement());
@@ -97,6 +104,15 @@ namespace MicroCode
             }
             Styles.Install(app);
             AgentStore.Load();
+            if (snapshot == null)
+            {
+                PhoneCompanionService.Shared.StartIfEnabled();
+                if (pendingDeepLink != null)
+                {
+                    string dl = pendingDeepLink;
+                    System.Threading.Tasks.Task.Run(() => DotminiAuth.HandleDeepLink(dl));
+                }
+            }
 
             // first-launch onboarding stays out of snapshots unless asked for
             FirstLaunchWelcome.Suppressed = snapshot != null && !args.Contains("--first-launch");

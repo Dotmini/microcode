@@ -734,7 +734,7 @@ namespace MicroCode.Views
                 MenuItemSpec.Header("Window & Panels"),
                 new MenuItemSpec { Title = "Auto-Hide Window Controls", Icon = "macwindow", Checked = _app.AutoHideTrafficLights, Action = () => { _app.AutoHideTrafficLights = !_app.AutoHideTrafficLights; Defaults.Set("autoHideWindowTrafficLights", _app.AutoHideTrafficLights); _app.Notify("lights"); } },
                 MenuItemSpec.Item(_app.AgenticContextVisible ? "Hide Context Inspector" : "Show Context Inspector (Ctrl+I)", "sidebar.right", _app.ToggleAgenticContext),
-                MenuItemSpec.Item("Connect with Phone (QR)…", "qrcode", () => SettingsWindow.Show(_app))
+                MenuItemSpec.Item("Connect with Phone (QR)…", "qrcode", () => SettingsWindow.Show(_app, 11))
             };
         }
     }

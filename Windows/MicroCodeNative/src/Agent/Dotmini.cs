@@ -92,7 +92,36 @@ namespace MicroCode.Views
 
     public static class DotminiNet
     {
-        public static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        public static readonly HttpClient Http;
+        static DotminiNet()
+        {
+            EnableTls();
+            var handler = new HttpClientHandler
+            {
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            };
+            Http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) };
+        }
+        public static void EnableTls()
+        {
+            try
+            {
+                // .NET Framework 4.8: explicitly enable TLS 1.2 (3072) and TLS 1.3 (12288)
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)12288 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls;
+            }
+            catch
+            {
+                try { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls; } catch { }
+            }
+            try { ServicePointManager.DefaultConnectionLimit = 32; } catch { }
+            try { ServicePointManager.Expect100Continue = false; } catch { }
+        }
+        public static void OpenExternalUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return;
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch { try { System.Diagnostics.Process.Start(url); } catch { } }
+        }
         public static string AppVersion { get { return AppInfo.Version; } }
         public static string UserAgent { get { return "MicroCode/" + AppVersion + " (Windows)"; } }
         public static double UnixNow() { return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds; }
@@ -142,6 +171,7 @@ namespace MicroCode.Views
         public static event Action Changed;
         public static DotminiEntitlement Entitlement = new DotminiEntitlement();
         public static string ReauthReason = "";
+        public static string LastError = "";
         static DotminiSession _session;
         static bool _loaded;
         static Task<string> _refreshing;
@@ -294,12 +324,97 @@ namespace MicroCode.Views
             if (!resp.IsSuccessStatusCode) throw new Exception("ส่งอีเมลรีเซ็ตรหัสผ่านไม่สำเร็จ กรุณารอสักครู่แล้วลองใหม่");
         }
 
-        /// <summary>startBrowserSignIn: the web sign-in page posts the session back to 127.0.0.1:18888/v1/auth/sync.</summary>
+        /// <summary>Registers the microcode:// custom URL scheme in HKCU (no admin required) so web OAuth callbacks return to Windows MicroCode.</summary>
+        public static void RegisterUriScheme()
+        {
+            try
+            {
+                string exePath = System.Reflection.Assembly.GetEntryAssembly() != null
+                    ? System.Reflection.Assembly.GetEntryAssembly().Location
+                    : System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                if (string.IsNullOrEmpty(exePath)) return;
+                using (var root = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Classes\microcode"))
+                {
+                    if (root == null) return;
+                    root.SetValue("", "URL:MicroCode Protocol");
+                    root.SetValue("URL Protocol", "");
+                    using (var cmd = root.CreateSubKey(@"shell\open\command"))
+                    {
+                        if (cmd != null) cmd.SetValue("", "\"" + exePath + "\" \"%1\"");
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static bool TryForwardDeepLinkToRunningInstance(string uri)
+        {
+            if (string.IsNullOrWhiteSpace(uri) || !uri.StartsWith("microcode://", StringComparison.OrdinalIgnoreCase)) return false;
+            try
+            {
+                using (var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(1500) })
+                {
+                    var resp = client.PostAsync("http://127.0.0.1:" + LocalBridge.Port + "/v1/auth/deeplink",
+                        DJ.Body(new Dictionary<string, object> { { "url", uri } })).Result;
+                    return resp.IsSuccessStatusCode;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static async Task<bool> HandleDeepLink(string rawUri)
+        {
+            Uri u;
+            if (string.IsNullOrWhiteSpace(rawUri) || !Uri.TryCreate(rawUri.Trim(), UriKind.Absolute, out u)) return false;
+            if (!string.Equals(u.Scheme, "microcode", StringComparison.OrdinalIgnoreCase)) return false;
+            var qp = ParseQueryString(u.Query);
+            string host = (u.Host ?? "").ToLowerInvariant();
+            string path = (u.AbsolutePath ?? "").Trim('/').ToLowerInvariant();
+            if (host == "platform-connect" || path == "platform-connect")
+            {
+                string code;
+                if (qp.TryGetValue("code", out code) && !string.IsNullOrEmpty(code))
+                {
+                    return await DotminiPlatformKey.RedeemConnectCode(code);
+                }
+                return false;
+            }
+            if (host == "auth" || path == "auth" || path == "auth/callback")
+            {
+                string token; qp.TryGetValue("token", out token);
+                if (string.IsNullOrEmpty(token)) qp.TryGetValue("access_token", out token);
+                if (!string.IsNullOrEmpty(token))
+                {
+                    string rt; qp.TryGetValue("refresh_token", out rt);
+                    string expStr; qp.TryGetValue("expires_at", out expStr);
+                    double exp = 0; double.TryParse(expStr ?? "", NumberStyles.Float, CultureInfo.InvariantCulture, out exp);
+                    string nm; qp.TryGetValue("name", out nm);
+                    return await IngestWebSession(token, rt, exp, nm);
+                }
+            }
+            return false;
+        }
+
+        static Dictionary<string, string> ParseQueryString(string q)
+        {
+            var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(q)) return d;
+            foreach (var part in q.TrimStart('?').Split('&'))
+            {
+                int eq = part.IndexOf('=');
+                if (eq <= 0) continue;
+                d[Uri.UnescapeDataString(part.Substring(0, eq))] = Uri.UnescapeDataString(part.Substring(eq + 1).Replace('+', ' '));
+            }
+            return d;
+        }
+
+        /// <summary>startBrowserSignIn: opens microcode.dotmini.net auth portal with loopback :18888 AND microcode:// callback fallback.</summary>
         public static bool StartBrowserSignIn(string provider)
         {
+            DotminiNet.EnableTls();
             bool bridge = LocalBridge.Start();
-            string url = Portal + "/auth.html" + (string.IsNullOrEmpty(provider) ? "" : "?provider=" + Uri.EscapeDataString(provider));
-            try { System.Diagnostics.Process.Start(url); } catch { }
+            string url = Portal + "/auth.html?source=macapp" + (string.IsNullOrEmpty(provider) ? "" : "&provider=" + Uri.EscapeDataString(provider));
+            DotminiNet.OpenExternalUrl(url);
             return bridge;
         }
 
@@ -318,22 +433,37 @@ namespace MicroCode.Views
         /// <summary>ingestWebSession: verifies a browser-synced JWT with GoTrue (/auth/v1/user) before trusting it.</summary>
         public static async Task<bool> IngestWebSession(string access, string refresh, double expiresAt, string displayName)
         {
+            DotminiNet.EnableTls();
             access = (access ?? "").Trim();
-            if (access.Split('.').Length < 3) return false;
+            if (access.Split('.').Length < 3) { LastError = "Invalid access token format"; return false; }
             var cur = Session;
             if (cur != null && cur.AccessToken == access && Entitlement.Loaded) return true;
             await Bootstrap();
             Dictionary<string, object> user = null;
-            try
+            string verifyErr = "";
+            foreach (var authOrigin in new[] { BaseUrl, DefaultUrl }.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var r = Req(HttpMethod.Get, "/auth/v1/user", null);
-                r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access);
-                var resp = await DotminiNet.Http.SendAsync(r);
-                if (resp.IsSuccessStatusCode) user = DJ.Obj(await resp.Content.ReadAsStringAsync());
+                try
+                {
+                    var r = new HttpRequestMessage(HttpMethod.Get, authOrigin.TrimEnd('/') + "/auth/v1/user");
+                    r.Headers.TryAddWithoutValidation("apikey", AnonKey);
+                    r.Headers.TryAddWithoutValidation("User-Agent", DotminiNet.UserAgent);
+                    r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access);
+                    var resp = await DotminiNet.Http.SendAsync(r);
+                    string body = await resp.Content.ReadAsStringAsync();
+                    if (resp.IsSuccessStatusCode) { user = DJ.Obj(body); break; }
+                    verifyErr = "HTTP " + (int)resp.StatusCode + " " + DJ.ErrorText(body);
+                }
+                catch (Exception ex) { verifyErr = ex.GetBaseException().Message; }
             }
-            catch { }
             string id = DJ.Str(user, "id");
-            if (string.IsNullOrEmpty(id)) return false;
+            if (string.IsNullOrEmpty(id))
+            {
+                LastError = "Could not verify web session with Dotmini ID (" + (verifyErr.Length > 0 ? verifyErr : "unknown") + ")";
+                Notify();
+                return false;
+            }
+            LastError = "";
             var meta = DJ.Child(user, "user_metadata");
             var s = new DotminiSession
             {
@@ -343,6 +473,7 @@ namespace MicroCode.Views
             };
             Persist(s);
             await RefreshEntitlement();
+            await DotminiCloud.Refresh(true);
             return true;
         }
 
@@ -748,6 +879,7 @@ namespace MicroCode.Views
         public static string ProxyURL { get { var c = Defaults.Str("dotminiProxyURL", null); return string.IsNullOrWhiteSpace(c) ? DefaultProxy : c.Trim().TrimEnd('/'); } }
         public static List<CloudModel> Models = new List<CloudModel>();
         public static string Source = "";
+        public static string LastError = "";
         public static bool Refreshing;
         public static event Action Changed;
         static DateTime _lastRefresh = DateTime.MinValue;
@@ -837,35 +969,103 @@ namespace MicroCode.Views
             if (Models.Count == 0 || (DateTime.Now - _lastRefresh).TotalMinutes > 30) { var _ = Refresh(false); }
         }
 
-        /// <summary>refreshCloudProxyModels: GET {proxy}/models (Bearer when signed in).</summary>
-        public static async Task Refresh(bool force)
+        static Task _inflight;
+
+        /// <summary>refreshCloudProxyModels: GET {proxy}/models (Bearer when signed in), with api.dotmini.net fallback.</summary>
+        public static Task Refresh(bool force)
         {
-            if (Refreshing) return;
+            if (_inflight != null && !_inflight.IsCompleted) return _inflight;
+            _inflight = RefreshCore(force);
+            return _inflight;
+        }
+
+        static async Task RefreshCore(bool force)
+        {
+            DotminiNet.EnableTls();
             Refreshing = true;
             _lastAttempt = DateTime.Now;
             DotminiNet.Raise(Changed);
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Get, ProxyURL + "/models" + (force ? "?refresh=1" : ""));
                 string token = null;
                 try { token = await Token(false); } catch { }
-                if (!string.IsNullOrEmpty(token)) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                var resp = await DotminiNet.Http.SendAsync(req);
-                if (!resp.IsSuccessStatusCode) return;
-                string raw = await resp.Content.ReadAsStringAsync();
-                var list = Parse(raw);
-                if (list.Count == 0) return;
-                Models = list;
-                Source = Summary(list);
-                _lastRefresh = DateTime.Now;
-                try { Defaults.WriteAtomic(CachePath, raw); } catch { }
+                string lastErr = "";
+                foreach (var baseUrl in new[] { ProxyURL, "https://api.dotmini.net/v1" }.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Get, baseUrl.TrimEnd('/') + "/models" + (force ? "?refresh=1" : ""));
+                        if (!string.IsNullOrEmpty(token)) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                        req.Headers.TryAddWithoutValidation("User-Agent", DotminiNet.UserAgent);
+                        req.Headers.TryAddWithoutValidation("X-MicroCode-Client", "windows");
+                        using (var cts = new CancellationTokenSource(10000))
+                        {
+                            var resp = await DotminiNet.Http.SendAsync(req, cts.Token);
+                            string raw = await resp.Content.ReadAsStringAsync();
+                            if (!resp.IsSuccessStatusCode) { lastErr = "HTTP " + (int)resp.StatusCode + " " + DJ.ErrorText(raw); continue; }
+                            var list = Parse(raw);
+                            if (list.Count == 0) { lastErr = "Empty model catalog returned"; continue; }
+                            Models = list;
+                            Source = Summary(list);
+                            LastError = "";
+                            _lastRefresh = DateTime.Now;
+                            try { Defaults.WriteAtomic(CachePath, raw); } catch { }
+                            return;
+                        }
+                    }
+                    catch (Exception ex) { lastErr = ex.GetBaseException().Message; }
+                }
+                if (lastErr.Length > 0) LastError = lastErr;
             }
-            catch { }
             finally { Refreshing = false; DotminiNet.Raise(Changed); }
         }
 
-        static List<CloudModel> Parse(string raw)
+        /// <summary>Live end-to-end diagnostic probe (port of DotminiCloudProbe.swift).</summary>
+        public static async Task<List<string>> RunProbe()
+        {
+            DotminiNet.EnableTls();
+            var lines = new List<string>();
+            foreach (var host in new[] { "https://microcode.dotmini.net/v1/models", "https://api.dotmini.net/v1/models" })
+            {
+                try
+                {
+                    var req = new HttpRequestMessage(HttpMethod.Get, host);
+                    string tok = await Token(false);
+                    if (!string.IsNullOrEmpty(tok)) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tok);
+                    var resp = await DotminiNet.Http.SendAsync(req);
+                    string raw = await resp.Content.ReadAsStringAsync();
+                    var list = Parse(raw);
+                    lines.Add(((int)resp.StatusCode == 200 && list.Count > 0 ? "PASS  " : "FAIL  ") + host + " -> HTTP " + (int)resp.StatusCode + " (" + list.Count + " models)");
+                }
+                catch (Exception ex) { lines.Add("FAIL  " + host + " -> " + ex.GetBaseException().Message); }
+            }
+            try
+            {
+                var cfg = DJ.Obj(await DotminiNet.Http.GetStringAsync("https://microcode.dotmini.net/api/microcode/auth-config"));
+                lines.Add((cfg != null && DJ.Str(cfg, "url") != null ? "PASS  " : "FAIL  ") + "auth-config -> " + (DJ.Str(cfg, "url") ?? "missing"));
+            }
+            catch (Exception ex) { lines.Add("FAIL  auth-config -> " + ex.GetBaseException().Message); }
+
+            if (DotminiPlatformKey.IsConfigured)
+            {
+                bool pkOk = await DotminiPlatformKey.Validate();
+                lines.Add((pkOk ? "PASS  " : "FAIL  ") + "Platform Key -> " + DotminiPlatformKey.Message);
+            }
+            else if (DotminiAuth.SignedIn)
+            {
+                string tok = await DotminiAuth.AccessToken(true);
+                await DotminiAuth.RefreshEntitlement();
+                lines.Add((!string.IsNullOrEmpty(tok) ? "PASS  " : "FAIL  ") + "Dotmini ID (" + DotminiAuth.Session.Email + ") -> " + DotminiAuth.Entitlement.PlanUpper + " (" + DotminiAuth.Entitlement.FormattedAvailable + ")");
+            }
+            else
+            {
+                lines.Add("INFO  Not signed in and no Platform Key configured yet.");
+            }
+            return lines;
+        }
+
+        public static List<CloudModel> Parse(string raw)
         {
             var result = new List<CloudModel>();
             System.Collections.ArrayList rows = null;
@@ -1115,7 +1315,8 @@ namespace MicroCode.Views
                     else if (method == "OPTIONS")
                     {
                         status = "200 OK"; json = "";
-                        extra = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Dotmini-Bridge\r\nAccess-Control-Allow-Private-Network: true\r\nAccess-Control-Max-Age: 600\r\n";
+                        extra = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Dotmini-Bridge\r\nAccess-Control-Max-Age: 600\r\n";
+                        if (origin == null) extra += "Access-Control-Allow-Private-Network: true\r\n";
                     }
                     else if (method == "POST" && path.StartsWith("/v1/auth/sync"))
                     {
@@ -1133,10 +1334,18 @@ namespace MicroCode.Views
                             json = DJ.Ser(new Dictionary<string, object> {
                                 { "success", ok }, { "verified", ok }, { "authenticated", s != null }, { "synced_email", s != null ? s.Email : "" }, { "uid", s != null ? s.UserId : "" },
                                 { "plan", e.Plan }, { "role", e.Role }, { "ai_credit_available_thb", e.TotalAvailableTHB }, { "ai_credit_remaining_thb", e.CreditRemainingTHB },
-                                { "ai_topup_balance_thb", e.TopupTHB }, { "app_version", DotminiNet.AppVersion } });
+                                { "ai_topup_balance_thb", e.TopupTHB }, { "app_version", DotminiNet.AppVersion }, { "error", DotminiAuth.LastError ?? "" } });
                             status = ok ? "200 OK" : "401 Unauthorized";
                             if (ok) DotminiNet.Raise(BringToFront);
                         }
+                    }
+                    else if (method == "POST" && path.StartsWith("/v1/auth/deeplink"))
+                    {
+                        var o = DJ.Obj(bodyText) ?? new Dictionary<string, object>();
+                        bool ok = await DotminiAuth.HandleDeepLink(DJ.Str(o, "url"));
+                        json = DJ.Ser(new Dictionary<string, object> { { "success", ok }, { "error", DotminiAuth.LastError ?? "" } });
+                        status = ok ? "200 OK" : "400 Bad Request";
+                        if (ok) DotminiNet.Raise(BringToFront);
                     }
                     else if (method == "GET" && (path.StartsWith("/v1/status") || path == "/v1/health"))
                     {
@@ -1147,7 +1356,7 @@ namespace MicroCode.Views
                     else { status = "404 Not Found"; json = "{\"error\": \"Not found\"}"; }
 
                     var payload = Encoding.UTF8.GetBytes(json);
-                    string acao = origin != null ? "Access-Control-Allow-Origin: " + origin + "\r\nVary: Origin\r\n" : "";
+                    string acao = origin != null ? "Access-Control-Allow-Origin: " + origin + "\r\nAccess-Control-Allow-Private-Network: true\r\nVary: Origin\r\n" : "";
                     var hdr = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + "\r\n" + acao + extra + "Content-Type: application/json\r\nContent-Length: " + payload.Length + "\r\nConnection: close\r\n\r\n");
                     await ns.WriteAsync(hdr, 0, hdr.Length);
                     if (payload.Length > 0) await ns.WriteAsync(payload, 0, payload.Length);
