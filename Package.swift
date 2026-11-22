@@ -182,6 +182,7 @@ let package = Package(
                 "Services/AuthService.swift",
                 "Services/SupabaseAuthService.swift",
                 "Services/CollaborationService.swift",
+                "Services/CollabTextOperation.swift",
                 "Views/EmbeddedToolsView.swift",
                 "Views/EmbeddedStudioView.swift",
                 "Views/EmbeddedProjectWizard.swift",

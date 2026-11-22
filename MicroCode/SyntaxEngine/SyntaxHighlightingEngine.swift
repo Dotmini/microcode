@@ -2393,6 +2393,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
     public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         coordinator.isInvalidated = true
+        CollaborationService.shared.unregisterLiveEditor(coordinator)
         coordinator.highlightTimer?.invalidate()
         coordinator.highlightTimer = nil
         coordinator.lspChangeTask?.cancel()
@@ -2454,6 +2455,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var autocompleteTask: Task<Void, Never>?
         var bindingSyncTask: Task<Void, Never>?
         var collabEditSyncTask: Task<Void, Never>?
+        /// File this editor is registered under for real-time co-editing (remote ops patch it in place).
+        var collabRegisteredURL: URL?
         var scrollHighlightWork: DispatchWorkItem?
         weak var observedClipView: NSClipView?
         var isUpdating = false
@@ -2623,6 +2626,14 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             if let ideTV = textView as? IDEInteractiveTextView, ideTV.collaborationFileURL != p.fileURL {
                 ideTV.collaborationFileURL = p.fileURL
                 ideTV.needsDisplay = true
+            }
+            if collabRegisteredURL != p.fileURL {
+                collabRegisteredURL = p.fileURL
+                if p.fileURL != nil {
+                    CollaborationService.shared.registerLiveEditor(path: p.fileURL?.path, buffer: self)
+                } else {
+                    CollaborationService.shared.unregisterLiveEditor(self)
+                }
             }
             attachScrollHighlightObserverIfNeeded(scrollView)
 
@@ -3746,3 +3757,112 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
  - This naturally handles cases like "if" inside a comment
  
  */
+
+
+// MARK: - Real-time co-editing bridge
+
+extension SyntaxHighlightedCodeView.Coordinator: CollabLiveEditorBuffer {
+    var collabLiveText: String { textView?.string ?? lastText }
+
+    /// Applies a collaborator's ot1 operation straight to the text storage: carets and selections are mapped
+    /// through the operation, the first visible line stays put when text changes above it, and pending debounced
+    /// pushes of the pre-edit text are cancelled so they cannot revert the remote change.
+    func collabApplyRemoteOperation(_ op: CollabTextOperation) -> Bool {
+        guard !isInvalidated, let tv = textView, let ts = tv.textStorage else { return false }
+        if tv.hasMarkedText() { tv.unmarkText() }
+        let before = tv.string
+        let oldLength = (before as NSString).length
+        guard oldLength == op.baseLength else { return false }
+        if op.isNoop { return true }
+
+        bindingSyncTask?.cancel()
+        bindingSyncTask = nil
+        collabEditSyncTask?.cancel()
+        collabEditSyncTask = nil
+
+        let selections = tv.selectedRanges.map { $0.rangeValue }
+        let scrollView = tv.enclosingScrollView
+        var anchor: (char: Int, y: CGFloat)?
+        if let sv = scrollView, let lm = tv.layoutManager, let tc = tv.textContainer, oldLength > 0 {
+            let visible = sv.contentView.bounds
+            let glyphs = lm.glyphRange(forBoundingRect: visible, in: tc)
+            if glyphs.location < lm.numberOfGlyphs {
+                let firstChar = lm.characterIndexForGlyph(at: glyphs.location)
+                let rect = lm.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+                anchor = (firstChar, rect.origin.y)
+            }
+        }
+        let savedOrigin = scrollView?.contentView.bounds.origin
+
+        let font = tv.font ?? NSFont.monospacedSystemFont(ofSize: parent.fontSize, weight: .regular)
+        let foreground = engine?.themeManager.editorForegroundColor ?? NSColor.textColor
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: foreground, .ligature: 0]
+
+        isUpdating = true
+        ts.beginEditing()
+        var index = 0
+        var changedStart = Int.max
+        var changedEnd = 0
+        for component in op.components {
+            switch component {
+            case .retain(let n):
+                index += n
+            case .insert(let text):
+                let length = (text as NSString).length
+                ts.replaceCharacters(in: NSRange(location: index, length: 0), with: NSAttributedString(string: text, attributes: attributes))
+                changedStart = min(changedStart, index)
+                index += length
+                changedEnd = max(changedEnd, index)
+            case .delete(let n):
+                ts.replaceCharacters(in: NSRange(location: index, length: n), with: "")
+                changedStart = min(changedStart, index)
+                changedEnd = max(changedEnd, index)
+            }
+        }
+        ts.endEditing()
+        // Undo entries recorded before this edit point at ranges that no longer exist; replaying one would corrupt
+        // the shared text, so this editor's undo history restarts here.
+        tv.undoManager?.removeAllActions(withTarget: tv)
+        tv.undoManager?.removeAllActions(withTarget: ts)
+
+        let after = tv.string
+        let newLength = (after as NSString).length
+        let mapped: [NSValue] = selections.map { range in
+            let start = min(newLength, op.transformIndex(range.location))
+            let end = min(newLength, op.transformIndex(range.location + range.length))
+            return NSValue(range: NSRange(location: start, length: max(0, end - start)))
+        }
+        if !mapped.isEmpty { tv.selectedRanges = mapped }
+        isUpdating = false
+
+        if let sv = scrollView {
+            if let anchor, changedStart < anchor.char, let lm = tv.layoutManager, let tc = tv.textContainer {
+                let newChar = min(max(0, newLength - 1), op.transformIndex(anchor.char))
+                let glyph = lm.glyphIndexForCharacter(at: newChar)
+                lm.ensureLayout(forGlyphRange: NSRange(location: 0, length: min(lm.numberOfGlyphs, glyph + 1)))
+                _ = tc
+                let rect = lm.lineFragmentRect(forGlyphAt: min(glyph, max(0, lm.numberOfGlyphs - 1)), effectiveRange: nil)
+                var origin = sv.contentView.bounds.origin
+                origin.y = max(0, (savedOrigin?.y ?? 0) + (rect.origin.y - anchor.y))
+                sv.contentView.scroll(to: origin)
+            } else if let savedOrigin {
+                sv.contentView.scroll(to: savedOrigin)
+            }
+            sv.reflectScrolledClipView(sv.contentView)
+        }
+
+        lastText = after
+        if parent.text != after { parent.text = after }
+        bindingSync.notePushedToBinding(after)
+        if parent.enableHighlighting, let engine, changedStart != Int.max {
+            engine.processEdit(
+                range: NSRange(location: changedStart, length: max(0, changedEnd - changedStart)),
+                changeInLength: newLength - oldLength,
+                newContent: after
+            )
+        }
+        (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.refreshContentIndex()
+        tv.needsDisplay = true
+        return true
+    }
+}
